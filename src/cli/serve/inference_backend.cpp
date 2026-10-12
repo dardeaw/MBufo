@@ -3188,7 +3188,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const TextSpeculativeConfig& speculative_config,
                             const TextDiskCacheConfig& disk_cache_config,
                             const std::string& vision_model_path,
-                            TextRunnerRamCacheOptions ram_cache_config) {
+                            TextRunnerRamCacheOptions ram_cache_config,
+                            const std::string& kv_cache_quant) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -3310,6 +3311,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .vision_model_path = vision_model_path,
             .decode_concurrency = static_cast<std::uint32_t>(
                 std::clamp<std::size_t>(session_count, 1, 8)),
+            .kv_cache_quant = kv_cache_quant,
         },
         &load_error);
     if (model == nullptr) {
