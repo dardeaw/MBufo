@@ -49,6 +49,8 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  /// KV cache precision: "f16" (default) or "q8" (per-row symmetric INT8).
+  std::string kv_cache_quant = "f16";
 };
 
 class Session;
