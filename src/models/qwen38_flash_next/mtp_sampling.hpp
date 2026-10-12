@@ -31,9 +31,12 @@ struct MtpProposal {
 };
 
 /// Top-1 mass inside the proposal's own candidate set, used as a per-position
-/// confidence signal. Renormalizing over the returned candidates rather than
-/// the full vocabulary is deliberate: the head already reduced to them, and the
-/// tail only shifts the scale.
+/// confidence signal. A wide verify batch is not free on a model with hundreds
+/// of experts: verifying n tokens touches far more distinct experts than one
+/// token does, so slots the predictor is unlikely to win are better left
+/// unspent. Renormalizing over the returned candidates rather than the full
+/// vocabulary is deliberate, the head already reduced to them, and the tail
+/// only shifts the scale.
 [[nodiscard]] inline float DraftConfidence(const MtpCandidateLogits& c) {
   if (c.size == 0) {
     return 0.0F;

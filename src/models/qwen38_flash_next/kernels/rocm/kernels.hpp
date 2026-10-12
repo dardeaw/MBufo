@@ -6,7 +6,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
+#include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
 #include "src/models/qwen/vision/rope.hpp"
 
@@ -43,6 +45,10 @@ enum class WeightType : std::uint32_t {
   kQ8_0 = 8,
   kQ4_K = 12,
   kQ5_K = 13,
+  kQ6_K = 14,
+  kIQ4_NL = 20,
+  kIQ3_S = 21,
+  kIQ4_XS = 23,
   kBF16 = 30,
 };
 
@@ -110,23 +116,32 @@ bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
 /// A non-null `xn_q8` also receives the norm quantized into the tiled Q8
 /// layout (`Q8TiledBytes(n_tokens, streams * hidden)`) for the W8A8 down
 /// projection; hidden must be a multiple of 32.
-void HcCombineF16(float* res, const float* block_out, const float* inject,
+void HcCombineF16(void* res, const float* block_out, const float* inject,
                   std::uint32_t inject_parts, const float* gamma, __half* xn,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
-                  std::uint32_t streams, float eps, hipStream_t stream);
+                  std::uint32_t streams, float eps, hipStream_t stream,
+                  bool res_half = false);
+/// Residual rows between F32 and F16 storage (count = elements, a multiple of
+/// four). The F16 form is used by large wide-prefill chunks; stores saturate.
+void ResidualToHalf(const float* src, __half* dst, std::size_t count,
+                    hipStream_t stream);
+void ResidualToFloat(const __half* src, float* dst, std::size_t count,
+                     hipStream_t stream);
 /// HcCombineF16 with the MoE epilogue fused in: the block output is
 /// MoeEpilogueVec4F16's result over `expert_out` ([tokens][used][hidden]
 /// F16 rows), `weights`, the gated shared expert; it is formed in
 /// registers and never written. Returns false (launching nothing) for a
 /// geometry the fused kernel does not cover (four 2,560-wide streams).
 /// A null gamma updates only the residual; otherwise xn_q8 is required.
-bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
+/// res is F16 when res_half is set, otherwise F32.
+bool HcCombineMoeF16(void* res, const __half* expert_out, const float* weights,
                      const float* shared_out, const float* gate,
                      std::uint32_t gate_stride, std::uint32_t used,
                      const float* inject, std::uint32_t inject_parts,
                      const float* gamma, __half* xn, void* xn_q8,
                      std::uint32_t n_tokens, std::uint32_t hidden,
-                     std::uint32_t streams, float eps, hipStream_t stream);
+                     std::uint32_t streams, float eps, hipStream_t stream,
+                     bool res_half = false);
 
 /// x[i] = silu(x[i] * scale), in place over `count` floats.
 void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream);
@@ -159,7 +174,16 @@ bool SigmoidMulQ8_1(float* x, const float* g, std::size_t count, void* x_q8,
 /// the narrow projections (routers, alpha/beta, indexer, inject) that the
 /// quantized tier does not cover.
 /// Converts `count` floats to BF16 (or F16) for a 16-bit hipBLAS GEMM.
+/// Narrow `count` float activations into a half or bfloat16 buffer.
+/// `capacity` is the destination buffer's element capacity in output units. The
+/// check is permanent rather than an assert: an over-large count reads past the
+/// source and writes past the destination, which faults on the device and
+/// reports nothing useful, so the call site and the offending extents are named
+/// here instead.
 void NarrowActivations(const float* x, void* out, bool bf16, std::size_t count,
+                       std::size_t capacity, const char* site,
+                       const char* layer, const char* tensor,
+                       std::size_t tokens, std::size_t width,
                        hipStream_t stream);
 
 /// W8A8 route for wide batches over Q8_0 weights: activations quantized per
@@ -179,12 +203,82 @@ void W8A8GemmWave64(const void* w, const void* x_tiled, float* out,
 
 /// Q8_0 HC down projection [320,10240], SiLU(x / 4), then F16 output.
 /// Matches the separate operators' rounding. Supports at least 96 tokens.
+/// Weight types the F16 GEMM family can read. Its kernels index weights as
+/// half or float32, so a quantized tensor must never reach one: the bytes are
+/// reinterpreted and the kernel reads far past the end of the buffer.
+constexpr bool HalfGemmable(core::GgmlType type) noexcept {
+  return type == core::GgmlType::kF16 || type == core::GgmlType::kBF16 ||
+         type == core::GgmlType::kQ8_0;
+}
+
+/// Allocation registry. Every device buffer that a GEMM can be handed is
+/// recorded with the name of the tensor or workspace that owns it, so a fault
+/// inside a library kernel can be attributed to a named allocation instead of
+/// a raw pointer. The address arithmetic is deliberately tolerant: a pointer
+/// just past the end of a buffer is still attributed to it.
+struct AllocationRecord {
+  std::string_view name;
+  std::uintptr_t base;
+  std::size_t bytes;
+};
+void RecordAllocation(std::string_view name, const void* base,
+                      std::size_t bytes);
+/// Owner of `p`, with the offset into it and its total size. Null if unknown.
+std::string_view AllocationOwner(const void* p, std::size_t* offset,
+                                 std::size_t* bytes);
+/// Drops the records of a buffer about to be freed. The range is kept as a
+/// tombstone, so a later copy that still names it is reported together with the
+/// site that freed it instead of being silently unattributed.
+void ForgetAllocation(const void* base, const char* free_site = "");
+/// Memcpy nodes baked into a captured graph, with the capture key. Called
+/// right after capture; forgetting them mirrors hipGraphExecDestroy.
+void RecordGraphMemcpyNodes(std::uint64_t key, hipGraph_t graph);
+void ForgetGraphMemcpyNodes(std::uint64_t key);
+
+/// Copy guard: every device copy and fill of this model goes through these.
+/// A registered destination or source whose [offset, offset + bytes) runs past
+/// its owner logs the site, owner, offset, bytes and current token count, then
+/// aborts. Unregistered pointers (host memory, pool scratch) are not checked.
+#define GUFO_GUARD_STR2(x) #x
+#define GUFO_GUARD_STR(x) GUFO_GUARD_STR2(x)
+#define GUFO_SITE __FILE__ ":" GUFO_GUARD_STR(__LINE__)
+void SetGuardTokens(std::size_t tokens);
+/// GUFO_TRIM_COUNT=1: reports and resets the rollback-trim and graph-capture
+/// counters, so the cost of dropping graphs on a free can be attributed.
+void ReportTrimCounters(const char* tag);
+/// hipHostMalloc that records the pinned buffer, so copies to and from host
+/// staging are bounds-checked too.
+template<typename T>
+hipError_t GuardedHostMalloc(const char* site, T** ptr, std::size_t bytes,
+                             unsigned int flags = hipHostMallocDefault) {
+  const hipError_t status = hipHostMalloc(ptr, bytes, flags);
+  if (status == hipSuccess)
+    RecordAllocation(site, *ptr, bytes);
+  return status;
+}
+void CheckDeviceRange(const char* site, const char* role, const void* p,
+                      std::size_t bytes);
+hipError_t GuardedMemcpy(const char* site, void* dst, const void* src,
+                         std::size_t bytes, hipMemcpyKind kind);
+hipError_t GuardedMemcpyAsync(const char* site, void* dst, const void* src,
+                              std::size_t bytes, hipMemcpyKind kind,
+                              hipStream_t stream);
+hipError_t GuardedMemcpy2D(const char* site, void* dst, std::size_t dpitch,
+                           const void* src, std::size_t spitch,
+                           std::size_t width, std::size_t height,
+                           hipMemcpyKind kind);
+hipError_t GuardedMemset(const char* site, void* dst, int value,
+                         std::size_t bytes);
+hipError_t GuardedMemsetAsync(const char* site, void* dst, int value,
+                              std::size_t bytes, hipStream_t stream);
+
 bool HcDownF16Gemm(const void* w, const void* x_tiled, __half* out,
                    std::uint32_t n_tokens, hipStream_t stream);
 
 /// Stacked Q8_0 QKV projection [13312,2560], head normalization and RoPE.
 /// Writes Q/gates in F32 and K/V caches in F16, preserving separate rounding.
 /// Fixed geometry: 24 query heads, two KV heads, 256 dimensions, 64 rotary.
+/// half_weights reads F16 weight rows (a dequantized copy) instead of Q8_0.
 /// Requires at least 1024 tokens; cache capacity must include position +
 /// tokens.
 bool AttentionF16Gemm(const void* weights, const __half* input,
@@ -192,26 +286,44 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
                       float* gate, __half* keys, __half* values,
                       std::uint32_t n_tokens, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
-                      const qwen::vision::DeviceRope* rope = nullptr);
+                      const qwen::vision::DeviceRope* rope = nullptr,
+                      bool half_weights = false);
 
 /// Exact Q8_0 HC up projection and F16-input mixer for the Flash Next
 /// 2560-hidden, rank-320 geometry. Returns false below 96 tokens or for other
 /// shapes. low_rank must not overlap mixed_half; side outputs are optional.
+/// half_weights reads F16 up rows (a dequantized copy) instead of Q8_0.
 bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
                   const float* inject_w, float* mixed, __half* mixed_half,
                   void* mixed_q8, float* inject, std::uint32_t n_tokens,
-                  std::uint32_t hidden, std::uint32_t rank, hipStream_t stream);
+                  std::uint32_t hidden, std::uint32_t rank, hipStream_t stream,
+                  bool half_weights = false);
 
 /// F16 activation rows [batch][k], Q8_0 weights dequantized to F16 in LDS,
 /// F32 accumulation. out is [batch][m]. Unsupported shapes launch nothing.
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
                         hipStream_t stream);
-/// input_stride is in half elements; zero means k. Padded rows are supported
-/// by the wide SSM output projection (batch >= 1024, m=2560, k=6144).
+/// Expands a Q4_K, Q5_K, Q5_1, IQ4_NL, IQ4_XS or IQ3_S matrix of `count`
+/// elements (whole blocks) to F16.
+/// Each value is rounded exactly as the CPU reference computes it in float
+/// (no fused multiply-add), then rounded once to F16. Other types launch
+/// nothing and return false.
+bool DequantizeHalf(const void* w, core::GgmlType type, __half* out,
+                    std::size_t count, hipStream_t stream);
+/// `ldx` is the element pitch between activation rows (0 means k). Rows whose
+/// byte pitch is a multiple of 4 KiB alias onto one memory channel and fetch
+/// several times slower, so wide activations are padded by the producer.
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   std::size_t m, std::size_t k, hipStream_t stream,
-                  std::size_t input_stride = 0);
+                  std::size_t ldx = 0);
+/// DenseF16Gemm's tile plan over F16 weight rows [m][k] (a dequantized copy).
+bool DenseHalfWeightGemm(const __half* w, const __half* x, float* out,
+                         std::size_t batch, std::size_t m, std::size_t k,
+                         hipStream_t stream, std::size_t ldx = 0);
+/// Re-encodes `blocks` Q8_0 blocks as Q5_1 (24 bytes each) for the decode GEMV.
+bool RequantQ8_0ToQ5_1(const void* src, void* dst, std::size_t blocks,
+                       hipStream_t stream);
 /// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
 /// F32 K16 chain per output. Token t's chain starts ((t / 32) % 4) * 128
 /// elements into K and wraps: hipBLASLt's MT32x32x64 order (BlasLt::Gemm).
@@ -226,11 +338,13 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
 /// history is read only; pass convolved=true to GatedDeltaNet to consume
 /// this result and update history. Speculative snapshots need all raw QKV
 /// rows and must use DenseF16Gemm instead. Unsupported shapes launch nothing.
+/// half_weights reads F16 weight rows (a dequantized copy) instead of Q8_0.
 bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0);
+                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0,
+                     bool half_weights = false);
 
 /// Routed expert GEMMs. RoutedCompact sorts the (token, slot) assignments
 /// by expert into `rows_token`/`rows_slot` (RoutedCompactRows(slots,
@@ -471,7 +585,16 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                float* partials, std::uint32_t splits, std::uint32_t n_tokens,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
-               hipStream_t stream);
+               hipStream_t stream, const std::uint32_t* sel_list = nullptr,
+               std::uint32_t list_stride = 0);
+
+/// Compacts each query's selected blocks from `mask` into `list` (see
+/// Attention's `sel_list`): list[t * stride] is the count, the ascending block
+/// indices follow. Only for the model's ratio of 4.
+void CompactSelection(const std::uint32_t* mask, std::uint32_t mask_words,
+                      std::uint32_t* list, std::uint32_t stride,
+                      std::uint32_t n_tokens, const std::uint32_t* start_pos,
+                      std::uint32_t ratio, hipStream_t stream);
 /// Fused Q/K/V projection + norm + RoPE + Q8_0 KV store for wide batches
 /// (mirrors AttentionF16Gemm; skips the s_.qg staging traffic in Q8 mode).
 bool AttentionQ8Gemm(const void* weights, const __half* input,
@@ -495,12 +618,14 @@ void AttentionQ8(const float* q, const std::int8_t* k_cache,
                  std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                  hipStream_t stream);
 
-/// Fused causal attention on the WMMA cores for wide batches: scores, online
-/// softmax, PV and the sigmoid output gate in one launch. `mask` follows
-/// Attention's block-selection contract (null for the dense window). Returns
-/// false, launching nothing, when the geometry is not the model's 24 x 256
-/// heads over two KV heads. `last_only` computes only the final dense query
-/// tile, retaining its key sweep and leaving earlier output rows untouched.
+/// Fused causal attention on the WMMA cores for wide batches:
+/// scores, online softmax, PV and the sigmoid output gate in one
+/// launch. `mask` follows Attention's block-selection contract
+/// (null for the dense window). Returns false, launching
+/// nothing, when the geometry is not the model's 24 x 256 heads
+/// over two KV heads. `last_only` computes only the final dense
+/// query tile, retaining its key sweep and leaving earlier
+/// output rows untouched.
 bool WmmaCausalAttention(const float* q, const float* gate,
                          const __half* k_cache, const __half* v_cache,
                          const std::uint32_t* mask, std::uint32_t mask_words,
@@ -515,8 +640,9 @@ void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
                   std::uint32_t n_tokens, std::uint32_t n_experts,
                   std::uint32_t k, hipStream_t stream);
 
-/// Softmax over `n_experts` logits per token (rows `stride` apart), top-k
-/// selection, renormalized weights. ids [t][k] int32, weights [t][k] f32.
+/// Softmax over `n_experts` logits per token (rows `stride`
+/// apart), top-k selection, renormalized weights. ids [t][k]
+/// int32, weights [t][k] f32.
 void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
                 float* weights, std::uint32_t n_tokens, std::uint32_t n_experts,
                 std::uint32_t k, hipStream_t stream);
@@ -527,8 +653,8 @@ void MoeEpilogue(const float* expert_out, const float* weights,
                  const float* shared, const float* gate,
                  std::uint32_t gate_stride, float* out, std::uint32_t n_tokens,
                  std::uint32_t k, std::uint32_t dim, hipStream_t stream);
-/// Same contract, four adjacent lanes per thread (`dim % 4 == 0`, else the
-/// scalar kernel runs).
+/// Same contract, four adjacent lanes per thread (`dim % 4 ==
+/// 0`, else the scalar kernel runs).
 void MoeEpilogueVec4(const float* expert_out, const float* weights,
                      const float* shared, const float* gate,
                      std::uint32_t gate_stride, float* out,
@@ -541,12 +667,14 @@ void MoeEpilogueVec4F16(const __half* expert_out, const float* weights,
                         std::uint32_t n_tokens, std::uint32_t k,
                         std::uint32_t dim, hipStream_t stream);
 
-/// dst[t] = *row < 0 ? alt[t] : base[*row + t] (rows of `width` floats).
+/// dst[t] = *row < 0 ? alt[t] : base[*row + t] (rows of `width`
+/// floats).
 void MtpHidden(const float* base, const float* alt, const std::int32_t* row,
                float* dst, std::uint32_t n_tokens, std::uint32_t width,
                hipStream_t stream);
 
-/// Add the projected embedding once to each projected hidden branch.
+/// Add the projected embedding once to each projected hidden
+/// branch.
 void MtpAddEmbedding(const float* embedding, float* residual,
                      std::uint32_t n_tokens, std::uint32_t hidden,
                      std::uint32_t streams, hipStream_t stream);
@@ -556,16 +684,18 @@ struct ArgmaxCandidate {
   float value;
   std::int32_t index;
 };
-/// Full-vocabulary argmax into out[t], with the lowest index winning ties.
-/// Matches std::max_element, including NaNs. Scratch holds
-/// n_tokens * kArgmaxParts candidates.
+/// Full-vocabulary argmax into out[t], with the lowest index
+/// winning ties. Matches std::max_element, including NaNs.
+/// Scratch holds n_tokens * kArgmaxParts candidates.
 void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
             std::uint32_t n_tokens, std::uint32_t vocab, hipStream_t stream);
 
-/// Gather selected IDs and their original logits from independent rows.
-/// The caller checks finite values only for the verification prefix it visits.
-// Sorted sparse histories, one per verification row. Penalty arithmetic is
-// FP64, matching SamplerState; output values remain the original logits.
+/// Gather selected IDs and their original logits from
+/// independent rows. The caller checks finite values only for
+/// the verification prefix it visits.
+// Sorted sparse histories, one per verification row. Penalty
+// arithmetic is FP64, matching SamplerState; output values
+// remain the original logits.
 struct GreedyPenaltyRows {
   const sampling::TokenPenalty* penalties;
   std::uint32_t offsets[8]{};
@@ -587,11 +717,12 @@ void GatherArgmaxCandidates(const float* logits, const std::uint32_t* ids,
 /// Number of IDs in each of the two selection buffers.
 std::uint32_t MtpCandidateWorkspaceSize(std::uint32_t vocab);
 
-/// Exact MTP top-64 selection, descending score with lowest-token-ID ties.
-/// Nonfinite scores become -infinity. Both ID buffers have room for
-/// MtpCandidateWorkspaceSize(vocab); scores receives min(vocab, 64) values.
-/// Scores may reuse the ID workspace starting at offset 64.
-/// All candidate operations are graph-safe.
+/// Exact MTP top-64 selection, descending score with
+/// lowest-token-ID ties. Nonfinite scores become -infinity. Both
+/// ID buffers have room for MtpCandidateWorkspaceSize(vocab);
+/// scores receives min(vocab, 64) values. Scores may reuse the
+/// ID workspace starting at offset 64. All candidate operations
+/// are graph-safe.
 void MtpTopCandidates(const float* logits, std::uint32_t* ids,
                       std::uint32_t* scratch_ids, float* scores,
                       std::uint32_t vocab, hipStream_t stream);

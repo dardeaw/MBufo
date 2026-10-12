@@ -2486,6 +2486,7 @@ public:
                 .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
+                .prefill_grid_tokens = model_->PrefillCapacity(),
             },
         .persistence = persistence_,
     };
