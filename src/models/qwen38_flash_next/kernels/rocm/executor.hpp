@@ -201,6 +201,18 @@ private:
   MtpState mtp_;
   Control* control_{nullptr};
   std::uint32_t blocks_{0};  ///< host shadow of Control::blocks
+  /// Persistent Q8->F16 prefill staging (q8 mode): one pair shared across
+  /// layers, reused across prefill chunks, dequantized incrementally. Rows
+  /// [0, q8_stage_valid_) mirror (q8_stage_ksrc_, q8_stage_vsrc_); the
+  /// source pointers disambiguate trunk vs draft caches, while
+  /// RestoreSnapshot/Rollback invalidate on overwrite/rewind. Buffers are
+  /// freed with allocations_ at teardown.
+  mutable __half* q8_stage_k_{nullptr};
+  mutable __half* q8_stage_v_{nullptr};
+  mutable std::size_t q8_stage_cap_{0};  ///< rows provisioned
+  mutable const void* q8_stage_ksrc_{nullptr};
+  mutable const void* q8_stage_vsrc_{nullptr};
+  mutable std::uint32_t q8_stage_valid_{0};  ///< rows [0, valid) dequantized
   /// Captured decode graphs by batch shape, and the shapes that ran eagerly
   /// once (the GEMM tier's arena must be grown before capture).
   std::unordered_map<std::uint64_t, hipGraphExec_t> graphs_;
@@ -525,9 +537,8 @@ private:
                  const std::uint32_t* pos, const std::uint32_t* first_block,
                  std::uint32_t start_pos, std::uint32_t pool_grid,
                  std::uint32_t max_context, bool sparse, std::string* error_msg,
-                 bool last_only = false, bool projections_ready = false,
-                 bool project_output = true,
-                 std::uint32_t checkpoint_tokens = 0) const;
+                 bool last_only, bool projections_ready, bool project_output,
+                 std::uint32_t checkpoint_tokens, Session& session) const;
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
            bool last_only = false) const;

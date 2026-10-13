@@ -2389,7 +2389,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                          std::uint32_t max_context, bool sparse,
                          std::string* error_msg, bool last_only,
                          bool projections_ready, bool project_output,
-                         std::uint32_t checkpoint_tokens) const {
+                         std::uint32_t checkpoint_tokens,
+                         Session& session) const {
   const Config& c = config();
   const std::uint32_t kv_row = c.AttentionKvDim();
   const std::uint32_t index_capacity =
@@ -2567,15 +2568,68 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         if (need == 0)
           return false;
         const std::size_t row_bytes = std::size_t(kv_row) * sizeof(__half);
-        __half* stage_k = nullptr;
-        __half* stage_v = nullptr;
+        const std::size_t kv_q8_row = (std::size_t{kv_row} + 31) / 32 * 34;
+        // Persistent per-session staging: reused across prefill chunks and
+        // dequantized incrementally (only rows [valid, need) are converted).
+        // The source pointers disambiguate trunk vs draft caches; snapshot
+        // restore/rollback invalidate (see RestoreSnapshot/Rollback). Any
+        // failure here falls back to the scalar kernel below.
+        if (session.q8_stage_ksrc_ != s.k_cache_q8 ||
+            session.q8_stage_vsrc_ != s.v_cache_q8) {
+          session.q8_stage_ksrc_ = s.k_cache_q8;
+          session.q8_stage_vsrc_ = s.v_cache_q8;
+          session.q8_stage_valid_ = 0;
+        }
+        if (need > session.q8_stage_cap_) {
+          const std::size_t new_cap =
+              (std::size_t{need} + 4095) & ~std::size_t{4095};
+          __half* nk = nullptr;
+          __half* nv = nullptr;
+          if (hipMalloc(reinterpret_cast<void**>(&nk), new_cap * row_bytes) !=
+                  hipSuccess ||
+              hipMalloc(reinterpret_cast<void**>(&nv), new_cap * row_bytes) !=
+                  hipSuccess) {
+            if (nk != nullptr)
+              (void)hipFree(nk);
+            if (nv != nullptr)
+              (void)hipFree(nv);
+            return false;
+          }
+          auto forget = [&](void* p) {
+            auto& a = session.allocations_;
+            a.erase(std::remove(a.begin(), a.end(), p), a.end());
+          };
+          if (session.q8_stage_k_ != nullptr) {
+            (void)hipFree(session.q8_stage_k_);
+            forget(session.q8_stage_k_);
+          }
+          if (session.q8_stage_v_ != nullptr) {
+            (void)hipFree(session.q8_stage_v_);
+            forget(session.q8_stage_v_);
+          }
+          session.q8_stage_k_ = nk;
+          session.q8_stage_v_ = nv;
+          session.allocations_.push_back(nk);
+          session.allocations_.push_back(nv);
+          session.q8_stage_cap_ = new_cap;
+          session.q8_stage_valid_ = 0;
+        }
+        if (need > session.q8_stage_valid_) {
+          const std::uint32_t base = session.q8_stage_valid_;
+          if (!rocm::DequantizeQ8KVRows(
+                  s.k_cache_q8 + std::size_t{base} * kv_q8_row,
+                  session.q8_stage_k_ + std::size_t{base} * kv_row,
+                  s.v_cache_q8 + std::size_t{base} * kv_q8_row,
+                  session.q8_stage_v_ + std::size_t{base} * kv_row, need - base,
+                  kv_row, stream_)) {
+            return false;
+          }
+          session.q8_stage_valid_ = need;
+        }
+        __half* stage_k = session.q8_stage_k_;
+        __half* stage_v = session.q8_stage_v_;
         bool ok = false;
-        if (hipMalloc(reinterpret_cast<void**>(&stage_k),
-                      std::size_t(need) * row_bytes) == hipSuccess &&
-            hipMalloc(reinterpret_cast<void**>(&stage_v),
-                      std::size_t(need) * row_bytes) == hipSuccess &&
-            rocm::DequantizeQ8KVRows(s.k_cache_q8, stage_k, s.v_cache_q8,
-                                     stage_v, need, kv_row, stream_)) {
+        {
           const auto at = [&](std::uint32_t row) {
             return std::size_t{first + row} * c.AttentionQDim();
           };
@@ -2599,10 +2653,6 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                                     c.num_heads, c.num_kv_heads, c.head_dim,
                                     c.compress_ratio, stream_, last));
         }
-        if (stage_k != nullptr)
-          (void)hipFree(stage_k);
-        if (stage_v != nullptr)
-          (void)hipFree(stage_v);
         return ok;
       };
   const auto attend = [&](std::uint32_t first, std::uint32_t rows, bool last) {
@@ -3209,7 +3259,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                           &session.control_->blocks, start_pos, pool_grid,
                           session.max_context_, sparse, error_msg,
                           last_attention, false, true,
-                          checkpoint ? checkpoint->tokens : 0)) {
+                          checkpoint ? checkpoint->tokens : 0, session)) {
       return false;
     }
 
@@ -3351,6 +3401,10 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
   if (keep == n && logits == nullptr) {
     return true;
   }
+  // Rewound K/V rows past the kept frontier will be overwritten by the next
+  // append; clamp the persistent Q8 staging so it cannot serve stale rows.
+  session.q8_stage_valid_ =
+      std::min(session.q8_stage_valid_, session.spec_base_ + keep);
   if (keep < n) {
     const std::size_t conv_elems =
         static_cast<std::size_t>(c.ssm_conv_kernel - 1) * c.SsmConvChannels();
@@ -3803,6 +3857,9 @@ bool Executor::RestoreSnapshot(Session& session,
     AssignError(error_msg, "session belongs to another executor");
     return false;
   }
+  // Snapshot payloads overwrite cache rows below any staged frontier;
+  // invalidate the persistent Q8 staging (buffers are kept for reuse).
+  session.q8_stage_valid_ = 0;
   if (payload.size() < sizeof(SnapshotHeader)) {
     AssignError(error_msg, "snapshot payload is truncated");
     return false;
@@ -4438,7 +4495,7 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
                  &session.control_->mtp_position, &session.control_->mtp_blocks,
                  pos, pool_grid, session.max_context_,
                  pos + n > c.indexer_top_k, error_msg, last_only, true,
-                 skipped == 0)) {
+                 skipped == 0, 0, session)) {
     return false;
   }
   struct RestoreScratch {
