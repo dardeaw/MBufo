@@ -6430,7 +6430,8 @@ struct AttentionProjectionOutput {
 /// skip decoding and use the same ordered K16 products. y is [batch][m].
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
-         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false>
+         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false,
+         bool kQ8Out = false>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
@@ -6829,6 +6830,10 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
             else if (gate)
               attention.gate[tok * width + head * dim + col] = v[c];
             else if (key) {
+              // Compile-time Q8/F16 split: the F16 arm is the untouched
+              // pre-Q8 body, so its codegen (VGPR/occupancy) cannot drift
+              // from main. Only AttentionQ8Gemm instantiates kQ8Out.
+              if constexpr (kQ8Out) {
               if (attention.keys_q8 != nullptr) {
                 // Fused Q8_0: the wave's lanes hold block c (lane l = elem l),
                 // so the per-block max is a wave-local shuffle reduction.
@@ -6849,12 +6854,17 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
                 blk[lane_id] = static_cast<std::int8_t>(qi);
                 if (lane_id == 0)
                   *reinterpret_cast<__half*>(blk + 32) = __float2half(dd);
+                }
               } else {
                 attention
                     .keys[std::size_t(*attention.position + tok) * kvwidth +
                           head * dim + col] = __float2half_rn(v[c]);
               }
             } else {
+              // Compile-time Q8/F16 split: the F16 arm is the untouched
+              // pre-Q8 body, so its codegen (VGPR/occupancy) cannot drift
+              // from main. Only AttentionQ8Gemm instantiates kQ8Out.
+              if constexpr (kQ8Out) {
               if (attention.values_q8 != nullptr) {
                 // Fused Q8_0: the wave's lanes hold block c (lane l = elem l),
                 // so the per-block max is a wave-local shuffle reduction.
@@ -6875,6 +6885,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
                 blk[lane_id] = static_cast<std::int8_t>(qi);
                 if (lane_id == 0)
                   *reinterpret_cast<__half*>(blk + 32) = __float2half(dd);
+                }
               } else {
                 attention
                     .values[std::size_t(*attention.position + tok) * kvwidth +
@@ -7136,7 +7147,8 @@ bool AttentionQ8Gemm(const void* weights, const __half* input,
                                          nullptr, nullptr, position, theta,
                                          eps,     rope,    keys,     values};
   hipLaunchKernelGGL(
-      (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true>),
+      (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true,
+                          false, false, false, true>),
       dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
       input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr, nullptr,
       nullptr, output);
