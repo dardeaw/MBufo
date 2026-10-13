@@ -327,7 +327,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
       if (!Attention(l, attention, s_.mixed, s_.block_out, n,
                      &session.control_->mtp_position,
                      &session.control_->mtp_blocks, session.mtp_.position, pool,
-                     session.max_context_, sparse, error, false, true, false))
+                     session.max_context_, sparse, error, false, true, false, 0,
+                     session))
         return false;
     }
     // Attention retains every catch-up KV row. Only each final residual
@@ -910,7 +911,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
                          &session.control_->position, &session.control_->blocks,
                          session.position_, pool, session.max_context_,
-                         sparse[i], error, false, true, false)) {
+                         sparse[i], error, false, true, false, 0, session)) {
             return false;
           }
         }
