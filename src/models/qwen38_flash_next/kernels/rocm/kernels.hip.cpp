@@ -6037,7 +6037,8 @@ struct AttentionProjectionOutput {
 /// and use the same ordered K16 products. y is [batch][m].
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
-         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false>
+         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false,
+         bool kQ8Out = false>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
@@ -6404,52 +6405,64 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
             else if (gate)
               attention.gate[tok * width + head * dim + col] = v[c];
             else if (key) {
-              if (attention.keys_q8 != nullptr) {
-                // Fused Q8_0: the wave's lanes hold block c (lane l = elem l),
-                // so the per-block max is a wave-local shuffle reduction.
-                float amax = fabsf(v[c]);
-                amax = fmaxf(amax, XorLane(amax, 16));
-                amax = fmaxf(amax, XorLane(amax, 8));
-                amax = fmaxf(amax, XorLane(amax, 4));
-                amax = fmaxf(amax, XorLane(amax, 2));
-                amax = fmaxf(amax, XorLane(amax, 1));
-                const float dd = amax > 0.0F ? amax / 127.0F : 1.0F;
-                int qi = static_cast<int>(rintf(v[c] / dd));
-                qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
-                std::int8_t* blk =
-                    attention.keys_q8 +
-                    (std::size_t(*attention.position + tok) * 16 + head * 8 +
-                     c) *
-                        34;
-                blk[lane_id] = static_cast<std::int8_t>(qi);
-                if (lane_id == 0)
-                  *reinterpret_cast<__half*>(blk + 32) = __float2half(dd);
+              // Compile-time Q8/F16 split: the F16 arm is the untouched
+              // pre-Q8 body, so its codegen (VGPR/occupancy) cannot drift
+              // from main. Only AttentionQ8Gemm instantiates kQ8Out.
+              if constexpr (kQ8Out) {
+                if (attention.keys_q8 != nullptr) {
+                  // Fused Q8_0: the wave's lanes hold block c (lane l = elem
+                  // l), so the per-block max is a wave-local shuffle reduction.
+                  // so the per-block max is a wave-local shuffle reduction.
+                  float amax = fabsf(v[c]);
+                  amax = fmaxf(amax, XorLane(amax, 16));
+                  amax = fmaxf(amax, XorLane(amax, 8));
+                  amax = fmaxf(amax, XorLane(amax, 4));
+                  amax = fmaxf(amax, XorLane(amax, 2));
+                  amax = fmaxf(amax, XorLane(amax, 1));
+                  const float dd = amax > 0.0F ? amax / 127.0F : 1.0F;
+                  int qi = static_cast<int>(rintf(v[c] / dd));
+                  qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
+                  std::int8_t* blk =
+                      attention.keys_q8 +
+                      (std::size_t(*attention.position + tok) * 16 + head * 8 +
+                       c) *
+                          34;
+                  blk[lane_id] = static_cast<std::int8_t>(qi);
+                  if (lane_id == 0)
+                    *reinterpret_cast<__half*>(blk + 32) = __float2half(dd);
+                }
               } else {
                 attention
                     .keys[std::size_t(*attention.position + tok) * kvwidth +
                           head * dim + col] = __float2half_rn(v[c]);
               }
             } else {
-              if (attention.values_q8 != nullptr) {
-                // Fused Q8_0: the wave's lanes hold block c (lane l = elem l),
-                // so the per-block max is a wave-local shuffle reduction.
-                float amax = fabsf(v[c]);
-                amax = fmaxf(amax, XorLane(amax, 16));
-                amax = fmaxf(amax, XorLane(amax, 8));
-                amax = fmaxf(amax, XorLane(amax, 4));
-                amax = fmaxf(amax, XorLane(amax, 2));
-                amax = fmaxf(amax, XorLane(amax, 1));
-                const float dd = amax > 0.0F ? amax / 127.0F : 1.0F;
-                int qi = static_cast<int>(rintf(v[c] / dd));
-                qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
-                std::int8_t* blk =
-                    attention.values_q8 +
-                    (std::size_t(*attention.position + tok) * 16 + head * 8 +
-                     c) *
-                        34;
-                blk[lane_id] = static_cast<std::int8_t>(qi);
-                if (lane_id == 0)
-                  *reinterpret_cast<__half*>(blk + 32) = __float2half(dd);
+              // Compile-time Q8/F16 split: the F16 arm is the untouched
+              // pre-Q8 body, so its codegen (VGPR/occupancy) cannot drift
+              // from main. Only AttentionQ8Gemm instantiates kQ8Out.
+              if constexpr (kQ8Out) {
+                if (attention.values_q8 != nullptr) {
+                  // Fused Q8_0: the wave's lanes hold block c (lane l = elem
+                  // l), so the per-block max is a wave-local shuffle reduction.
+                  // so the per-block max is a wave-local shuffle reduction.
+                  float amax = fabsf(v[c]);
+                  amax = fmaxf(amax, XorLane(amax, 16));
+                  amax = fmaxf(amax, XorLane(amax, 8));
+                  amax = fmaxf(amax, XorLane(amax, 4));
+                  amax = fmaxf(amax, XorLane(amax, 2));
+                  amax = fmaxf(amax, XorLane(amax, 1));
+                  const float dd = amax > 0.0F ? amax / 127.0F : 1.0F;
+                  int qi = static_cast<int>(rintf(v[c] / dd));
+                  qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
+                  std::int8_t* blk =
+                      attention.values_q8 +
+                      (std::size_t(*attention.position + tok) * 16 + head * 8 +
+                       c) *
+                          34;
+                  blk[lane_id] = static_cast<std::int8_t>(qi);
+                  if (lane_id == 0)
+                    *reinterpret_cast<__half*>(blk + 32) = __float2half(dd);
+                }
               } else {
                 attention
                     .values[std::size_t(*attention.position + tok) * kvwidth +
@@ -6710,11 +6723,11 @@ bool AttentionQ8Gemm(const void* weights, const __half* input,
   const AttentionProjectionOutput output{q_gamma, k_gamma, query,    gate,
                                          nullptr, nullptr, position, theta,
                                          eps,     rope,    keys,     values};
-  hipLaunchKernelGGL(
-      (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true>),
-      dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
-      input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr, nullptr,
-      nullptr, output);
+  hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false,
+                                         true, false, false, false, true>),
+                     dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0,
+                     stream, weights, input, nullptr, n_tokens, 13312, 2560,
+                     nullptr, nullptr, nullptr, nullptr, nullptr, output);
   return true;
 }
 
