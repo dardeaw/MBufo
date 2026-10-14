@@ -87,6 +87,9 @@ public:
   [[nodiscard]] std::uint32_t DecodeConcurrency() const noexcept {
     return options_.decode_concurrency;
   }
+  [[nodiscard]] bool KvCacheInt8() const noexcept {
+    return options_.kv_cache_quant == "q8";
+  }
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] const Config& config() const noexcept;
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
@@ -213,7 +216,7 @@ public:
   }
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 16;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 17;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
