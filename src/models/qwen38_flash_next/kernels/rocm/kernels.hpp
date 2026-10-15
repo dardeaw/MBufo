@@ -518,6 +518,17 @@ void AttentionQ8(const float* q, const std::int8_t* k_cache,
 /// false, launching nothing, when the geometry is not the model's 24 x 256
 /// heads over two KV heads. `last_only` computes only the final dense query
 /// tile, retaining its key sweep and leaving earlier output rows untouched.
+/// Int8 twin of WmmaCausalAttention: K/V are Q8_0 blocks consumed by int8
+/// tensor cores (Q requant + per-block scales inline, no staging buffer).
+bool WmmaCausalAttentionI8(const float* q, const float* gate,
+                           const std::int8_t* k_cache,
+                           const std::int8_t* v_cache,
+                           const std::uint32_t* mask, std::uint32_t mask_words,
+                           float* out, std::uint32_t n_tokens,
+                           std::uint32_t start_pos, std::uint32_t heads,
+                           std::uint32_t kv_heads, std::uint32_t d,
+                           std::uint32_t ratio, hipStream_t stream,
+                           bool last_only = false);
 bool WmmaCausalAttention(const float* q, const float* gate,
                          const __half* k_cache, const __half* v_cache,
                          const std::uint32_t* mask, std::uint32_t mask_words,

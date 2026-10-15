@@ -2517,6 +2517,43 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
           (void)hipFree(stage_v);
         return ok;
       };
+  // Int8 tensor-core twin: Q requant + Q8_0 K/V straight into int8 WMMA,
+  // no staging buffer. Falls back to the staging path on any refusal.
+  // GUFO_Q8_I8=0 forces the staging path (A/B comparisons).
+  std::function<bool(std::uint32_t, std::uint32_t, bool)> wmma_i8 =
+      [&](std::uint32_t first, std::uint32_t rows, bool last) {
+        if (first == 0 && rows == n_tokens && checkpoint_tokens != 0 &&
+            checkpoint_tokens < n_tokens) {
+          return wmma_i8(0, checkpoint_tokens, false) &&
+                 wmma_i8(checkpoint_tokens, n_tokens - checkpoint_tokens,
+                         false);
+        }
+        const std::uint32_t pos0 = start_pos + first;
+        if (pos0 + rows == 0)
+          return false;
+        const auto at = [&](std::uint32_t row) {
+          return std::size_t{first + row} * c.AttentionQDim();
+        };
+        const std::uint32_t dense_rows =
+            mask != nullptr && pos0 < c.indexer_top_k
+                ? std::min(rows, c.indexer_top_k - pos0)
+                : 0;
+        return (dense_rows == rows ||
+                WmmaCausalAttentionI8(
+                    s_.q + at(dense_rows), s_.attn_gate + at(dense_rows),
+                    s.k_cache_q8, s.v_cache_q8,
+                    mask ? mask + std::size_t{first + dense_rows} * mask_words_
+                         : nullptr,
+                    mask_words_, s_.ctx + at(dense_rows), rows - dense_rows,
+                    pos0 + dense_rows, c.num_heads, c.num_kv_heads, c.head_dim,
+                    c.compress_ratio, stream_, last)) &&
+               (dense_rows == 0 || (last && dense_rows != rows) ||
+                WmmaCausalAttentionI8(
+                    s_.q + at(0), s_.attn_gate + at(0), s.k_cache_q8,
+                    s.v_cache_q8, nullptr, mask_words_, s_.ctx + at(0),
+                    dense_rows, pos0, c.num_heads, c.num_kv_heads, c.head_dim,
+                    c.compress_ratio, stream_, last));
+      };
   const auto attend = [&](std::uint32_t first, std::uint32_t rows, bool last) {
     const std::uint32_t pos = start_pos + first;
     const std::uint32_t dense_rows = mask != nullptr && pos < c.indexer_top_k
@@ -2561,9 +2598,15 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // decode step at depth fills the device.
   const bool split = !MatrixRows(n_tokens);
   if (options_.kv_cache_int8) {
-    // Wide batches ride the tensor cores via transient F16 staging;
-    // narrow (decode) keeps the scalar kernel (memory-bound, Q8 wins).
-    const bool wmma = !split && wmma_q8(0, n_tokens, last_only);
+    // Wide batches prefer int8 tensor cores (no staging); narrow (decode)
+    // keeps the scalar kernel (memory-bound, Q8 wins). Any refusal falls
+    // through the staging path to scalar.
+    static const bool use_i8 = [] {
+      const char* e = std::getenv("GUFO_Q8_I8");
+      return e == nullptr || e[0] != '0';
+    }();
+    const bool wmma = !split && ((use_i8 && wmma_i8(0, n_tokens, last_only)) ||
+                                 wmma_q8(0, n_tokens, last_only));
     if (!wmma) {
       rocm::AttentionQ8(s_.q, s.k_cache_q8, s.v_cache_q8, mask, mask_words_,
                         s_.ctx, split ? s_.attn_partials : nullptr, kAttnSplits,

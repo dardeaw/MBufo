@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <hipcub/block/block_radix_sort.hpp>
 #include <stdexcept>
 #include <type_traits>
@@ -2666,6 +2667,13 @@ __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
 }
 
+using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
+__device__ __forceinline__ int32x8_t WmmaI8(int32x4_t a, int32x4_t b,
+                                            int32x8_t c) {
+  return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
+}
+
 // BF16 fragments carry the same sixteen 16-bit lanes.
 using v16bf = __attribute__((ext_vector_type(16))) __bf16;
 
@@ -4033,10 +4041,11 @@ constexpr std::uint32_t kWmmaMaxMaskWords = 2048;
 /// tiles are gathered from the union of the block's query selections and
 /// four selections overlap far less than 32 (measured at 16k depth: 846
 /// versus 2,478 selected blocks against 512 per query).
-template<std::uint32_t kQueryRows, std::uint32_t kKeys, bool kPackHeads>
+template<std::uint32_t kQueryRows, std::uint32_t kKeys, bool kPackHeads,
+         bool kI8Mma = false>
 __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
     const float* __restrict__ q, const float* __restrict__ gate,
-    const __half* __restrict__ k_cache, const __half* __restrict__ v_cache,
+    const void* __restrict__ k_cache, const void* __restrict__ v_cache,
     const std::uint32_t* __restrict__ mask, std::uint32_t mask_words,
     float* __restrict__ out, std::uint32_t start_pos, std::uint32_t n_tokens,
     std::uint32_t first_query_group = 0) {
@@ -4116,6 +4125,9 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   const std::uint32_t s_kb = s_tile / kRowBlocks;
 
   v16h q_frag[kKStepsPerWave];
+  int32x4_t q_frag_i8[kKStepsPerWave];
+  // Per-32-block Q scales for this wave's 128-dim half (4 whole blocks).
+  float q_sc[4] = {1.0F, 1.0F, 1.0F, 1.0F};
   if (wave < 2 * kSTiles) {
     const std::uint32_t local_query = row_query(s_rb, sub);
     const bool live = row_live(s_rb, sub);
@@ -4123,17 +4135,56 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
         q +
         (static_cast<std::size_t>(live ? local_query : 0) * kWmmaAttnWidth) +
         (static_cast<std::size_t>(live ? row_head(s_rb, sub) : 0) * kHeadDim);
+    if constexpr (kI8Mma) {
+      // Pass 1: per-block absmax (attention_scale folded in, as in F16).
+      for (std::uint32_t b = 0; b < 4; ++b) {
+        float m = 0.0F;
+        for (std::uint32_t i = 0; i < 32; ++i) {
+          const float v =
+              live ? q_row[s_kh * 128 + b * 32 + i] * attention_scale : 0.0F;
+          m = fmaxf(m, fabsf(v));
+        }
+        q_sc[b] = m > 0.0F ? m / 127.0F : 1.0F;
+      }
+      // Pass 2: quantize the 16-dim slices (ks >> 1 is the in-half block).
+      for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
+        const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
+        const auto* qp = reinterpret_cast<const float4*>(q_row + d0);
+        const float sc = q_sc[ks >> 1];
+        const float id = 1.0F / sc;
+        std::int8_t tmp[16];
 #pragma unroll
-    for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
-      const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
-      const auto* qp = reinterpret_cast<const float4*>(q_row + d0);
+        for (std::uint32_t v = 0; v < 4; ++v) {
+          const float4 f = live ? qp[v] : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+          const float e[4] = {
+              f.x * attention_scale * id, f.y * attention_scale * id,
+              f.z * attention_scale * id, f.w * attention_scale * id};
 #pragma unroll
-      for (std::uint32_t v = 0; v < 4; ++v) {
-        const float4 f = live ? qp[v] : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
-        q_frag[ks][(v * 4) + 0] = static_cast<_Float16>(f.x * attention_scale);
-        q_frag[ks][(v * 4) + 1] = static_cast<_Float16>(f.y * attention_scale);
-        q_frag[ks][(v * 4) + 2] = static_cast<_Float16>(f.z * attention_scale);
-        q_frag[ks][(v * 4) + 3] = static_cast<_Float16>(f.w * attention_scale);
+          for (std::uint32_t j = 0; j < 4; ++j) {
+            int qi = static_cast<int>(roundf(e[j]));
+            qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
+            tmp[v * 4 + j] = static_cast<std::int8_t>(qi);
+          }
+        }
+        __builtin_memcpy(&q_frag_i8[ks], tmp, 16);
+      }
+    } else {
+#pragma unroll
+      for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
+        const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
+        const auto* qp = reinterpret_cast<const float4*>(q_row + d0);
+#pragma unroll
+        for (std::uint32_t v = 0; v < 4; ++v) {
+          const float4 f = live ? qp[v] : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+          q_frag[ks][(v * 4) + 0] =
+              static_cast<_Float16>(f.x * attention_scale);
+          q_frag[ks][(v * 4) + 1] =
+              static_cast<_Float16>(f.y * attention_scale);
+          q_frag[ks][(v * 4) + 2] =
+              static_cast<_Float16>(f.z * attention_scale);
+          q_frag[ks][(v * 4) + 3] =
+              static_cast<_Float16>(f.w * attention_scale);
+        }
       }
     }
   }
@@ -4315,9 +4366,10 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   static_assert(kKRegs * 256 == kKeys * (kHeadDim / 8), "K stages evenly");
   const std::uint32_t v_key = lane % kKeys;
   const std::uint32_t v_slice = (tid / kKeys) * (kVRegs * 8);
-  const auto* v_base =
-      v_cache + (static_cast<std::size_t>(kv_head) * kHeadDim) + v_slice;
-  const auto* k_base = k_cache + (static_cast<std::size_t>(kv_head) * kHeadDim);
+  const auto* v_base = static_cast<const __half*>(v_cache) +
+                       (static_cast<std::size_t>(kv_head) * kHeadDim) + v_slice;
+  const auto* k_base = static_cast<const __half*>(k_cache) +
+                       (static_cast<std::size_t>(kv_head) * kHeadDim);
 
   const auto load_v = [&](const Tile& tile, uint4* dst) {
     const std::uint32_t key_position = tile_key(tile, v_key);
@@ -4347,6 +4399,46 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
                : make_uint4(0u, 0u, 0u, 0u);
     }
   };
+  // Int8 twin pointers: Q8_0 blocks, 34 bytes per 32 values with the fp16
+  // scale trailing each block.
+  constexpr std::uint32_t kQ8RowBytes = (kWmmaKvWidth / 32) * 34;
+  constexpr std::uint32_t kQ8HeadBytes = (kWmmaHeadDim / 32) * 34;
+  const auto* v_base_q8 = static_cast<const std::int8_t*>(v_cache) +
+                          (static_cast<std::size_t>(kv_head) * kQ8HeadBytes);
+  const auto* k_base_q8 = static_cast<const std::int8_t*>(k_cache) +
+                          (static_cast<std::size_t>(kv_head) * kQ8HeadBytes);
+  auto* k_lds_i8 = reinterpret_cast<std::uint8_t*>(k_lds);
+  auto* v_lds_i8 = reinterpret_cast<std::uint8_t*>(v_lds);
+  // Int8 twin: one 16-byte chunk per thread (kKeys * kHeadDim / 16 / 256).
+  // d16 % 32 is 0 or 16, so the chunk never crosses a 32-block.
+  const auto load_k_i8 = [&](const Tile& tile, int32x4_t* dst) {
+    const std::uint32_t key_row = tid / 16;
+    const std::uint32_t d16 = (tid % 16) * 16;
+    const std::uint32_t key_position = tile_key(tile, key_row);
+    const bool live = key_position < context_end;
+    int32x4_t u = {0, 0, 0, 0};
+    if (live) {
+      const std::int8_t* blk =
+          k_base_q8 + (static_cast<std::size_t>(key_position) * kQ8RowBytes) +
+          (d16 / 32) * 34 + (d16 % 32);
+      __builtin_memcpy(&u, blk, 16);
+    }
+    dst[0] = u;
+  };
+  // Int8 twin: one 16-byte chunk per thread; e % 32 is 0 or 16.
+  const auto load_v_i8 = [&](const Tile& tile, int32x4_t* dst) {
+    const std::uint32_t key_position = tile_key(tile, v_key);
+    const bool live = key_position < context_end;
+    const std::uint32_t e = (tid / kKeys) * 16;
+    int32x4_t u = {0, 0, 0, 0};
+    if (live) {
+      const std::int8_t* blk =
+          v_base_q8 + (static_cast<std::size_t>(key_position) * kQ8RowBytes) +
+          (e / 32) * 34 + (e % 32);
+      __builtin_memcpy(&u, blk, 16);
+    }
+    dst[0] = u;
+  };
 
   const auto stage_k = [&](const uint4* regs) {
 #pragma unroll
@@ -4371,15 +4463,46 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 
   // --- S = Q K^T of the tile in k_lds. Each half writes its own slot; the
   // reader sums them.
-  const auto scores = [&] {
+  const auto scores = [&](const Tile& tile) {
     if (wave < 2 * kSTiles) {
       v8f s_acc = {};
+      if constexpr (kI8Mma) {
+        // Per-step scales: Q block ks >> 1, K block ((s_kh * 8) + ks) >> 1.
+        // The lane's key column is sub; invalid keys use scale 1 (unused).
+        for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
+          const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
+          int32x4_t k8;
+          __builtin_memcpy(&k8, &k_lds_i8[(((s_kb * 16) + sub) * 264) + d0],
+                           16);
+          int32x8_t acc = {0, 0, 0, 0, 0, 0, 0, 0};
+          acc = WmmaI8(q_frag_i8[ks], k8, acc);
+          const std::uint32_t bb = ((s_kh * kKStepsPerWave) + ks) >> 1;
+          const std::uint32_t kp = tile_key(tile, sub);
+          const float sk =
+              kp < context_end
+                  ? __half2float(*reinterpret_cast<const __half*>(
+                        k_base_q8 +
+                        (static_cast<std::size_t>(kp) * kQ8RowBytes) + bb * 34 +
+                        32))
+                  : 1.0F;
+          // WMMA C element i is row (2i + half_id): the Q scale must come
+          // from the lane holding that A-row, not this lane's own row.
+          const float qs = q_sc[ks >> 1];
 #pragma unroll
-      for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
-        const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
-        const v16h k_frag =
-            LoadFrag(&k_lds[(((s_kb * 16) + sub) * kWmmaKStride) + d0]);
-        s_acc = Wmma(q_frag[ks], k_frag, s_acc);
+          for (std::uint32_t i = 0; i < 8; ++i) {
+            const std::uint32_t q_row = (2u * i) + half_id;
+            const float qs_row = __shfl(qs, (half_id * 16u) + q_row);
+            s_acc[i] += static_cast<float>(acc[i]) * (qs_row * sk);
+          }
+        }
+      } else {
+#pragma unroll
+        for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
+          const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
+          const v16h k_frag =
+              LoadFrag(&k_lds[(((s_kb * 16) + sub) * kWmmaKStride) + d0]);
+          s_acc = Wmma(q_frag[ks], k_frag, s_acc);
+        }
       }
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
@@ -4482,50 +4605,144 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 #pragma unroll
     for (std::uint32_t t = 0; t < 2; ++t) {
       const std::uint32_t dim_tile = wave + (t * 8);
-      v16h v_frag[kKeyBlocks];
+      if constexpr (kI8Mma) {
+        // V scales for this dim-block, hoisted out of the rb loop.
+        const std::uint32_t bd = (dim_tile * 16) / 32;
+        float sv_col[16];
 #pragma unroll
-      for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
-        v_frag[kb] =
-            LoadFrag(&v_lds[(((dim_tile * 16) + sub) * kVtStride) + (kb * 16)]);
-      }
-#pragma unroll
-      for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
+        for (std::uint32_t col = 0; col < 16; ++col) {
+          const std::uint32_t kp = tile_key(tile, col);
+          sv_col[col] = kp < context_end
+                            ? __half2float(*reinterpret_cast<const __half*>(
+                                  v_base_q8 +
+                                  (static_cast<std::size_t>(kp) * kQ8RowBytes) +
+                                  bd * 34 + 32))
+                            : 1.0F;
+        }
+        int32x4_t v_frag8[kKeyBlocks];
 #pragma unroll
         for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
-          const v16h p_frag = LoadFrag(&p_lds[(rb * 16) + sub][kb * 16]);
-          v8f next = Wmma(p_frag, v_frag[kb], o_acc[rb][t]);
-          if constexpr (!kPackHeads) {
-            const std::uint32_t first_key = tile.block[0] * ratio;
-            // WMMA's dot accumulation can change its last bits when zero
-            // probabilities multiply populated future values instead of the
-            // zero padding at a chunk boundary. Accumulate each query's final
-            // partial tile over its visible keys only. Earlier complete tiles
-            // retain the matrix-core path.
-            if (first_key + kKeys - 1 > start_pos + query_start) {
+          __builtin_memcpy(
+              &v_frag8[kb],
+              &v_lds_i8[(((dim_tile * 16) + sub) * kVtStride) + (kb * 16)], 16);
+        }
 #pragma unroll
-              for (std::uint32_t i = 0; i < 8; ++i) {
-                const std::uint32_t row = (2 * i) + half_id;
-                const std::uint32_t absolute_query =
-                    start_pos + row_query(rb, row);
-                if (absolute_query < first_key + kKeys - 1) {
-                  float acc = o_acc[rb][t][i];
-                  for (std::uint32_t key = 0;
-                       key < kKeys && first_key + key <= absolute_query;
-                       ++key) {
-                    acc = fmaf(
-                        __half2float(p_lds[(rb * 16) + row][key]),
-                        __half2float(
-                            v_lds[((dim_tile * 16) + sub) * kVtStride + key]),
-                        acc);
+        for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
+          // Per-lane P requant: row (rb*16)+sub, key-scaled, one row scale.
+          float mx = 0.0F;
+          for (std::uint32_t col = 0; col < 16; ++col) {
+            const float pv =
+                __half2float(p_lds[(rb * 16) + sub][col]) * sv_col[col];
+            mx = fmaxf(mx, fabsf(pv));
+          }
+          const float sp = mx > 0.0F ? mx / 127.0F : 1.0F;
+          const float id = 1.0F / sp;
+          std::int8_t p8[16];
+          for (std::uint32_t col = 0; col < 16; ++col) {
+            const float pv =
+                __half2float(p_lds[(rb * 16) + sub][col]) * sv_col[col];
+            int qi = static_cast<int>(roundf(pv * id));
+            qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
+            p8[col] = static_cast<std::int8_t>(qi);
+          }
+          int32x4_t p8f;
+          __builtin_memcpy(&p8f, p8, 16);
+#pragma unroll
+          for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
+            int32x8_t acc0 = {0, 0, 0, 0, 0, 0, 0, 0};
+            acc0 = WmmaI8(p8f, v_frag8[kb], acc0);
+            v8f next = o_acc[rb][t];
+            // WMMA C element i is row (2i + half_id): the P scale must come
+            // from the lane holding that A-row, not this lane's own row.
+#pragma unroll
+            for (std::uint32_t i = 0; i < 8; ++i) {
+              const std::uint32_t p_row = (2u * i) + half_id;
+              const float sp_row = __shfl(sp, (half_id * 16u) + p_row);
+              next[i] += static_cast<float>(acc0[i]) * sp_row;
+            }
+            if constexpr (!kPackHeads) {
+              const std::uint32_t first_key = tile.block[0] * ratio;
+              // Same partial-tile fixup as the F16 path, reading V from the
+              // Q8 cache: zero probabilities must not accumulate populated
+              // future values at a chunk boundary.
+              if (first_key + kKeys - 1 > start_pos + query_start) {
+#pragma unroll
+                for (std::uint32_t i = 0; i < 8; ++i) {
+                  const std::uint32_t row = (2 * i) + half_id;
+                  const std::uint32_t absolute_query =
+                      start_pos + row_query(rb, row);
+                  if (absolute_query < first_key + kKeys - 1) {
+                    float acc = o_acc[rb][t][i];
+                    for (std::uint32_t key = 0;
+                         key < kKeys && first_key + key <= absolute_query;
+                         ++key) {
+                      const std::uint32_t kp = first_key + key;
+                      const std::uint32_t dm = (dim_tile * 16) + sub;
+                      const std::int8_t* vblk =
+                          v_base_q8 +
+                          (static_cast<std::size_t>(kp) * kQ8RowBytes) +
+                          (dm / 32) * 34;
+                      const float vv =
+                          static_cast<float>(vblk[dm % 32]) *
+                          __half2float(
+                              *reinterpret_cast<const __half*>(vblk + 32));
+                      acc = fmaf(__half2float(p_lds[(rb * 16) + row][key]), vv,
+                                 acc);
+                    }
+                    next[i] = acc;
                   }
-                  next[i] = acc;
                 }
               }
             }
+            o_acc[rb][t] = next;
           }
-          o_acc[rb][t] = next;
         }
-      }
+      } else {
+        v16h v_frag[kKeyBlocks];
+#pragma unroll
+        for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
+          v_frag[kb] = LoadFrag(
+              &v_lds[(((dim_tile * 16) + sub) * kVtStride) + (kb * 16)]);
+        }
+#pragma unroll
+        for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
+#pragma unroll
+          for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
+            const v16h p_frag = LoadFrag(&p_lds[(rb * 16) + sub][kb * 16]);
+            v8f next = Wmma(p_frag, v_frag[kb], o_acc[rb][t]);
+            if constexpr (!kPackHeads) {
+              const std::uint32_t first_key = tile.block[0] * ratio;
+              // WMMA's dot accumulation can change its last bits when zero
+              // probabilities multiply populated future values instead of the
+              // zero padding at a chunk boundary. Accumulate each query's
+              // final partial tile over its visible keys only. Earlier
+              // complete tiles retain the matrix-core path.
+              if (first_key + kKeys - 1 > start_pos + query_start) {
+#pragma unroll
+                for (std::uint32_t i = 0; i < 8; ++i) {
+                  const std::uint32_t row = (2 * i) + half_id;
+                  const std::uint32_t absolute_query =
+                      start_pos + row_query(rb, row);
+                  if (absolute_query < first_key + kKeys - 1) {
+                    float acc = o_acc[rb][t][i];
+                    for (std::uint32_t key = 0;
+                         key < kKeys && first_key + key <= absolute_query;
+                         ++key) {
+                      acc = fmaf(
+                          __half2float(p_lds[(rb * 16) + row][key]),
+                          __half2float(
+                              v_lds[((dim_tile * 16) + sub) * kVtStride + key]),
+                          acc);
+                    }
+                    next[i] = acc;
+                  }
+                }
+              }
+            }
+            o_acc[rb][t] = next;
+          }
+        }
+      }  // else !kI8Mma: F16 fragments
     }
   };
 
@@ -4536,54 +4753,95 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   // rescale and accumulation sequence as a sequential sweep.
   uint4 k_regs[kKRegs] = {};
   uint4 v_regs[kVRegs] = {};
+  int32x4_t k_regs_i8[1] = {};
+  int32x4_t v_regs_i8[1] = {};
   Tile cur;     // tile j: P in p_lds, V in v_lds
   Tile next;    // tile j + 1: K in k_lds
   Tile k_tile;  // tile j + 2: K in k_regs
   Tile v_tile;  // tile j + 1 V in v_regs
   std::uint32_t cursor = gather_tile(0, cur);
   if (cur.count != 0) {
-    load_k(cur, k_regs);
-    load_v(cur, v_regs);
+    if constexpr (kI8Mma) {
+      load_k_i8(cur, k_regs_i8);
+      load_v_i8(cur, v_regs_i8);
+    } else {
+      load_k(cur, k_regs);
+      load_v(cur, v_regs);
+    }
   }
   stage_k(k_regs);
-  stage_v(v_regs);
+  if constexpr (kI8Mma) {
+    // Byte LDS rows: key_row * 264 + d16, mirroring the F16 transpose.
+    const auto* vb = reinterpret_cast<const std::uint8_t*>(&v_regs_i8[0]);
+    const std::uint32_t eb = (tid / kKeys) * 16;
+#pragma unroll
+    for (std::uint32_t i = 0; i < 16; ++i)
+      v_lds_i8[((eb + i) * kVtStride) + v_key] = vb[i];
+  } else {
+    stage_v(v_regs);
+  }
   cursor = gather_tile(cursor, next);
   if (next.count != 0) {
-    load_k(next, k_regs);
-    load_v(next, v_regs);
+    if constexpr (kI8Mma) {
+      load_k_i8(next, k_regs_i8);
+      load_v_i8(next, v_regs_i8);
+    } else {
+      load_k(next, k_regs);
+      load_v(next, v_regs);
+    }
   }
   SyncLds();
   if (cur.count != 0)
-    scores();
+    scores(cur);
   SyncLds();
   if (cur.count != 0)
     softmax(cur);
   stage_k(k_regs);
   v_tile = next;
   cursor = gather_tile(cursor, k_tile);
-  if (k_tile.count != 0)
-    load_k(k_tile, k_regs);
+  if (k_tile.count != 0) {
+    if constexpr (kI8Mma)
+      load_k_i8(k_tile, k_regs_i8);
+    else
+      load_k(k_tile, k_regs);
+  }
   SyncLds();
 
   while (cur.count != 0) {
     // Phase A: k_lds = K(j + 1), v_lds = V(j), p_lds = P(j).
     if (next.count != 0)
-      scores();
+      scores(next);
     accumulate(cur);
     SyncLds();
     // Phase B.
     if (next.count != 0)
       softmax(next);
-    stage_v(v_regs);
+    if constexpr (kI8Mma) {
+      const auto* vb = reinterpret_cast<const std::uint8_t*>(&v_regs_i8[0]);
+      const std::uint32_t eb = (tid / kKeys) * 16;
+#pragma unroll
+      for (std::uint32_t i = 0; i < 16; ++i)
+        v_lds_i8[((eb + i) * kVtStride) + v_key] = vb[i];
+    } else {
+      stage_v(v_regs);
+    }
     stage_k(k_regs);
     cur = next;
     next = k_tile;
     v_tile = next;
     cursor = gather_tile(cursor, k_tile);
-    if (k_tile.count != 0)
-      load_k(k_tile, k_regs);
-    if (v_tile.count != 0)
-      load_v(v_tile, v_regs);
+    if (k_tile.count != 0) {
+      if constexpr (kI8Mma)
+        load_k_i8(k_tile, k_regs_i8);
+      else
+        load_k(k_tile, k_regs);
+    }
+    if (v_tile.count != 0) {
+      if constexpr (kI8Mma)
+        load_v_i8(v_tile, v_regs_i8);
+      else
+        load_v(v_tile, v_regs);
+    }
     SyncLds();
   }
   if (tid < kRows * kSoftmaxLanes && tid % kSoftmaxLanes == 0)
@@ -4638,13 +4896,7 @@ static_assert(sizeof(Q8_0Block) == 34, "block_q8_0 must be 34 bytes");
 constexpr std::size_t kW8A8TailMaxTokens = 16;
 constexpr std::size_t kW8A8TailMaxK = 10240;
 
-using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
-using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
-
-__device__ __forceinline__ int32x8_t WmmaI8(int32x4_t a, int32x4_t b,
-                                            int32x8_t c) {
-  return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
-}
+// int32x4_t/int32x8_t/WmmaI8 live next to Wmma above (shared with attention).
 
 /// Four elements per lane, eight lanes per 32-wide K block, four blocks per
 /// wave: per-block absmax scale, four codes stored as one word straight
@@ -7826,6 +8078,35 @@ bool WmmaCausalAttention(const float* q, const float* gate,
       (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false>), grid,
       dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask, mask_words,
       out, start_pos, n_tokens, first_group);
+  return true;
+}
+
+/// Int8 twin of WmmaCausalAttention: K/V are Q8_0 blocks consumed by int8
+/// tensor cores (Q requant + per-block scales inline, no staging buffer).
+bool WmmaCausalAttentionI8(
+    const float* q, const float* gate, const std::int8_t* k_cache,
+    const std::int8_t* v_cache, const std::uint32_t* mask,
+    std::uint32_t mask_words, float* out, std::uint32_t n_tokens,
+    std::uint32_t start_pos, std::uint32_t heads, std::uint32_t kv_heads,
+    std::uint32_t d, std::uint32_t ratio, hipStream_t stream, bool last_only) {
+  // The packed (sparse) layout falls back to the F16-staging path until its
+  // int8 twin is validated; the dense layout runs int8 tensor cores below.
+  if (mask != nullptr)
+    return false;
+  if (heads != kWmmaQueryHeads || kv_heads != kWmmaKvHeads ||
+      d != kWmmaHeadDim || ratio != kWmmaRatio || n_tokens == 0 ||
+      (mask != nullptr && mask_words > kWmmaMaxMaskWords)) {
+    return false;
+  }
+  const std::uint32_t first_group =
+      last_only ? (n_tokens - 1) / kWmmaQueryRows : 0;
+  const dim3 grid(
+      (n_tokens + kWmmaQueryRows - 1) / kWmmaQueryRows - first_group,
+      kWmmaKvHeads * (kWmmaGqa / kWmmaHeads));
+  hipLaunchKernelGGL((WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys,
+                                                false, true>),
+                     grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache,
+                     mask, mask_words, out, start_pos, n_tokens, first_group);
   return true;
 }
 
