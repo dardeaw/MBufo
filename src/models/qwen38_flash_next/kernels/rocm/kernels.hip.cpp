@@ -7230,8 +7230,8 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
       position == nullptr)
     return false;
   const AttentionProjectionOutput output{
-      q_gamma,  k_gamma, query, gate, keys,           values,
-      position, theta,   eps,   rope, skip_gate_heads};
+      q_gamma, k_gamma, query, gate, keys, values, position, theta, eps, rope,
+      nullptr, nullptr, skip_gate_heads};
   // One 256-row tile per query, gate, key or value head (52). Four row
   // tiles per token tile in launch order share each activation tile's read
   // (8.8 to 7.9 ms at 4,096 tokens). One K block per LDS stage halves the
@@ -7260,7 +7260,8 @@ bool AttentionQ8Gemm(const void* weights, const __half* input,
     return false;
   const AttentionProjectionOutput output{q_gamma, k_gamma, query,    gate,
                                          nullptr, nullptr, position, theta,
-                                         eps,     rope,    keys,     values};
+                                         eps,     rope,    keys,     values,
+                                         0};
   hipLaunchKernelGGL(
       (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true,
                           false, false, false, true>),
@@ -8069,6 +8070,7 @@ bool DequantizeQ8KVRows(const std::int8_t* src_k, __half* dst_k,
                      0, stream, src_k, dst_k, src_v, dst_v, blocks, row_elems,
                      n_rows);
   return true;
+}
 
 void PrepareQueryHeadsStreams(
     const std::uint8_t* const* streams, std::uint32_t stream_stride,
