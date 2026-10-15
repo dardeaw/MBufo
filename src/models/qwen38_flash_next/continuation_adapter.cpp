@@ -754,11 +754,11 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
     // Restored K/V rows overwrite the caches in place, which the persistent
     // Q8 staging cannot detect by source pointer: drop its validity so the
     // next prefill re-dequantizes instead of serving stale rows.
-    if (!bytes.empty() &&
-        (component.part == ContinuationPart::kKey ||
-         component.part == ContinuationPart::kValue ||
-         component.part == ContinuationPart::kDraftKey ||
-         component.part == ContinuationPart::kDraftValue))
+    const bool restores_kv = component.part == ContinuationPart::kKey ||
+                             component.part == ContinuationPart::kValue ||
+                             component.part == ContinuationPart::kDraftKey ||
+                             component.part == ContinuationPart::kDraftValue;
+    if (!bytes.empty() && restores_kv)
       state.CaptureState().q8_stage_valid_ = 0;
     {
       const std::lock_guard lock(state.jobs_mutex);
