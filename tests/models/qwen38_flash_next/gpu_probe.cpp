@@ -318,6 +318,123 @@ void BigBatch(q::rocm::Executor& executor,
     throw std::runtime_error("big-batch mixed fired unexpectedly");
 }
 
+// MTP edition (P1): speculative sessions prove the in-batch predictor-KV
+// tail. MtpPosition must track the tracked trunk position exactly like legacy
+// (tail ran), for the chunk and (unchanged) for decodes. Needs --mtp-model.
+void MtpBatch(q::rocm::Executor& executor,
+              gufo::tokenization::QwenTokenizer& tokenizer,
+              const q::ModelWeights& weights, std::uint32_t kChunk) {
+  if (!executor.has_mtp())
+    throw std::runtime_error("MX_MTP needs --mtp-model");
+  const auto& c = weights.config;
+  const std::uint32_t context = 512;
+  constexpr int kDecodes = 2;
+  std::string big;
+  for (int i = 0; i < 10; ++i)
+    big += "The quick brown fox jumps over the lazy dog. ";
+  const auto ids = tokenizer.Encode(big);
+  if (ids.size() < kChunk + 8)
+    throw std::runtime_error("mtp prompt too short");
+  std::string error;
+  auto make = [&]() {
+    auto s = executor.CreateSession(gufo::core::SessionMode::kSpeculative,
+                                    context, &error);
+    if (!s)
+      throw std::runtime_error(std::string("mtp session failed: ") + error);
+    return s;
+  };
+  std::vector<std::int32_t> seed(ids.begin(), ids.begin() + 8);
+  std::vector<std::int32_t> chunk(ids.begin(), ids.begin() + kChunk);
+  auto runrows = [&](auto& s, const std::vector<std::int32_t>& toks, bool pre) {
+    std::vector<float> o((pre ? 1 : 1) * c.vocab_size);
+    if (!executor.Forward(
+            *s, std::span<const std::int32_t>(toks.data(), toks.size()),
+            1, o.data(),
+            pre ? q::rocm::Executor::ForwardMode::kPrefill
+                : q::rocm::Executor::ForwardMode::kDecode,
+            &error, nullptr, std::span<const std::int32_t>()))
+      throw std::runtime_error("mtp setup failed: " + error);
+  };
+  std::vector<decltype(make())> ds, dr;
+  for (int i = 0; i < kDecodes; ++i) {
+    ds.push_back(make());
+    dr.push_back(make());
+    runrows(ds[i], seed, true);
+    runrows(dr[i], seed, true);
+  }
+  auto sC = make();
+  auto sCr = make();
+  // tracked positions: decodes at 8, chunks at 0
+  const std::uint64_t before = executor.mixed_batches();
+  const auto bt0 = std::chrono::steady_clock::now();
+  {
+    const bool alone = std::getenv("MX_MTP_ALONE") != nullptr;
+    const bool no_chunk = std::getenv("MX_MTP_NOCHUNK") != nullptr;
+    std::vector<q::rocm::Executor::BatchItem> items;
+    if (!alone) {
+      for (int i = 0; i < kDecodes; ++i) {
+        items.push_back({ds[i].get(),
+                         std::span<const std::int32_t>(seed.data() + 7, 1),
+                         false});
+      }
+    }
+    if (!no_chunk || alone) {
+      items.push_back({sC.get(),
+                       std::span<const std::int32_t>(chunk.data(), chunk.size()),
+                       false});
+    }
+    if (!executor.ForwardBatch(items, &error))
+      throw std::runtime_error(std::string("mtp ForwardBatch failed: ") + error);
+    if (no_chunk)
+      return;
+  }
+  const auto bt1 = std::chrono::steady_clock::now();
+  const std::uint64_t after = executor.mixed_batches();
+  // predictor invariant: chunk MtpPosition == 0 + 32; decodes unchanged at 8.
+  const auto mpC = executor.MtpPosition(*sC);
+  std::cout << "  mtp chunk mtp_pos=" << mpC << " expect=" << kChunk
+            << " mixed_fired=" << (after - before) << " batch_ms="
+            << std::chrono::duration<double, std::milli>(bt1 - bt0).count()
+            << "\n";
+  // Parity with the legacy single-Forward tail (MtpForward over tokens[1:]):
+  // mp trails trunk position by one; the engine-level DraftCatchUp (Feed
+  // protocol, P2) consumes the frontier on the next call. P1 contract ends here.
+  if (mpC + 1 != kChunk)
+    throw std::runtime_error("mtp predictor tail did not run for the chunk");
+  for (int i = 0; i < kDecodes; ++i) {
+    const auto mp = executor.MtpPosition(*ds[i]);
+    if (mp + 1 != 8)
+      throw std::runtime_error("mtp decode predictor position moved");
+  }
+  // reference twin + continuation compare (report-only, prepare gap applies)
+  {
+    std::vector<float> o(c.vocab_size);
+    if (!executor.Forward(
+            *sCr, std::span<const std::int32_t>(chunk.data(), chunk.size()), 1,
+            o.data(), q::rocm::Executor::ForwardMode::kPrefill, &error, nullptr,
+            std::span<const std::int32_t>()))
+      throw std::runtime_error("mtp reference prefill failed: " + error);
+    if (executor.MtpPosition(*sCr) + 1 != kChunk)
+      throw std::runtime_error("reference predictor position unexpected");
+    const std::int32_t nt = chunk.back();
+    std::vector<float> m1(c.vocab_size), r1(c.vocab_size);
+    if (!executor.Forward(*sC, std::span<const std::int32_t>(&nt, 1), 1,
+                           m1.data(),
+                           q::rocm::Executor::ForwardMode::kDecode, &error))
+      throw std::runtime_error("mtp continuation failed: " + error);
+    if (!executor.Forward(*sCr, std::span<const std::int32_t>(&nt, 1), 1,
+                           r1.data(),
+                           q::rocm::Executor::ForwardMode::kDecode, &error))
+      throw std::runtime_error("mtp ref continuation failed: " + error);
+    double worst_c = 0.0;
+    for (std::size_t j = 0; j < m1.size(); ++j)
+      worst_c = std::max(worst_c, std::abs(double(m1[j]) - double(r1[j])));
+    std::cout << "  mtp continuation worst " << worst_c << "\n";
+    if (!std::isfinite(worst_c))
+      throw std::runtime_error("mtp non-finite output");
+  }
+}
+
 void AuditMixed(q::rocm::Executor& executor,
                 gufo::tokenization::QwenTokenizer& tokenizer,
                 const q::ModelWeights& weights) {
@@ -448,6 +565,12 @@ std::cout << "  mixed row-split worstA(decode) " << worstA << " worstB(chunk) " 
   std::cout << "  mixed batches served: " << (after - before) << '\n';
   if (std::getenv("MX_TEXT") != nullptr)
     TextMixed(executor, tokenizer, weights);
+  const char* mtp = std::getenv("MX_MTP");
+  if (mtp != nullptr) {
+    const unsigned long mr = std::strtoul(mtp, nullptr, 10);
+    if (mr > 0)
+      MtpBatch(executor, tokenizer, weights, static_cast<std::uint32_t>(mr));
+  }
   const char* big = std::getenv("MX_BIG");
   if (big != nullptr) {
     const unsigned long br = std::strtoul(big, nullptr, 10);

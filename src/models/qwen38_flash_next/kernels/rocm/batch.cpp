@@ -818,6 +818,20 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   if (rows == 0 || rows > kMaxBatchRows || rows > options_.max_batch) {
     return Fail(error, "decode batch exceeds executor capacity");
   }
+  // MTP parity with single Forward (kPrefill): a non-speculative multi-row
+  // item is a prefill chunk, which requires a consumed predictor frontier and
+  // a predictor-KV feed below. Legacy refuses loudly here, before any GPU
+  // work; 1-row advances and speculative verify chains never take this path
+  // (single decode/verify never checks or feeds), so existing batch shapes see
+  // zero behavior change.
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    const auto& item = items[i];
+    if (!item.speculative && item.tokens.size() > 1 &&
+        item.session->mtp_enabled_ &&
+        MtpPosition(*item.session) != item.session->position_) {
+      return Fail(error, "MTP must consume the preceding frontier before prefill");
+    }
+  }
   if (!AnyActive(items))
     return true;
   for (const auto& item : items) {
@@ -1181,6 +1195,13 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     for (std::size_t i = 0; i < items.size(); ++i) {
       const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
       UseScratch(RowScratch(base, offsets[i]));
+      // Stage final residuals for immediate MTP drafting. target_hidden
+      // holds max_speculative rows; bigger items (prefill chunks) skip this:
+      // the ForwardBatch MTP tail below feeds their predictor KV instead, and
+      // the tail advances mtp_.position past the chunk so kept rows are never
+      // read for it. Copying n > max_speculative rows would heap-overflow.
+      if (n > options_.max_speculative)
+        continue;
       if (!items[i].session->Cancelled() && items[i].session->mtp_enabled_ &&
           !Check(hipMemcpyAsync(
                      items[i].session->mtp_.target_hidden, s_.res,
@@ -1214,6 +1235,25 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     items[i].session->position_ += items[i].tokens.size();
     if (sparse[i]) {
       items[i].session->blocks_ = complete[i];
+    }
+  }
+  // Predictor-KV feed for prefill chunks, mirroring single Forward: the trunk
+  // residual rows are still hot in packed scratch (RowScratch packs res by
+  // HcDim, chunk last or not). PrefillPhase is already false in batch context,
+  // so the legacy draft_phase guard would be a no-op here.
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    const auto& item = items[i];
+    const auto n =
+        static_cast<std::uint32_t>(item.tokens.size());
+    if (item.speculative || n <= 1 || !item.session->mtp_enabled_ ||
+        item.session->Cancelled() ||
+        std::getenv("MX_NO_MTP_TAIL") != nullptr)
+      continue;
+    const float* residual =
+        base.res + static_cast<std::size_t>(offsets[i]) * c.HcDim();
+    if (!MtpForward(*item.session, item.tokens.subspan(1), 0,
+                      {.kv_only = true}, error, residual)) {
+      return false;
     }
   }
   batch_rows_ = rows;
