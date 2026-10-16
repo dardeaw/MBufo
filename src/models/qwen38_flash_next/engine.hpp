@@ -18,7 +18,6 @@
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/lookup_draft.hpp"
-
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 
 namespace gufo::core {

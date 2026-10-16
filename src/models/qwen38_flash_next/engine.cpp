@@ -973,9 +973,9 @@ bool Session::PrepareDecode(const DecodeRequest& request,
                           draft_vocab_.Fits(anchor, [&](std::int32_t token) {
                             return model_->InDraftSubset(token);
                           });
-  if (!defer_head && !DraftCatchUp(anchor, true, error_msg,
-                                   &pending->candidates, !sampled,
-                                   pending->draft_subset)) {
+  if (!defer_head &&
+      !DraftCatchUp(anchor, true, error_msg, &pending->candidates, !sampled,
+                    pending->draft_subset)) {
     return false;
   }
   // A cycle-local proposal stream needs no pending RNG state in snapshots.
