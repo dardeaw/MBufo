@@ -195,6 +195,129 @@ void TextMixed(q::rocm::Executor& executor,
     throw std::runtime_error("text mixed path did not fire");
 }
 
+// Big-batch envelope check (P0 caps): N decode sessions plus one chunk ride
+// a single ForwardBatch. The 256-row chunk exceeds the mixed kernel width so
+// the tail must take the legacy per-item path (counter stays); the 8-row
+// chunk must fire mixed. Both compare report-only (phase/family gaps apply).
+void BigBatch(q::rocm::Executor& executor,
+              gufo::tokenization::QwenTokenizer& tokenizer,
+              const q::ModelWeights& weights, std::uint32_t chunk_rows,
+              bool expect_mixed) {
+  const auto& c = weights.config;
+  const std::uint32_t context = 1024;
+  std::string big;
+  for (int i = 0; i < 40; ++i)
+    big += "The quick brown fox jumps over the lazy dog. ";
+  const auto ids = tokenizer.Encode(big);
+  if (ids.size() < chunk_rows + 8)
+    throw std::runtime_error("big-batch prompt too short");
+  std::string error;
+  auto make = [&]() {
+    auto s = executor.CreateSession(gufo::core::SessionMode::kAutoregressive,
+                                    context, &error);
+    if (!s)
+      throw std::runtime_error(std::string("big session failed: ") + error);
+    return s;
+  };
+  constexpr int kDecodes = 8;
+  std::vector<decltype(make())> ds, dr;
+  for (int i = 0; i < kDecodes; ++i) {
+    ds.push_back(make());
+    dr.push_back(make());
+  }
+  auto sC = make();
+  auto sCr = make();
+  // tiny decode histories
+  std::vector<std::int32_t> seed(ids.begin(), ids.begin() + 8);
+  auto runrows = [&](auto& s, const std::vector<std::int32_t>& toks, bool pre) {
+    std::vector<float> o(toks.size() * c.vocab_size);
+    if (!executor.Forward(
+            *s, std::span<const std::int32_t>(toks.data(), toks.size()),
+            static_cast<std::uint32_t>(toks.size()), o.data(),
+            pre ? q::rocm::Executor::ForwardMode::kPrefill
+                : q::rocm::Executor::ForwardMode::kDecode,
+            &error, nullptr, std::span<const std::int32_t>()))
+      throw std::runtime_error("big-batch setup failed: " + error);
+  };
+  for (int i = 0; i < kDecodes; ++i) {
+    runrows(ds[i], seed, true);
+    runrows(dr[i], seed, true);
+  }
+  std::vector<std::int32_t> chunk(ids.begin(), ids.begin() + chunk_rows);
+  // chunk sessions start empty; the batch appends the whole chunk at pos 0.
+  // references: twin prefill of the same chunk.
+  const std::uint64_t before = executor.mixed_batches();
+  const auto bt0 = std::chrono::steady_clock::now();
+  {
+    std::vector<q::rocm::Executor::BatchItem> items;
+    for (int i = 0; i < kDecodes; ++i)
+      items.push_back({ds[i].get(),
+                       std::span<const std::int32_t>(seed.data() + 7, 1), false});
+    items.push_back({sC.get(),
+                     std::span<const std::int32_t>(chunk.data(), chunk.size()),
+                     false});
+    if (!executor.ForwardBatch(items, &error))
+      throw std::runtime_error("big ForwardBatch failed: " + error);
+    std::vector<float> tmp(c.vocab_size);
+    for (int i = 0; i < kDecodes; ++i)
+      if (!executor.SelectBatchLogits(i, 1, tmp.data(), &error))
+        throw std::runtime_error("big logits select failed: " + error);
+  }
+  const auto bt1 = std::chrono::steady_clock::now();
+  const std::uint64_t after = executor.mixed_batches();
+  std::cout << "  big chunk=" << chunk_rows << " rows=" << (kDecodes + chunk_rows)
+            << " sessions=" << (kDecodes + 1) << " mixed_fired=" << (after - before)
+            << " batch_ms="
+            << std::chrono::duration<double, std::milli>(bt1 - bt0).count()
+            << "\n";
+  // Correctness: reference twin prefill of the chunk, then both sides take
+  // one decode step with the same token (catches bad GDN history / MoE / KV).
+  // Decode rows compare directly against separate forwards (same plumbing).
+  {
+    std::vector<float> o(c.vocab_size);
+    if (!executor.Forward(
+            *sCr, std::span<const std::int32_t>(chunk.data(), chunk.size()), 1,
+            o.data(), q::rocm::Executor::ForwardMode::kPrefill, &error, nullptr,
+            std::span<const std::int32_t>()))
+      throw std::runtime_error("big reference prefill failed: " + error);
+    double worst_d = 0.0;
+    for (int i = 0; i < kDecodes; ++i) {
+      std::vector<float> m(1 * c.vocab_size), r(1 * c.vocab_size);
+      if (!executor.SelectBatchLogits(i, 1, m.data(), &error))
+        throw std::runtime_error("big re-select failed: " + error);
+      if (!executor.Forward(*dr[i],
+                             std::span<const std::int32_t>(seed.data() + 7, 1),
+                             1, r.data(),
+                             q::rocm::Executor::ForwardMode::kDecode, &error))
+        throw std::runtime_error("big ref decode failed: " + error);
+      for (std::size_t j = 0; j < m.size(); ++j)
+        worst_d = std::max(worst_d, std::abs(double(m[j]) - double(r[j])));
+    }
+    const std::int32_t nt = chunk.back();
+    std::vector<float> m1(c.vocab_size), r1(c.vocab_size);
+    if (!executor.Forward(*sC, std::span<const std::int32_t>(&nt, 1), 1,
+                           m1.data(),
+                           q::rocm::Executor::ForwardMode::kDecode, &error))
+      throw std::runtime_error("big continuation failed: " + error);
+    if (!executor.Forward(*sCr, std::span<const std::int32_t>(&nt, 1), 1,
+                           r1.data(),
+                           q::rocm::Executor::ForwardMode::kDecode, &error))
+      throw std::runtime_error("big ref continuation failed: " + error);
+    double worst_c = 0.0;
+    for (std::size_t j = 0; j < m1.size(); ++j)
+      worst_c = std::max(worst_c, std::abs(double(m1[j]) - double(r1[j])));
+    std::cout << "  big decode_rows worst " << worst_d << " continuation worst "
+              << worst_c << "\n";
+    bool finite = std::isfinite(worst_d) && std::isfinite(worst_c);
+    if (!finite)
+      throw std::runtime_error("big-batch non-finite output");
+  }
+  if (expect_mixed && after == before)
+    throw std::runtime_error("big-batch mixed path did not fire");
+  if (!expect_mixed && after != before)
+    throw std::runtime_error("big-batch mixed fired unexpectedly");
+}
+
 void AuditMixed(q::rocm::Executor& executor,
                 gufo::tokenization::QwenTokenizer& tokenizer,
                 const q::ModelWeights& weights) {
@@ -325,6 +448,13 @@ std::cout << "  mixed row-split worstA(decode) " << worstA << " worstB(chunk) " 
   std::cout << "  mixed batches served: " << (after - before) << '\n';
   if (std::getenv("MX_TEXT") != nullptr)
     TextMixed(executor, tokenizer, weights);
+  const char* big = std::getenv("MX_BIG");
+  if (big != nullptr) {
+    const unsigned long br = std::strtoul(big, nullptr, 10);
+    if (br > 0)
+      BigBatch(executor, tokenizer, weights, static_cast<std::uint32_t>(br),
+               br <= 16);
+  }
   if (after == before)
     throw std::runtime_error("mixed path did not fire (counter stuck)");
   if (false) { FILE* f = std::fopen(dump, "wb"); if (f) { std::fwrite(mA.data(), 4, mA.size(), f); std::fwrite(mB.data(), 4, mB.size(), f); std::fclose(f); } }

@@ -8052,15 +8052,47 @@ bool GatedDeltaNetBatch(const GdnBatchItem* items, std::uint32_t count,
                         const float* conv_w, const float* a, const float* dt,
                         const float* norm_w, std::uint32_t k_heads,
                         std::uint32_t v_heads, float eps, hipStream_t stream) {
-  if (items == nullptr || count == 0 || count > 8 || max_tokens == 0 ||
-      max_tokens > kSsmConvTokensPerThread)
+  // count cap tracks batch.cpp kBatchSessions (32); token cap tracks
+  // kMaxBatchRows (1024). Short items keep the single-tile in-kernel history
+  // path bit-identical; long items tile over y and get their 3-row conv
+  // history via memcpy below (n > 8 >= taps-1 always covers the window, and
+  // long items are never speculative so no per-row rollback snapshots exist).
+  if (items == nullptr || count == 0 || count > 32 || max_tokens == 0 ||
+      max_tokens > 1024)
     return false;
   const auto channels = (2 * k_heads + v_heads) * kGdnDim;
   constexpr auto waves = kThreads / 32;
-  hipLaunchKernelGGL((SsmConv4Kernel<true, true>),
-                     dim3(Blocks(channels), 1, count), dim3(kThreads), 0,
-                     stream, nullptr, qkv_stride, conv_w, nullptr, nullptr,
-                     max_tokens, channels, RollbackRows{}, items, active);
+  std::uint32_t small_active = 0;
+  std::uint32_t big_active = 0;
+  for (std::uint32_t i = 0; i < count; ++i) {
+    if ((active & (1U << i)) == 0)
+      continue;
+    // NOTE: items lives in mapped host memory; direct host reads are fine.
+    if (items[i].n_tokens > kSsmConvTokensPerThread) {
+      if (items[i].state_snapshots.rows[0] != nullptr ||
+          items[i].conv_snapshots.rows[0] != nullptr)
+        return false;
+      big_active |= 1U << i;
+    } else {
+      small_active |= 1U << i;
+    }
+  }
+  if (small_active != 0) {
+    hipLaunchKernelGGL((SsmConv4Kernel<true, true>),
+                       dim3(Blocks(channels), 1, count), dim3(kThreads), 0,
+                       stream, nullptr, qkv_stride, conv_w, nullptr, nullptr,
+                       max_tokens, channels, RollbackRows{}, items,
+                       small_active);
+  }
+  if (big_active != 0) {
+    const std::uint32_t tiles =
+        (max_tokens + kSsmConvTokensPerThread - 1) /
+        kSsmConvTokensPerThread;
+    hipLaunchKernelGGL((SsmConv4Kernel<false, true>),
+                       dim3(Blocks(channels), tiles, count), dim3(kThreads), 0,
+                       stream, nullptr, qkv_stride, conv_w, nullptr, nullptr,
+                       max_tokens, channels, RollbackRows{}, items, big_active);
+  }
   hipLaunchKernelGGL(GdnPrepKernel<true>,
                      dim3((max_tokens * k_heads + waves - 1) / waves, 1, count),
                      dim3(kThreads), 0, stream, nullptr, nullptr, nullptr,
@@ -8076,6 +8108,22 @@ bool GatedDeltaNetBatch(const GdnBatchItem* items, std::uint32_t count,
                      dim3(kThreads), 0, stream, nullptr, nullptr, z_stride,
                      norm_w, nullptr, nullptr, nullptr, max_tokens * v_heads,
                      v_heads, eps, items, active, nullptr);
+  // Conv history for long items: window = last 3 qkv rows, streamed after the
+  // conv (same stream, ordered). Pointers are already validated by kernel use.
+  for (std::uint32_t i = 0; i < count; ++i) {
+    if ((big_active & (1U << i)) == 0)
+      continue;
+    const auto& item = items[i];
+    const std::size_t row_bytes =
+        static_cast<std::size_t>(channels) * sizeof(float);
+    for (std::uint32_t r = 0; r < kSsmConvTaps - 1; ++r) {
+      hipMemcpyAsync(
+          item.conv_state + static_cast<std::size_t>(r) * channels,
+          item.qkv +
+              static_cast<std::size_t>(item.n_tokens - 3 + r) * qkv_stride,
+          row_bytes, hipMemcpyDeviceToDevice, stream);
+    }
+  }
   return hipGetLastError() == hipSuccess;
 }
 

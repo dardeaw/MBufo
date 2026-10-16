@@ -15,7 +15,13 @@
 namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
 
-constexpr std::uint32_t kBatchSessions = 8;
+constexpr std::uint32_t kBatchSessions = 32;
+// Total packed rows per ForwardBatch. Packed scratch is sized for
+// max_batch (PrefillThroughCapacity, 4224); the binding constraint is
+// batch_logits_. Per-item rows above kWmmaQueryRows (16) fall back to
+// legacy per-item cores inside the same batch.
+constexpr std::uint32_t kMaxBatchRows = 1024;
+constexpr std::uint32_t kMaxBatchItemRows = 1024;
 constexpr std::uint32_t kDecodeRows = 8;
 
 namespace {
@@ -140,13 +146,13 @@ void Executor::UseScratch(const Scratch& scratch) const {
 }
 
 bool Executor::AllocateBatch(std::string* error) const {
+  // Logit rows for the whole batch (kMaxBatchRows covers decodes plus any
+  // chunk riders). This stays >= kBatchSessions * vocab: the MTP-heads path
+  // stages prefix projections in the buffer tail.
+  const std::size_t logit_bytes = static_cast<std::size_t>(kMaxBatchRows) *
+                                  config().vocab_size * sizeof(float);
   return batch_logits_ != nullptr ||
-         Check(hip::AllocateDevice(
-                   &batch_logits_,
-                   static_cast<std::size_t>(kBatchSessions) *
-                       std::min(kDecodeRows, options_.max_logit_rows) *
-                       config().vocab_size * sizeof(float)),
-               error);
+         Check(hip::AllocateDevice(&batch_logits_, logit_bytes), error);
 }
 
 bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
@@ -732,7 +738,10 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
                        error) ||
       !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error))
     return false;
-  if (l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
+  // The Q4_K vector fast path caps at MMVQ_MAX_ROUTED_BATCH (64) rows;
+  // bigger batches fall through to the generic tiled MoeExperts loop below
+  // (same pattern as the non-Q4_K path; per-row independent, no vec limit).
+  if (rows <= 64 && l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
       l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
     // Share expert weights across request boundaries while retaining the
     // scalar Q8 activation quantization and dot-product reduction.
@@ -779,8 +788,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   for (std::size_t i = 0; i < items.size(); ++i) {
     const auto& item = items[i];
     if (item.session == nullptr || item.session->owner_ != this ||
-        item.tokens.empty() || item.tokens.size() > kDecodeRows ||
-        item.tokens.size() > options_.max_logit_rows ||
+        item.tokens.empty() || item.tokens.size() > kMaxBatchItemRows ||
         (item.speculative && item.tokens.size() > options_.max_speculative) ||
         item.session->position_ + item.tokens.size() >
             item.session->max_context_) {
@@ -804,7 +812,10 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     sparse[i] = c.compress_ratio > 0 && end > c.indexer_top_k;
     complete[i] = c.compress_ratio > 0 ? end / c.compress_ratio : 0;
   }
-  if (rows > options_.max_batch) {
+  // Packed scratch fits max_batch rows, but batch_logits_ only fits
+  // kMaxBatchRows total logit rows (MTP-heads tail staging needs at least
+  // kBatchSessions * vocab below it, which 1024 rows cover).
+  if (rows == 0 || rows > kMaxBatchRows || rows > options_.max_batch) {
     return Fail(error, "decode batch exceeds executor capacity");
   }
   if (!AnyActive(items))
