@@ -512,6 +512,26 @@ void AttentionQ8(const float* q, const std::int8_t* k_cache,
                  std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                  hipStream_t stream);
 
+/// One mixed-batch unit: packed rows from a single session. The kernel
+/// launch covers all (blk, kv-head-group) pairs; grid.y fans out over head
+/// groups exactly like the uniform path.
+struct MixedBlk {
+  std::uint32_t q_off;
+  std::uint64_t k_ptr;
+  std::uint64_t v_ptr;
+  std::uint32_t kv_len;
+  std::uint32_t q_pos_base;
+  std::uint32_t n_rows;
+};
+/// Mixed-batch varlen twin of WmmaCausalAttention (dense only). Packed Q
+/// rows from any number of sessions compute side by side in one launch, each
+/// block serving one MixedBlk with its own KV range and causal base. Returns
+/// false, launching nothing, on unsupported geometry.
+bool WmmaMixedAttention(const float* q, const float* gate,
+                        const MixedBlk* blks, std::uint32_t n_blks, float* out,
+                        std::uint32_t heads, std::uint32_t kv_heads,
+                        std::uint32_t d, std::uint32_t ratio,
+                        hipStream_t stream);
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows
 /// Attention's block-selection contract (null for the dense window). Returns

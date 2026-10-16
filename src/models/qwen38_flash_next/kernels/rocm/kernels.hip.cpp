@@ -4739,14 +4739,6 @@ __device__ __forceinline__ float HcScaledSilu(float value) {
 /// Each block serves ONE MixedBlk: rows from a single session packed into Q.
 /// Per-block {q_off, kv bases, kv_len, q_pos_base, n_rows} replaces the
 /// uniform (start_pos, n_tokens) geometry; the math below is untouched.
-struct MixedBlk {
-  std::uint32_t q_off;      // first packed-Q row of this block
-  std::uint64_t k_ptr;      // session K cache base (bytes as int)
-  std::uint64_t v_ptr;      // session V cache base
-  std::uint32_t kv_len;     // live keys in this session
-  std::uint32_t q_pos_base;  // absolute position of packed row q_off
-  std::uint32_t n_rows;     // live packed rows in this block
-};
 template<std::uint32_t kQueryRows, std::uint32_t kKeys>
 __launch_bounds__(256, 2) __global__ void WmmaMixedAttentionKernel(
     const float* __restrict__ q, const float* __restrict__ gate,
@@ -5255,123 +5247,6 @@ __launch_bounds__(256, 2) __global__ void WmmaMixedAttentionKernel(
       }
     }
   }
-}
-
-// W8A8 int8 WMMA GEMM over the GGUF Q8_0 weights, ported from the Qwen 27B
-// route (src/models/qwen/hip/kernels/prefill_quant_gemm.hip,
-// opt-c163-blocked-w8a8 with the opt-c179 addressing). Weights stay in their
-// row-major 34-byte block_q8_0 layout; activations are quantized per 32-wide
-// block into WMMA B-fragment order:
-//
-//   tile(tt, kb) = [b0: 16 tokens x 16 bytes]   offset   0
-//                  [b1: 16 tokens x 16 bytes]   offset 256
-//                  [16 fp32 token scales    ]   offset 512
-//
-// with tt = token / 16 and kb the 32-element K block, 576 bytes per tile.
-struct Q8_0Block {
-  __half d;
-  std::int8_t qs[32];
-};
-static_assert(sizeof(Q8_0Block) == 34, "block_q8_0 must be 34 bytes");
-/// W8A8TailKernel limits: tokens past the last full tile and K width.
-constexpr std::size_t kW8A8TailMaxTokens = 16;
-constexpr std::size_t kW8A8TailMaxK = 10240;
-
-using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
-using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
-
-__device__ __forceinline__ int32x8_t WmmaI8(int32x4_t a, int32x4_t b,
-                                            int32x8_t c) {
-  return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
-}
-
-/// Four elements per lane, eight lanes per 32-wide K block, four blocks per
-/// wave: per-block absmax scale, four codes stored as one word straight
-/// into the fragment order the GEMM stages from.
-__global__ void QuantizeQ8TiledVec4Kernel(const float* __restrict__ x,
-                                          void* __restrict__ y,
-                                          std::size_t batch, std::size_t k) {
-  const std::size_t num_blocks = k / 32;
-  const std::size_t b_idx =
-      (blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x) >> 3u;
-  const std::uint32_t lane8 = threadIdx.x & 7u;
-  if (b_idx >= batch * num_blocks) {
-    return;
-  }
-  const std::size_t tok = b_idx / num_blocks;
-  const std::size_t blk = b_idx % num_blocks;
-  const float4 v = *reinterpret_cast<const float4*>(x + (tok * k) + (blk * 32) +
-                                                    (lane8 * 4));
-  float max_abs =
-      fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w)));
-  for (int off = 4; off > 0; off >>= 1) {
-    max_abs = fmaxf(max_abs, XorLane(max_abs, off));
-  }
-  const float d = max_abs / 127.0F;
-  const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-  const auto q0 = static_cast<std::uint32_t>(
-      static_cast<std::uint8_t>(static_cast<std::int8_t>(roundf(v.x * id))));
-  const auto q1 = static_cast<std::uint32_t>(
-      static_cast<std::uint8_t>(static_cast<std::int8_t>(roundf(v.y * id))));
-  const auto q2 = static_cast<std::uint32_t>(
-      static_cast<std::uint8_t>(static_cast<std::int8_t>(roundf(v.z * id))));
-  const auto q3 = static_cast<std::uint32_t>(
-      static_cast<std::uint8_t>(static_cast<std::int8_t>(roundf(v.w * id))));
-  const std::size_t tt = tok / kQ8ActTileTokens;
-  const std::size_t tl = tok % kQ8ActTileTokens;
-  std::int8_t* tile = Q8ActTile(y, num_blocks, tt, blk);
-  const std::uint32_t pos = lane8 * 4;  // 0, 4, ..., 28
-  *reinterpret_cast<std::uint32_t*>(tile + ((pos >> 4u) * 256) + (tl * 16) +
-                                    (pos & 15u)) =
-      q0 | (q1 << 8) | (q2 << 16) | (q3 << 24);
-  if (lane8 == 0) {
-    *reinterpret_cast<float*>(tile + kQ8ActScaleOffset + (tl * sizeof(float))) =
-        d;
-  }
-}
-
-/// One wave per (token, 32-wide K block): per-block absmax scale, codes
-/// written straight into the fragment order the GEMM stages from.
-__global__ void QuantizeQ8TiledKernel(const float* __restrict__ x,
-                                      void* __restrict__ y, std::size_t batch,
-                                      std::size_t k) {
-  const std::size_t num_blocks = k / 32;
-  const std::size_t b_idx =
-      (blockIdx.x * (blockDim.x >> 5u)) + (threadIdx.x >> 5u);
-  const std::size_t lane_id = threadIdx.x & 31u;
-  if (b_idx >= batch * num_blocks) {
-    return;
-  }
-  const std::size_t tok = b_idx / num_blocks;
-  const std::size_t blk = b_idx % num_blocks;
-  const float val = x[(tok * k) + (blk * 32) + lane_id];
-  float max_abs = fabsf(val);
-  for (int off = 16; off > 0; off >>= 1) {
-    max_abs = fmaxf(max_abs, XorLane(max_abs, off));
-  }
-  const float d = max_abs / 127.0F;
-  const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-  const auto q = static_cast<std::int8_t>(roundf(val * id));
-  const std::size_t tt = tok / kQ8ActTileTokens;
-  const std::size_t tl = tok % kQ8ActTileTokens;
-  std::int8_t* tile = Q8ActTile(y, num_blocks, tt, blk);
-  const std::size_t half = lane_id >> 4u;
-  const std::size_t pos = lane_id & 15u;
-  tile[(half * 256) + (tl * 16) + pos] = q;
-  if (lane_id == 0) {
-    *reinterpret_cast<float*>(tile + kQ8ActScaleOffset + (tl * sizeof(float))) =
-        d;
-  }
-}
-
-// Preserve the separate scale/SiLU kernel's F32 intermediates before narrowing.
-// Without these compiler boundaries, fused F16 output can round differently.
-__device__ __forceinline__ float HcScaledSilu(float value) {
-  float scaled = value * 0.25F;
-  asm volatile("" : "+v"(scaled));
-  float result = SiluF(scaled);
-  asm volatile("" : "+v"(result));
-  return result;
 }
 
 /// Two-dimensionally blocked W8A8 WMMA GEMM: block = BM rows x BN tokens, BK
@@ -8465,6 +8340,31 @@ bool WmmaCausalAttention(const float* q, const float* gate,
       (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false>), grid,
       dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask, mask_words,
       out, start_pos, n_tokens, first_group);
+  return true;
+}
+
+/// Mixed-batch host entry (dense only): packed Q rows from any number of
+/// sessions, one MixedBlk per (session, kv-head-group) unit. Returns false
+/// when the geometry is unsupported so callers fall back to per-session.
+bool WmmaMixedAttention(const float* q, const float* gate,
+                        const MixedBlk* blks, std::uint32_t n_blks,
+                        float* out, std::uint32_t heads, std::uint32_t kv_heads,
+                        std::uint32_t d, std::uint32_t ratio,
+                        hipStream_t stream) {
+  if (heads != kWmmaQueryHeads || kv_heads != kWmmaKvHeads ||
+      d != kWmmaHeadDim || ratio != kWmmaRatio || n_blks == 0) {
+    return false;
+  }
+  for (std::uint32_t b = 0; b < n_blks; ++b) {
+    if (blks[b].n_rows == 0 || blks[b].n_rows > kWmmaQueryRows ||
+        blks[b].kv_len == 0) {
+      return false;
+    }
+  }
+  const dim3 grid(n_blks, kWmmaKvHeads * (kWmmaGqa / kWmmaHeads));
+  hipLaunchKernelGGL((WmmaMixedAttentionKernel<kWmmaQueryRows, kWmmaKeys>),
+                     grid, dim3(kThreads), 0, stream, q, gate, blks, nullptr,
+                     0, out, n_blks, 0);
   return true;
 }
 

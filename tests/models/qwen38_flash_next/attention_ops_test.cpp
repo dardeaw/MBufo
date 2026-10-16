@@ -602,10 +602,94 @@ void CheckChunks(std::uint32_t n, std::uint32_t split) {
     throw std::runtime_error("attention depends on prefill chunk boundary");
 }
 
+/// Mixed-batch varlen check: session A contributes one decode row (one
+/// query over an 8-key prefix), session B a 4-token prefill chunk over a
+/// 16-key prefix with causal self-attention. Each side is verified against
+/// its own dense Fp64Attention; the kernel computes both in one launch.
+double CompareMixed(std::uint32_t seed) {
+  constexpr std::uint32_t kChunk = 4;
+  constexpr std::uint32_t kKvA = 8;
+  constexpr std::uint32_t kKvB = 20;
+  constexpr std::uint32_t kRows = 1 + kChunk;
+  const std::size_t q_count = static_cast<std::size_t>(kRows) * kQWidth;
+  const auto qv = MakeValues(q_count, seed, 4.0F);
+  const auto gate = MakeValues(q_count, seed ^ 0x5555U, 3.0F);
+  const auto kfA = MakeValues(static_cast<std::size_t>(kKvA) * kKvWidth,
+                              seed ^ 0xAAAAU, 1.0F);
+  const auto vfA = MakeValues(static_cast<std::size_t>(kKvA) * kKvWidth,
+                              seed ^ 0x3333U, 1.0F);
+  const auto kfB = MakeValues(static_cast<std::size_t>(kKvB) * kKvWidth,
+                              seed ^ 0xBBBBU, 1.0F);
+  const auto vfB = MakeValues(static_cast<std::size_t>(kKvB) * kKvWidth,
+                              seed ^ 0xCCCCU, 1.0F);
+  std::vector<__half> khA(kfA.size()), vhA(vfA.size()), khB(kfB.size()),
+      vhB(vfB.size());
+  for (std::size_t i = 0; i < kfA.size(); ++i) {
+    khA[i] = __float2half(kfA[i]);
+    vhA[i] = __float2half(vfA[i]);
+  }
+  for (std::size_t i = 0; i < kfB.size(); ++i) {
+    khB[i] = __float2half(kfB[i]);
+    vhB[i] = __float2half(vfB[i]);
+  }
+  HipBuffer<float> d_q(q_count);
+  HipBuffer<float> d_gate(q_count);
+  HipBuffer<__half> d_kA(kfA.size());
+  HipBuffer<__half> d_kB(kfB.size());
+  HipBuffer<__half> d_vA(vfA.size());
+  HipBuffer<__half> d_vB(vfB.size());
+  HipBuffer<float> d_out(q_count);
+  HipBuffer<q::MixedBlk> d_blks(2);
+  Upload(&d_q, qv);
+  Upload(&d_gate, gate);
+  Upload(&d_kA, khA);
+  Upload(&d_vA, vhA);
+  Upload(&d_kB, khB);
+  Upload(&d_vB, vhB);
+  std::vector<q::MixedBlk> blks(2);
+  blks[0] = {0, reinterpret_cast<std::uint64_t>(d_kA.get()),
+             reinterpret_cast<std::uint64_t>(d_vA.get()), kKvA,
+             kKvA - 1, 1};
+  blks[1] = {1, reinterpret_cast<std::uint64_t>(d_kB.get()),
+             reinterpret_cast<std::uint64_t>(d_vB.get()), kKvB,
+             kKvB - kChunk, kChunk};
+  Upload(&d_blks, blks);
+  if (!q::WmmaMixedAttention(d_q.get(), d_gate.get(), d_blks.get(), 2,
+                             d_out.get(), kHeads, kKvHeads, kDim, kRatio,
+                             nullptr)) {
+    throw std::runtime_error("mixed attention rejected the geometry");
+  }
+  CheckHip(hipDeviceSynchronize(), "mixed attention synchronization");
+  const auto out = Download(&d_out, q_count);
+  // Reference: row 0 is A's decode token (absolute query kKvA - 1 over A's
+  // own cache); rows 1..4 are B's chunk (absolute queries kKvB - kChunk + r).
+  const auto refA = Fp64Attention(
+      std::vector<float>(qv.begin(), qv.begin() + kQWidth),
+      std::vector<float>(gate.begin(), gate.begin() + kQWidth), khA, vhA,
+      nullptr, 0, 1, kKvA - 1);
+  const auto refB = Fp64Attention(
+      std::vector<float>(qv.begin() + kQWidth, qv.end()),
+      std::vector<float>(gate.begin() + kQWidth, gate.end()), khB, vhB,
+      nullptr, 0, kChunk, kKvB - kChunk);
+  double worst = 0.0;
+  for (std::size_t i = 0; i < q_count; ++i) {
+    const double e = (i < static_cast<std::size_t>(kQWidth))
+                         ? refA[i]
+                         : refB[i - kQWidth];
+    worst = std::max(worst, std::abs(static_cast<double>(out[i]) - e));
+  }
+  std::cout << "  mixed attention worst absolute error " << worst << '\n';
+  return worst;
+}
+
 }  // namespace
 
 int main() {
   try {
+    const double mixed = CompareMixed(0xC0FFEEU);
+    std::cout << "WMMA mixed attention worst absolute error " << mixed << '\n';
+    if (mixed > 2e-2)
+      throw std::runtime_error("mixed attention exceeds its FP64 envelope");
     CheckChunks(136, 94);
     CheckChunks(2048, 1025);
     CheckPreparation(1, 0, 64);
