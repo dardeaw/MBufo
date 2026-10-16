@@ -2381,6 +2381,71 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
   return Dense(l.ssm_out, s_.gdn_out, out, n_tokens, error_msg);
 }
 
+bool Executor::EnsureQ8Staging(Session& session, Session::AttentionState& s,
+                               std::uint32_t need, std::uint32_t kv_row,
+                               std::string* error) const {
+  const std::size_t row_bytes = std::size_t(kv_row) * sizeof(__half);
+  const std::size_t kv_q8_row = (std::size_t{kv_row} + 31) / 32 * 34;
+  // Persistent per-session staging: reused across prefill chunks and
+  // dequantized incrementally (only rows [valid, need) are converted).
+  // The source pointers disambiguate trunk vs draft caches; snapshot
+  // restore/rollback invalidate (see RestoreSnapshot/Rollback). Any
+  // failure here falls back to the scalar kernel below.
+  if (session.q8_stage_ksrc_ != s.k_cache_q8 ||
+      session.q8_stage_vsrc_ != s.v_cache_q8) {
+    session.q8_stage_ksrc_ = s.k_cache_q8;
+    session.q8_stage_vsrc_ = s.v_cache_q8;
+    session.q8_stage_valid_ = 0;
+  }
+  if (need > session.q8_stage_cap_) {
+    const std::size_t new_cap =
+        (std::size_t{need} + 4095) & ~std::size_t{4095};
+    __half* nk = nullptr;
+    __half* nv = nullptr;
+    if (hipMalloc(reinterpret_cast<void**>(&nk), new_cap * row_bytes) !=
+            hipSuccess ||
+        hipMalloc(reinterpret_cast<void**>(&nv), new_cap * row_bytes) !=
+            hipSuccess) {
+      if (nk != nullptr)
+        (void)hipFree(nk);
+      if (nv != nullptr)
+        (void)hipFree(nv);
+      return false;
+    }
+    auto forget = [&](void* p) {
+      auto& a = session.allocations_;
+      a.erase(std::remove(a.begin(), a.end(), p), a.end());
+    };
+    if (session.q8_stage_k_ != nullptr) {
+      (void)hipFree(session.q8_stage_k_);
+      forget(session.q8_stage_k_);
+    }
+    if (session.q8_stage_v_ != nullptr) {
+      (void)hipFree(session.q8_stage_v_);
+      forget(session.q8_stage_v_);
+    }
+    session.q8_stage_k_ = nk;
+    session.q8_stage_v_ = nv;
+    session.allocations_.push_back(nk);
+    session.allocations_.push_back(nv);
+    session.q8_stage_cap_ = new_cap;
+    session.q8_stage_valid_ = 0;
+  }
+  if (need > session.q8_stage_valid_) {
+    const std::uint32_t base = session.q8_stage_valid_;
+    if (!rocm::DequantizeQ8KVRows(
+            s.k_cache_q8 + std::size_t{base} * kv_q8_row,
+            session.q8_stage_k_ + std::size_t{base} * kv_row,
+            s.v_cache_q8 + std::size_t{base} * kv_q8_row,
+            session.q8_stage_v_ + std::size_t{base} * kv_row, need - base,
+            kv_row, stream_)) {
+      return false;
+    }
+    session.q8_stage_valid_ = need;
+  }
+  return true;
+}
+
 bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                          const float* x, float* out, std::uint32_t n_tokens,
                          const std::uint32_t* pos,
@@ -2573,66 +2638,9 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         const std::uint32_t need = pos0 + rows;
         if (need == 0)
           return false;
-        const std::size_t row_bytes = std::size_t(kv_row) * sizeof(__half);
-        const std::size_t kv_q8_row = (std::size_t{kv_row} + 31) / 32 * 34;
-        // Persistent per-session staging: reused across prefill chunks and
-        // dequantized incrementally (only rows [valid, need) are converted).
-        // The source pointers disambiguate trunk vs draft caches; snapshot
-        // restore/rollback invalidate (see RestoreSnapshot/Rollback). Any
-        // failure here falls back to the scalar kernel below.
-        if (session.q8_stage_ksrc_ != s.k_cache_q8 ||
-            session.q8_stage_vsrc_ != s.v_cache_q8) {
-          session.q8_stage_ksrc_ = s.k_cache_q8;
-          session.q8_stage_vsrc_ = s.v_cache_q8;
-          session.q8_stage_valid_ = 0;
-        }
-        if (need > session.q8_stage_cap_) {
-          const std::size_t new_cap =
-              (std::size_t{need} + 4095) & ~std::size_t{4095};
-          __half* nk = nullptr;
-          __half* nv = nullptr;
-          if (hipMalloc(reinterpret_cast<void**>(&nk), new_cap * row_bytes) !=
-                  hipSuccess ||
-              hipMalloc(reinterpret_cast<void**>(&nv), new_cap * row_bytes) !=
-                  hipSuccess) {
-            if (nk != nullptr)
-              (void)hipFree(nk);
-            if (nv != nullptr)
-              (void)hipFree(nv);
-            return false;
-          }
-          auto forget = [&](void* p) {
-            auto& a = session.allocations_;
-            a.erase(std::remove(a.begin(), a.end(), p), a.end());
-          };
-          if (session.q8_stage_k_ != nullptr) {
-            (void)hipFree(session.q8_stage_k_);
-            forget(session.q8_stage_k_);
-          }
-          if (session.q8_stage_v_ != nullptr) {
-            (void)hipFree(session.q8_stage_v_);
-            forget(session.q8_stage_v_);
-          }
-          session.q8_stage_k_ = nk;
-          session.q8_stage_v_ = nv;
-          session.allocations_.push_back(nk);
-          session.allocations_.push_back(nv);
-          session.q8_stage_cap_ = new_cap;
-          session.q8_stage_valid_ = 0;
-        }
-        if (need > session.q8_stage_valid_) {
-          const std::uint32_t base = session.q8_stage_valid_;
-          if (!rocm::DequantizeQ8KVRows(
-                  s.k_cache_q8 + std::size_t{base} * kv_q8_row,
-                  session.q8_stage_k_ + std::size_t{base} * kv_row,
-                  s.v_cache_q8 + std::size_t{base} * kv_q8_row,
-                  session.q8_stage_v_ + std::size_t{base} * kv_row, need - base,
-                  kv_row, stream_)) {
-            return false;
-          }
-          session.q8_stage_valid_ = need;
-        }
-        __half* stage_k = session.q8_stage_k_;
+        if (!EnsureQ8Staging(session, s, need, kv_row, error_msg)) {
+          return false;
+        }        __half* stage_k = session.q8_stage_k_;
         __half* stage_v = session.q8_stage_v_;
         bool ok = false;
         {

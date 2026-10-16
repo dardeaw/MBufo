@@ -960,15 +960,14 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         }
       }
       std::uint32_t gdn_active = 0;
-      // Mixed-batch attention: all items must be plain F16 dense rows
-      // (no speculative chains, no sparse selection); Q8, MTP and sparse
-      // batches keep the legacy per-item cores.
-      bool use_mixed = !l.linear && UseMixedBatch() && !options_.kv_cache_int8 &&
-                       items.size() >= 2;
+      // Mixed-batch attention: all items must be dense rows; speculative
+      // verify chains are plain rows for attention purposes (rollback and
+      // selection live outside the core). Sparse batches keep legacy cores.
+      bool use_mixed = !l.linear && UseMixedBatch() && items.size() >= 2;
       if (use_mixed) {
         for (std::size_t i = 0; i < items.size(); ++i) {
           const auto& item = items[i];
-          if (item.session->Cancelled() || item.speculative || sparse[i] ||
+          if (item.session->Cancelled() || sparse[i] ||
               item.tokens.empty()) {
             use_mixed = false;
             break;
@@ -1045,17 +1044,57 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                      error))
             return false;
         }
+        const std::uint32_t kv_row = c.AttentionKvDim();
         for (std::size_t i = 0; i < items.size(); ++i) {
           const auto& item = items[i];
           auto& session = *item.session;
           const auto n = static_cast<std::uint32_t>(item.tokens.size());
           const auto& ks = session.attention_[il];
+          const __half* k_ptr = ks.k_cache;
+          const __half* v_ptr = ks.v_cache;
+          if (options_.kv_cache_int8) {
+            // Q8 sessions read their persistent F16 staging; ensure it
+            // covers the live rows first, else the whole batch falls back.
+            const std::uint32_t need = session.position_ + n;
+            if (!EnsureQ8Staging(session,
+                                 const_cast<Session::AttentionState&>(ks), need,
+                                 kv_row, error)) {
+              use_mixed = false;
+              break;
+            }
+            k_ptr = session.q8_stage_k_;
+            v_ptr = session.q8_stage_v_;
+          }
           batch_mixed_host_[i] = {
-              offsets[i], reinterpret_cast<std::uint64_t>(ks.k_cache),
-              reinterpret_cast<std::uint64_t>(ks.v_cache),
+              offsets[i], reinterpret_cast<std::uint64_t>(k_ptr),
+              reinterpret_cast<std::uint64_t>(v_ptr),
               session.position_ + n, session.position_, n};
         }
-        if (!WmmaMixedAttention(base.q, base.attn_gate, batch_mixed_,
+        if (!use_mixed) {
+          // Staging ensure failed above: rerun the legacy per-item cores.
+          for (std::size_t i = 0; i < items.size(); ++i) {
+            const auto& item = items[i];
+            auto& session = *item.session;
+            const auto n = static_cast<std::uint32_t>(item.tokens.size());
+            auto view = RowScratch(base, offsets[i]);
+            if (!l.linear && l.attn_qkv.empty()) {
+              view.qg = base.qg + static_cast<std::size_t>(offsets[i]) * 2 *
+                                      c.AttentionQDim();
+            }
+            UseScratch(view);
+            const auto pool = sparse[i] && complete[i] > session.blocks_
+                                  ? complete[i] - session.blocks_
+                                  : 0;
+            if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out,
+                           n, &session.control_->position,
+                           &session.control_->blocks, session.position_, pool,
+                           session.max_context_, sparse[i], error, false, true,
+                           false, 0, session)) {
+              return false;
+            }
+          }
+          UseScratch(base);
+        } else if (!WmmaMixedAttention(base.q, base.attn_gate, batch_mixed_,
                                 static_cast<std::uint32_t>(items.size()),
                                 base.ctx, c.num_heads, c.num_kv_heads,
                                 c.head_dim, c.compress_ratio, stream_)) {

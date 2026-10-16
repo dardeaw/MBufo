@@ -540,6 +540,11 @@ private:
                  bool last_only, bool projections_ready, bool project_output,
                  std::uint32_t checkpoint_tokens, Session& session,
                  bool defer_wmma = false) const;
+  /// Provision and incrementally dequantize a session's persistent Q8
+  /// staging up to `need` rows (shared by the staging path and mixed).
+  [[nodiscard]] bool EnsureQ8Staging(Session& session, Session::AttentionState& s,
+                                     std::uint32_t need, std::uint32_t kv_row,
+                                     std::string* error) const;
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
            bool last_only = false) const;
