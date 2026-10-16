@@ -4735,6 +4735,645 @@ __device__ __forceinline__ float HcScaledSilu(float value) {
   return result;
 }
 
+/// Mixed-batch varlen twin of WmmaCausalAttentionKernel (dense only).
+/// Each block serves ONE MixedBlk: rows from a single session packed into Q.
+/// Per-block {q_off, kv bases, kv_len, q_pos_base, n_rows} replaces the
+/// uniform (start_pos, n_tokens) geometry; the math below is untouched.
+struct MixedBlk {
+  std::uint32_t q_off;      // first packed-Q row of this block
+  std::uint64_t k_ptr;      // session K cache base (bytes as int)
+  std::uint64_t v_ptr;      // session V cache base
+  std::uint32_t kv_len;     // live keys in this session
+  std::uint32_t q_pos_base;  // absolute position of packed row q_off
+  std::uint32_t n_rows;     // live packed rows in this block
+};
+template<std::uint32_t kQueryRows, std::uint32_t kKeys>
+__launch_bounds__(256, 2) __global__ void WmmaMixedAttentionKernel(
+    const float* __restrict__ q, const float* __restrict__ gate,
+    const MixedBlk* __restrict__ blks, const std::uint32_t* __restrict__ mask,
+    std::uint32_t mask_words, float* __restrict__ out,
+    std::uint32_t n_blks, std::uint32_t first_blk = 0) {
+  // Dense only: packed heads and the sparse selection machinery are compiled
+  // out; mask/words stay in the signature for call-site symmetry.
+  constexpr bool kPackHeads = false;
+  constexpr bool kI8Mma = false;
+  (void)mask;
+  (void)mask_words;
+  (void)n_blks;
+  // The launcher accepts only four-token selection blocks. Keep that
+  // geometry constant throughout the key sweep.
+  constexpr std::uint32_t ratio = kWmmaRatio;
+  constexpr std::uint32_t kHeadDim = kWmmaHeadDim;
+  constexpr std::uint32_t kRowBlocks = kPackHeads
+                                           ? (kQueryRows * kWmmaGqa + 15) / 16
+                                           : (kQueryRows / 16) * kWmmaHeads;
+  static_assert(!kPackHeads || kQueryRows * kWmmaGqa == 48,
+                "four queries pack twelve heads into three tiles");
+  constexpr std::uint32_t kKeyBlocks = kKeys / 16;
+  constexpr std::uint32_t kSTiles = kRowBlocks * kKeyBlocks;
+  constexpr std::uint32_t kKStepsPerWave = kWmmaKSteps / 2;
+  constexpr std::uint32_t kRows = kRowBlocks * 16;
+  constexpr std::uint32_t kOTilesPerWave = (kRowBlocks * kWmmaKSteps) / 8;
+  constexpr std::uint32_t kSoftmaxLanes = 4;
+  constexpr std::uint32_t kVtStride = kKeys + 8;
+  static_assert(kSTiles == (kPackHeads ? 3 : 2), "two waves per S tile");
+  static_assert(kOTilesPerWave == 2 * kRowBlocks, "O tiles per wave");
+  static_assert(kKeys % 16 == 0 && (kPackHeads || kQueryRows % 16 == 0),
+                "16-row WMMA tiles");
+  static_assert(kKStepsPerWave * 2 == kWmmaKSteps, "k split");
+  static_assert(kWmmaKStride % 8 == 0 && kVtStride % 8 == 0,
+                "fragment rows must start on a 16-byte boundary");
+  static_assert(kSoftmaxLanes * (kKeys / kSoftmaxLanes) == kKeys, "softmax");
+
+  const std::uint32_t tid = threadIdx.x;
+  const std::uint32_t lane = tid & 31u;
+  const std::uint32_t wave = tid >> 5u;
+  const std::uint32_t sub = lane & 15u;
+  const std::uint32_t half_id = lane >> 4u;
+
+  // Keep the two KV heads of nearby queries together in the launch order.
+  // This improves cache reuse without changing any query's key sweep.
+  const std::uint32_t blk_idx = first_blk + blockIdx.x;
+  const MixedBlk blk = blks[blk_idx];
+  const std::uint32_t kv_head = blockIdx.y / (kWmmaGqa / kWmmaHeads);
+  const std::uint32_t first_query_head =
+      (kv_head * kWmmaGqa) +
+      ((blockIdx.y % (kWmmaGqa / kWmmaHeads)) * kWmmaHeads);
+  constexpr float attention_scale = 1.0F / 16.0F;
+
+  // Packed rows: local row lr = (rb / kWmmaHeads) * 16 + r lives at packed
+  // index blk.q_off + lr with absolute position blk.q_pos_base + lr.
+  const auto row_local = [&](std::uint32_t rb, std::uint32_t r) {
+    return ((rb / kWmmaHeads) * 16) + r;
+  };
+  const auto row_query = [&](std::uint32_t rb, std::uint32_t r) {
+    return blk.q_off + row_local(rb, r);
+  };
+  const auto row_head = [&](std::uint32_t rb, std::uint32_t r) {
+    return first_query_head + (rb % kWmmaHeads);
+  };
+  const auto row_live = [&](std::uint32_t rb, std::uint32_t r) {
+    return row_local(rb, r) < blk.n_rows;
+  };
+  const auto row_qpos = [&](std::uint32_t rb, std::uint32_t r) {
+    return blk.q_pos_base + row_local(rb, r);
+  };
+
+  // K and V^T have their own buffers so the next tile's S overlaps this
+  // tile's PV (see the key sweep below).
+  __shared__ __half k_lds[kKeys * kWmmaKStride];
+  __shared__ __half v_lds[kHeadDim * kVtStride];
+  // Pad score rows for the four-lane softmax reads and probability rows
+  // for the WMMA fragments. Both transposes otherwise repeat LDS banks.
+  __shared__ float s_lds[2][kSTiles][16][17];
+  __shared__ __half p_lds[kRows][kKeys + 8];
+  __shared__ float row_sum[kRows];
+  __shared__ float row_scale[kRows];
+
+  const std::uint32_t s_tile = wave % kSTiles;
+  const std::uint32_t s_kh = wave / kSTiles;
+  const std::uint32_t s_rb = s_tile % kRowBlocks;
+  const std::uint32_t s_kb = s_tile / kRowBlocks;
+
+  v16h q_frag[kKStepsPerWave];
+  if (wave < 2 * kSTiles) {
+    const std::uint32_t local_query = row_query(s_rb, sub);
+    const bool live = row_live(s_rb, sub);
+    const float* q_row =
+        q +
+        (static_cast<std::size_t>(live ? local_query : 0) * kWmmaAttnWidth) +
+        (static_cast<std::size_t>(live ? row_head(s_rb, sub) : 0) * kHeadDim);
+#pragma unroll
+    for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
+      const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
+      const auto* qp = reinterpret_cast<const float4*>(q_row + d0);
+#pragma unroll
+      for (std::uint32_t v = 0; v < 4; ++v) {
+        const float4 f = live ? qp[v] : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+        q_frag[ks][(v * 4) + 0] = static_cast<_Float16>(f.x * attention_scale);
+        q_frag[ks][(v * 4) + 1] = static_cast<_Float16>(f.y * attention_scale);
+        q_frag[ks][(v * 4) + 2] = static_cast<_Float16>(f.z * attention_scale);
+        q_frag[ks][(v * 4) + 3] = static_cast<_Float16>(f.w * attention_scale);
+      }
+    }
+  }
+
+  // This wave owns dim tiles `wave` and `wave + 8` for every row block.
+  v8f o_acc[kRowBlocks][2] = {};
+  // The same four threads own each softmax row throughout the key sweep.
+  // Keep its running statistics in registers; only the final denominator
+  // and each tile's rescale factor need to cross waves.
+  float running_max = -INFINITY;
+  float running_sum = 0.0F;
+
+  const std::uint32_t context_end = blk.kv_len;
+  const std::uint32_t max_visible =
+      min(context_end, blk.q_pos_base + blk.n_rows);
+
+  // Key tiles are gathered from `kBlocksPerTile` selection blocks (ratio
+  // keys each). In the sparse window the blocks come from the union of this
+  // block's query masks (every row still applies its own mask below), then
+  // every block from the earliest row's tail on; the dense window walks the
+  // blocks in order. The sweep therefore costs the union of the selected
+  // windows, not the context.
+  constexpr std::uint32_t kBlocksPerTile = kKeys / 4;
+  static_assert(kBlocksPerTile == 4, "a tile is four selection blocks");
+  const std::uint32_t n_blocks = (max_visible + ratio - 1) / ratio;
+  const std::uint32_t tail_block =
+      ((blk.q_pos_base + 1) / ratio);  // first always-visible block
+  constexpr bool sparse = kPackHeads;
+  // Four 512-block selections plus their incomplete tail. The same LDS
+  // stores a mask for arbitrary wider selections used by operator callers.
+  constexpr unsigned kListCapacity = 4 * 512 + 4;
+  // A compact entry also carries which of the packed queries selected the
+  // block, so the softmax reads its mask bits from the tile, not global.
+  constexpr unsigned kMaskRows = kPackHeads ? kQueryRows : 1;
+  constexpr unsigned kMemberShift = 28;
+  static_assert(kMaskRows <= 32 - kMemberShift, "membership bits fit");
+  __shared__ unsigned union_words[kListCapacity];
+  __shared__ unsigned wave_counts[8];
+  bool compact = false;
+  unsigned selected = 0;
+  if (sparse) {
+    // Dense-only twin: the selection machinery above is compiled out.
+    compact = false;
+    selected = 0;
+  }
+  // First visible block at or after `b` (n_blocks when none). Uniform across
+  // the block: every thread walks the same words.
+  const auto next_block = [&](std::uint32_t b) -> std::uint32_t {
+    if (!sparse) {
+      return b;
+    }
+    while (b < tail_block && b < n_blocks) {
+      const std::uint32_t bits = union_words[b / 32] >> (b % 32);
+      // Never jump past the tail: from tail_block on every block is visible.
+      if (bits != 0) {
+        return min(b + static_cast<std::uint32_t>(__builtin_ctz(bits)),
+                   tail_block);
+      }
+      b = min(((b / 32) + 1) * 32u, tail_block);
+    }
+    return b;
+  };
+  struct Tile {
+    std::uint32_t block[kBlocksPerTile];
+    std::uint32_t count;
+    std::uint32_t members;  // kMaskRows bits per block, compact lists only
+  };
+  // Gathers the next tile starting the search at block `b`; returns the
+  // block to continue from.
+  const auto gather_tile = [&](std::uint32_t b, Tile& tile) {
+    if (compact) {
+      tile.count = min(kBlocksPerTile, selected - min(b, selected));
+      tile.members = 0;
+#pragma unroll
+      for (unsigned i = 0; i < kBlocksPerTile; ++i) {
+        const unsigned entry = b + i < selected ? union_words[b + i] : 0u;
+        tile.block[i] =
+            b + i < selected ? entry & ((1u << kMemberShift) - 1u) : n_blocks;
+        tile.members |= (entry >> kMemberShift) << (i * kMaskRows);
+      }
+      return b + tile.count;
+    }
+    tile.count = 0;
+    tile.members = 0;
+#pragma unroll
+    for (std::uint32_t i = 0; i < kBlocksPerTile; ++i) {
+      b = next_block(b);
+      const bool have = b < n_blocks;
+      tile.block[i] = have ? b : n_blocks;
+      tile.count += have ? 1u : 0u;
+      b = have ? b + 1 : b;
+    }
+    return b;
+  };
+  // Key position of tile row `r` (0..15), or context_end past the tile.
+  const auto tile_key = [&](const Tile& tile, std::uint32_t r) {
+    const std::uint32_t i = r / ratio;
+    std::uint32_t blk = n_blocks;
+#pragma unroll
+    for (std::uint32_t j = 0; j < kBlocksPerTile; ++j) {
+      if (i == j) {
+        blk = tile.block[j];
+      }
+    }
+    return blk < n_blocks ? (blk * ratio) + (r % ratio) : context_end;
+  };
+
+  // One key per lane for V, a 16-dim slice per thread: a strided global read
+  // in exchange for conflict-free transpose writes.
+  constexpr std::uint32_t kVRegs = (kKeys * kHeadDim) / (256 * 8);
+  constexpr std::uint32_t kKRegs = (kKeys * (kHeadDim / 8)) / 256;
+  static_assert(kKRegs * 256 == kKeys * (kHeadDim / 8), "K stages evenly");
+  const std::uint32_t v_key = lane % kKeys;
+  const std::uint32_t v_slice = (tid / kKeys) * (kVRegs * 8);
+  const auto* v_base =
+      reinterpret_cast<const __half*>(blk.v_ptr) +
+      (static_cast<std::size_t>(kv_head) * kHeadDim) + v_slice;
+  const auto* k_base = reinterpret_cast<const __half*>(blk.k_ptr) +
+                       (static_cast<std::size_t>(kv_head) * kHeadDim);
+
+  const auto load_v = [&](const Tile& tile, uint4* dst) {
+    const std::uint32_t key_position = tile_key(tile, v_key);
+    const bool live = key_position < context_end;
+    const auto* src =
+        v_base +
+        (static_cast<std::size_t>(live ? key_position : 0) * kWmmaKvWidth);
+#pragma unroll
+    for (std::uint32_t j = 0; j < kVRegs; ++j) {
+      dst[j] = live ? *reinterpret_cast<const uint4*>(src + (j * 8))
+                    : make_uint4(0u, 0u, 0u, 0u);
+    }
+  };
+  // Coalesced: a wave reads one key row's 512 contiguous bytes.
+  const auto load_k = [&](const Tile& tile, uint4* dst) {
+#pragma unroll
+    for (std::uint32_t n = 0; n < kKRegs; ++n) {
+      const std::uint32_t idx = tid + (n * 256);
+      const std::uint32_t key_position = tile_key(tile, idx / (kHeadDim / 8));
+      const std::uint32_t d8 = (idx % (kHeadDim / 8)) * 8;
+      const bool live = key_position < context_end;
+      dst[n] =
+          live ? *reinterpret_cast<const uint4*>(
+                     k_base +
+                     (static_cast<std::size_t>(key_position) * kWmmaKvWidth) +
+                     d8)
+               : make_uint4(0u, 0u, 0u, 0u);
+    }
+  };
+
+  const auto stage_k = [&](const uint4* regs) {
+#pragma unroll
+    for (std::uint32_t n = 0; n < kKRegs; ++n) {
+      const std::uint32_t idx = tid + (n * 256);
+      const std::uint32_t key_row = idx / (kHeadDim / 8);
+      const std::uint32_t d8 = (idx % (kHeadDim / 8)) * 8;
+      *reinterpret_cast<uint4*>(&k_lds[(key_row * kWmmaKStride) + d8]) =
+          regs[n];
+    }
+  };
+  const auto stage_v = [&](const uint4* regs) {
+#pragma unroll
+    for (std::uint32_t j = 0; j < kVRegs; ++j) {
+      const auto* packed = reinterpret_cast<const __half*>(&regs[j]);
+#pragma unroll
+      for (std::uint32_t i = 0; i < 8; ++i) {
+        v_lds[((v_slice + (j * 8) + i) * kVtStride) + v_key] = packed[i];
+      }
+    }
+  };
+
+  // --- S = Q K^T of the tile in k_lds. Each half writes its own slot; the
+  // reader sums them.
+  const auto scores = [&] {
+    if (wave < 2 * kSTiles) {
+      v8f s_acc = {};
+#pragma unroll
+      for (std::uint32_t ks = 0; ks < kKStepsPerWave; ++ks) {
+        const std::uint32_t d0 = ((s_kh * kKStepsPerWave) + ks) * 16;
+        const v16h k_frag =
+            LoadFrag(&k_lds[(((s_kb * 16) + sub) * kWmmaKStride) + d0]);
+        s_acc = Wmma(q_frag[ks], k_frag, s_acc);
+      }
+#pragma unroll
+      for (std::uint32_t i = 0; i < 8; ++i) {
+        s_lds[s_kh][s_tile][(2 * i) + half_id][sub] = s_acc[i];
+      }
+    }
+  };
+
+  // --- online softmax of the scores in s_lds: kSoftmaxLanes threads per
+  // query row ---
+  const auto softmax = [&](const Tile& tile) {
+    const std::uint32_t rg = tid / kSoftmaxLanes;
+    if (rg < kRows) {
+      const std::uint32_t seg = tid % kSoftmaxLanes;
+      constexpr std::uint32_t kPerLane = kKeys / kSoftmaxLanes;
+      const std::uint32_t rb = rg / 16;
+      const std::uint32_t row = rg % 16;
+      const std::uint32_t local_query = row_query(rb, row);
+      const bool live_row = row_live(rb, row);
+      const std::uint32_t absolute_query = row_qpos(rb, row);
+      // Dense twin: no selection mask (mask is always null here); per-row
+      // causality is already enforced by valid above.
+      float part_max = -INFINITY;
+      float vals[kPerLane];
+#pragma unroll
+      for (std::uint32_t m = 0; m < kPerLane; ++m) {
+        const std::uint32_t col = (seg * kPerLane) + m;
+        const std::uint32_t key_position = tile_key(tile, col);
+        const bool valid = live_row && key_position <= absolute_query &&
+                           key_position < context_end;
+        const std::uint32_t s_index = ((col / 16) * kRowBlocks) + rb;
+        vals[m] = valid ? (s_lds[0][s_index][row][col % 16] +
+                           s_lds[1][s_index][row][col % 16])
+                        : -INFINITY;
+        part_max = fmaxf(part_max, vals[m]);
+      }
+#pragma unroll
+      for (std::uint32_t off = 1; off < kSoftmaxLanes; off <<= 1) {
+        part_max = fmaxf(part_max, XorLane(part_max, off));
+      }
+      const float prev_max = running_max;
+      const float next_max = fmaxf(prev_max, part_max);
+      const float prior_scale =
+          isfinite(prev_max) ? __expf(prev_max - next_max) : 0.0F;
+      float part_sum = 0.0F;
+#pragma unroll
+      for (std::uint32_t m = 0; m < kPerLane; ++m) {
+        const float w = isfinite(vals[m]) ? __expf(vals[m] - next_max) : 0.0F;
+        part_sum += w;
+        p_lds[rg][(seg * kPerLane) + m] = static_cast<__half>(w);
+      }
+#pragma unroll
+      for (std::uint32_t off = 1; off < kSoftmaxLanes; off <<= 1) {
+        part_sum += XorLane(part_sum, off);
+      }
+      running_max = next_max;
+      // The completed partial sum, then one fused update: written out so
+      // fast-math cannot reassociate the reduction into the update.
+      running_sum = __fmaf_rn(prior_scale, running_sum, part_sum);
+      if (seg == 0) {
+        row_scale[rg] = prior_scale;
+      }
+    }
+  };
+
+  // --- rescale the running O by the tile's new maximum, then O += P V. A
+  // lane touches only rows 2i + half_id, so the factors are read once per
+  // row block.
+  const auto accumulate = [&](const Tile& tile) {
+#pragma unroll
+    for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
+      float scale[8];
+#pragma unroll
+      for (std::uint32_t i = 0; i < 8; ++i) {
+        scale[i] = row_scale[(rb * 16) + (2 * i) + half_id];
+      }
+#pragma unroll
+      for (std::uint32_t t = 0; t < 2; ++t) {
+#pragma unroll
+        for (std::uint32_t i = 0; i < 8; ++i) {
+          o_acc[rb][t][i] *= scale[i];
+        }
+      }
+    }
+#pragma unroll
+    for (std::uint32_t t = 0; t < 2; ++t) {
+      const std::uint32_t dim_tile = wave + (t * 8);
+      v16h v_frag[kKeyBlocks];
+#pragma unroll
+      for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
+        v_frag[kb] =
+            LoadFrag(&v_lds[(((dim_tile * 16) + sub) * kVtStride) + (kb * 16)]);
+      }
+#pragma unroll
+      for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
+#pragma unroll
+        for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
+          const v16h p_frag = LoadFrag(&p_lds[(rb * 16) + sub][kb * 16]);
+          v8f next = Wmma(p_frag, v_frag[kb], o_acc[rb][t]);
+          if constexpr (!kPackHeads) {
+            const std::uint32_t first_key = tile.block[0] * ratio;
+            // WMMA's dot accumulation can change its last bits when zero
+            // probabilities multiply populated future values instead of the
+            // zero padding at a chunk boundary. Accumulate each query's final
+            // partial tile over its visible keys only. Earlier complete tiles
+            // retain the matrix-core path.
+            if (first_key + kKeys - 1 > blk.q_pos_base) {
+#pragma unroll
+              for (std::uint32_t i = 0; i < 8; ++i) {
+                const std::uint32_t row = (2 * i) + half_id;
+                const std::uint32_t absolute_query = row_qpos(rb, row);
+                if (absolute_query < first_key + kKeys - 1) {
+                  float acc = o_acc[rb][t][i];
+                  for (std::uint32_t key = 0;
+                       key < kKeys && first_key + key <= absolute_query;
+                       ++key) {
+                    acc = fmaf(
+                        __half2float(p_lds[(rb * 16) + row][key]),
+                        __half2float(
+                            v_lds[((dim_tile * 16) + sub) * kVtStride + key]),
+                        acc);
+                  }
+                  next[i] = acc;
+                }
+              }
+            }
+          }
+          o_acc[rb][t] = next;
+        }
+      }
+    }
+  };
+
+  // Software-pipelined key sweep. Phase A of step j accumulates tile j's PV
+  // while the score waves compute tile j + 1's S; phase B runs tile j + 1's
+  // softmax while staging K for tile j + 2 and V for tile j + 1, whose
+  // registers were loaded one step earlier. Every row sees the same S, P,
+  // rescale and accumulation sequence as a sequential sweep.
+  uint4 k_regs[kKRegs] = {};
+  uint4 v_regs[kVRegs] = {};
+  Tile cur;     // tile j: P in p_lds, V in v_lds
+  Tile next;    // tile j + 1: K in k_lds
+  Tile k_tile;  // tile j + 2: K in k_regs
+  Tile v_tile;  // tile j + 1 V in v_regs
+  std::uint32_t cursor = gather_tile(0, cur);
+  if (cur.count != 0) {
+    load_k(cur, k_regs);
+    load_v(cur, v_regs);
+  }
+  stage_k(k_regs);
+  stage_v(v_regs);
+  cursor = gather_tile(cursor, next);
+  if (next.count != 0) {
+    load_k(next, k_regs);
+    load_v(next, v_regs);
+  }
+  SyncLds();
+  if (cur.count != 0)
+    scores();
+  SyncLds();
+  if (cur.count != 0)
+    softmax(cur);
+  stage_k(k_regs);
+  v_tile = next;
+  cursor = gather_tile(cursor, k_tile);
+  if (k_tile.count != 0)
+    load_k(k_tile, k_regs);
+  SyncLds();
+
+  while (cur.count != 0) {
+    // Phase A: k_lds = K(j + 1), v_lds = V(j), p_lds = P(j).
+    if (next.count != 0)
+      scores();
+    accumulate(cur);
+    SyncLds();
+    // Phase B.
+    if (next.count != 0)
+      softmax(next);
+    stage_v(v_regs);
+    stage_k(k_regs);
+    cur = next;
+    next = k_tile;
+    v_tile = next;
+    cursor = gather_tile(cursor, k_tile);
+    if (k_tile.count != 0)
+      load_k(k_tile, k_regs);
+    if (v_tile.count != 0)
+      load_v(v_tile, v_regs);
+    SyncLds();
+  }
+  if (tid < kRows * kSoftmaxLanes && tid % kSoftmaxLanes == 0)
+    row_sum[tid / kSoftmaxLanes] = running_sum;
+  SyncLds();
+
+  // --- epilogue: normalize and apply the sigmoid output gate ---
+#pragma unroll
+  for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
+#pragma unroll
+    for (std::uint32_t t = 0; t < 2; ++t) {
+      const std::uint32_t dim_tile = wave + (t * 8);
+#pragma unroll
+      for (std::uint32_t i = 0; i < 8; ++i) {
+        const std::uint32_t row = (2 * i) + half_id;
+        if (!row_live(rb, row)) {
+          continue;
+        }
+        const float denominator = row_sum[(rb * 16) + row];
+        const std::size_t offset =
+            (static_cast<std::size_t>(row_query(rb, row)) * kWmmaAttnWidth) +
+            (static_cast<std::size_t>(row_head(rb, row)) * kHeadDim) +
+            (dim_tile * 16) + sub;
+        float value =
+            (denominator > 0.0F) ? (o_acc[rb][t][i] / denominator) : 0.0F;
+        if (gate != nullptr) {
+          value *= SigmoidF(gate[offset]);
+        }
+        out[offset] = value;
+      }
+    }
+  }
+}
+
+// W8A8 int8 WMMA GEMM over the GGUF Q8_0 weights, ported from the Qwen 27B
+// route (src/models/qwen/hip/kernels/prefill_quant_gemm.hip,
+// opt-c163-blocked-w8a8 with the opt-c179 addressing). Weights stay in their
+// row-major 34-byte block_q8_0 layout; activations are quantized per 32-wide
+// block into WMMA B-fragment order:
+//
+//   tile(tt, kb) = [b0: 16 tokens x 16 bytes]   offset   0
+//                  [b1: 16 tokens x 16 bytes]   offset 256
+//                  [16 fp32 token scales    ]   offset 512
+//
+// with tt = token / 16 and kb the 32-element K block, 576 bytes per tile.
+struct Q8_0Block {
+  __half d;
+  std::int8_t qs[32];
+};
+static_assert(sizeof(Q8_0Block) == 34, "block_q8_0 must be 34 bytes");
+/// W8A8TailKernel limits: tokens past the last full tile and K width.
+constexpr std::size_t kW8A8TailMaxTokens = 16;
+constexpr std::size_t kW8A8TailMaxK = 10240;
+
+using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
+
+__device__ __forceinline__ int32x8_t WmmaI8(int32x4_t a, int32x4_t b,
+                                            int32x8_t c) {
+  return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
+}
+
+/// Four elements per lane, eight lanes per 32-wide K block, four blocks per
+/// wave: per-block absmax scale, four codes stored as one word straight
+/// into the fragment order the GEMM stages from.
+__global__ void QuantizeQ8TiledVec4Kernel(const float* __restrict__ x,
+                                          void* __restrict__ y,
+                                          std::size_t batch, std::size_t k) {
+  const std::size_t num_blocks = k / 32;
+  const std::size_t b_idx =
+      (blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x) >> 3u;
+  const std::uint32_t lane8 = threadIdx.x & 7u;
+  if (b_idx >= batch * num_blocks) {
+    return;
+  }
+  const std::size_t tok = b_idx / num_blocks;
+  const std::size_t blk = b_idx % num_blocks;
+  const float4 v = *reinterpret_cast<const float4*>(x + (tok * k) + (blk * 32) +
+                                                    (lane8 * 4));
+  float max_abs =
+      fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w)));
+  for (int off = 4; off > 0; off >>= 1) {
+    max_abs = fmaxf(max_abs, XorLane(max_abs, off));
+  }
+  const float d = max_abs / 127.0F;
+  const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
+  const auto q0 = static_cast<std::uint32_t>(
+      static_cast<std::uint8_t>(static_cast<std::int8_t>(roundf(v.x * id))));
+  const auto q1 = static_cast<std::uint32_t>(
+      static_cast<std::uint8_t>(static_cast<std::int8_t>(roundf(v.y * id))));
+  const auto q2 = static_cast<std::uint32_t>(
+      static_cast<std::uint8_t>(static_cast<std::int8_t>(roundf(v.z * id))));
+  const auto q3 = static_cast<std::uint32_t>(
+      static_cast<std::uint8_t>(static_cast<std::int8_t>(roundf(v.w * id))));
+  const std::size_t tt = tok / kQ8ActTileTokens;
+  const std::size_t tl = tok % kQ8ActTileTokens;
+  std::int8_t* tile = Q8ActTile(y, num_blocks, tt, blk);
+  const std::uint32_t pos = lane8 * 4;  // 0, 4, ..., 28
+  *reinterpret_cast<std::uint32_t*>(tile + ((pos >> 4u) * 256) + (tl * 16) +
+                                    (pos & 15u)) =
+      q0 | (q1 << 8) | (q2 << 16) | (q3 << 24);
+  if (lane8 == 0) {
+    *reinterpret_cast<float*>(tile + kQ8ActScaleOffset + (tl * sizeof(float))) =
+        d;
+  }
+}
+
+/// One wave per (token, 32-wide K block): per-block absmax scale, codes
+/// written straight into the fragment order the GEMM stages from.
+__global__ void QuantizeQ8TiledKernel(const float* __restrict__ x,
+                                      void* __restrict__ y, std::size_t batch,
+                                      std::size_t k) {
+  const std::size_t num_blocks = k / 32;
+  const std::size_t b_idx =
+      (blockIdx.x * (blockDim.x >> 5u)) + (threadIdx.x >> 5u);
+  const std::size_t lane_id = threadIdx.x & 31u;
+  if (b_idx >= batch * num_blocks) {
+    return;
+  }
+  const std::size_t tok = b_idx / num_blocks;
+  const std::size_t blk = b_idx % num_blocks;
+  const float val = x[(tok * k) + (blk * 32) + lane_id];
+  float max_abs = fabsf(val);
+  for (int off = 16; off > 0; off >>= 1) {
+    max_abs = fmaxf(max_abs, XorLane(max_abs, off));
+  }
+  const float d = max_abs / 127.0F;
+  const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
+  const auto q = static_cast<std::int8_t>(roundf(val * id));
+  const std::size_t tt = tok / kQ8ActTileTokens;
+  const std::size_t tl = tok % kQ8ActTileTokens;
+  std::int8_t* tile = Q8ActTile(y, num_blocks, tt, blk);
+  const std::size_t half = lane_id >> 4u;
+  const std::size_t pos = lane_id & 15u;
+  tile[(half * 256) + (tl * 16) + pos] = q;
+  if (lane_id == 0) {
+    *reinterpret_cast<float*>(tile + kQ8ActScaleOffset + (tl * sizeof(float))) =
+        d;
+  }
+}
+
+// Preserve the separate scale/SiLU kernel's F32 intermediates before narrowing.
+// Without these compiler boundaries, fused F16 output can round differently.
+__device__ __forceinline__ float HcScaledSilu(float value) {
+  float scaled = value * 0.25F;
+  asm volatile("" : "+v"(scaled));
+  float result = SiluF(scaled);
+  asm volatile("" : "+v"(result));
+  return result;
+}
+
 /// Two-dimensionally blocked W8A8 WMMA GEMM: block = BM rows x BN tokens, BK
 /// 32-element K blocks per LDS stage, waves = WM row groups x WN token groups.
 /// Out-of-range rows and K blocks are clamped and their scale zeroed, so
