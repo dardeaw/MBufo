@@ -2390,7 +2390,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                          std::string* error_msg, bool last_only,
                          bool projections_ready, bool project_output,
                          std::uint32_t checkpoint_tokens,
-                         Session& session) const {
+                         Session& session, bool defer_wmma) const {
   const Config& c = config();
   const std::uint32_t kv_row = c.AttentionKvDim();
   const std::uint32_t index_capacity =
@@ -2534,6 +2534,12 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                    mask_words_, max_blocks, stream_, live);
     }
     mask = s_.mask;
+  }
+  // Mixed-batch callers run projections and KV append per item, then a
+  // single WmmaMixedAttention over the packed rows: defer skips the core
+  // (wide, narrow and scalar paths) plus the output gate and projection.
+  if (defer_wmma) {
+    return true;
   }
   // Wide batches run the fused WMMA kernel (never inside a graph: the kv
   // extent is a host value), output gate included, skipping the key tiles

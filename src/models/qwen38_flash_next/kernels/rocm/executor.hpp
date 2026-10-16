@@ -538,7 +538,8 @@ private:
                  std::uint32_t start_pos, std::uint32_t pool_grid,
                  std::uint32_t max_context, bool sparse, std::string* error_msg,
                  bool last_only, bool projections_ready, bool project_output,
-                 std::uint32_t checkpoint_tokens, Session& session) const;
+                 std::uint32_t checkpoint_tokens, Session& session,
+                 bool defer_wmma = false) const;
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
            bool last_only = false) const;
@@ -708,6 +709,10 @@ private:
   // preparing the next layer. ForwardBatch drains before reusing this table.
   mutable GdnBatchItem* batch_gdn_host_{nullptr};
   mutable GdnBatchItem* batch_gdn_{nullptr};
+  // Mapped MixedBlk table for the mixed-batch attention path: one entry per
+  // batch item, read directly by the GPU. ForwardBatch drains before reuse.
+  mutable MixedBlk* batch_mixed_host_{nullptr};
+  mutable MixedBlk* batch_mixed_{nullptr};
   mutable std::uint32_t batch_rows_{0};
   mutable const float* selected_logits_{nullptr};
   [[nodiscard]] const float* VerificationLogits() const {

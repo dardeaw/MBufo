@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <cstdio>
 #include <stdexcept>
 
 #include "qfn_mmq.h"
@@ -14,6 +16,18 @@ namespace {
 
 constexpr std::uint32_t kBatchSessions = 8;
 constexpr std::uint32_t kDecodeRows = 8;
+
+namespace {
+// Mixed-batch attention (GUFO_MIXED_BATCH=1): one WmmaMixedAttention over
+// packed decode + prefill-chunk rows instead of per-item launches.
+bool UseMixedBatch() {
+  static const bool on = [] {
+    const char* e = std::getenv("GUFO_MIXED_BATCH");
+    return e != nullptr && e[0] == '1';
+  }();
+  return on;
+}
+}  // namespace
 
 bool Fail(std::string* error, const std::string& message) {
   if (error != nullptr) {
@@ -946,6 +960,21 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         }
       }
       std::uint32_t gdn_active = 0;
+      // Mixed-batch attention: all items must be plain F16 dense rows
+      // (no speculative chains, no sparse selection); Q8, MTP and sparse
+      // batches keep the legacy per-item cores.
+      bool use_mixed = !l.linear && UseMixedBatch() && !options_.kv_cache_int8 &&
+                       items.size() >= 2;
+      if (use_mixed) {
+        for (std::size_t i = 0; i < items.size(); ++i) {
+          const auto& item = items[i];
+          if (item.session->Cancelled() || item.speculative || sparse[i] ||
+              item.tokens.empty()) {
+            use_mixed = false;
+            break;
+          }
+        }
+      }
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto& item = items[i];
         auto& session = *item.session;
@@ -993,10 +1022,69 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
                          &session.control_->position, &session.control_->blocks,
                          session.position_, pool, session.max_context_,
-                         sparse[i], error, false, true, false, 0, session)) {
+                         sparse[i], error, false, true, false, 0, session,
+                         use_mixed)) {
             return false;
           }
         }
+      }
+      if (use_mixed) {
+        // All items projected above (deferred): one mixed launch over the
+        // packed rows, then the shared output gate.
+        // Refusal reruns the legacy per-item cores below (projections rerun
+        // idempotently).
+        if (batch_mixed_host_ == nullptr) {
+          if (!Check(hipHostMalloc(reinterpret_cast<void**>(&batch_mixed_host_),
+                                   kBatchSessions * sizeof(MixedBlk),
+                                   hipHostMallocMapped),
+                     error))
+            return false;
+          if (!Check(hipHostGetDevicePointer(
+                         reinterpret_cast<void**>(&batch_mixed_),
+                         batch_mixed_host_, 0),
+                     error))
+            return false;
+        }
+        for (std::size_t i = 0; i < items.size(); ++i) {
+          const auto& item = items[i];
+          auto& session = *item.session;
+          const auto n = static_cast<std::uint32_t>(item.tokens.size());
+          const auto& ks = session.attention_[il];
+          batch_mixed_host_[i] = {
+              offsets[i], reinterpret_cast<std::uint64_t>(ks.k_cache),
+              reinterpret_cast<std::uint64_t>(ks.v_cache),
+              session.position_ + n, session.position_, n};
+        }
+        if (!WmmaMixedAttention(base.q, base.attn_gate, batch_mixed_,
+                                static_cast<std::uint32_t>(items.size()),
+                                base.ctx, c.num_heads, c.num_kv_heads,
+                                c.head_dim, c.compress_ratio, stream_)) {
+          for (std::size_t i = 0; i < items.size(); ++i) {
+            const auto& item = items[i];
+            auto& session = *item.session;
+            const auto n = static_cast<std::uint32_t>(item.tokens.size());
+            auto view = RowScratch(base, offsets[i]);
+            if (!l.linear && l.attn_qkv.empty()) {
+              view.qg = base.qg + static_cast<std::size_t>(offsets[i]) * 2 *
+                                      c.AttentionQDim();
+            }
+            UseScratch(view);
+            const auto pool = sparse[i] && complete[i] > session.blocks_
+                                  ? complete[i] - session.blocks_
+                                  : 0;
+            if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out,
+                           n, &session.control_->position,
+                           &session.control_->blocks, session.position_, pool,
+                           session.max_context_, sparse[i], error, false, true,
+                           false, 0, session)) {
+              return false;
+            }
+          }
+        } else {
+          SigmoidMul(base.ctx, base.attn_gate,
+                     std::size_t{rows} * c.AttentionQDim(), stream_);
+        }
+        UseScratch(base);
       }
       if (l.linear && batch_gdn && gdn_active != 0) {
         const auto offset = il * kBatchSessions;
