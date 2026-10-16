@@ -62,3 +62,6 @@ per-layer diag，只有 `GUFO_MIXED_BATCH=1` 才印。
   decode-forward + chunk-forward 兩次調用的 wall time，量化獎品再動 serve 路徑。
 - Q8 KV + MTP verify 行在 mixed 下尚未驗證（`c37b1d5e` 只做了指針/staging 框架）。
 - 上線門檻：needle 51207 + 50K prefill A/B + TTFT（目標 27s→3s 量級）實測。
+- Engine 級獎品（gpuprobedbg `--mixed-audit` 內建 bench，1 decode + 4 chunk 行）：
+  混合 batch **56.98ms** vs decode-forward 34.83ms + chunk-forward 86.12ms
+  = 120.95ms——**2.1x**（省掉一整遍 48 層）。

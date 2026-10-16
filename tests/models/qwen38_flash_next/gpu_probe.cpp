@@ -272,8 +272,10 @@ void AuditMixed(q::rocm::Executor& executor,
   items.push_back({sB.get(),
                    std::span<const std::int32_t>(tokB.data() + 48, 4),
                    /*speculative=*/false});
+  const auto bt0 = std::chrono::steady_clock::now();
   if (!executor.ForwardBatch(items, &error))
     throw std::runtime_error("mixed ForwardBatch failed: " + error);
+  const auto bt1 = std::chrono::steady_clock::now();
   const std::uint64_t after = executor.mixed_batches();
   std::vector<float> mA(c.vocab_size), mB(4 * c.vocab_size);
   if (!executor.SelectBatchLogits(0, 1, mA.data(), &error) ||
@@ -283,15 +285,26 @@ void AuditMixed(q::rocm::Executor& executor,
   const char* dump = std::getenv("MX_DUMP");
   if (dump) { FILE* f = std::fopen(dump, "wb"); if (f) { std::fwrite(mA.data(), 4, mA.size(), f); std::fwrite(mB.data(), 4, mB.size(), f); std::fclose(f); } }
   std::vector<float> rA(c.vocab_size), rB(4 * c.vocab_size);
+  const auto bt2 = std::chrono::steady_clock::now();
   if (!executor.Forward(*sAr, std::span<const std::int32_t>(&tokA[32], 1), 1,
                          rA.data(),
                          q::rocm::Executor::ForwardMode::kDecode, &error))
     throw std::runtime_error("reference decode failed: " + error);
+  const auto bt3 = std::chrono::steady_clock::now();
+  const auto bt4 = std::chrono::steady_clock::now();
   if (!executor.Forward(*sBr, std::span<const std::int32_t>(tokB.data() + 48, 4),
                          4, rB.data(),
                          q::rocm::Executor::ForwardMode::kPrefill, &error,
                          nullptr, std::span<const std::int32_t>()))
     throw std::runtime_error("reference prefill failed: " + error);
+  const auto bt5 = std::chrono::steady_clock::now();
+  std::cout << "  bench mixed-batch ms "
+            << std::chrono::duration<double, std::milli>(bt1 - bt0).count()
+            << " ref-decode ms "
+            << std::chrono::duration<double, std::milli>(bt3 - bt2).count()
+            << " ref-prefill ms "
+            << std::chrono::duration<double, std::milli>(bt5 - bt4).count()
+            << "\n";
   double worst = 0.0, worstA = 0.0, worstB = 0.0;
   for (std::size_t i = 0; i < mA.size(); ++i) {
     worstA = std::max(worstA, std::abs(static_cast<double>(mA[i]) - rA[i]));
