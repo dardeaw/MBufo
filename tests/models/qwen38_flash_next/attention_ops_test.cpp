@@ -608,8 +608,8 @@ void CheckChunks(std::uint32_t n, std::uint32_t split) {
 /// its own dense Fp64Attention; the kernel computes both in one launch.
 double CompareMixed(std::uint32_t seed) {
   constexpr std::uint32_t kChunk = 4;
-  constexpr std::uint32_t kKvA = 8;
-  constexpr std::uint32_t kKvB = 20;
+  constexpr std::uint32_t kKvA = 35;
+  constexpr std::uint32_t kKvB = 52;
   constexpr std::uint32_t kRows = 1 + kChunk;
   const std::size_t q_count = static_cast<std::size_t>(kRows) * kQWidth;
   const auto qv = MakeValues(q_count, seed, 4.0F);

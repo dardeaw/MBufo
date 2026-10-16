@@ -308,6 +308,7 @@ public:
   /// Logit rows remain in batch order until SelectBatchLogits is called.
   [[nodiscard]] bool ForwardBatch(std::span<const BatchItem> items,
                                   std::string* error_msg) const;
+  [[nodiscard]] std::uint64_t mixed_batches() const noexcept { return mixed_batches_; }
   [[nodiscard]] bool SelectBatchLogits(std::uint32_t offset, std::uint32_t rows,
                                        float* logits,
                                        std::string* error_msg) const;
@@ -718,6 +719,7 @@ private:
   // batch item, read directly by the GPU. ForwardBatch drains before reuse.
   mutable MixedBlk* batch_mixed_host_{nullptr};
   mutable MixedBlk* batch_mixed_{nullptr};
+  mutable std::uint64_t mixed_batches_{0};
   mutable std::uint32_t batch_rows_{0};
   mutable const float* selected_logits_{nullptr};
   [[nodiscard]] const float* VerificationLogits() const {

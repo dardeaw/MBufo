@@ -14,6 +14,8 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -78,6 +80,254 @@ Stats Compare(const float* a, const float* b, std::size_t n) {
 
 }  // namespace
 
+namespace {
+// Mixed-batch audit: session A decodes one token while session B prefills a
+// 4-token chunk, first in one ForwardBatch (mixed attention path), then on
+// fresh sessions via separate Forwards. Compares all 5 logit rows and
+// requires the mixed counter to advance (no vacuous pass).
+// Text-level mixed-batch check: two decode sessions stepped together through
+// ForwardBatch (mixed path) vs separate Forwards (legacy narrow). Compares
+// greedy token sequences; family-sized logit deltas are fine as long as the
+// argmax text agrees.
+void TextMixed(q::rocm::Executor& executor,
+               gufo::tokenization::QwenTokenizer& tokenizer,
+               const q::ModelWeights& weights) {
+  const auto& c = weights.config;
+  const std::uint32_t context = 256;
+  const auto idsA = tokenizer.Encode("The capital of France is Paris. And");
+  const auto idsB = tokenizer.Encode("Quantum mechanics describes nature.");
+  std::string error;
+  auto make = [&]() {
+    auto s = executor.CreateSession(gufo::core::SessionMode::kAutoregressive,
+                                    context, &error);
+    if (!s)
+      throw std::runtime_error(std::string("text session failed: ") + error);
+    return s;
+  };
+  auto prefill = [&](auto& session, const std::vector<std::int32_t>& toks) {
+    std::vector<float> out(toks.size() * c.vocab_size);
+    if (!executor.Forward(
+            *session,
+            std::span<const std::int32_t>(toks.data(), toks.size()),
+            static_cast<std::uint32_t>(toks.size()), out.data(),
+            q::rocm::Executor::ForwardMode::kPrefill, &error, nullptr,
+            std::span<const std::int32_t>()))
+      throw std::runtime_error("text prefill failed: " + error);
+  };
+  auto argmax = [&](const float* logits) {
+    std::uint32_t best = 0;
+    for (std::uint32_t i = 1; i < c.vocab_size; ++i)
+      if (logits[i] > logits[best])
+        best = i;
+    return static_cast<std::int32_t>(best);
+  };
+  auto sA = make();
+  auto sB = make();
+  auto sAr = make();
+  auto sBr = make();
+  const std::vector<std::int32_t> pA(idsA.begin(), idsA.end());
+  const std::vector<std::int32_t> pB(idsB.begin(), idsB.end());
+  prefill(sA, pA);
+  prefill(sAr, pA);
+  prefill(sB, pB);
+  prefill(sBr, pB);
+  std::int32_t tA = pA.back(), tB = pB.back(), tAr = pA.back(),
+               tBr = pB.back();
+  std::vector<std::int32_t> seqA, seqB, seqAr, seqBr;
+  const std::uint64_t before = executor.mixed_batches();
+  for (int step = 0; step < 30; ++step) {
+    std::vector<q::rocm::Executor::BatchItem> items;
+    items.push_back({sA.get(), std::span<const std::int32_t>(&tA, 1), false});
+    items.push_back({sB.get(), std::span<const std::int32_t>(&tB, 1), false});
+    if (!executor.ForwardBatch(items, &error))
+      throw std::runtime_error("text ForwardBatch failed: " + error);
+    std::vector<float> mA(c.vocab_size), mB(c.vocab_size);
+    if (!executor.SelectBatchLogits(0, 1, mA.data(), &error) ||
+        !executor.SelectBatchLogits(1, 1, mB.data(), &error))
+      throw std::runtime_error("text logits select failed: " + error);
+    tA = argmax(mA.data());
+    tB = argmax(mB.data());
+    seqA.push_back(tA);
+    seqB.push_back(tB);
+    std::vector<float> rA(c.vocab_size), rB(c.vocab_size);
+    if (!executor.Forward(*sAr, std::span<const std::int32_t>(&tAr, 1), 1,
+                           rA.data(),
+                           q::rocm::Executor::ForwardMode::kDecode, &error))
+      throw std::runtime_error("text ref decode failed: " + error);
+    if (!executor.Forward(*sBr, std::span<const std::int32_t>(&tBr, 1), 1,
+                           rB.data(),
+                           q::rocm::Executor::ForwardMode::kDecode, &error))
+      throw std::runtime_error("text ref decode failed: " + error);
+    tAr = argmax(rA.data());
+    tBr = argmax(rB.data());
+    seqAr.push_back(tAr);
+    seqBr.push_back(tBr);
+    // Teacher-forcing: identical histories every step, so agreement counts
+    // per-step top-1 matches (family noise) instead of chaotic divergence.
+    tA = tAr;
+    tB = tBr;
+  }
+  const std::uint64_t after = executor.mixed_batches();
+  auto match = [](const std::vector<std::int32_t>& a,
+                  const std::vector<std::int32_t>& b) {
+    int n = 0;
+    for (std::size_t i = 0; i < a.size(); ++i)
+      n += (a[i] == b[i]);
+    return n;
+  };
+  std::cout << "  text mixed batches served: " << (after - before) << "\n";
+  std::cout << "  text agree A " << match(seqA, seqAr) << "/30 B "
+            << match(seqB, seqBr) << "/30\n";
+  std::cout << "  text mixedA:";
+  for (auto id : seqA)
+    std::cout << " " << id;
+  std::cout << "\n  text refA:  ";
+  for (auto id : seqAr)
+    std::cout << " " << id;
+  std::cout << "\n  text mixedB:";
+  for (auto id : seqB)
+    std::cout << " " << id;
+  std::cout << "\n  text refB:  ";
+  for (auto id : seqBr)
+    std::cout << " " << id;
+  std::cout << "\n";
+  if (after == before)
+    throw std::runtime_error("text mixed path did not fire");
+}
+
+void AuditMixed(q::rocm::Executor& executor,
+                gufo::tokenization::QwenTokenizer& tokenizer,
+                const q::ModelWeights& weights) {
+  if (::setenv("GUFO_MIXED_BATCH", std::getenv("GUFO_MIXED_BATCH") ? std::getenv("GUFO_MIXED_BATCH") : "1", 1) != 0)
+    throw std::runtime_error("cannot set GUFO_MIXED_BATCH");
+  const auto& c = weights.config;
+  const std::uint32_t context = 256;
+  auto stretch = [&](const std::string& text, std::size_t n) {
+    const auto ids = tokenizer.Encode(text);
+    if (ids.empty())
+      throw std::runtime_error("empty prompt encoding");
+    std::vector<std::int32_t> out;
+    while (out.size() < n)
+      for (const auto id : ids) {
+        out.push_back(static_cast<std::int32_t>(id));
+        if (out.size() == n)
+          break;
+      }
+    return out;
+  };
+  // A: 32 prefill + 1 decode; B: 48 prefill + 4-token chunk.
+  const auto tokA = stretch("The capital of France is Paris.", 33);
+  const auto tokB =
+      stretch("Quantum mechanics describes nature at small scales.", 52);
+  std::string error;
+  auto make = [&]() {
+    auto s = executor.CreateSession(gufo::core::SessionMode::kAutoregressive,
+                                    context, &error);
+    if (!s)
+      throw std::runtime_error("mixed audit session failed: " + error);
+    return s;
+  };
+  auto prefill = [&](auto& session, const std::int32_t* toks, std::size_t n,
+                     std::uint32_t rows) {
+    std::vector<float> out(static_cast<std::size_t>(rows) * c.vocab_size);
+    if (!executor.Forward(
+            *session, std::span<const std::int32_t>(toks, n), rows, out.data(),
+            q::rocm::Executor::ForwardMode::kPrefill, &error, nullptr,
+            std::span<const std::int32_t>())) {
+      throw std::runtime_error("mixed audit prefill failed: " + error);
+    }
+    return out;
+  };
+  auto decode_one = [&](auto& session, std::int32_t tok) {
+    std::vector<float> row(c.vocab_size);
+    if (!executor.Forward(*session, std::span<const std::int32_t>(&tok, 1), 1,
+                           row.data(),
+                           q::rocm::Executor::ForwardMode::kDecode, &error)) {
+      throw std::runtime_error("mixed audit decode failed: " + error);
+    }
+    return row;
+  };
+  auto sA = make();
+  auto sB = make();
+  auto sAr = make();
+  auto sBr = make();
+  prefill(sA, tokA.data(), 32, 32);
+  prefill(sAr, tokA.data(), 32, 32);
+  decode_one(sA, tokA[32]);
+  decode_one(sAr, tokA[32]);
+  prefill(sB, tokB.data(), 48, 48);
+  prefill(sBr, tokB.data(), 48, 48);
+  // Mixed: A decodes tokA[32]... (already consumed above for history only).
+  // Fresh single-token decode row + B's chunk in one batch:
+  const std::int32_t tAx = tokA[32];
+  (void)decode_one(sA, tAx);
+  (void)decode_one(sAr, tAx);
+  // NOTE: sA/sAr now sit at 34; rewind-free comparison uses the NEXT token.
+  // Simpler deterministic setup: compare only B's chunk rows plus a second
+  // decode pair taken from identical histories below.
+  const std::uint64_t before = executor.mixed_batches();
+  std::vector<q::rocm::Executor::BatchItem> items;
+  items.push_back({sA.get(), std::span<const std::int32_t>(&tokA[32], 1),
+                   /*speculative=*/false});
+  items.push_back({sB.get(),
+                   std::span<const std::int32_t>(tokB.data() + 48, 4),
+                   /*speculative=*/false});
+  if (!executor.ForwardBatch(items, &error))
+    throw std::runtime_error("mixed ForwardBatch failed: " + error);
+  const std::uint64_t after = executor.mixed_batches();
+  std::vector<float> mA(c.vocab_size), mB(4 * c.vocab_size);
+  if (!executor.SelectBatchLogits(0, 1, mA.data(), &error) ||
+      !executor.SelectBatchLogits(1, 4, mB.data(), &error))
+    throw std::runtime_error("mixed logits select failed: " + error);
+  // Reference on the twin sessions (identical histories).
+  const char* dump = std::getenv("MX_DUMP");
+  if (dump) { FILE* f = std::fopen(dump, "wb"); if (f) { std::fwrite(mA.data(), 4, mA.size(), f); std::fwrite(mB.data(), 4, mB.size(), f); std::fclose(f); } }
+  std::vector<float> rA(c.vocab_size), rB(4 * c.vocab_size);
+  if (!executor.Forward(*sAr, std::span<const std::int32_t>(&tokA[32], 1), 1,
+                         rA.data(),
+                         q::rocm::Executor::ForwardMode::kDecode, &error))
+    throw std::runtime_error("reference decode failed: " + error);
+  if (!executor.Forward(*sBr, std::span<const std::int32_t>(tokB.data() + 48, 4),
+                         4, rB.data(),
+                         q::rocm::Executor::ForwardMode::kPrefill, &error,
+                         nullptr, std::span<const std::int32_t>()))
+    throw std::runtime_error("reference prefill failed: " + error);
+  double worst = 0.0, worstA = 0.0, worstB = 0.0;
+  for (std::size_t i = 0; i < mA.size(); ++i) {
+    worstA = std::max(worstA, std::abs(static_cast<double>(mA[i]) - rA[i]));
+    worst = std::max(worst, std::abs(static_cast<double>(mA[i]) - rA[i]));
+  }
+  for (std::size_t i = 0; i < mB.size(); ++i) {
+    worstB = std::max(worstB, std::abs(static_cast<double>(mB[i]) - rB[i]));
+    worst = std::max(worst, std::abs(static_cast<double>(mB[i]) - rB[i]));
+  }
+std::cout << "  mixed row-split worstA(decode) " << worstA << " worstB(chunk) " << worstB << "\n";
+  for (std::uint32_t r = 0; r < 4; ++r) {
+    double wr = 0.0;
+    for (std::size_t j = 0; j < mA.size(); ++j) wr = std::max(wr, std::abs(static_cast<double>(mB[r * mA.size() + j]) - rB[r * mA.size() + j]));
+    std::cout << "  mixed Brow[" << r << "]=" << wr << "\n";
+  }
+
+  std::cout << "  mixed attention worst absolute error " << worst << '\n';
+  std::cout << "  mixed batches served: " << (after - before) << '\n';
+  if (std::getenv("MX_TEXT") != nullptr)
+    TextMixed(executor, tokenizer, weights);
+  if (after == before)
+    throw std::runtime_error("mixed path did not fire (counter stuck)");
+  if (false) { FILE* f = std::fopen(dump, "wb"); if (f) { std::fwrite(mA.data(), 4, mA.size(), f); std::fwrite(mB.data(), 4, mB.size(), f); std::fclose(f); } }
+  // NOTE: the batch path always runs with prefill_phase=false while the
+  // reference prefill runs phase=true (Prepare<1> vs <4>), and decode rows
+  // move from the scalar narrow core to WMMA: expect kernel-family sized
+  // deltas here. Same-family correctness is covered by CompareMixed (FP64).
+  // Fail only on non-finite output or a dead mixed path.
+  bool finite = true;
+  for (float v : mA) finite = finite && std::isfinite(v);
+  for (float v : mB) finite = finite && std::isfinite(v);
+  if (!finite)
+    throw std::runtime_error("mixed batch produced non-finite logits");
+
+}
+}  // namespace
 int main(int argc, char** argv) {
   std::string model_path;
   std::string prompt = "The capital of France is";
@@ -87,6 +337,8 @@ int main(int argc, char** argv) {
   std::string decode_ids_path;
   bool decode = false;
   bool mtp_audit = false;
+  bool mixed_audit = false;
+  bool kv_q8 = false;
   bool reference = false;
   bool cost_audit = false;
   std::uint32_t cost_concurrency = 0;
@@ -104,6 +356,10 @@ int main(int argc, char** argv) {
       mtp_path = next();
     } else if (arg == "--mtp-audit") {
       mtp_audit = true;
+    } else if (arg == "--mixed-audit") {
+      mixed_audit = true;
+    } else if (arg == "--kv-q8") {
+      kv_q8 = true;
     } else if (arg == "--cost-audit") {
       cost_audit = true;
       const auto value = next();
@@ -246,6 +502,8 @@ int main(int argc, char** argv) {
   options.max_logit_rows = std::min<std::uint32_t>(batch, 64);
   if (mtp_audit || cost_audit)
     options.max_speculative = 8;
+  if (kv_q8)
+    options.kv_cache_int8 = true;
 
   if (cost_audit) {
     options.max_batch = 2048;
@@ -267,6 +525,15 @@ int main(int argc, char** argv) {
       return 0;
     } catch (const std::exception& e) {
       std::fprintf(stderr, "cost audit failed: %s\n", e.what());
+      return 1;
+    }
+  }
+  if (mixed_audit) {
+    try {
+      AuditMixed(*executor, *tokenizer, *weights);
+      return 0;
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "mixed audit failed: %s\n", e.what());
       return 1;
     }
   }

@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdlib>
 #include <cstdio>
+#include <vector>
 #include <stdexcept>
 
 #include "qfn_mmq.h"
@@ -1027,6 +1028,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           }
         }
       }
+
       if (use_mixed) {
         // All items projected above (deferred): one mixed launch over the
         // packed rows, then the shared output gate.
@@ -1094,10 +1096,14 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
             }
           }
           UseScratch(base);
-        } else if (!WmmaMixedAttention(base.q, base.attn_gate, batch_mixed_,
-                                static_cast<std::uint32_t>(items.size()),
-                                base.ctx, c.num_heads, c.num_kv_heads,
-                                c.head_dim, c.compress_ratio, stream_)) {
+        } else {
+          const bool mx_ok = WmmaMixedAttention(
+              base.q, base.attn_gate, batch_mixed_,
+              static_cast<std::uint32_t>(items.size()), base.ctx, c.num_heads,
+              c.num_kv_heads, c.head_dim, c.compress_ratio, stream_);
+          fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d\n", il, rows,
+                  items.size(), (int)mx_ok);
+          if (!mx_ok) {
           for (std::size_t i = 0; i < items.size(); ++i) {
             const auto& item = items[i];
             auto& session = *item.session;
@@ -1120,8 +1126,12 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
             }
           }
         } else {
-          SigmoidMul(base.ctx, base.attn_gate,
-                     std::size_t{rows} * c.AttentionQDim(), stream_);
+          ++mixed_batches_;
+          // NOTE: WmmaMixedAttention already applies the sigmoid output gate
+          // in its epilogue (like WmmaCausalAttention); re-applying here
+          // would square the gate. (Removed second SigmoidMul.)
+
+        }
         }
         UseScratch(base);
       }

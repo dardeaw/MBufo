@@ -1464,6 +1464,176 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
   return true;
 }
 
+/// Mixed prefill/decode step: decode requests run their ordinary MTP
+/// dance while one prefill chunk rides the same ForwardBatch as a final
+/// non-sampled item (no logits selection, no sampler, no drafts for it).
+/// The scheduler guarantees the chunk holds no snapshot boundary or
+/// checkpoint; anything else falls back to legacy Prefill. The chunk
+/// session must be distinct from every decode session.
+bool Session::MixedBatchImpl(std::span<const DecodeRequest> requests,
+                             Session* chunk_session,
+                             std::span<const std::int32_t> chunk,
+                             std::string* error_msg) {
+  auto fail = [&](const char* what) {
+    if (error_msg != nullptr)
+      *error_msg = what;
+    return false;
+  };
+  if (requests.empty() || chunk_session == nullptr || chunk.empty())
+    return fail("mixed batch needs decode requests and a chunk");
+  auto* model = requests.front().session->model_.get();
+  auto& exec = *model->executor_;
+  for (const auto& r : requests) {
+    if (r.session == chunk_session || r.session->model_.get() != model)
+      return fail("mixed batch sessions must be distinct and share a model");
+  }
+  if (chunk_session->model_.get() != model)
+    return fail("mixed batch sessions must be distinct and share a model");
+  std::optional<std::uint32_t> batch_drafts;
+  std::uint32_t batch_context = 0;
+  auto& policy = model->batch_policy_;
+  if (std::ranges::all_of(
+          requests, [](const auto& r) { return r.session->MtpEnabled(); }) &&
+      std::ranges::none_of(requests, [](const auto& request) {
+        return request.sampler->config().uses_random_sampling();
+      })) {
+    std::array<MtpBatchController::Row, 8> rows{};
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+      const auto& r = requests[i];
+      const auto cap = std::min<std::size_t>(
+          r.max_tokens, r.session->ContextSize() - r.session->Position());
+      rows[i] = {&r.session->draft_length_,
+                 static_cast<std::uint32_t>(
+                     std::min<std::size_t>(cap, exec.max_speculative())) -
+                     (cap != 0)};
+      batch_context = std::max(batch_context, r.session->Position());
+    }
+    batch_drafts =
+        policy.Choose(std::span(rows).first(requests.size()), batch_context);
+  }
+  const auto cycle_start = std::chrono::steady_clock::now();
+  std::vector<PendingDecode> pending(requests.size());
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& r = requests[i];
+    try {
+      if (!r.session->PrepareDecode(r, &pending[i], &r.outcome->error, true,
+                                    batch_drafts))
+        pending[i] = {};
+    } catch (const std::exception& exception) {
+      r.outcome->error = exception.what();
+      pending[i] = {};
+    }
+  }
+  std::vector<AdvanceRequest> catchup;
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    if (!pending[i].chain.empty())
+      catchup.push_back({requests[i].session, pending[i].chain.front()});
+  }
+  if (!DraftCatchUpBatch(catchup, error_msg))
+    return false;
+  // Each round shares predictor projections across ready sessions.
+  // Attention state, proposal distributions and RNG streams stay private.
+  for (;;) {
+    std::vector<rocm::Executor::MtpHeadItem> heads;
+    std::vector<rocm::Executor::MtpBatchItem> bodies;
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+      auto& p = pending[i];
+      if (!requests[i].session->session_->Cancelled() && p.speculative &&
+          p.chain.size() < p.width) {
+        heads.push_back({requests[i].session->session_.get(),
+                         {.token = p.sampled ? nullptr : &p.draft,
+                          .candidates = p.sampled ? &p.candidates : nullptr,
+                          .draft_subset = p.draft_subset}});
+      }
+    }
+    if (heads.empty())
+      break;
+    if (!exec.MtpHeads(heads, error_msg))
+      return false;
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+      auto& p = pending[i];
+      if (requests[i].session->session_->Cancelled() || !p.speculative ||
+          p.chain.size() >= p.width)
+        continue;
+      AppendDraft(p);
+      if (p.chain.size() < p.width)
+        bodies.push_back({requests[i].session->session_.get(),
+                          std::span<const std::int32_t>(&p.draft, 1), -1});
+    }
+    if (!bodies.empty() && !exec.MtpForwardBatch(bodies, error_msg))
+      return false;
+  }
+  std::vector<rocm::Executor::BatchItem> items;
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& r = requests[i];
+    if (!r.session->session_->Cancelled() && !pending[i].chain.empty()) {
+      items.push_back({r.session->session_.get(), pending[i].chain,
+                       pending[i].speculative});
+    }
+  }
+  // The chunk rides last: decode row offsets below are unaffected, and its
+  // rows get no logits selection or sampling.
+  if (!chunk_session->session_->Cancelled() && !chunk.empty()) {
+    items.push_back(
+        {chunk_session->session_.get(), chunk, /*speculative=*/false});
+  }
+  if (!items.empty() && !exec.ForwardBatch(items, error_msg))
+    return false;
+  std::uint32_t offset = 0;
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& p = pending[i];
+    const auto& r = requests[i];
+    auto& session = *r.session;
+    const bool included =
+        std::any_of(items.begin(), items.end(), [&](const auto& item) {
+          return item.session == session.session_.get();
+        });
+    const auto row_offset = offset;
+    if (included)
+      offset += static_cast<std::uint32_t>(p.chain.size());
+    if (!r.outcome->error.empty())
+      continue;
+    if (session.session_->Cancelled()) {
+      r.outcome->error = "generation cancelled";
+      continue;
+    }
+    if (p.chain.empty()) {
+      r.outcome->completed = true;
+      continue;
+    }
+    float* logits = !p.speculative       ? session.logits_.data()
+                    : p.gpu_verification ? nullptr
+                                         : session.verify_logits_.data();
+    try {
+      r.outcome->completed =
+          exec.SelectBatchLogits(row_offset,
+                                 static_cast<std::uint32_t>(p.chain.size()),
+                                 logits, &r.outcome->error) &&
+          session.FinishDecode(r, p, &r.outcome->error);
+    } catch (const std::exception& exception) {
+      r.outcome->error = exception.what();
+    }
+  }
+  // Chunk post: mirror the prefill frontier bookkeeping (no checkpoint or
+  // capture inside a mixed chunk by scheduler contract).
+  if (!chunk_session->session_->Cancelled() && !chunk.empty()) {
+    chunk_session->hidden_base_ = static_cast<std::uint32_t>(
+        chunk_session->tokens_.size() + chunk.size() -
+        std::min<std::size_t>(chunk.size(), exec.max_speculative()));
+    chunk_session->tokens_.insert(chunk_session->tokens_.end(), chunk.begin(),
+                                  chunk.end());
+  }
+  if (batch_drafts && items.size() == requests.size() + 1 &&
+      std::ranges::all_of(requests,
+                          [](const auto& r) { return r.outcome->completed; })) {
+    const auto ms = std::chrono::duration<float, std::milli>(
+                        std::chrono::steady_clock::now() - cycle_start)
+                        .count();
+    policy.Observe(requests.size(), batch_context, *batch_drafts, ms);
+  }
+  return true;
+}
+
 bool Session::EvaluateBatchImpl(std::span<const AdvanceRequest> requests,
                                 std::string* error_msg) {
   if (requests.size() == 1) {

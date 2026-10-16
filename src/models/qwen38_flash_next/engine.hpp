@@ -299,6 +299,11 @@ private:
   template<class Request>
   static bool RunIsolatedBatch(std::span<const Request> requests,
                                std::string* error_msg);
+  /// Mixed prefill/decode step; see MixedBatchImpl in engine.cpp.
+  static bool MixedBatchImpl(std::span<const DecodeRequest> requests,
+                             Session* chunk_session,
+                             std::span<const std::int32_t> chunk,
+                             std::string* error_msg);
   static bool DecodeBatchImpl(std::span<const DecodeRequest> requests,
                               std::string* error_msg);
   static bool EvaluateBatchImpl(std::span<const AdvanceRequest> requests,
