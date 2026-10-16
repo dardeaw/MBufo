@@ -53,15 +53,30 @@ ForwardBatch([{decode x1}, {chunk x4}])
 （teacher-forcing 文本比對）。`[mixed] il=.. rows=.. blks=.. ok=..` 是 lib 內
 per-layer diag，只有 `GUFO_MIXED_BATCH=1` 才印。
 
-## Phase 4 TODO（scheduler 接線）
+## Phase 4 設計（scheduler 接線，未開工）
 
-- 合併點：`StepPrefill` 的 chunk + `StepDecodeBatch` 的 decodes 合成一個
-  `ForwardBatch`。注意 MTP 草稿/verify、preview token、sampler 狀態、
-  snapshot/checkpoint 都綁在單 request 路徑上， blast radius 大。
-- 前置實驗（零風險）：engine 級 benchmark——1 個混合 batch vs
-  decode-forward + chunk-forward 兩次調用的 wall time，量化獎品再動 serve 路徑。
-- Q8 KV + MTP verify 行在 mixed 下尚未驗證（`c37b1d5e` 只做了指針/staging 框架）。
-- 上線門檻：needle 51207 + 50K prefill A/B + TTFT（目標 27s→3s 量級）實測。
-- Engine 級獎品（gpuprobedbg `--mixed-audit` 內建 bench，1 decode + 4 chunk 行）：
-  混合 batch **56.98ms** vs decode-forward 34.83ms + chunk-forward 86.12ms
-  = 120.95ms——**2.1x**（省掉一整遍 48 層）。
+現狀測繪（2026-10-17）：
+
+- `StepPrefill`：單 request 調 `runner_request.Prefill(budget)` → runner
+  `Prefill` → `session.Sync(整個 prefix[0..next_pos))`（內部增量，只算新行）。
+  chunk 不是獨立的 token 段，合併必須進 Sync 語義。
+- `StepDecodeBatch`：decodes 經 `AdvanceBatch` → `Session::EvaluateBatch`
+ （plain advance）或 `DecodeBatch`（MTP speculative）→ 已走 `exec.ForwardBatch`。
+- `Session::MixedBatchImpl`（engine.cpp:1473）已寫好、未被調用：
+  MTP draft dance + chunk-last 非採樣 item + bookkeeping；MTP speculative
+  item 進 tail 會自動降級 legacy（use_mixed 要求全 plain），正確但不加速。
+
+合併選項：
+
+- A（小）：plain-advance decodes + chunk 共用一個 `ForwardBatch`
+  （仿 `EvaluateBatchImpl` 25 行模式加 chunk-last）。MTP speculative 不進，
+  自動降級。需新 engine 方法 + 測具（engine 級 harness 目前沒有）。
+- B（大）：`MixedBatchImpl` 直連 scheduler（`StepPrefill`+`StepDecodeBatch`
+  二合一）。動 preview token、sampler RNG、snapshot/checkpoint、MTP verify、
+  scheduler bookkeeping（prefill_tokens/chunks/decode_ready 全要等價重做）。
+  MTP session 的 chunk 還要處理 `mtp_enabled_ && prefill_phase` 檢查在 batch
+  內被跳過的問題（batch 永遠 phase=false）。
+
+建議順序：A（engine 方法 + 合成驗證）→ scheduler 試點（env + serve flag 雙 gate，
+只合併 plain-advance + 無 snapshot 邊界的 chunk，其餘照舊）→ Q8/MTP 覆蓋 →
+needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review。
