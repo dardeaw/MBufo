@@ -173,3 +173,15 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
   只會排隊，不會更快）；engine 層 32 session 的表和緩衝已備好（kBatchSessions
   等），將來換更大卡或更小 context 直接開。
 - A/B（4 路）：mixed 開 5.3s vs 關 6.3s；觸發 120 vs 0。
+
+## MoE ids 對賬結論（2026-10-17）+ WMMA 暫封存
+
+- Expert ids batch-vs-single：首個 MoE 層 6/64 換專家集 + 15/64 僅換序，
+  逐層放大到 ~50/64。驅動是上游小差（prepare 等）+ router 平坦區，
+  屬家族噪聲（vec 版總差距 0.60 即證：大面積換專家也不翻車）。
+- WMMA 全行分支在 batch 里差 10.07，已排除：counts（對過全對）、
+  down_e（量級一致）、epilogue 輸入（weights/shexp/router 全對）。
+  未排除（另案線索）：Combine-fold/deferred/殘差時序在 batch 上下文行為。
+  分支已移除（預設 vec64-tiles，正確且不太慢）；diag 代碼全清。
+- 大包速度現狀：batch 316ms vs 單路 247ms（vec-MoE memory-bound 之故）；
+  小包 2.1x 不變。WMMA 修好之日就是反超之時。

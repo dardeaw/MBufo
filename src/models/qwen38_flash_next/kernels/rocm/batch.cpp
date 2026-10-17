@@ -734,6 +734,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
     return false;
   RouterTopK(base.router, c.num_experts + 1, base.ids, base.weights, rows,
              c.num_experts, c.num_experts_used, stream_);
+
   if (rows > 32) {
     // Mirror single-Forward Moe(): route-matched shared expert (F16 GEMM when
     // DenseF16Route fires, else Q8-tiled/plain) so big batches match prefill
@@ -1252,7 +1253,10 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
               ? (c.IsPleLayer(il + 1) ? nullptr
                                       : layers[il + 1].hc_attn.norm.f32())
               : model_->hc_head().norm.f32();
-      UseScratch(base);
+      // NOTE: no UseScratch(base) here on purpose. MoeExperts sets moe_pending_
+      // when out == s_.block_out so this Combine folds the epilogue; a restore
+      // would clear that flag (UseScratch resets it) and drop the whole MoE
+      // contribution silently. s_ already addresses base.
       CombineBatch(base.res, next_norm, rows);
       normed = next_norm != nullptr;
     }
