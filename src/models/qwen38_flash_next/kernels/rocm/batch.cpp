@@ -25,12 +25,14 @@ constexpr std::uint32_t kMaxBatchItemRows = 1024;
 constexpr std::uint32_t kDecodeRows = 8;
 
 namespace {
-// Mixed-batch attention (GUFO_MIXED_BATCH=1): one WmmaMixedAttention over
-// packed decode + prefill-chunk rows instead of per-item launches.
+// Mixed-batch attention (on by default; GUFO_MIXED_BATCH=0 opts out): one
+// WmmaMixedAttention over packed decode + prefill-chunk rows instead of
+// per-item launches. Validated envelope: decode bit-exact, chunk family
+// noise (see docs/MIXED_BATCH.md); any refusal falls back to legacy cores.
 bool UseMixedBatch() {
   static const bool on = [] {
     const char* e = std::getenv("GUFO_MIXED_BATCH");
-    return e != nullptr && e[0] == '1';
+    return e == nullptr || e[0] != '0';
   }();
   return on;
 }

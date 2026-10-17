@@ -1835,7 +1835,7 @@ struct TextGenerationScheduler::Impl {
       std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
     static const bool mixed_batches = [] {
       const char* e = std::getenv("GUFO_MIXED_BATCH");
-      return e != nullptr && e[0] == '1';
+      return e == nullptr || e[0] != '0';
     }();
     if (!mixed_batches)
       return false;
