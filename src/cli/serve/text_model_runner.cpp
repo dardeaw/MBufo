@@ -1481,6 +1481,130 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
                                        : SnapshotPurpose::kHistory);
   return step;
 }
+// Merged plain-advance + prefill-chunk step (P3). Mirrors Request::Prefill
+// line-for-line except the backend call (AdvanceBatchWithPrefillChunk instead
+// of Prefill/PrefillThrough) plus coworker advance plumbing. Returns nullopt
+// (no mutation beyond idempotent pinning) when the chunk is not a vanilla
+// interior segment: in-pass capture, live boundaries/checkpoints/snapshots,
+// disk/cancel activity, or anything the legacy wrapper would treat specially.
+// The backend itself refuses oversized shapes; legacy pair then runs.
+std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
+    std::size_t max_input_tokens, std::span<Request*> coworkers,
+    std::span<std::exception_ptr> coworker_failures) {
+  if (!*this) {
+    throw std::logic_error("text runner request is empty");
+  }
+  if (impl_->pending_selection.has_value()) {
+    throw std::logic_error(
+        "text runner cannot prefill with a pending decode token");
+  }
+  if (impl_->stopped) {
+    throw std::logic_error("text runner request already stopped");
+  }
+  if (impl_->decode_ready) {
+    return std::nullopt;
+  }
+  if (max_input_tokens == 0) {
+    throw std::invalid_argument(
+        "text runner prefill budget must be at least one token");
+  }
+  if (coworkers.size() != coworker_failures.size()) {
+    throw std::invalid_argument("coworker failure sink mismatch");
+  }
+  // Coworker validation mirrors pool AdvanceBatch (same runner, prepared
+  // decode token each, no duplicates, never self).
+  std::vector<TextRunnerAdvance> advances;
+  advances.reserve(coworkers.size());
+  for (std::size_t index = 0; index < coworkers.size(); ++index) {
+    auto* coworker = coworkers[index];
+    if (coworker == nullptr || !*coworker || coworker == this ||
+        coworker->impl_->runner != impl_->runner ||
+        !coworker->impl_->pending_selection.has_value()) {
+      throw std::logic_error("invalid coworker in mixed prefill batch");
+    }
+    for (std::size_t j = 0; j < index; ++j) {
+      if (coworkers[j] == coworker) {
+        throw std::invalid_argument(
+            "mixed prefill batch contains a duplicate request");
+      }
+    }
+    advances.push_back({
+        .state = dynamic_cast<TextRunnerState&>(coworker->impl_->lease.state()),
+        .token = coworker->impl_->pending_selection->token,
+        .failure = &coworker_failures[index],
+    });
+  }
+  // Vanilla-only gate (read-only): anything the legacy wrapper would treat
+  // specially (snapshots, checkpoints, boundaries, disk, cancellation)
+  // refuses into the legacy pair. Pinning below is idempotent.
+  if (impl_->prompt_snapshot_attempted || !impl_->boundaries.empty() ||
+      !impl_->checkpoints.empty() || !impl_->snapshot_tokens.empty() ||
+      impl_->disk_store || (impl_->cancelled && impl_->cancelled())) {
+    return std::nullopt;
+  }
+  if (impl_->prompt.size() - impl_->prefill_offset >= 512)
+    impl_->lease.PreparePrefill();
+  impl_->CapturePromptSnapshot();
+  const auto snapshot_position = impl_->snapshot_tokens.size();
+  // Re-check after capture: a live capture or fresh boundary refuses.
+  if (impl_->prompt_snapshot_attempted ||
+      impl_->snapshot_tokens.size() != snapshot_position) {
+    return std::nullopt;
+  }
+  const std::size_t remaining = impl_->prompt.size() - impl_->prefill_offset;
+  if (impl_->cancelled && impl_->cancelled())
+    throw std::runtime_error("generation cancelled");
+  impl_->state_reusable = false;
+  for (auto* coworker : coworkers) {
+    coworker->CapturePromptSnapshot();
+    coworker->impl_->state_reusable = false;
+  }
+  auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
+  const bool finish_step =
+      impl_->runner->Descriptor().capabilities.partial_prefill_retention &&
+      impl_->cancelled;
+  struct Rearm {
+    TextRunnerState* state;
+    const CancellationCheck* check;
+    ~Rearm() {
+      if (state != nullptr)
+        state->SetCancellationCheck(*check);
+    }
+  } rearm{finish_step ? &state : nullptr, &impl_->cancelled};
+  if (finish_step)
+    state.SetCancellationCheck({});
+  TextPrefillStep step;
+  bool merged = false;
+  try {
+    merged = impl_->runner->AdvanceBatchWithPrefillChunk(
+        advances, coworker_failures, state, impl_->prompt, impl_->prefill_offset,
+        max_input_tokens, step);
+  } catch (const MixedBatchRefused&) {
+    return std::nullopt;
+  }
+  for (std::size_t i = 0; i < coworkers.size(); ++i) {
+    if (!coworker_failures[i]) {
+      coworkers[i]->impl_->pending_selection.reset();
+      coworkers[i]->impl_->state_reusable = true;
+    }
+  }
+  const std::size_t maximum_consumed = std::min(remaining, max_input_tokens);
+  if (step.consumed_tokens == 0 || step.consumed_tokens > maximum_consumed) {
+    throw std::runtime_error(
+        "text runner returned an invalid prefill token count");
+  }
+  impl_->prefill_offset += step.consumed_tokens;
+  const bool reached_frontier = impl_->prefill_offset == impl_->prompt.size();
+  if (step.decode_ready != (impl_->prefill_offset == impl_->prompt.size())) {
+    throw std::runtime_error(
+        "text runner returned an inconsistent prefill boundary");
+  }
+  impl_->decode_ready = reached_frontier;
+  step.decode_ready = reached_frontier;
+  impl_->state_reusable = true;
+  return step;
+}
+
 
 TextDecodeSelection TextRunnerPool::Request::SelectNext() {
   if (!*this) {

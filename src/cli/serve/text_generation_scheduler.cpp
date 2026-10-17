@@ -1170,6 +1170,43 @@ struct TextGenerationScheduler::Impl {
     }
   }
 
+  // Post-Prefill publish shared by StepPrefill and the mixed step: metrics,
+  // progress, phase and requeue routing. The execution (single or merged)
+  // already ran; step carries its consumed/decoded outcome.
+  void FinishPrefillStep(const std::shared_ptr<ScheduledRequest>& request,
+                         const TextPrefillStep& step, double step_ms,
+                         bool decoder_runnable) {
+    request->result.prefill_ms += step_ms;
+    request->result.prefill_tokens += step.consumed_tokens;
+    request->live_prefill_tokens.store(request->result.prefill_tokens,
+                                       std::memory_order_relaxed);
+    detail::TotalPromptTokens().fetch_add(step.consumed_tokens,
+                                          std::memory_order_relaxed);
+    ++request->result.prefill_chunks;
+    request->result.max_prefill_chunk_tokens = std::max(
+        request->result.max_prefill_chunk_tokens, step.consumed_tokens);
+    LogPrefillProgress(request, step.consumed_tokens, step_ms);
+    PublishPromptProgress(request);
+
+    if (decoder_runnable) {
+      ++request->result.active_decode_prefill_chunks;
+      ++consecutive_active_prefill_chunks;
+      request->result.max_consecutive_active_prefill_chunks =
+          std::max(request->result.max_consecutive_active_prefill_chunks,
+                   consecutive_active_prefill_chunks);
+    } else {
+      consecutive_active_prefill_chunks = 0;
+    }
+
+    if (CompleteIfStopped(request)) {
+      return;
+    }
+
+    request->phase.store(step.decode_ready ? TextRequestPhase::kDecodeReady
+                                           : TextRequestPhase::kPrefilling,
+                         std::memory_order_release);
+  }
+
   void StepPrefill(const std::shared_ptr<ScheduledRequest>& request,
                    bool decoder_runnable, bool peer_waiting = false) {
     try {
@@ -1197,35 +1234,7 @@ struct TextGenerationScheduler::Impl {
       const double step_ms =
           std::chrono::duration<double, std::milli>(Clock::now() - start)
               .count();
-      request->result.prefill_ms += step_ms;
-      request->result.prefill_tokens += step.consumed_tokens;
-      request->live_prefill_tokens.store(request->result.prefill_tokens,
-                                         std::memory_order_relaxed);
-      detail::TotalPromptTokens().fetch_add(step.consumed_tokens,
-                                            std::memory_order_relaxed);
-      ++request->result.prefill_chunks;
-      request->result.max_prefill_chunk_tokens = std::max(
-          request->result.max_prefill_chunk_tokens, step.consumed_tokens);
-      LogPrefillProgress(request, step.consumed_tokens, step_ms);
-      PublishPromptProgress(request);
-
-      if (decoder_runnable) {
-        ++request->result.active_decode_prefill_chunks;
-        ++consecutive_active_prefill_chunks;
-        request->result.max_consecutive_active_prefill_chunks =
-            std::max(request->result.max_consecutive_active_prefill_chunks,
-                     consecutive_active_prefill_chunks);
-      } else {
-        consecutive_active_prefill_chunks = 0;
-      }
-
-      if (CompleteIfStopped(request)) {
-        return;
-      }
-
-      request->phase.store(step.decode_ready ? TextRequestPhase::kDecodeReady
-                                             : TextRequestPhase::kPrefilling,
-                           std::memory_order_release);
+      FinishPrefillStep(request, step, step_ms, decoder_runnable);
     } catch (...) {
       const auto failure = std::current_exception();
       if (!CompleteIfStopped(request)) {
@@ -1469,49 +1478,14 @@ struct TextGenerationScheduler::Impl {
     return PublishSelection(request, selection);
   }
 
-  void StepDecodeBatch(
-      const std::vector<std::shared_ptr<ScheduledRequest>>& requests) {
-    const auto selected_plan = runner_pool->SelectDecodePlan(requests.size());
-    if (batched_multi_token_decode &&
-        (batched_multi_token_decode_max_width == 0 ||
-         selected_plan.physical_width <=
-             batched_multi_token_decode_max_width)) {
-      StepMultiTokenDecodeBatch(requests);
-      return;
-    }
-    if (requests.size() == 1) {
-      StepDecode(requests.front());
-      return;
-    }
-
-    consecutive_active_prefill_chunks = 0;
-    struct PreparedRequest {
-      std::shared_ptr<ScheduledRequest> request;
-      Clock::time_point decode_start;
-    };
-    std::vector<PreparedRequest> prepared;
-    prepared.reserve(requests.size());
-    for (const auto& request : requests) {
-      try {
-        const auto decode_start = PrepareDecode(request);
-        if (decode_start.has_value()) {
-          prepared.push_back({
-              .request = request,
-              .decode_start = *decode_start,
-          });
-        }
-      } catch (...) {
-        CompleteFailure(request, std::current_exception());
-      }
-    }
-    if (prepared.empty()) {
-      return;
-    }
-    if (device_lost.load(std::memory_order_acquire)) {
-      for (const auto& item : prepared)
-        CompleteFailure(item.request, device_lost_failure);
-      return;
-    }
+  struct PreparedDecode {
+    std::shared_ptr<ScheduledRequest> request;
+    Clock::time_point decode_start;
+  };
+  // Plain-decode tail shared by StepDecodeBatch and the mixed prefill+decode
+  // step: single advance, non-batched fan-out, or one runner AdvanceBatch,
+  // then per-lane publish. Callers prepare via PrepareDecode first.
+  void ExecutePreparedDecodeBatch(std::vector<PreparedDecode>& prepared) {
     if (prepared.size() == 1) {
       try {
         prepared.front().request->runner_request.Advance();
@@ -1579,6 +1553,57 @@ struct TextGenerationScheduler::Impl {
       item.request->result.execution_plan = execution_plan;
       FinishAdvanced(item.request, item.decode_start);
     }
+  }
+
+  void StepDecodeBatch(
+      const std::vector<std::shared_ptr<ScheduledRequest>>& requests) {
+    const auto selected_plan = runner_pool->SelectDecodePlan(requests.size());
+    if (batched_multi_token_decode &&
+        (batched_multi_token_decode_max_width == 0 ||
+         selected_plan.physical_width <=
+             batched_multi_token_decode_max_width)) {
+      StepMultiTokenDecodeBatch(requests);
+      return;
+    }
+    if (requests.size() == 1) {
+      StepDecode(requests.front());
+      return;
+    }
+
+    consecutive_active_prefill_chunks = 0;
+    struct PreparedRequest {
+      std::shared_ptr<ScheduledRequest> request;
+      Clock::time_point decode_start;
+    };
+    std::vector<PreparedRequest> prepared;
+    prepared.reserve(requests.size());
+    for (const auto& request : requests) {
+      try {
+        const auto decode_start = PrepareDecode(request);
+        if (decode_start.has_value()) {
+          prepared.push_back({
+              .request = request,
+              .decode_start = *decode_start,
+          });
+        }
+      } catch (...) {
+        CompleteFailure(request, std::current_exception());
+      }
+    }
+    if (prepared.empty()) {
+      return;
+    }
+    if (device_lost.load(std::memory_order_acquire)) {
+      for (const auto& item : prepared)
+        CompleteFailure(item.request, device_lost_failure);
+      return;
+    }
+    std::vector<PreparedDecode> converted;
+    converted.reserve(prepared.size());
+    for (auto& item : prepared) {
+      converted.push_back({std::move(item.request), item.decode_start});
+    }
+    ExecutePreparedDecodeBatch(converted);
   }
 
   void StepMultiTokenDecodeBatch(
@@ -1798,6 +1823,156 @@ struct TextGenerationScheduler::Impl {
     waiting.clear();
   }
 
+  // Mixed prefill+decode step (P3): one prefill chunk rides the same batch
+  // as plain decodes via pool PrefillWithCoworkers. Returns true when handled
+  // (merged, or legacy-fallback completed inline); false runs the legacy
+  // StepPrefill alone. Gated by GUFO_MIXED_BATCH; MTP-speculative batches and
+  // snapshot/checkpoint states fall through untouched. Prepared decodes are
+  // never resampled: refusal reuses them through ExecutePreparedDecodeBatch.
+  bool TryStepMixedBatch(
+      std::deque<std::shared_ptr<ScheduledRequest>>& prefilling,
+      std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
+      std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
+    static const bool mixed_batches = [] {
+      const char* e = std::getenv("GUFO_MIXED_BATCH");
+      return e != nullptr && e[0] == '1';
+    }();
+    if (!mixed_batches)
+      return false;
+    auto& prefill_req = prefilling.front();
+    if (prefill_req->runner_request.SnapshotPending())
+      return false;
+    // Mirror StepDecodeBatch routing: speculative multi-token batches keep
+    // their own path; only plain-routed decodes merge.
+    {
+      const auto plan = runner_pool->SelectDecodePlan(decoding.size());
+      if (batched_multi_token_decode &&
+          (batched_multi_token_decode_max_width == 0 ||
+           plan.physical_width <= batched_multi_token_decode_max_width))
+        return false;
+    }
+    // Prepare plain decodes (same loop as StepDecodeBatch; sampling runs once
+    // and is never redone on fallback).
+    std::vector<PreparedDecode> prepared;
+    prepared.reserve(decoding.size());
+    for (const auto& request : decoding) {
+      try {
+        const auto decode_start = PrepareDecode(request);
+        if (decode_start.has_value()) {
+          prepared.push_back({request, *decode_start});
+        }
+      } catch (...) {
+        CompleteFailure(request, std::current_exception());
+      }
+    }
+    if (prepared.empty())
+      return false;
+    if (device_lost.load(std::memory_order_acquire)) {
+      for (const auto& item : prepared)
+        CompleteFailure(item.request, device_lost_failure);
+      CompleteFailure(prefill_req, device_lost_failure);
+      return true;
+    }
+    std::vector<TextRunnerPool::Request*> decode_reqs;
+    decode_reqs.reserve(prepared.size());
+    for (const auto& item : prepared) {
+      decode_reqs.push_back(&item.request->runner_request);
+    }
+    std::vector<std::exception_ptr> failures(decode_reqs.size());
+    // Budget mirrors StepPrefill with decoder_runnable=true.
+    const bool bounded_prefill = incremental_prefill_supported;
+    const std::size_t budget =
+        bounded_prefill ? prefill_policy.decode_active_tokens
+                        : prefill_req->runner_request.prompt_tokens();
+    if ((runner_pool->capacity() > 1) && !incremental_prefill_supported) {
+      prefill_req->result.prefill_fallback_reason = "incremental_prefill_unavailable";
+    }
+    const auto start = Clock::now();
+    std::optional<TextPrefillStep> step;
+    try {
+      step = prefill_req->runner_request.PrefillWithCoworkers(
+          budget, decode_reqs, failures);
+    } catch (...) {
+      const auto failure = std::current_exception();
+      for (const auto& item : prepared) {
+        if (!CompleteIfStopped(item.request))
+          CompleteFailure(item.request, failure);
+      }
+      CompleteFailure(prefill_req, failure);
+      MarkAllDecodersDue(decoding);
+      return true;
+    }
+    if (!step.has_value()) {
+      // Legacy fallback on the same prepared list (no re-sampling), then the
+      // prefill chunk alone: today's tick-tock for one round.
+      ExecutePreparedDecodeBatch(prepared);
+      auto request = std::move(prefilling.front());
+      prefilling.pop_front();
+      StepPrefill(request, true);
+      if (!IsTerminal(request)) {
+        if (request->runner_request.SnapshotPending()) {
+          capturing.push_back(std::move(request));
+        } else if (request->runner_request.prefill_complete()) {
+          decoding.push_back(std::move(request));
+        } else {
+          prefilling.push_back(std::move(request));
+        }
+      }
+      MarkAllDecodersDue(decoding);
+      return true;
+    }
+    // Merged post: decodes like a decode batch (mixed label), chunk like a
+    // prefill step. Per-lane failures split exactly like StepDecodeBatch.
+    const auto plan = runner_pool->SelectDecodePlan(prepared.size());
+    for (auto& failure : failures) {
+      if (failure)
+        failure = ClassifyFailure(std::move(failure));
+      if (device_lost.load(std::memory_order_acquire)) {
+        for (const auto& item : prepared)
+          CompleteFailure(item.request, device_lost_failure);
+        CompleteFailure(prefill_req, device_lost_failure);
+        return true;
+      }
+    }
+    const std::string execution_plan =
+        "mixed-w" + std::to_string(plan.physical_width);
+    for (std::size_t i = 0; i < prepared.size(); ++i) {
+      const auto& item = prepared[i];
+      if (failures[i]) {
+        if (!CompleteIfStopped(item.request))
+          CompleteFailure(item.request, failures[i], true);
+        continue;
+      }
+      item.request->result.physical_execution_width = std::max(
+          item.request->result.physical_execution_width, plan.physical_width);
+      item.request->result.execution_plan = execution_plan;
+      FinishAdvanced(item.request, item.decode_start);
+    }
+    // Attribute wall time by rows (chunk share vs decode rows); the legacy
+    // StepPrefill records pure-chunk time.
+    const double elapsed_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    const double chunk_ms =
+        elapsed_ms * static_cast<double>(step->consumed_tokens) /
+        static_cast<double>(step->consumed_tokens + prepared.size());
+    {
+      auto request = std::move(prefilling.front());
+      prefilling.pop_front();
+      FinishPrefillStep(request, *step, chunk_ms, true);
+      if (!IsTerminal(request)) {
+        if (request->runner_request.SnapshotPending()) {
+          capturing.push_back(std::move(request));
+        } else if (request->runner_request.prefill_complete()) {
+          decoding.push_back(std::move(request));
+        } else {
+          prefilling.push_back(std::move(request));
+        }
+      }
+    }
+    MarkAllDecodersDue(decoding);
+    return true;
+  }
+
   void Run(const std::stop_token& stop_token) noexcept {
     std::deque<std::shared_ptr<ScheduledRequest>> prefilling;
     std::deque<std::shared_ptr<ScheduledRequest>> decoding;
@@ -1897,6 +2072,9 @@ struct TextGenerationScheduler::Impl {
                       });
       if (!prefilling.empty() && !decoding.empty() &&
           (!due_decoder || assemble_initial_batch)) {
+        if (TryStepMixedBatch(prefilling, decoding, capturing)) {
+          continue;
+        }
         auto request = std::move(prefilling.front());
         prefilling.pop_front();
         StepPrefill(request, true);

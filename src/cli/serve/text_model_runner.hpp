@@ -172,6 +172,13 @@ struct TextPrefillStep {
   double checkpoint_ms{0};
 };
 
+// Clean refusal from a fused batch entry point: nothing executed, all
+// pending selections intact, the caller runs the legacy pair instead.
+// Anything else thrown means partial work (see per-lane failures).
+struct MixedBatchRefused : std::logic_error {
+  using std::logic_error::logic_error;
+};
+
 struct TextDecodeSelection {
   bool stop{false};
   TextRunnerToken token{0};
@@ -381,6 +388,23 @@ public:
   [[nodiscard]] virtual std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const;
   virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
+  /// Merged plain-advance + prefill-chunk step. The default refuses (returns
+  /// false, advances untouched) so callers fall back to the legacy pair;
+  /// backends that fuse the batch override it. Plain advances only.
+  [[nodiscard]] virtual bool AdvanceBatchWithPrefillChunk(
+      std::span<const TextRunnerAdvance> advances,
+      std::span<std::exception_ptr> advance_failures, TextRunnerState& prefill_state,
+      std::span<const TextRunnerToken> prompt, std::size_t offset,
+      std::size_t max_input_tokens, TextPrefillStep& chunk_step) const {
+    (void)advances;
+    (void)advance_failures;
+    (void)prefill_state;
+    (void)prompt;
+    (void)offset;
+    (void)max_input_tokens;
+    (void)chunk_step;
+    return false;
+  }
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
   /// Retain a safe executed frontier when cancellation interrupts publication
@@ -514,6 +538,13 @@ public:
 
     void PrepareBatchExecution();
     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+    /// Merged plain-advance + prefill-chunk step (P3): coworkers are prepared
+    /// decode requests whose pending selections ride the same batch. Returns
+    /// nullopt (nothing mutated beyond idempotent pinning) when the chunk is
+    /// not vanilla; coworker failures mirror AdvanceBatch semantics.
+    [[nodiscard]] std::optional<TextPrefillStep> PrefillWithCoworkers(
+        std::size_t max_input_tokens, std::span<Request*> coworkers,
+        std::span<std::exception_ptr> coworker_failures);
     [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();
     [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);

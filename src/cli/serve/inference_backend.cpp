@@ -3010,6 +3010,72 @@ public:
     }
   }
 
+  // Merged plain-advance + prefill-chunk step (P3): one engine
+  // EvaluateBatchWithChunk instead of separate Prefill + AdvanceBatch.
+  // Plain advances only (MTP speculative decodes use DecodeBatch and never
+  // enter here). Any refusal or failure leaves advances untouched when they
+  // did not run, so the caller can run the legacy pair; completed advances
+  // are committed exactly like AdvanceBatch and never rerun.
+  [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
+      std::span<const TextRunnerAdvance> advances,
+      std::span<std::exception_ptr> advance_failures, TextRunnerState& prefill_state,
+      std::span<const TextRunnerToken> prompt, std::size_t offset,
+      std::size_t max_input_tokens, TextPrefillStep& chunk_step) const {
+    auto& qfn = RequireQwenFlashNextState(prefill_state);
+    if (advances.empty() || offset != qfn.position() || offset >= prompt.size() ||
+        max_input_tokens == 0)
+      throw MixedBatchRefused("mixed batch preconditions unmet");
+    const std::size_t remaining = prompt.size() - offset;
+    const std::size_t consumed = std::min<std::size_t>(
+        {max_input_tokens, remaining,
+         remaining <= model_->PrefillThroughCapacity()
+             ? model_->PrefillThroughCapacity()
+             : model_->PrefillCapacity()});
+    if (consumed == 0 || advances.size() + consumed > 1024)
+      throw MixedBatchRefused("mixed batch shape exceeds envelope");
+    std::vector<QwenFlashNextSession::BatchOutcome> outcomes(advances.size());
+    std::vector<QwenFlashNextSession::AdvanceRequest> requests;
+    for (const auto& advance : advances) {
+      if (advance.token > static_cast<TextRunnerToken>(
+                              std::numeric_limits<std::int32_t>::max()))
+        throw MixedBatchRefused("mixed batch token exceeds engine range");
+      requests.push_back(
+          {&RequireQwenFlashNextState(advance.state.get()).session(),
+           static_cast<std::int32_t>(advance.token),
+           &outcomes[requests.size()]});
+    }
+    const auto chunk_ids = QwenFlashNextEngineTokens(prompt.subspan(offset, consumed));
+    std::string error;
+    const bool ok = QwenFlashNextSession::EvaluateBatchWithChunk(
+        requests, &qfn.session(),
+        std::span<const std::int32_t>(chunk_ids), &error);
+    bool attempted = false;
+    for (const auto& outcome : outcomes) {
+      if (outcome.completed || !outcome.error.empty()) {
+        attempted = true;
+        break;
+      }
+    }
+    if (!ok && !attempted)
+      throw MixedBatchRefused("mixed batch refused cleanly: " + error);
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      if (!outcomes[i].completed) {
+        advance_failures[i] = std::make_exception_ptr(std::runtime_error(
+            "Flash-Next mixed advance failed: " + outcomes[i].error));
+        continue;
+      }
+      advance_failures[i] = nullptr;
+      auto& state = RequireQwenFlashNextState(advances[i].state.get());
+      state.set_position(state.session().Position());
+    }
+    if (!ok)
+      return false;
+    qfn.set_position(offset + consumed);
+    chunk_step = {.consumed_tokens = consumed,
+                  .decode_ready = (offset + consumed) == prompt.size()};
+    return true;
+  }
+
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const override {
     if (decodes.size() < 2 || !use_mtp_) {
