@@ -185,3 +185,15 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
   分支已移除（預設 vec64-tiles，正確且不太慢）；diag 代碼全清。
 - 大包速度現狀：batch 316ms vs 單路 247ms（vec-MoE memory-bound 之故）；
   小包 2.1x 不變。WMMA 修好之日就是反超之時。
+
+## Serve A/B：16 路 sustained（2026-10-17，生產配置+MBufo 預設）
+
+- 負載：10 短 + 6 長隨機文本（0 緩存，真 prefill），3 輪，開關各一遍。
+  開（預設）：14/17/15s（均 15.3s），mixed 觸發數百次；
+  關（`GUFO_MIXED_BATCH=0`）：15/16/20s（均 17.0s），mixed 0 次。
+  短回覆兩邊全部精確一致，長回覆正常結束，log 零錯誤。
+- 解讀：GPU 打到 99% 時，總牆鐘是 FLOP-bound（兩邊做同樣的功），
+  mixed 省的是 layer pass 開銷和 decode 等待，約 10% 牆鐘 + 更好的尾延遲；
+  小包（engine 級）2.1x，大包 FLOP 反超等 WMMA-MoE。
+- 教訓：測速前務必驗 PID（曾有舊測試服務佔著端口，兩輪全打到同一個
+  開著 mixed 的服務上，白測一輪；現在流程里每次重啟都對 PID 和啟動行）。
