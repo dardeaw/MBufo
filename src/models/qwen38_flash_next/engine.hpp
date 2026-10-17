@@ -196,6 +196,12 @@ public:
   [[nodiscard]] static bool EvaluateBatch(
       std::span<const AdvanceRequest> requests,
       std::string* error_msg = nullptr);
+  /// Plain advances plus one prefill chunk in a single ForwardBatch; see
+  /// EvaluateBatchWithChunk in engine.cpp. The chunk rides last, takes no
+  /// logits or sampling, and must hold no snapshot/checkpoint boundary.
+  [[nodiscard]] static bool EvaluateBatchWithChunk(
+      std::span<const AdvanceRequest> advances, Session* chunk_session,
+      std::span<const std::int32_t> chunk, std::string* error_msg = nullptr);
   [[nodiscard]] std::span<const float> Logits() const noexcept {
     return valid_ ? std::span<const float>(logits_) : std::span<const float>{};
   }

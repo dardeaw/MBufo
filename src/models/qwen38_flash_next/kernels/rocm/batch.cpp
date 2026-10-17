@@ -734,14 +734,44 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
     return false;
   RouterTopK(base.router, c.num_experts + 1, base.ids, base.weights, rows,
              c.num_experts, c.num_experts_used, stream_);
-  if (!GatedDenseBatch(l.shexp_up, l.shexp_gate, x, base.shexp_up, rows,
-                       error) ||
-      !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error))
+  if (rows > 32) {
+    // Mirror single-Forward Moe(): route-matched shared expert (F16 GEMM when
+    // DenseF16Route fires, else Q8-tiled/plain) so big batches match prefill
+    // numerics. Small batches keep the always-Q8 GatedDenseBatch below, which
+    // matches single-decode bit-exactly. UseScratch(base) because GatedDense
+    // stages through member scratch (s_.shexp_gate/half, q8t memo).
+    UseScratch(base);
+    shexp_half_ready_ = false;
+    bool shexp_ok =
+        GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, rows,
+                   &l.shexp_down, error);
+    if (shexp_ok && shexp_half_ready_) {
+      shexp_half_ready_ = false;
+      if (!DenseF16Gemm(l.shexp_down.data, s_.shexp_half, s_.shexp_out, rows,
+                        l.shexp_down.rows, l.shexp_down.cols, stream_)) {
+        shexp_ok = false;
+        Fail(error, "shared expert F16 GEMM failed");
+      }
+    } else if (shexp_ok) {
+      shexp_ok =
+          Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, rows, error);
+    } else {
+      shexp_half_ready_ = false;
+    }
+    UseScratch(base);
+    if (!shexp_ok)
+      return false;
+  } else if (!GatedDenseBatch(l.shexp_up, l.shexp_gate, x, base.shexp_up, rows,
+                              error) ||
+             !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows,
+                         error)) {
     return false;
-  // The Q4_K vector fast path caps at MMVQ_MAX_ROUTED_BATCH (64) rows;
-  // bigger batches fall through to the generic tiled MoeExperts loop below
-  // (same pattern as the non-Q4_K path; per-row independent, no vec limit).
-  if (rows <= 64 && l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
+  }
+  // Small batches keep the single-decode-matched kernels bit-exactly:
+  // Q4_K vector fast path (vec cap 64, used to 32) and the tiled MoeExperts
+  // loop. Above 32 rows single prefills run WMMA buckets, so big batches take
+  // the single full-rows MoeExperts call below (counts downloaded first).
+  if (rows <= 32 && l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
       l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
     // Share expert weights across request boundaries while retaining the
     // scalar Q8 activation quantization and dot-product reduction.
@@ -755,6 +785,37 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
             base.gate_e, base.ids, base.down_e, c.hidden_size, c.expert_ff,
             rows * c.num_experts_used, c.num_experts, 1, stream_) != 0)
       return Fail(error, "batched routed vector projection failed");
+    MoeEpilogue(base.down_e, base.weights, base.shexp_out,
+                base.router + c.num_experts, c.num_experts + 1, out, rows,
+                c.num_experts_used, c.hidden_size, stream_);
+    return true;
+  }
+  if (rows > 32 && l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
+      l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
+    // Big Q4_K batches: 64-row tiles through the proven vec fast path
+    // (MMVQ cap). Per-row independent, so tiling is exact; the WMMA route
+    // stays out until its batch numerics are characterized.
+    for (std::uint32_t r = 0; r < rows; r += 64) {
+      const std::uint32_t tt = std::min<std::uint32_t>(64, rows - r);
+      const std::size_t row_off = static_cast<std::size_t>(r);
+      if (qfn_mmq_moe_gated_vec(static_cast<int>(l.ffn_gate_exps.type),
+                                l.ffn_gate_exps.data, l.ffn_up_exps.data,
+                                x + row_off * c.hidden_size,
+                                base.ids + row_off * c.num_experts_used,
+                                base.gate_e + row_off * c.num_experts_used *
+                                                c.expert_ff,
+                                c.expert_ff, c.hidden_size, tt, c.num_experts,
+                                c.num_experts_used, stream_) != 0 ||
+          qfn_mmq_moe_vec(
+              static_cast<int>(l.ffn_down_exps.type), l.ffn_down_exps.data,
+              base.gate_e + row_off * c.num_experts_used * c.expert_ff,
+              base.ids + row_off * c.num_experts_used,
+              base.down_e + row_off * c.num_experts_used * c.hidden_size,
+              c.hidden_size, c.expert_ff, tt * c.num_experts_used,
+              c.num_experts, 1, stream_) != 0) {
+        return Fail(error, "batched routed vector projection failed");
+      }
+    }
     MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
                 c.num_experts_used, c.hidden_size, stream_);
@@ -778,7 +839,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   DropReadyQ8();
   const Config& c = config();
   if (items.empty() || items.size() > kBatchSessions) {
-    return Fail(error, "decode batch must contain 1..8 sessions");
+    return Fail(error, "decode batch must contain 1..32 sessions");
   }
   std::array<std::uint32_t, kBatchSessions> offsets{};
   std::array<bool, kBatchSessions> sparse{};
@@ -918,6 +979,9 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   const auto body = [&]() -> bool {
     if (!AnyActive(items))
       return true;
+    // NOTE (2026-10-17): whole-batch prefill_phase was tried and reverted
+    // (~10x gap regression via unisolated subsystem interaction). Batches stay
+    // phase-false (proven envelope).
     for (std::size_t i = 0; i < items.size(); ++i) {
       if (!Check(hipMemcpyAsync(items[i].session->control_, batch_controls_ + i,
                                 sizeof(Session::Control), hipMemcpyHostToDevice,

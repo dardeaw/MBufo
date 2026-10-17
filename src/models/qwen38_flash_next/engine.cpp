@@ -1671,4 +1671,91 @@ bool Session::EvaluateBatchImpl(std::span<const AdvanceRequest> requests,
   return true;
 }
 
+/// Plain advances plus one prefill chunk in a single ForwardBatch (the
+/// P2 engine entry for scheduler merging). The chunk rides last as a
+/// non-sampled item: no logits selection, no sampler. Assembles three proven
+/// pieces: Feed's frontier catch-up (DraftCatchUp with chunk[0]) for the chunk
+/// session, EvaluateBatchImpl's advance handling, and Feed's token/hidden
+/// bookkeeping. The executor-side MTP predictor tail (ForwardBatch) feeds the
+/// chunk's predictor KV; without it a later MTP decode would trip the
+/// frontier check, so callers must not bypass ForwardBatch for the chunk.
+/// Failure falls back per-peer: advances via Evaluate, chunk via full-prefix
+/// Sync. The chunk must hold no snapshot/checkpoint boundary.
+bool Session::EvaluateBatchWithChunk(std::span<const AdvanceRequest> advances,
+                                     Session* chunk_session,
+                                     std::span<const std::int32_t> chunk,
+                                     std::string* error_msg) {
+  auto fail = [&](const char* what) {
+    if (error_msg != nullptr)
+      *error_msg = what;
+    return false;
+  };
+  if (advances.empty() || chunk_session == nullptr || chunk.empty())
+    return fail("mixed batch needs advances and a chunk");
+  auto* model = advances.front().session->model_.get();
+  for (const auto& r : advances) {
+    if (r.session == chunk_session || r.session == nullptr ||
+        r.session->model_.get() != model || r.outcome == nullptr)
+      return fail("mixed batch sessions must be distinct and share a model");
+  }
+  if (chunk_session->model_.get() != model)
+    return fail("mixed batch sessions must be distinct and share a model");
+  auto& exec = *model->executor_;
+  // Feed protocol: consume a pending predictor frontier with the chunk's
+  // first token before appending (no-op when already caught up).
+  if (chunk_session->MtpEnabled() && !chunk_session->tokens_.empty() &&
+      !chunk_session->DraftCatchUp(chunk.front(), false, error_msg))
+    return false;
+  if (!DraftCatchUpBatch(advances, error_msg))
+    return false;
+  std::vector<rocm::Executor::BatchItem> items;
+  for (const auto& r : advances) {
+    items.push_back({r.session->session_.get(), {&r.token, 1}, false});
+  }
+  items.push_back({chunk_session->session_.get(), chunk, false});
+  if (!exec.ForwardBatch(items, error_msg)) {
+    bool ok = true;
+    for (const auto& r : advances) {
+      r.outcome->completed =
+          r.session->Evaluate(r.token, &r.outcome->error);
+      ok = ok && r.outcome->completed;
+    }
+    std::vector<std::int32_t> full(chunk_session->tokens_.begin(),
+                                   chunk_session->tokens_.end());
+    full.insert(full.end(), chunk.begin(), chunk.end());
+    if (!chunk_session->Sync(full, error_msg))
+      ok = false;
+    return ok;
+  }
+  for (std::size_t i = 0; i < advances.size(); ++i) {
+    auto& session = *advances[i].session;
+    auto& outcome = *advances[i].outcome;
+    if (session.session_->Cancelled()) {
+      outcome.error = "generation cancelled";
+      continue;
+    }
+    try {
+      if (!exec.SelectBatchLogits(i, 1, session.logits_.data(), &outcome.error))
+        continue;
+      session.hidden_base_ = static_cast<std::uint32_t>(session.tokens_.size());
+      session.tokens_.push_back(advances[i].token);
+      outcome.completed = true;
+    } catch (const std::exception& exception) {
+      outcome.error = exception.what();
+    }
+  }
+  // Chunk bookkeeping mirrors Feed without capture: keep the tail hidden rows
+  // the predictor may replay, drop nothing else. No logits, no sampling.
+  {
+    const auto n = chunk.size();
+    const auto kept = n;
+    chunk_session->hidden_base_ = static_cast<std::uint32_t>(
+        chunk_session->tokens_.size() + n -
+        std::min<std::size_t>(kept, exec.max_speculative()));
+    chunk_session->tokens_.insert(chunk_session->tokens_.end(), chunk.begin(),
+                                  chunk.end());
+  }
+  return true;
+}
+
 }  // namespace gufo::models::qwen38_flash_next

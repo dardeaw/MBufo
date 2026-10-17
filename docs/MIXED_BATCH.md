@@ -80,3 +80,47 @@ per-layer diag，只有 `GUFO_MIXED_BATCH=1` 才印。
 建議順序：A（engine 方法 + 合成驗證）→ scheduler 試點（env + serve flag 雙 gate，
 只合併 plain-advance + 無 snapshot 邊界的 chunk，其餘照舊）→ Q8/MTP 覆蓋 →
 needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review。
+
+# P0/P1/P2 狀態追加（2026-10-17）
+
+## P0：batch 包絡 32 session / 1024 行（已驗）
+
+- `kBatchSessions` 8→32，單 item/總行數上限 1024，`batch_logits_` 按總行數配
+  （622MB；MTP-heads 尾巴 staging 照舊裝得下）。
+- 附帶修了三個擋路的硬上限（都是「小形狀能跑、大形狀直接拒/炸」的）：
+  GDN（按 n 切分大小兩路：小路徑原樣，大路徑 y-tiling 無 history 核 +
+  host-side 3 行 history 拷貝；speculative 大 item 直接拒收保安全）、
+  MoE-Q4（vec fast path 保留到 32 行，大行數走 64-tile vec，逐行獨立故 tiling
+  精確；WMMA 全行分支因 batch 數值未定暫時不用）、logits。
+- 驗：264 行/9 session，decode 行 **bit-exact（0.00）**，chunk 續跑在已知
+  prepare 家族差內（1.49）。
+
+## P1：MTP parity（已驗）
+
+- 非 speculative 多行 item（=chunk）：入口 frontier-check（乾淨拒絕，對標
+  single-Forward 報錯文案）+ drain 後 `MtpForward kv_only` 餵 predictor。
+  target_hidden staging 只拷裝得下的行數（chunk 靠 tail，不靠它）。
+- 驗：chunk `MtpPosition` 跟 legacy tail **一字不差**（都落后 trunk 一拍，
+  靠 engine `DraftCatchUp` 補齊——那是 P2 的活），mixed 12/12 fire，
+  非 MTP 路徑數字完全不變。
+
+## P2：EvaluateBatchWithChunk（已驗，engine 級）
+
+- 拼裝：Feed 的 catch-up + EvaluateBatchImpl 的 advances 處理 + Feed 的
+  bookkeeping；失敗回退（advances 逐個 Evaluate，chunk 全前綴 Sync）。
+- 驗（`engine_mixed_test`）：chunk tokens/position **精確一致**（含第二 chunk，
+  覆蓋 catch-up 協議）、decode logits 小包絡、bench。
+
+## 教訓：全局 phase 不要碰
+
+- 試過整批 `prefill_phase=true` 想讓 chunk 對齊 single-prefill（Prepare<4>、
+  wide core、raw bucket），結果 gap 惡化 ~10x（0.60→7.51），子系統交互沒
+  隔離乾淨。已 revert，batch 保持 phase-false（驗證過的包絡）。
+- per-item `Prepare<4>` 透傳是可能的微優化，但不是正確性項，先不做。
+
+## 性能現狀（engine 級，2 decode + 64 chunk）
+
+- 小 batch（5 行）：混合 **57ms** vs 分開 121ms = **2.1x**。
+- 大 batch（66 行）：混合 316ms vs 分開 247ms——**暫輸**，主因 batch-MoE 走
+  vec（memory-bound）而單路走 matrix（compute-bound）。WMMA-MoE 修好前，
+  混合贏在延遲/併發，不贏單 prefill FLOP。
