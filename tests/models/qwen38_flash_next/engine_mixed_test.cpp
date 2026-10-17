@@ -199,6 +199,74 @@ int main(int argc, char** argv) {
     std::cout << "  engine teacher agree " << agree0 << "/10 " << agree1
               << "/10\n";
   }
+  // Sharp teacher on BIG batches: confident top-1s (arithmetic facts) for
+  // the decodes, fox 64-row chunks riding along (5 steps). Measures whether
+  // big-batch MoE (vec vs WMMA) preserves confident argmaxes under identical
+  // histories. Chunk token pool must cover 5*64 rows past position 128.
+  {
+    const auto sharpA =
+        model->Tokenize("What is 17 times 23? Reply with the number only. 391.");
+    const auto sharpB =
+        model->Tokenize("What is 19 times 21? Reply with the number only. 399.");
+    auto qd0 = make("qd0");
+    auto qd1 = make("qd1");
+    auto qr0 = make("qr0");
+    auto qr1 = make("qr1");
+    std::vector<std::int32_t> pA(sharpA.begin(), sharpA.end());
+    std::vector<std::int32_t> pB(sharpB.begin(), sharpB.end());
+    for (auto* s : {qd0.get(), qr0.get()})
+      if (!s->Sync(pA, &error))
+        throw std::runtime_error("sharp setup failed");
+    for (auto* s : {qd1.get(), qr1.get()})
+      if (!s->Sync(pB, &error))
+        throw std::runtime_error("sharp setup failed");
+    std::int32_t u0 = pA.back(), u1 = pB.back(), v0 = pA.back(), v1 = pB.back();
+    auto argmax = [&](const std::vector<float>& v) {
+      std::uint32_t b = 0;
+      for (std::uint32_t i = 1; i < v.size(); ++i)
+        if (v[i] > v[b])
+          b = i;
+      return static_cast<std::int32_t>(b);
+    };
+    int agree0 = 0, agree1 = 0;
+    std::size_t koff = 2 * chunk_rows;
+    for (int step = 0; step < 5; ++step) {
+      if (ids.size() < koff + chunk_rows)
+        throw std::runtime_error("sharp chunk pool exhausted");
+      std::vector<std::int32_t> kchunk(ids.begin() + koff,
+                                       ids.begin() + koff + chunk_rows);
+      koff += chunk_rows;
+      qfn::Session::BatchOutcome q0, q1;
+      std::vector<qfn::Session::AdvanceRequest> ad = {{qd0.get(), u0, &q0},
+                                                     {qd1.get(), u1, &q1}};
+      if (!qfn::Session::EvaluateBatchWithChunk(ad, sc.get(), kchunk, &error))
+        throw std::runtime_error("sharp batch failed: " + error);
+      if (!q0.completed || !q1.completed)
+        throw std::runtime_error("sharp advance incomplete");
+      const std::vector<float> md0(qd0->Logits().begin(), qd0->Logits().end());
+      const std::vector<float> md1(qd1->Logits().begin(), qd1->Logits().end());
+      if (!qr0->Evaluate(v0, &error) || !qr1->Evaluate(v1, &error))
+        throw std::runtime_error("sharp ref failed");
+      const std::vector<float> rd0(qr0->Logits().begin(), qr0->Logits().end());
+      const std::vector<float> rd1(qr1->Logits().begin(), qr1->Logits().end());
+      const auto n0 = argmax(md0), n1 = argmax(md1);
+      agree0 += (n0 == argmax(rd0));
+      agree1 += (n1 == argmax(rd1));
+      std::vector<std::int32_t> full(rc->Tokens().begin(), rc->Tokens().end());
+      full.insert(full.end(), kchunk.begin(), kchunk.end());
+      if (!rc->Sync(full, &error))
+        throw std::runtime_error("sharp ref chunk failed");
+      if (step == 0)
+        std::cout << "  sharp step0 mixed ids " << n0 << "/" << n1
+                  << " ref ids " << argmax(rd0) << "/" << argmax(rd1) << "\n";
+      v0 = argmax(rd0);
+      v1 = argmax(rd1);
+      u0 = v0;
+      u1 = v1;
+    }
+    std::cout << "  sharp teacher agree " << agree0 << "/5 " << agree1
+              << "/5\n";
+  }
   if (!std::isfinite(w0 + w1 + wc))
     throw std::runtime_error("non-finite logits");
   std::cout << "ENGINE_MIXED_PASS\n";
