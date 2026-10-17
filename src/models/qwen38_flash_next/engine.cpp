@@ -1693,13 +1693,42 @@ bool Session::EvaluateBatchWithChunk(std::span<const AdvanceRequest> advances,
   if (advances.empty() || chunk_session == nullptr || chunk.empty())
     return fail("mixed batch needs advances and a chunk");
   auto* model = advances.front().session->model_.get();
-  for (const auto& r : advances) {
+  if (chunk_session->model_.get() != model)
+    return fail("mixed batch sessions must be distinct and share a model");
+  std::vector<std::uint64_t> epochs(advances.size() + 1, 0);
+  for (std::size_t i = 0; i < advances.size(); ++i) {
+    const auto& r = advances[i];
     if (r.session == chunk_session || r.session == nullptr ||
         r.session->model_.get() != model || r.outcome == nullptr)
       return fail("mixed batch sessions must be distinct and share a model");
+    epochs[i] = r.session->session_->MutationEpoch();
+    bool valid = r.session->valid_ && r.token >= 0 &&
+                 static_cast<std::uint32_t>(r.token) < model->VocabSize() &&
+                 r.session->Position() < r.session->ContextSize();
+    for (std::size_t j = 0; j < advances.size(); ++j)
+      valid = valid && (i == j || r.session != advances[j].session);
+    if (!valid)
+      return fail("invalid or non-independent batch request");
+    try {
+      if (r.session->continuation_hooks_)
+        r.session->continuation_hooks_->BeforeExecution();
+    } catch (const std::exception& exception) {
+      return fail(exception.what());
+    }
+    if (!r.session->session_->CheckCancellation(error_msg))
+      return false;
   }
-  if (chunk_session->model_.get() != model)
-    return fail("mixed batch sessions must be distinct and share a model");
+  epochs.back() = chunk_session->session_->MutationEpoch();
+  if (!chunk_session->valid_)
+    return fail("invalid or non-independent batch request");
+  try {
+    if (chunk_session->continuation_hooks_)
+      chunk_session->continuation_hooks_->BeforeExecution();
+  } catch (const std::exception& exception) {
+    return fail(exception.what());
+  }
+  if (!chunk_session->session_->CheckCancellation(error_msg))
+    return false;
   auto& exec = *model->executor_;
   // Feed protocol: consume a pending predictor frontier with the chunk's
   // first token before appending (no-op when already caught up).
@@ -1713,18 +1742,51 @@ bool Session::EvaluateBatchWithChunk(std::span<const AdvanceRequest> advances,
     items.push_back({r.session->session_.get(), {&r.token, 1}, false});
   }
   items.push_back({chunk_session->session_.get(), chunk, false});
-  if (!exec.ForwardBatch(items, error_msg)) {
+  std::string shared_error;
+  if (!exec.ForwardBatch(items, &shared_error)) {
+    // Mirror RunIsolatedBatch: peers the batch did not touch (epoch
+    // unchanged: validation/allocation failure) retry independently; peers it
+    // partially mutated are poisoned, never retried in place.
     bool ok = true;
-    for (const auto& r : advances) {
-      r.outcome->completed =
-          r.session->Evaluate(r.token, &r.outcome->error);
-      ok = ok && r.outcome->completed;
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      const auto& r = advances[i];
+      auto& outcome = *r.outcome;
+      if (r.session->session_->MutationEpoch() == epochs[i]) {
+        r.session->valid_ = true;
+        try {
+          outcome.completed =
+              r.session->Evaluate(r.token, &outcome.error);
+        } catch (const std::exception& exception) {
+          outcome.error = exception.what();
+        }
+      } else {
+        r.session->valid_ = false;
+        outcome.error = shared_error.empty() ? "batch execution failed"
+                                             : shared_error;
+      }
+      if (!outcome.completed) {
+        if (outcome.error.empty())
+          outcome.error = "batch request failed";
+        ok = false;
+      }
     }
-    std::vector<std::int32_t> full(chunk_session->tokens_.begin(),
-                                   chunk_session->tokens_.end());
-    full.insert(full.end(), chunk.begin(), chunk.end());
-    if (!chunk_session->Sync(full, error_msg))
+    if (chunk_session->session_->MutationEpoch() == epochs.back()) {
+      chunk_session->valid_ = true;
+      std::vector<std::int32_t> full(chunk_session->tokens_.begin(),
+                                     chunk_session->tokens_.end());
+      full.insert(full.end(), chunk.begin(), chunk.end());
+      if (!chunk_session->Sync(full, error_msg))
+        ok = false;
+    } else {
+      chunk_session->valid_ = false;
+      if (ok)
+        AssignError(error_msg, shared_error.empty() ? "batch execution failed"
+                                                    : shared_error);
       ok = false;
+    }
+    if (!ok && error_msg != nullptr && error_msg->empty())
+      AssignError(error_msg, shared_error.empty() ? "batch execution failed"
+                                                  : shared_error);
     return ok;
   }
   for (std::size_t i = 0; i < advances.size(); ++i) {

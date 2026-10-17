@@ -199,6 +199,9 @@ public:
   /// Plain advances plus one prefill chunk in a single ForwardBatch; see
   /// EvaluateBatchWithChunk in engine.cpp. The chunk rides last, takes no
   /// logits or sampling, and must hold no snapshot/checkpoint boundary.
+  /// Returns true iff every peer completed. On false, completed advance
+  /// outcomes stay usable; dirty peers are poisoned (valid_ false) exactly
+  /// like RunIsolatedBatch, and the chunk either fully synced or untouched.
   [[nodiscard]] static bool EvaluateBatchWithChunk(
       std::span<const AdvanceRequest> advances, Session* chunk_session,
       std::span<const std::int32_t> chunk, std::string* error_msg = nullptr);

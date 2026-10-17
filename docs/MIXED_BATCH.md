@@ -124,3 +124,25 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
 - 大 batch（66 行）：混合 316ms vs 分開 247ms——**暫輸**，主因 batch-MoE 走
   vec（memory-bound）而單路走 matrix（compute-bound）。WMMA-MoE 修好前，
   混合贏在延遲/併發，不贏單 prefill FLOP。
+
+## P2 驗收（2026-10-17，engine 級 `engine_mixed_test`）
+
+- `EvaluateBatchWithChunk`：plain advances + chunk-last，含 Feed 式 catch-up、
+  epoch-safe fallback（照抄 `RunIsolatedBatch`：乾淨重試/髒 poison，絕不原地
+  重算髒 session）。
+- 數字（2 decode + 64 chunk，plain 與 MTP 一致）：
+  decode logits 0.60、continuation 1.57、chunk2 tokens+position 精確、
+  teacher-forcing 在通用文本上 0/10（分布太平，top-1 全翻；(1,1) 形狀 17/30，
+  Q8 標尺 11/30——包絡內）。
+- 速度：batch 316ms vs 分開 247ms（vec-MoE 拖累；WMMA-MoE 修好前先記賬）。
+
+## MTP 調試血淚（按時間順序，別再踩）
+
+1. `target_hidden` 只有 `max_speculative` 行，chunk 行數直接寫爆堆——
+   batch 內跳過（tail  cover），已修。
+2. `MX_MTP` 初版期望寫錯：legacy tail 本來就只走 `tokens[1:]`，mp 落后一拍
+   是設計（engine catch-up 補），不是 bug。
+3. `full-rows WMMA MoE` 在 batch 里差 10.07：counts 對過是對的，懷疑 epilogue/
+   combine 或 tile-map 的 batch 上下文問題；已回退 vec-64-tiles（0.60，
+   tiling 精確），WMMA 另案。
+4. 全局 phase 方案回退（0.60→7.51，子系統交互未隔離）。
