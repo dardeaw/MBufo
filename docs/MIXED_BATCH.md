@@ -161,3 +161,15 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
   只有 4，上限在併發數不在單批）。
 - 安全設計：prepared decode 絕不重採樣；completed 的 advance 絕不重跑；
   脏 session poison 大聲報錯；chunk Sidebar via Sync 冪等自愈。
+
+## 併發驗收（2026-10-17，serve 級，16 路）
+
+- 配置：`--sessions 16 --context 32768`（原生 context 下單 session KV 太貴，
+  admission 公式 `capacity/per_request` 擋 16 路；降 context 換併發數）。
+  16 路常駐約 99GB/124GB。
+- 負載：10 短 + 6 長（隨機文本，0 緩存，真 prefill）併發；sustained 第二輪
+  8 短 + 6 長。結果：短回覆 18/18 精確，長回覆全 stop 且計數合理，log 零錯誤。
+- **GPU use 99%**：16 路 mixed batch 已把 8060S 打滿。32 路不需要（滿了再加
+  只會排隊，不會更快）；engine 層 32 session 的表和緩衝已備好（kBatchSessions
+  等），將來換更大卡或更小 context 直接開。
+- A/B（4 路）：mixed 開 5.3s vs 關 6.3s；觸發 120 vs 0。
