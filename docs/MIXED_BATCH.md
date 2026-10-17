@@ -146,3 +146,18 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
    combine 或 tile-map 的 batch 上下文問題；已回退 vec-64-tiles（0.60，
    tiling 精確），WMMA 另案。
 4. 全局 phase 方案回退（0.60→7.51，子系統交互未隔離）。
+
+## P3：serve 併單（2026-10-17，已上線驗證）
+
+- 新鏈路：scheduler 1898 分支（`TryStepMixedBatch`）→ pool
+  `PrefillWithCoworkers` → backend `AdvanceBatchWithPrefillChunk` →
+  engine `EvaluateBatchWithChunk`。每層可獨立降級，任何一步拒絕都走 legacy
+  pair（tick-tock 一輪），行為與今天一致。
+- Gate：`GUFO_MIXED_BATCH=1`（scheduler + engine 共用；關掉整條鏈路靜默，
+  已驗 mixed 觸發 120 vs 0）。
+- Serve A/B（4 session，3 短 + 1 長隨機 prompt，3 輪）：
+  開 5.3s vs 關 6.3s（每輪都贏，~16%），輸出全對（精確回覆、數學、摘要），
+  零錯誤。幅度不如 engine 級 2.1x（serve 有 MTP/調度/cache 開銷，且 session
+  只有 4，上限在併發數不在單批）。
+- 安全設計：prepared decode 絕不重採樣；completed 的 advance 絕不重跑；
+  脏 session poison 大聲報錯；chunk Sidebar via Sync 冪等自愈。
