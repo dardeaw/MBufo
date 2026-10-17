@@ -197,3 +197,10 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
   小包（engine 級）2.1x，大包 FLOP 反超等 WMMA-MoE。
 - 教訓：測速前務必驗 PID（曾有舊測試服務佔著端口，兩輪全打到同一個
   開著 mixed 的服務上，白測一輪；現在流程里每次重啟都對 PID 和啟動行）。
+
+## Production（2026-10-17，gufo.service :8741）
+
+- 同今天 flags（sessions 4、MTP、Q8 KV、disk cache），只換 binary；
+  mixed 預設開（無需 env，`GUFO_MIXED_BATCH=0` 可關）。
+- 上線驗證：單發精確 + 4 路併發全精確 + journal 零錯誤。
+- 開機自啟：沿用既有 `gufo.service`（enabled），binary 路徑不變。
