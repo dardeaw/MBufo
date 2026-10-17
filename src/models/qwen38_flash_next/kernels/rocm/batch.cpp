@@ -770,8 +770,8 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
   }
   // Small batches keep the single-decode-matched kernels bit-exactly:
   // Q4_K vector fast path (vec cap 64, used to 32) and the tiled MoeExperts
-  // loop. Above 32 rows single prefills run WMMA buckets, so big batches take
-  // the single full-rows MoeExperts call below (counts downloaded first).
+  // loop. Above 32 rows Q4_K batches use 64-row vec tiles (exact); the WMMA
+  // route stays out pending batch-numerics characterization (see docs).
   if (rows <= 32 && l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
       l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
     // Share expert weights across request boundaries while retaining the
