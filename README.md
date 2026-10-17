@@ -1,31 +1,8 @@
-# MBufo：为 Strix Halo 而生的高并发推理引擎
-
-> MBufo 是 [gufo](https://github.com/gufo-org/gufo) 的一个专注高并发方向的 fork（branch `r151-mixed`），目标是第一款真正为 AMD Strix Halo（Ryzen AI MAX+ 395 / Radeon 8060S / 128GB 统一内存）调优的高并发本地推理引擎。上游 gufo 负责单路极限性能，MBufo 负责多路并发打满算力。底层模型、内核与绝大部分代码均来自上游开源项目，致谢 gufo-org 及所有贡献者。
-
-## MBufo 带来了什么
-
-- **混合 batch 注意力（mixed-batch attention）**：把 1 个 decode 行和 N 个 prefill-chunk 行装进一次 `ForwardBatch`，用一个 `WmmaMixedAttention` 核代替逐 item 的 attention core，消除 decode/prefill tick-tock（小包 2.1x，serve 實測开 5.3s vs 關 6.3s）。
-- **32 路包絡**：`ForwardBatch` 从 8 session/8 行放大到 32 session/1024 行（附带修了 GDN、MoE、logits 缓冲三个硬上限），16 路并发实测 GPU 占用 **99%**，输出全对、零错误。
-- **MTP 对等**：chunk 进 batch 自动补 predictor-KV（frontier-check + tail），MTP 会话行为与单路一致；speculative 行自动降级走 legacy，正确但不加速。
-- **Serve 併單（P3）**：scheduler 把 prefill chunk 和 plain decode 合成一批（`TryStepMixedBatch`），全链路可独立降级，任何一步拒绝都走今天的老路。
-
-## 快速开始（相对上游的增量）
-
-```bash
-# mixed 默认开启；关掉回到上游行为：
-GUFO_MIXED_BATCH=0 gufo serve llm ... &
-# 高并发建议（16 路约占 99GB，需 32K context 控制 KV）：
-gufo serve llm --sessions 16 --context 32768 ... &
-```
-
-- 设计文档（含三条铁律、验证矩阵、性能数据）：[docs/MIXED_BATCH.md](docs/MIXED_BATCH.md)
-- 上游相关 PR（Q8 KV cache #561、int8 WMMA #566、persist #579、history drafting #608）：见上游仓库，MBufo 分支已包含对应实现。
-
----
-
 # MBufo: a High-Concurrency Inference Engine for Strix Halo
 
 > MBufo is a high-concurrency-focused fork of [gufo](https://github.com/gufo-org/gufo) (branch `r151-mixed`), aiming to be the first locally-deployed inference engine tuned for high concurrency on AMD Strix Halo (Ryzen AI MAX+ 395 / Radeon 8060S / 128GB unified memory). Upstream gufo optimizes single-stream peak performance; MBufo saturates the chip under concurrent load. All models, kernels and most code come from the upstream open-source project — credit to gufo-org and all contributors.
+>
+> [繁體中文版](README.zh-Hant.md)
 
 ## What MBufo adds
 
