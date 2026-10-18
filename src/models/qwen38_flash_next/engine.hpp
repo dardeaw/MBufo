@@ -337,10 +337,14 @@ private:
   LookupIndex lookup_;
   /// Position until which history drafts need a long match to be trusted again.
   std::size_t suffix_cooldown_until_{0};
-  /// Consecutive fully-accepted retrieval-draft cycles in the current decode.
-  /// A deep run means the history is replaying an earlier answer (echo loops
-  /// feed the next draft from the previous one), so the run arms a lockout.
-  std::size_t suffix_full_accept_run_{0};
+  /// Position until which history drafting is switched off entirely, after a
+  /// run of near-fully-accepted retrieval cycles marked the context as an echo
+  /// loop. Absolute, because the token history only ever grows in a session.
+  std::size_t suffix_echo_disabled_until_{0};
+  /// Consecutive near-fully-accepted retrieval cycles (request ends excluded).
+  /// A deep run means the context is replaying an earlier answer, and the loop
+  /// feeds its own next draft, so the run switches the shortcut off.
+  std::size_t suffix_echo_run_{0};
   void SyncLookup();
   SpeculativeStats stats_;
   std::shared_ptr<const qwen::vision::Prompt> image_prompt_;

@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -819,14 +820,35 @@ namespace {
 /// costs the verify width.
 constexpr std::uint32_t kSuffixMinMatch = 16;
 
-/// Consecutive fully-accepted retrieval-draft cycles before echo suppression.
-/// Plain continuations accept fully once or twice; an assistant replaying its
-/// own previous turn hits four-plus in a row.
-constexpr std::size_t kSuffixEchoRunLimit = 4;
+/// A cycle only counts toward echo suppression once this many tokens were
+/// drafted, so a one- or two-token round cannot look like a perfect match.
+constexpr std::size_t kSuffixEchoMinDraft = 4;
 
-/// Tokens generated past the arm point before long-match-only drafting ends.
-/// Covers the remainder of a short looped turn plus the next few requests.
-constexpr std::size_t kSuffixEchoLockout = 256;
+/// Consecutive near-fully-accepted retrieval-draft cycles before suppression.
+/// The end-of-request cycle is always short (the stop token is rejected), so
+/// requiring a *fully* accepted cycle never accumulates across a looped turn:
+/// a real loop is recognised by its rate instead. Plain continuations sit far
+/// below this bar; an assistant replaying its own previous turn sits at 94-100%
+/// for every cycle of the request.
+constexpr std::size_t kSuffixEchoRunLimit = 6;
+
+/// Tokens past the arm point with history drafting switched off entirely. A
+/// longer match threshold demonstrably does not stop an echo loop: the loop
+/// body is a 100-plus-token tool call that satisfies every long-match bar, so
+/// only removing the shortcut itself moves the model off the copied path.
+constexpr std::size_t kSuffixEchoLockout = 16384;
+
+/// Test hook: GUFO_MTP_RETRIEVAL=0 removes history drafting entirely, so a
+/// replayed echo transcript can be checked with and without the shortcut.
+bool RetrievalDisabledByEnv() {
+  static const bool disabled = [] {
+    const char* value = std::getenv("GUFO_MTP_RETRIEVAL");
+    return value != nullptr &&
+           (std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0 ||
+            std::strcmp(value, "false") == 0);
+  }();
+  return disabled;
+}
 
 MtpProposal PointMassProposal(std::int32_t token) {
   MtpProposal proposal;
@@ -927,7 +949,8 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   // Retrieval drafts: the token history may already contain what follows this
   // phrase. The index includes the anchor, which is committed in every outcome.
   std::vector<std::int32_t> history_draft;
-  if (MtpEnabled() && cap > 1) {
+  if (MtpEnabled() && cap > 1 && !RetrievalDisabledByEnv() &&
+      tokens_.size() >= suffix_echo_disabled_until_) {
     SyncLookup();
     lookup_.Append(anchor);
     std::uint32_t matched = 0;
@@ -1154,23 +1177,30 @@ bool Session::FinishDecode(const DecodeRequest& request,
     stats_.suffix_cycles += 1;
     stats_.suffix_drafted += k - 1;
     stats_.suffix_accepted += keep - 1;
-    if ((keep - 1) * 2 < k - 1) {
+    const std::size_t proposed = k - 1;
+    const std::size_t accepted = keep - 1;
+    if (result->stop) {
+      // The request ended inside this round, so its accept count says nothing
+      // about the draft quality: the stop token is always the rejected one.
+      // Keep the run intact instead of treating every request end as a miss.
+    } else if (accepted * 2 < proposed) {
       suffix_cooldown_until_ = base + keep + 32;
-      suffix_full_accept_run_ = 0;
-    } else if (keep - 1 == k - 1) {
-      ++suffix_full_accept_run_;
-      // A steady run of fully-accepted retrieval drafts is the signature of
-      // the context echoing an earlier answer (assistant loops re-draft the
-      // previous turn verbatim). Don't keep feeding that loop: lock retrieval
-      // out until the session advances well past this point. The MTP predictor
-      // takes over, so speed is intact; only the history replay shortcut is
-      // disabled.
-      if (suffix_full_accept_run_ >= kSuffixEchoRunLimit) {
-        suffix_cooldown_until_ = base + keep + kSuffixEchoLockout;
-        suffix_full_accept_run_ = 0;
+      suffix_echo_run_ = 0;
+    } else if (proposed >= kSuffixEchoMinDraft && accepted * 10 >= proposed * 9) {
+      ++suffix_echo_run_;
+      // A sustained run of near-fully-accepted retrieval drafts is the
+      // signature of the context replaying an earlier answer: each request
+      // copies the previous one, so the next draft is fed from the copy and
+      // the loop sustains itself. Removing the shortcut is the only lever that
+      // breaks it: a longer match threshold still matches a 100-plus-token
+      // tool call verbatim. The MTP predictor keeps drafting throughout, so
+      // speed is unchanged; only the history replay path is switched off.
+      if (suffix_echo_run_ >= kSuffixEchoRunLimit) {
+        suffix_echo_disabled_until_ = tokens_.size() + kSuffixEchoLockout;
+        suffix_echo_run_ = 0;
       }
     } else {
-      suffix_full_accept_run_ = 0;
+      suffix_echo_run_ = 0;
     }
   } else {
     // A target stop ends the request; it does not classify the remaining
