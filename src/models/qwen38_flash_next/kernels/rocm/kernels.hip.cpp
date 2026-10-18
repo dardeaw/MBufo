@@ -2476,21 +2476,25 @@ __global__ void PrepareAttentionQ8Kernel(
     if (h < heads)
       continue;
     const std::uint32_t head = h - heads;
-    float mx = tid < d ? fabsf(norm[j][tid]) : 0.0f;
-    mx = BlockMax(mx, partial[j]);
-    const float sc = mx > 0.0f ? mx / 127.0f : 1.0f;
     if (tid < d) {
+      const std::uint32_t b = tid / 32;
+      const std::uint32_t base = b * 32;
+      const std::uint32_t n = base + 32 <= d ? 32 : (base < d ? d - base : 0);
+      float mx = 0.0f;
+      for (std::uint32_t k = 0; k < n; ++k)
+        mx = fmaxf(mx, fabsf(norm[j][base + k]));
+      const float sc = mx > 0.0f ? mx / 127.0f : 1.0f;
       float qv = norm[j][tid] / sc;
       qv = qv > 127.0f ? 127.0f : (qv < -127.0f ? -127.0f : qv);
-      // Q8_0 blocked layout; the row scale repeats per 32-block.
+      // Q8_0 blocked layout with a real per-32-block scale.
       const std::uint32_t head_blocks = (d + 31) / 32;
       const std::uint32_t row_blocks =
           static_cast<std::uint32_t>((kv_width + 31) / 32);
       std::int8_t* out = k_cache + std::size_t(ppos) * row_blocks * 34 +
                          std::size_t(head) * head_blocks * 34;
-      out[(tid / 32) * 34 + (tid % 32)] = static_cast<std::int8_t>(rintf(qv));
-      if (tid < head_blocks) {
-        *reinterpret_cast<__half*>(out + std::size_t(tid) * 34 + 32) =
+      out[b * 34 + (tid % 32)] = static_cast<std::int8_t>(rintf(qv));
+      if (tid % 32 == 0) {
+        *reinterpret_cast<__half*>(out + std::size_t(b) * 34 + 32) =
             __float2half(sc);
       }
     }
@@ -2506,24 +2510,25 @@ __global__ void PrepareAttentionQ8Kernel(
       continue;
     const std::uint32_t head = h - heads;
     const float* vrow = row + 2 * width + kv_width + std::size_t(head) * d;
-    float mx = 0.0f;
-    for (std::uint32_t i = tid; i < d; i += blockDim.x)
-      mx = fmaxf(mx, fabsf(vrow[i]));
-    mx = BlockMax(mx, partial[j]);
-    const float sc = mx > 0.0f ? mx / 127.0f : 1.0f;
     const std::uint32_t head_blocks = (d + 31) / 32;
-    const std::uint32_t row_blocks =
-        static_cast<std::uint32_t>((kv_width + 31) / 32);
+    const std::uint32_t row_blocks = static_cast<std::uint32_t>((kv_width + 31) / 32);
     std::int8_t* out = v_cache + std::size_t(ppos) * row_blocks * 34 +
                        std::size_t(head) * head_blocks * 34;
     for (std::uint32_t i = tid; i < d; i += blockDim.x) {
+      const std::uint32_t b = i / 32;
+      const std::uint32_t base = b * 32;
+      const std::uint32_t n = base + 32 <= d ? 32 : (base < d ? d - base : 0);
+      float mx = 0.0f;
+      for (std::uint32_t k = 0; k < n; ++k)
+        mx = fmaxf(mx, fabsf(vrow[base + k]));
+      const float sc = mx > 0.0f ? mx / 127.0f : 1.0f;
       float qv = vrow[i] / sc;
       qv = qv > 127.0f ? 127.0f : (qv < -127.0f ? -127.0f : qv);
-      out[(i / 32) * 34 + (i % 32)] = static_cast<std::int8_t>(rintf(qv));
-    }
-    if (tid < head_blocks) {
-      *reinterpret_cast<__half*>(out + std::size_t(tid) * 34 + 32) =
-          __float2half(sc);
+      out[b * 34 + (i % 32)] = static_cast<std::int8_t>(rintf(qv));
+      if (i % 32 == 0) {
+        *reinterpret_cast<__half*>(out + std::size_t(b) * 34 + 32) =
+            __float2half(sc);
+      }
     }
   }
 }
@@ -2572,26 +2577,27 @@ __global__ void QuantizeKvRowsQ8Kernel(
   const std::uint32_t tid = threadIdx.x;
   const float* row =
       src + std::size_t(t) * src_tok_stride + std::size_t(h) * src_head_stride;
-  float mx = 0.0f;
-  for (std::uint32_t i = tid; i < d; i += blockDim.x)
-    mx = fmaxf(mx, fabsf(row[i]));
-  __shared__ float smax[32];
-  mx = BlockMax(mx, smax);
-  const float sc = mx > 0.0f ? mx / 127.0f : 1.0f;
   const std::uint32_t ppos = *start_pos + t;
-  // Q8_0 blocked layout; the row scale repeats in every 32-block.
+  // Q8_0 blocked layout with a real per-32-block scale. A per-head scale is
+  // too coarse for post-RoPE K (outliers collapse the small dims to 0).
   const std::uint32_t row_blocks = (kv_width + 31) / 32;
   const std::uint32_t head_blocks = (d + 31) / 32;
   std::int8_t* out = dst + std::size_t(ppos) * row_blocks * 34 +
                      std::size_t(h) * head_blocks * 34;
-  for (std::uint32_t i = tid; i < d; i += blockDim.x) {
-    float q = row[i] / sc;
-    q = q > 127.0f ? 127.0f : (q < -127.0f ? -127.0f : q);
-    out[(i / 32) * 34 + (i % 32)] = static_cast<std::int8_t>(rintf(q));
-  }
-  if (tid < head_blocks) {
-    *reinterpret_cast<__half*>(out + std::size_t(tid) * 34 + 32) =
-        __float2half(sc);
+  for (std::uint32_t b = tid; b < head_blocks; b += blockDim.x) {
+    const std::uint32_t base = b * 32;
+    const std::uint32_t n = base + 32 <= d ? 32 : (base < d ? d - base : 0);
+    float mx = 0.0f;
+    for (std::uint32_t k = 0; k < n; ++k)
+      mx = fmaxf(mx, fabsf(row[base + k]));
+    const float sc = mx > 0.0f ? mx / 127.0f : 1.0f;
+    std::int8_t* blk = out + std::size_t(b) * 34;
+    for (std::uint32_t k = 0; k < n; ++k) {
+      float q = row[base + k] / sc;
+      q = q > 127.0f ? 127.0f : (q < -127.0f ? -127.0f : q);
+      blk[k] = static_cast<std::int8_t>(rintf(q));
+    }
+    *reinterpret_cast<__half*>(blk + 32) = __float2half(sc);
   }
 }
 
