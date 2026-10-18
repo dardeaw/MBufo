@@ -819,6 +819,15 @@ namespace {
 /// costs the verify width.
 constexpr std::uint32_t kSuffixMinMatch = 16;
 
+/// Consecutive fully-accepted retrieval-draft cycles before echo suppression.
+/// Plain continuations accept fully once or twice; an assistant replaying its
+/// own previous turn hits four-plus in a row.
+constexpr std::size_t kSuffixEchoRunLimit = 4;
+
+/// Tokens generated past the arm point before long-match-only drafting ends.
+/// Covers the remainder of a short looped turn plus the next few requests.
+constexpr std::size_t kSuffixEchoLockout = 256;
+
 MtpProposal PointMassProposal(std::int32_t token) {
   MtpProposal proposal;
   proposal.size = 1;
@@ -1145,8 +1154,24 @@ bool Session::FinishDecode(const DecodeRequest& request,
     stats_.suffix_cycles += 1;
     stats_.suffix_drafted += k - 1;
     stats_.suffix_accepted += keep - 1;
-    if ((keep - 1) * 2 < k - 1)
+    if ((keep - 1) * 2 < k - 1) {
       suffix_cooldown_until_ = base + keep + 32;
+      suffix_full_accept_run_ = 0;
+    } else if (keep - 1 == k - 1) {
+      ++suffix_full_accept_run_;
+      // A steady run of fully-accepted retrieval drafts is the signature of
+      // the context echoing an earlier answer (assistant loops re-draft the
+      // previous turn verbatim). Don't keep feeding that loop: lock retrieval
+      // out until the session advances well past this point. The MTP predictor
+      // takes over, so speed is intact; only the history replay shortcut is
+      // disabled.
+      if (suffix_full_accept_run_ >= kSuffixEchoRunLimit) {
+        suffix_cooldown_until_ = base + keep + kSuffixEchoLockout;
+        suffix_full_accept_run_ = 0;
+      }
+    } else {
+      suffix_full_accept_run_ = 0;
+    }
   } else {
     // A target stop ends the request; it does not classify the remaining
     // proposals as failed predictions.

@@ -337,6 +337,10 @@ private:
   LookupIndex lookup_;
   /// Position until which history drafts need a long match to be trusted again.
   std::size_t suffix_cooldown_until_{0};
+  /// Consecutive fully-accepted retrieval-draft cycles in the current decode.
+  /// A deep run means the history is replaying an earlier answer (echo loops
+  /// feed the next draft from the previous one), so the run arms a lockout.
+  std::size_t suffix_full_accept_run_{0};
   void SyncLookup();
   SpeculativeStats stats_;
   std::shared_ptr<const qwen::vision::Prompt> image_prompt_;
