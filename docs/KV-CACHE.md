@@ -619,6 +619,64 @@ Reading them:
   `tests/cli/text_model_runner_test.cpp` cover retention, admission, eviction
   and the event sinks without loading a model.
 
+## Blocked (quantized) attention cache
+
+The attention cache itself (not the cross-request snapshot above) can be stored
+at reduced precision with `--kv-quant`. Two layouts exist:
+
+- `f16`: two bytes per element, written by `PrepareAttention` /
+  `StoreKvKernel`.
+- `q8` and `fp8`: the blocked layout, written by `PrepareAttentionKv` /
+  `QuantizeKvRowsKernel`. Each 32-element block is 34 bytes: 32 one-byte codes
+  followed by one `f16` scale. `q8` uses symmetric INT8 levels over
+  `max|block| / 127`; `fp8` uses the OCP E4M3 grid over `max|block| / 448`.
+  The indexer keys and pooled block keys stay `f32`/`f16` and are not affected.
+
+Decode reads the blocked layout directly in the fused attention kernel. Prefill
+does the same. A transient `f16` staging route (`EnsureKvStaging` plus
+`WmmaCausalAttention`) exists for the tensor-core path and is gated behind
+`GUFO_KV_WMMA=1`; it is off by default because it produced attention output
+that disagreed with `f16` (KL 0.239 against 0.0166 for an exact emulation of the
+same quantization) whenever the prefill batch was wider than one token. See the
+0.18.1 changelog entry.
+
+`q8` and `fp8` occupy the same 34-byte block, so the choice is about decode
+cost, not size: `q8` decodes with native INT8 instructions, while E4M3 is
+emulated in software on targets without an FP8 conversion instruction.
+
+### Auditing the blocked cache offline
+
+Three env-gated hooks keep this class of regression measurable. They are inert
+unless the variable is set, and they append to the named file, so a single run
+produces one record per call.
+
+| variable | writes |
+| --- | --- |
+| `GUFO_KV_DUMP=<file>` | the blocked K/V rows a `PrepareAttentionKv` call produced: `u32 n_tokens, kv_heads, d, row_bytes, start_pos`, then `row_bytes * n_tokens` of K followed by the same amount of V |
+| `GUFO_KV_STAGE=<file>` | the dequantized `f16` staging rows of an `EnsureKvStaging` call: `u32 need, kv_row, base`, then the K and V halves |
+
+The reference side of the comparison comes from the probe binary:
+
+```sh
+# per-layer post-RoPE K/V, raw indexer keys and pooled block keys, as float32
+# binaries plus meta.json; also covers pre-RoPE vectors
+qwen38_flash_next_reference_probe --model FIRST_SHARD.gguf --prompt TEXT \
+    --dump-k /tmp/keys/
+
+# the same run with the blocked cache emulated on the CPU
+qwen38_flash_next_reference_probe --model FIRST_SHARD.gguf --prompt TEXT \
+    --kv-q8 --dump logits.bin
+```
+
+`--kv-q8p16` emulates a per-16 block for comparison. It did not change the
+outcome of a decision-boundary study (top-1 agreement 90.4% versus 93.0% for
+per-32, inside noise), because halving the block only shrinks the block peak by
+about 1.18x. Bit width, not block size, is the lever.
+
+Two cautions when comparing dumps: rows are per position, so align on the
+position rather than the file offset, and a `--prompt-file` keeps a trailing
+newline that `--prompt` does not, which shifts every later position by one.
+
 ## Known gaps
 
 Tracked under #336, with the upstream reports #331, #335, #259, #267, #275,
