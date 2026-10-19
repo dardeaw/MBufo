@@ -3,10 +3,17 @@
 // llama.cpp logits and, later, against the ROCm runtime.
 //
 //   reference_probe --model FIRST_SHARD.gguf [--prompt TEXT | --tokens 1,2,3]
-//                   [--generate N] [--dump logits.bin] [--top 5]
+//                   [--generate N] [--dump logits.bin] [--dump-k PREFIX]
+//                   [--kv-q8] [--kv-q8p16] [--top 5]
 //
 // --dump writes float32 logits for every prompt position (and generated
 // position) back to back; the row width is the vocabulary size.
+// --dump-k writes the accumulated post-RoPE key/value history and the raw
+// indexer keys of every attention layer under PREFIX (see
+// ReferenceModel::DumpAttentionState).
+// --kv-q8 emulates the blocked int8 KV cache (per-32-block symmetric levels
+// on cached K/V) instead of float32 formulas, for offline drift studies.
+// --kv-q8p16 is the same with per-16-block granularity.
 
 #include <algorithm>
 #include <chrono>
@@ -77,6 +84,9 @@ int main(int argc, char** argv) {
   std::string prompt;
   std::string tokens_arg;
   std::string dump_path;
+  std::string dump_key_prefix;
+  bool kv_q8 = false;
+  bool kv_q8p16 = false;
   int generate = 0;
   std::uint32_t top = 5;
   bool tokenize_only = false;
@@ -93,6 +103,12 @@ int main(int argc, char** argv) {
       tokens_arg = next();
     } else if (arg == "--dump") {
       dump_path = next();
+    } else if (arg == "--dump-k") {
+      dump_key_prefix = next();
+    } else if (arg == "--kv-q8") {
+      kv_q8 = true;
+    } else if (arg == "--kv-q8p16") {
+      kv_q8p16 = true;
     } else if (arg == "--generate") {
       generate = std::atoi(next().c_str());
     } else if (arg == "--top") {
@@ -165,8 +181,12 @@ int main(int argc, char** argv) {
     dump.open(dump_path, std::ios::binary);
   }
 
-  q::ReferenceModel model(*weights, ngram.get(),
-                          static_cast<std::uint32_t>(tokens.size()) + generate);
+  q::ReferenceModel model(
+      *weights, ngram.get(),
+      static_cast<std::uint32_t>(tokens.size()) + generate,
+      kv_q8p16 ? q::ReferenceModel::Storage::kQ8p16
+      : kv_q8  ? q::ReferenceModel::Storage::kQ8
+               : q::ReferenceModel::Storage::kFloat32);
   std::vector<float> logits(c.vocab_size);
   const std::size_t total = tokens.size() + static_cast<std::size_t>(generate);
   for (std::size_t i = 0; i < total; ++i) {
@@ -194,6 +214,13 @@ int main(int argc, char** argv) {
       dump.write(reinterpret_cast<const char*>(logits.data()),
                  static_cast<std::streamsize>(logits.size() * sizeof(float)));
     }
+  }
+  if (!dump_key_prefix.empty()) {
+    if (!model.DumpAttentionState(dump_key_prefix, &error)) {
+      std::fprintf(stderr, "key dump failed: %s\n", error.c_str());
+      return 1;
+    }
+    std::printf("key dump written under %s\n", dump_key_prefix.c_str());
   }
   if (generate > 0) {
     std::vector<std::uint32_t> generated(

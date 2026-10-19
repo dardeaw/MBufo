@@ -5,6 +5,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
 #include <hipcub/block/block_radix_sort.hpp>
 #include <stdexcept>
 #include <type_traits>
@@ -8652,8 +8655,34 @@ bool PrepareAttentionKv(const float* packed, std::uint32_t stride,
       hipLaunchKernelGGL((PrepareAttentionKvKernel<4, Codec>), grid,
                          dim3(kThreads), 0, stream, packed, stride, q_gamma,
                          k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
-                         rotary_dim, start_pos, theta, eps, rope);
+                          rotary_dim, start_pos, theta, eps, rope);
   });
+  if (const char* dump = std::getenv("GUFO_KV_DUMP")) {
+    // Offline audit hook: append the raw blocked K/V rows written by this call
+    // so the cache can be compared against a CPU emulation of the same
+    // quantization. Layout: u32 n_tokens, kv_heads, d, row_bytes, start_pos,
+    // then row_bytes*n_tokens of K followed by the same amount of V.
+    if (hipStreamSynchronize(stream) == hipSuccess) {
+      const std::size_t kv_width = static_cast<std::size_t>(kv_heads) * d;
+      const std::size_t row_bytes = (kv_width + 31) / 32 * 34;
+      const std::size_t bytes = row_bytes * n_tokens;
+      std::vector<std::uint8_t> host_k(bytes), host_v(bytes);
+      if (hipMemcpy(host_k.data(), k_cache, bytes, hipMemcpyDeviceToHost) ==
+              hipSuccess &&
+          hipMemcpy(host_v.data(), v_cache, bytes, hipMemcpyDeviceToHost) ==
+              hipSuccess) {
+        if (std::FILE* f = std::fopen(dump, "ab")) {
+          const std::uint32_t header[5] = {
+              n_tokens, kv_heads, d, static_cast<std::uint32_t>(row_bytes),
+              start_pos != nullptr ? *start_pos : 0u};
+          std::fwrite(header, sizeof(header), 1, f);
+          std::fwrite(host_k.data(), 1, bytes, f);
+          std::fwrite(host_v.data(), 1, bytes, f);
+          std::fclose(f);
+        }
+      }
+    }
+  }
   return true;
 }
 

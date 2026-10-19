@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <fstream>
 #include <numeric>
 
 #include "src/models/qwen38_flash_next/cpu_ops.hpp"
@@ -30,14 +32,16 @@ float Half(float value) {
   return static_cast<float>(static_cast<_Float16>(value));
 }
 
-std::vector<float> QuantizedInput(std::span<const float> input) {
+std::vector<float> QuantizedInput(std::span<const float> input,
+                                  std::size_t blk = 32) {
   std::vector<float> result(input.size());
-  for (std::size_t base = 0; base < input.size(); base += 32) {
+  for (std::size_t base = 0; base < input.size(); base += blk) {
     float peak = 0;
-    for (std::size_t j = 0; j < 32; ++j)
+    const std::size_t n = std::min(blk, input.size() - base);
+    for (std::size_t j = 0; j < n; ++j)
       peak = std::max(peak, std::abs(input[base + j]));
     const float scale = peak / 127.0F, stored = Half(scale);
-    for (std::size_t j = 0; j < 32; ++j)
+    for (std::size_t j = 0; j < n; ++j)
       result[base + j] =
           peak == 0 ? 0 : stored * std::round(input[base + j] / scale);
   }
@@ -93,6 +97,92 @@ void ReferenceModel::Reset() {
   ngram_history_.Reset();
   ple_conv_history_.assign(
       static_cast<std::size_t>(c_.PleConvHistory()) * c_.HcDim(), 0.0F);
+}
+
+bool ReferenceModel::DumpAttentionState(const std::string& prefix,
+                                        std::string* error_msg) const {
+  const std::size_t head_stride =
+      static_cast<std::size_t>(c_.num_kv_heads) * c_.head_dim;
+
+  std::ofstream meta(prefix + "meta.json");
+  if (!meta) {
+    if (error_msg != nullptr) {
+      *error_msg = "cannot open " + prefix + "meta.json";
+    }
+    return false;
+  }
+  meta << "{\n"
+       << "  \"position\": " << position_ << ",\n"
+       << "  \"layers\": " << c_.num_layers << ",\n"
+       << "  \"kv_heads\": " << c_.num_kv_heads << ",\n"
+       << "  \"head_dim\": " << c_.head_dim << ",\n"
+       << "  \"rotary_dim\": " << c_.rotary_dim << ",\n"
+       << "  \"indexer_dim\": " << c_.indexer_head_dim << ",\n"
+       << "  \"compress_ratio\": " << c_.compress_ratio << ",\n"
+       << "  \"storage\": \""
+       << (storage_ == Storage::kQ8p16
+               ? "q8p16"
+               : (storage_ == Storage::kQ8
+                      ? "q8"
+                      : (storage_ == Storage::kFloat32 ? "float32" : "decode")))
+       << "\",\n"
+       << "  \"entries\": [\n";
+
+  const auto write = [&](const std::string& name,
+                         const std::vector<float>& data) {
+    if (data.empty()) {
+      return true;
+    }
+    std::ofstream out(prefix + name, std::ios::binary);
+    if (!out) {
+      return false;
+    }
+    out.write(reinterpret_cast<const char*>(data.data()),
+              static_cast<std::streamsize>(data.size() * sizeof(float)));
+    return static_cast<bool>(out);
+  };
+
+  char name[64];
+  bool first = true;
+  for (std::size_t il = 0; il < attention_.size(); ++il) {
+    const AttentionState& s = attention_[il];
+    if (s.k.empty() && s.index_k.empty()) {
+      continue;  // linear (gated DeltaNet) layer, no KV cache
+    }
+    const std::size_t positions = head_stride == 0 ? 0 : s.k.size() / head_stride;
+    std::snprintf(name, sizeof(name), "layer%02zu_k.bin", il);
+    if (!write(name, s.k)) {
+      if (error_msg != nullptr) *error_msg = std::string("cannot write ") + name;
+      return false;
+    }
+    std::snprintf(name, sizeof(name), "layer%02zu_v.bin", il);
+    if (!write(name, s.v)) {
+      if (error_msg != nullptr) *error_msg = std::string("cannot write ") + name;
+      return false;
+    }
+    std::snprintf(name, sizeof(name), "layer%02zu_index_k.bin", il);
+    if (!write(name, s.index_k)) {
+      if (error_msg != nullptr) *error_msg = std::string("cannot write ") + name;
+      return false;
+    }
+    std::snprintf(name, sizeof(name), "layer%02zu_block_k.bin", il);
+    if (!write(name, s.block_k)) {
+      if (error_msg != nullptr) *error_msg = std::string("cannot write ") + name;
+      return false;
+    }
+    if (!first) {
+      meta << ",\n";
+    }
+    first = false;
+    meta << "    {\"layer\": " << il << ", \"positions\": " << positions
+         << ", \"blocks\": " << s.blocks << "}";
+  }
+  meta << "\n  ]\n}\n";
+  if (!meta) {
+    if (error_msg != nullptr) *error_msg = "cannot write metadata";
+    return false;
+  }
+  return true;
 }
 
 // Grouped RMSNorm: each of the hc streams is normalized over hidden_size on
@@ -375,6 +465,14 @@ void ReferenceModel::Attention(const LayerWeights& l, AttentionState& s,
       value = Half(value);
     for (auto& value : v)
       value = Half(value);
+  } else if (storage_ == Storage::kQ8 || storage_ == Storage::kQ8p16) {
+    // Emulate the blocked int8 KV cache: per-block peak scale stored as
+    // F16 with int8 symmetric levels (see QuantizedInput). GPU rounds ties to
+    // even, std::round here goes away from zero; exact ties are measure-zero
+    // in real K/V. Indexer keys stay F32, matching the engine.
+    const std::size_t blk = storage_ == Storage::kQ8p16 ? 16 : 32;
+    k = QuantizedInput(k, blk);
+    v = QuantizedInput(v, blk);
   }
   s.k.insert(s.k.end(), k.begin(), k.end());
   s.v.insert(s.v.end(), v.begin(), v.end());
@@ -409,7 +507,7 @@ void ReferenceModel::Attention(const LayerWeights& l, AttentionState& s,
     cpu::RmsNorm(pooled, static_cast<const float*>(l.indexer_k_norm.data),
                  c_.rms_eps);
     rope(pooled.data(), 1, idim, s.blocks * ratio);
-    if (storage_ == Storage::kDecode)
+    if (storage_ != Storage::kFloat32)
       for (auto& value : pooled)
         value = Half(value);
     s.block_k.insert(s.block_k.end(), pooled.begin(), pooled.end());
@@ -641,7 +739,7 @@ bool ReferenceModel::MtpStep(const MtpWeights& mtp, std::int32_t token,
   cpu::RmsNorm(norm, static_cast<const float*>(l.nextn_hnorm.data), c_.rms_eps);
   if (trace)
     copy(norm, trace->normalized_hidden);
-  if (storage_ == Storage::kDecode &&
+  if (storage_ != Storage::kFloat32 &&
       l.nextn_eh_proj.type == core::GgmlType::kQ8_0) {
     embedding = QuantizedInput(embedding);
     norm = QuantizedInput(norm);

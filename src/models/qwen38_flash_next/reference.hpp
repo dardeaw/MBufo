@@ -22,7 +22,10 @@ class ReferenceModel {
 public:
   /// Float32 formulas versus an independent emulation of decode storage:
   /// Q8 activation blocks, F16 KV/pooled keys and F16 uploaded router weights.
-  enum class Storage { kFloat32, kDecode };
+  /// kQ8 additionally rounds cached K/V through per-32-block int8 symmetric
+  /// levels, emulating the blocked Q8 KV cache (offline drift studies only).
+  /// kQ8p16 is the same with per-16-block granularity.
+  enum class Storage { kFloat32, kDecode, kQ8, kQ8p16 };
   ReferenceModel(const ModelWeights& weights, NgramTable* ngram,
                  std::uint32_t max_context,
                  Storage storage = Storage::kFloat32);
@@ -50,6 +53,15 @@ public:
 
   [[nodiscard]] std::uint32_t Position() const noexcept { return position_; }
   void Reset();
+
+  /// Writes the accumulated post-RoPE key/value history and the raw indexer
+  /// keys of every attention layer as float32 binaries next to a JSON
+  /// descriptor `<prefix>meta.json`. Offline KV-quantization studies read this
+  /// instead of guessing at the decode distribution. Files are named
+  /// `<prefix>layerNN_{k,v,index_k,block_k}.bin`; a layer that runs the
+  /// linear (gated DeltaNet) mixer contributes no entry.
+  [[nodiscard]] bool DumpAttentionState(const std::string& prefix,
+                                        std::string* error_msg = nullptr) const;
 
 private:
   void MatVec(const TensorRef& weight, std::uint64_t expert,

@@ -9,6 +9,7 @@
 #include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -2473,6 +2474,27 @@ bool Executor::EnsureKvStaging(Session& session, Session::AttentionState& s,
       return false;
     }
     session.kv_stage_valid_ = need;
+    if (const char* dump = std::getenv("GUFO_KV_STAGE")) {
+      // Offline audit hook: append the f16 staging rows dequantized by this
+      // call so they can be compared against the blocked cache of the same run
+      // (no CPU/GPU divergence confound). Header: u32 need, kv_row, base.
+      (void)hipStreamSynchronize(stream_);
+      const std::size_t bytes = std::size_t{need} * kv_row * sizeof(__half);
+      void* host = std::malloc(2 * bytes);
+      if (host != nullptr &&
+          hipMemcpy(host, session.kv_stage_k_, bytes,
+                    hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(static_cast<char*>(host) + bytes, session.kv_stage_v_, bytes,
+                    hipMemcpyDeviceToHost) == hipSuccess) {
+        if (std::FILE* f = std::fopen(dump, "ab")) {
+          const std::uint32_t header[3] = {need, kv_row, base};
+          std::fwrite(header, sizeof(header), 1, f);
+          std::fwrite(host, 1, 2 * bytes, f);
+          std::fclose(f);
+        }
+      }
+      std::free(host);
+    }
   }
   return true;
 }
@@ -2751,9 +2773,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // decode step at depth fills the device.
   const bool split = !MatrixRows(n_tokens);
   if (KvBlocked(options_.kv_format)) {
-    // Wide batches ride the tensor cores via transient F16 staging;
-    // narrow (decode) keeps the scalar kernel (memory-bound, blocked wins).
-    const bool wmma = !split && wmma_kv(0, n_tokens, last_only);
+    // Wide batches used to ride the tensor cores via transient F16 staging.
+    // The staging route is gated behind GUFO_KV_WMMA until its prefill numerics
+    // match the fused blocked kernel: the offline audit measured KL 0.63 at
+    // position 0 through staging versus 0.03 through the fused kernel for the
+    // same cache bytes, so correctness takes the fused path by default.
+    static const bool wmma_enabled = std::getenv("GUFO_KV_WMMA") != nullptr;
+    const bool wmma = wmma_enabled && !split && wmma_kv(0, n_tokens, last_only);
     if (!wmma) {
       rocm::AttentionKv(s_.q, s.k_cache_kv, s.v_cache_kv, mask, mask_words_,
                         s_.ctx, split ? s_.attn_partials : nullptr, kAttnSplits,
