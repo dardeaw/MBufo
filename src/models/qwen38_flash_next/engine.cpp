@@ -79,8 +79,9 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     AssignError(error_msg, "decode concurrency must be between one and eight");
     return nullptr;
   }
-  if (options.kv_cache_quant != "f16" && options.kv_cache_quant != "q8") {
-    AssignError(error_msg, "kv cache quant must be f16 or q8");
+  if (options.kv_cache_quant != "f16" && options.kv_cache_quant != "q8" &&
+      options.kv_cache_quant != "fp8") {
+    AssignError(error_msg, "kv cache quant must be f16, q8 or fp8");
     return nullptr;
   }
   if (options.max_draft_tokens == 0) {
@@ -172,7 +173,9 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                 exec.max_batch, std::uint64_t{options.max_draft_tokens} + 1))
           : 1;
   exec.max_speculative = exec.max_logit_rows;
-  exec.kv_cache_int8 = (options.kv_cache_quant == "q8");
+  exec.kv_format = options.kv_cache_quant == "q8"    ? rocm::KvFormat::kQ8
+                   : options.kv_cache_quant == "fp8" ? rocm::KvFormat::kFp8
+                                                     : rocm::KvFormat::kF16;
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
   if (!m->executor_) {
@@ -621,8 +624,7 @@ bool Session::DraftReplay(std::int32_t next_token,
 
 bool Session::DraftCatchUp(std::int32_t next_token, bool propose,
                            std::string* error_msg,
-                           MtpCandidateLogits* candidates,
-                           bool draft_subset) {
+                           MtpCandidateLogits* candidates, bool draft_subset) {
   std::vector<std::int32_t> replay;
   std::int32_t hidden_row = 0;
   if (!DraftReplay(next_token, &replay, &hidden_row, error_msg))
@@ -1815,15 +1817,14 @@ bool Session::EvaluateBatchWithChunk(std::span<const AdvanceRequest> advances,
       if (r.session->session_->MutationEpoch() == epochs[i]) {
         r.session->valid_ = true;
         try {
-          outcome.completed =
-              r.session->Evaluate(r.token, &outcome.error);
+          outcome.completed = r.session->Evaluate(r.token, &outcome.error);
         } catch (const std::exception& exception) {
           outcome.error = exception.what();
         }
       } else {
         r.session->valid_ = false;
-        outcome.error = shared_error.empty() ? "batch execution failed"
-                                             : shared_error;
+        outcome.error =
+            shared_error.empty() ? "batch execution failed" : shared_error;
       }
       if (!outcome.completed) {
         if (outcome.error.empty())

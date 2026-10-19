@@ -277,7 +277,7 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
 std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
     std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
     bool has_mtp, std::uint32_t max_context, std::uint32_t max_draft_tokens,
-    std::uint32_t decode_concurrency, bool kv_cache_int8 = false) {
+    std::uint32_t decode_concurrency, std::string_view kv_cache_quant = "f16") {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen3.8-Flash-Next disk cache requires an artifact fingerprint");
@@ -302,7 +302,7 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
            << '\n'
            << "context_tokens=" << max_context << '\n'
            << "position_policy=absolute-v1\n"
-           << "kv_quant=" << (kv_cache_int8 ? "q8" : "f16") << "\n"
+           << "kv_quant=" << kv_cache_quant << "\n"
            << "adapters=none\n";
   if (has_mtp) {
     identity << "draft_backend=qfn-mtp-v1\n"
@@ -2487,12 +2487,12 @@ public:
                           std::uint32_t max_draft_tokens,
                           std::string artifact_fingerprint = {},
                           std::string mtp_fingerprint = {},
-                          bool kv_cache_int8 = false)
+                          std::string kv_cache_quant = "f16")
       : model_(std::move(model)),
         max_context_(max_context),
         use_mtp_(use_mtp),
         max_draft_tokens_(max_draft_tokens),
-        kv_cache_int8_(kv_cache_int8) {
+        kv_cache_quant_(std::move(kv_cache_quant)) {
     // The typed in-process API owns an immutable loaded model but need not
     // supply file fingerprints when disk caching is disabled. Its model
     // lifetime is an exact process-local identity; durable caches still
@@ -2502,7 +2502,7 @@ public:
           .compatibility_identity = QwenFlashNextCompatibilityIdentity(
               artifact_fingerprint, use_mtp_ ? mtp_fingerprint : std::string{},
               use_mtp_, max_context_, max_draft_tokens_,
-              model_->DecodeConcurrency(), kv_cache_int8_),
+              model_->DecodeConcurrency(), kv_cache_quant_),
           .payload_version =
               models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
       };
@@ -3099,19 +3099,20 @@ public:
   // are committed exactly like AdvanceBatch and never rerun.
   [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
       std::span<const TextRunnerAdvance> advances,
-      std::span<std::exception_ptr> advance_failures, TextRunnerState& prefill_state,
-      std::span<const TextRunnerToken> prompt, std::size_t offset,
-      std::size_t max_input_tokens, TextPrefillStep& chunk_step) const {
+      std::span<std::exception_ptr> advance_failures,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens,
+      TextPrefillStep& chunk_step) const {
     auto& qfn = RequireQwenFlashNextState(prefill_state);
-    if (advances.empty() || offset != qfn.position() || offset >= prompt.size() ||
-        max_input_tokens == 0)
+    if (advances.empty() || offset != qfn.position() ||
+        offset >= prompt.size() || max_input_tokens == 0)
       throw MixedBatchRefused("mixed batch preconditions unmet");
     const std::size_t remaining = prompt.size() - offset;
-    const std::size_t consumed = std::min<std::size_t>(
-        {max_input_tokens, remaining,
-         remaining <= model_->PrefillThroughCapacity()
-             ? model_->PrefillThroughCapacity()
-             : model_->PrefillCapacity()});
+    const std::size_t consumed =
+        std::min<std::size_t>({max_input_tokens, remaining,
+                               remaining <= model_->PrefillThroughCapacity()
+                                   ? model_->PrefillThroughCapacity()
+                                   : model_->PrefillCapacity()});
     if (consumed == 0 || advances.size() + consumed > 1024)
       throw MixedBatchRefused("mixed batch shape exceeds envelope");
     std::vector<QwenFlashNextSession::BatchOutcome> outcomes(advances.size());
@@ -3125,11 +3126,12 @@ public:
            static_cast<std::int32_t>(advance.token),
            &outcomes[requests.size()]});
     }
-    const auto chunk_ids = QwenFlashNextEngineTokens(prompt.subspan(offset, consumed));
+    const auto chunk_ids =
+        QwenFlashNextEngineTokens(prompt.subspan(offset, consumed));
     std::string error;
     const bool ok = QwenFlashNextSession::EvaluateBatchWithChunk(
-        requests, &qfn.session(),
-        std::span<const std::int32_t>(chunk_ids), &error);
+        requests, &qfn.session(), std::span<const std::int32_t>(chunk_ids),
+        &error);
     bool attempted = false;
     for (const auto& outcome : outcomes) {
       if (outcome.completed || !outcome.error.empty()) {
@@ -3227,7 +3229,7 @@ private:
   std::uint32_t max_context_;
   bool use_mtp_;
   std::uint32_t max_draft_tokens_;
-  bool kv_cache_int8_ = false;
+  std::string kv_cache_quant_ = "f16";
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
 };
@@ -3837,13 +3839,13 @@ bool InferenceBackend::load(
     new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
     new_state->sampling_defaults.supplied = {};
     new_state->supports_images = model->VisionEncoder() != nullptr;
-    const bool kv_cache_int8 = model->KvCacheInt8();
+    const std::string kv_cache_quant = model->KvCacheQuant();
     auto runner = std::make_shared<QwenFlashNextTextRunner>(
         std::move(model), max_context,
         speculative_config.backend == TextSpeculativeBackend::kMtp,
         speculative_config.max_draft_tokens,
         disk_cache_config.model_artifact_fingerprint,
-        disk_cache_config.draft_model_artifact_fingerprint, kv_cache_int8);
+        disk_cache_config.draft_model_artifact_fingerprint, kv_cache_quant);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;

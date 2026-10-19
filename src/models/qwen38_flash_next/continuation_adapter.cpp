@@ -33,6 +33,16 @@ bool Pool(ContinuationPart part) {
   return part == ContinuationPart::kPooledKeys ||
          part == ContinuationPart::kDraftPooledKeys;
 }
+/// Stable cache-identity byte for a KV precision selector (see
+/// `Model::KvCacheQuant`). Unknown selectors hash as F16, matching the
+/// engine's default.
+std::uint32_t KvQuantId(const std::string& quant) {
+  if (quant == "q8")
+    return 1;
+  if (quant == "fp8")
+    return 2;
+  return 0;
+}
 struct Metadata {
   std::uint32_t version{2};
   std::uint32_t target{}, draft{}, blocks{}, draft_blocks{}, hidden_base{};
@@ -212,7 +222,7 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
       layout_(model_ ? model_->config() : Config{},
               mode == core::SessionMode::kSpeculative, context,
               model_ ? model_->executor_->max_speculative() : 0,
-              model_ ? model_->KvCacheInt8() : false),
+              model_ ? model_->KvCacheBlocked() : false),
       identity_(std::move(identity)) {
   if ((mode != core::SessionMode::kAutoregressive &&
        mode != core::SessionMode::kSpeculative) ||
@@ -230,7 +240,7 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
   put(model_->executor_->max_speculative());
   put(model_->PrefillCapacity());
   put(model_->DecodeConcurrency());
-  put(model_->KvCacheInt8() ? 1 : 0);  // F16 and Q8 snapshots must not mix.
+  put(KvQuantId(model_->KvCacheQuant()));  // F16/Q8/FP8 must not mix.
   for (const auto& component : layout_.Components())
     descriptors_.push_back(component.descriptor);
 }
@@ -361,29 +371,29 @@ void* ContinuationAdapter::RowData(
     State& state, const ContinuationComponent& component) const {
   auto& native = state.CaptureState();
   // The slot facade's precision flag is not always populated, but the
-  // session allocates exactly one of the F16 / Q8 cache pairs: resolve by
-  // presence (the flag only breaks ties, which never occur in practice).
-  const bool q8flag = native.kv_cache_int8();
-  const auto pick = [&](void* f16, void* q8) -> void* {
-    if (f16 != nullptr && q8 != nullptr)
-      return q8flag ? q8 : f16;
-    return f16 != nullptr ? f16 : q8;
+  // session allocates exactly one of the F16 / blocked cache pairs: resolve
+  // by presence (the flag only breaks ties, which never occur in practice).
+  const bool blocked = native.kv_format() != rocm::KvFormat::kF16;
+  const auto pick = [&](void* f16, void* blocked_ptr) -> void* {
+    if (f16 != nullptr && blocked_ptr != nullptr)
+      return blocked ? blocked_ptr : f16;
+    return f16 != nullptr ? f16 : blocked_ptr;
   };
   switch (component.part) {
     case ContinuationPart::kTokens:
       return state.session->tokens_.data();
     case ContinuationPart::kKey:
       return pick(native.attention_[component.layer].k_cache,
-                  native.attention_[component.layer].k_cache_q8);
+                  native.attention_[component.layer].k_cache_kv);
     case ContinuationPart::kValue:
       return pick(native.attention_[component.layer].v_cache,
-                  native.attention_[component.layer].v_cache_q8);
+                  native.attention_[component.layer].v_cache_kv);
     case ContinuationPart::kPooledKeys:
       return native.attention_[component.layer].block_k;
     case ContinuationPart::kDraftKey:
-      return pick(native.mtp_.k_cache, native.mtp_.k_cache_q8);
+      return pick(native.mtp_.k_cache, native.mtp_.k_cache_kv);
     case ContinuationPart::kDraftValue:
-      return pick(native.mtp_.v_cache, native.mtp_.v_cache_q8);
+      return pick(native.mtp_.v_cache, native.mtp_.v_cache_kv);
     case ContinuationPart::kDraftPooledKeys:
       return native.mtp_.block_k;
     default:
@@ -758,14 +768,14 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
             ? nullptr
             : static_cast<std::byte*>(RowData(state, component)) + first * row;
     // Restored K/V rows overwrite the caches in place, which the persistent
-    // Q8 staging cannot detect by source pointer: drop its validity so the
-    // next prefill re-dequantizes instead of serving stale rows.
+    // blocked staging cannot detect by source pointer: drop its validity so
+    // the next prefill re-dequantizes instead of serving stale rows.
     const bool restores_kv = component.part == ContinuationPart::kKey ||
                              component.part == ContinuationPart::kValue ||
                              component.part == ContinuationPart::kDraftKey ||
                              component.part == ContinuationPart::kDraftValue;
     if (!bytes.empty() && restores_kv)
-      state.CaptureState().q8_stage_valid_ = 0;
+      state.CaptureState().kv_stage_valid_ = 0;
     {
       const std::lock_guard lock(state.jobs_mutex);
       state.coverage[id.value - 1].emplace_back(first * row, end * row);

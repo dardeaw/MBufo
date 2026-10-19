@@ -1,9 +1,9 @@
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <cstdio>
-#include <vector>
+#include <cstdlib>
 #include <stdexcept>
+#include <vector>
 
 #include "qfn_mmq.h"
 #include "src/core/hip/managed_alloc.hpp"
@@ -341,8 +341,8 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
       attention.rope = session.vision_input_.rope();
       attention.k_cache = session.mtp_.k_cache;
       attention.v_cache = session.mtp_.v_cache;
-      attention.k_cache_q8 = session.mtp_.k_cache_q8;
-      attention.v_cache_q8 = session.mtp_.v_cache_q8;
+      attention.k_cache_kv = session.mtp_.k_cache_kv;
+      attention.v_cache_kv = session.mtp_.v_cache_kv;
       attention.index_k = session.mtp_.index_k;
       attention.block_k = session.mtp_.block_k;
       const bool sparse = session.mtp_.position + n > c.indexer_top_k;
@@ -746,9 +746,8 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
     // stages through member scratch (s_.shexp_gate/half, q8t memo).
     UseScratch(base);
     shexp_half_ready_ = false;
-    bool shexp_ok =
-        GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, rows,
-                   &l.shexp_down, error);
+    bool shexp_ok = GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, rows,
+                               &l.shexp_down, error);
     if (shexp_ok && shexp_half_ready_) {
       shexp_half_ready_ = false;
       if (!DenseF16Gemm(l.shexp_down.data, s_.shexp_half, s_.shexp_out, rows,
@@ -757,8 +756,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
         Fail(error, "shared expert F16 GEMM failed");
       }
     } else if (shexp_ok) {
-      shexp_ok =
-          Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, rows, error);
+      shexp_ok = Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, rows, error);
     } else {
       shexp_half_ready_ = false;
     }
@@ -802,14 +800,13 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
     for (std::uint32_t r = 0; r < rows; r += 64) {
       const std::uint32_t tt = std::min<std::uint32_t>(64, rows - r);
       const std::size_t row_off = static_cast<std::size_t>(r);
-      if (qfn_mmq_moe_gated_vec(static_cast<int>(l.ffn_gate_exps.type),
-                                l.ffn_gate_exps.data, l.ffn_up_exps.data,
-                                x + row_off * c.hidden_size,
-                                base.ids + row_off * c.num_experts_used,
-                                base.gate_e + row_off * c.num_experts_used *
-                                                c.expert_ff,
-                                c.expert_ff, c.hidden_size, tt, c.num_experts,
-                                c.num_experts_used, stream_) != 0 ||
+      if (qfn_mmq_moe_gated_vec(
+              static_cast<int>(l.ffn_gate_exps.type), l.ffn_gate_exps.data,
+              l.ffn_up_exps.data, x + row_off * c.hidden_size,
+              base.ids + row_off * c.num_experts_used,
+              base.gate_e + row_off * c.num_experts_used * c.expert_ff,
+              c.expert_ff, c.hidden_size, tt, c.num_experts, c.num_experts_used,
+              stream_) != 0 ||
           qfn_mmq_moe_vec(
               static_cast<int>(l.ffn_down_exps.type), l.ffn_down_exps.data,
               base.gate_e + row_off * c.num_experts_used * c.expert_ff,
@@ -894,7 +891,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     if (!item.speculative && item.tokens.size() > 1 &&
         item.session->mtp_enabled_ &&
         MtpPosition(*item.session) != item.session->position_) {
-      return Fail(error, "MTP must consume the preceding frontier before prefill");
+      return Fail(error,
+                  "MTP must consume the preceding frontier before prefill");
     }
   }
   if (!AnyActive(items))
@@ -1062,8 +1060,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       if (use_mixed) {
         for (std::size_t i = 0; i < items.size(); ++i) {
           const auto& item = items[i];
-          if (item.session->Cancelled() || sparse[i] ||
-              item.tokens.empty()) {
+          if (item.session->Cancelled() || sparse[i] || item.tokens.empty()) {
             use_mixed = false;
             break;
           }
@@ -1148,23 +1145,25 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           const auto& ks = session.attention_[il];
           const __half* k_ptr = ks.k_cache;
           const __half* v_ptr = ks.v_cache;
-          if (options_.kv_cache_int8) {
-            // Q8 sessions read their persistent F16 staging; ensure it
+          if (KvBlocked(options_.kv_format)) {
+            // Blocked sessions read their persistent F16 staging; ensure it
             // covers the live rows first, else the whole batch falls back.
             const std::uint32_t need = session.position_ + n;
-            if (!EnsureQ8Staging(session,
+            if (!EnsureKvStaging(session,
                                  const_cast<Session::AttentionState&>(ks), need,
                                  kv_row, error)) {
               use_mixed = false;
               break;
             }
-            k_ptr = session.q8_stage_k_;
-            v_ptr = session.q8_stage_v_;
+            k_ptr = session.kv_stage_k_;
+            v_ptr = session.kv_stage_v_;
           }
-          batch_mixed_host_[i] = {
-              offsets[i], reinterpret_cast<std::uint64_t>(k_ptr),
-              reinterpret_cast<std::uint64_t>(v_ptr),
-              session.position_ + n, session.position_, n};
+          batch_mixed_host_[i] = {offsets[i],
+                                  reinterpret_cast<std::uint64_t>(k_ptr),
+                                  reinterpret_cast<std::uint64_t>(v_ptr),
+                                  session.position_ + n,
+                                  session.position_,
+                                  n};
         }
         if (!use_mixed) {
           // Staging ensure failed above: rerun the legacy per-item cores.
@@ -1181,8 +1180,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
             const auto pool = sparse[i] && complete[i] > session.blocks_
                                   ? complete[i] - session.blocks_
                                   : 0;
-            if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out,
-                           n, &session.control_->position,
+            if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
+                           &session.control_->position,
                            &session.control_->blocks, session.position_, pool,
                            session.max_context_, sparse[i], error, false, true,
                            false, 0, session)) {
@@ -1198,34 +1197,33 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d\n", il, rows,
                   items.size(), (int)mx_ok);
           if (!mx_ok) {
-          for (std::size_t i = 0; i < items.size(); ++i) {
-            const auto& item = items[i];
-            auto& session = *item.session;
-            const auto n = static_cast<std::uint32_t>(item.tokens.size());
-            auto view = RowScratch(base, offsets[i]);
-            if (!l.linear && l.attn_qkv.empty()) {
-              view.qg = base.qg + static_cast<std::size_t>(offsets[i]) * 2 *
-                                      c.AttentionQDim();
+            for (std::size_t i = 0; i < items.size(); ++i) {
+              const auto& item = items[i];
+              auto& session = *item.session;
+              const auto n = static_cast<std::uint32_t>(item.tokens.size());
+              auto view = RowScratch(base, offsets[i]);
+              if (!l.linear && l.attn_qkv.empty()) {
+                view.qg = base.qg + static_cast<std::size_t>(offsets[i]) * 2 *
+                                        c.AttentionQDim();
+              }
+              UseScratch(view);
+              const auto pool = sparse[i] && complete[i] > session.blocks_
+                                    ? complete[i] - session.blocks_
+                                    : 0;
+              if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out,
+                             n, &session.control_->position,
+                             &session.control_->blocks, session.position_, pool,
+                             session.max_context_, sparse[i], error, false,
+                             true, false, 0, session)) {
+                return false;
+              }
             }
-            UseScratch(view);
-            const auto pool = sparse[i] && complete[i] > session.blocks_
-                                  ? complete[i] - session.blocks_
-                                  : 0;
-            if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out,
-                           n, &session.control_->position,
-                           &session.control_->blocks, session.position_, pool,
-                           session.max_context_, sparse[i], error, false, true,
-                           false, 0, session)) {
-              return false;
-            }
+          } else {
+            ++mixed_batches_;
+            // NOTE: WmmaMixedAttention already applies the sigmoid output gate
+            // in its epilogue (like WmmaCausalAttention); re-applying here
+            // would square the gate. (Removed second SigmoidMul.)
           }
-        } else {
-          ++mixed_batches_;
-          // NOTE: WmmaMixedAttention already applies the sigmoid output gate
-          // in its epilogue (like WmmaCausalAttention); re-applying here
-          // would square the gate. (Removed second SigmoidMul.)
-
-        }
         }
         UseScratch(base);
       }
@@ -1315,16 +1313,14 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   // so the legacy draft_phase guard would be a no-op here.
   for (std::size_t i = 0; i < items.size(); ++i) {
     const auto& item = items[i];
-    const auto n =
-        static_cast<std::uint32_t>(item.tokens.size());
+    const auto n = static_cast<std::uint32_t>(item.tokens.size());
     if (item.speculative || n <= 1 || !item.session->mtp_enabled_ ||
-        item.session->Cancelled() ||
-        std::getenv("MX_NO_MTP_TAIL") != nullptr)
+        item.session->Cancelled() || std::getenv("MX_NO_MTP_TAIL") != nullptr)
       continue;
     const float* residual =
         base.res + static_cast<std::size_t>(offsets[i]) * c.HcDim();
-    if (!MtpForward(*item.session, item.tokens.subspan(1), 0,
-                      {.kv_only = true}, error, residual)) {
+    if (!MtpForward(*item.session, item.tokens.subspan(1), 0, {.kv_only = true},
+                    error, residual)) {
       return false;
     }
   }

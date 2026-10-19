@@ -106,7 +106,7 @@ public:
   Session& operator=(const Session&) = delete;
 
   [[nodiscard]] bool mtp_enabled() const noexcept { return mtp_enabled_; }
-  [[nodiscard]] bool kv_cache_int8() const noexcept { return kv_cache_int8_; }
+  [[nodiscard]] KvFormat kv_format() const noexcept { return kv_format_; }
   [[nodiscard]] std::uint32_t position() const noexcept { return position_; }
   [[nodiscard]] std::uint32_t max_context() const noexcept {
     return max_context_;
@@ -148,10 +148,10 @@ private:
   };
   struct AttentionState {
     const qwen::vision::DeviceRope* rope{nullptr};
-    __half* k_cache{nullptr};          ///< [max_context][kv_heads*d]
-    __half* v_cache{nullptr};          ///< [max_context][kv_heads*d]
-    std::int8_t* k_cache_q8{nullptr};  ///< Q8_0 blocks (q8)
-    std::int8_t* v_cache_q8{nullptr};  ///< Q8_0 blocks (q8)
+    __half* k_cache{nullptr};           ///< [max_context][kv_heads*d]
+    __half* v_cache{nullptr};           ///< [max_context][kv_heads*d]
+    std::uint8_t* k_cache_kv{nullptr};  ///< blocked layout (q8/fp8)
+    std::uint8_t* v_cache_kv{nullptr};  ///< blocked layout (q8/fp8)
     float* index_k{nullptr};   ///< [index_capacity_][indexer_dim] raw ring
     __half* block_k{nullptr};  ///< [max_context/ratio][indexer_dim]
   };
@@ -167,8 +167,8 @@ private:
   struct MtpState {
     __half* k_cache{nullptr};
     __half* v_cache{nullptr};
-    std::int8_t* k_cache_q8{nullptr};  ///< (q8 mode)
-    std::int8_t* v_cache_q8{nullptr};  ///< (q8 mode)
+    std::uint8_t* k_cache_kv{nullptr};  ///< blocked layout (q8/fp8)
+    std::uint8_t* v_cache_kv{nullptr};  ///< blocked layout (q8/fp8)
     float* index_k{nullptr};
     __half* block_k{nullptr};
     std::uint32_t blocks{0};
@@ -188,8 +188,8 @@ private:
   qwen::vision::DeviceInput vision_input_;
   std::uint32_t max_context_{0};
   bool mtp_enabled_{false};
-  bool kv_cache_int8_{false};        ///< Q8 KV cache mode (Phase 2)
-  std::uint32_t index_capacity_{0};  ///< power-of-two raw indexer ring rows
+  KvFormat kv_format_{KvFormat::kF16};  ///< attention cache element format
+  std::uint32_t index_capacity_{0};     ///< power-of-two raw indexer ring rows
   std::uint32_t position_{0};
   ContinuationHooks* continuation_hooks_{nullptr};
   std::vector<LinearState> linear_;
@@ -203,18 +203,18 @@ private:
   MtpState mtp_;
   Control* control_{nullptr};
   std::uint32_t blocks_{0};  ///< host shadow of Control::blocks
-  /// Persistent Q8->F16 prefill staging (q8 mode): one pair shared across
+  /// Persistent blocked->F16 prefill staging (q8/fp8): one pair shared across
   /// layers, reused across prefill chunks, dequantized incrementally. Rows
-  /// [0, q8_stage_valid_) mirror (q8_stage_ksrc_, q8_stage_vsrc_); the
+  /// [0, kv_stage_valid_) mirror (kv_stage_ksrc_, kv_stage_vsrc_); the
   /// source pointers disambiguate trunk vs draft caches, while
   /// RestoreSnapshot/Rollback invalidate on overwrite/rewind. Buffers are
   /// freed with allocations_ at teardown.
-  mutable __half* q8_stage_k_{nullptr};
-  mutable __half* q8_stage_v_{nullptr};
-  mutable std::size_t q8_stage_cap_{0};  ///< rows provisioned
-  mutable const void* q8_stage_ksrc_{nullptr};
-  mutable const void* q8_stage_vsrc_{nullptr};
-  mutable std::uint32_t q8_stage_valid_{0};  ///< rows [0, valid) dequantized
+  mutable __half* kv_stage_k_{nullptr};
+  mutable __half* kv_stage_v_{nullptr};
+  mutable std::size_t kv_stage_cap_{0};  ///< rows provisioned
+  mutable const void* kv_stage_ksrc_{nullptr};
+  mutable const void* kv_stage_vsrc_{nullptr};
+  mutable std::uint32_t kv_stage_valid_{0};  ///< rows [0, valid) dequantized
   /// Captured decode graphs by batch shape, and the shapes that ran eagerly
   /// once (the GEMM tier's arena must be grown before capture).
   std::unordered_map<std::uint64_t, hipGraphExec_t> graphs_;
@@ -255,8 +255,9 @@ public:
     std::uint32_t max_logit_rows{1};
     /// Longest speculative batch; bounds the recurrent snapshot storage.
     std::uint32_t max_speculative{1};
-    /// INT8 KV cache (per-row symmetric); false keeps the FP16 path.
-    bool kv_cache_int8{false};
+    /// KV cache element format: kF16 keeps the plain half rows, kQ8 and kFp8
+    /// share the blocked layout. See rocm::KvFormat.
+    KvFormat kv_format{KvFormat::kF16};
   };
 
   ~Executor();
@@ -310,7 +311,9 @@ public:
   /// Logit rows remain in batch order until SelectBatchLogits is called.
   [[nodiscard]] bool ForwardBatch(std::span<const BatchItem> items,
                                   std::string* error_msg) const;
-  [[nodiscard]] std::uint64_t mixed_batches() const noexcept { return mixed_batches_; }
+  [[nodiscard]] std::uint64_t mixed_batches() const noexcept {
+    return mixed_batches_;
+  }
   [[nodiscard]] bool SelectBatchLogits(std::uint32_t offset, std::uint32_t rows,
                                        float* logits,
                                        std::string* error_msg) const;
@@ -543,9 +546,10 @@ private:
                  bool last_only, bool projections_ready, bool project_output,
                  std::uint32_t checkpoint_tokens, Session& session,
                  bool defer_wmma = false) const;
-  /// Provision and incrementally dequantize a session's persistent Q8
+  /// Provision and incrementally dequantize a session's persistent blocked
   /// staging up to `need` rows (shared by the staging path and mixed).
-  [[nodiscard]] bool EnsureQ8Staging(Session& session, Session::AttentionState& s,
+  [[nodiscard]] bool EnsureKvStaging(Session& session,
+                                     Session::AttentionState& s,
                                      std::uint32_t need, std::uint32_t kv_row,
                                      std::string* error) const;
   bool Moe(const DeviceLayer& l, const float* x, float* out,

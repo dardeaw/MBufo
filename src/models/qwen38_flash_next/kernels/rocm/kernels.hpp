@@ -403,6 +403,29 @@ void UnpackQGate(const float* qg, std::uint32_t qg_stride, float* q,
                  std::uint32_t heads, std::uint32_t d, std::uint32_t kv_width,
                  hipStream_t stream);
 
+/// KV cache element format of the Flash-Next attention caches.
+///
+/// kF16 stores plain half rows of `AttentionKvDim()`. kQ8 and kFp8 store the
+/// same blocked layout -- 32 elements followed by an f16 block scale, 34 bytes
+/// -- and differ only in the element codec. Because the blocked layouts are
+/// byte-compatible, allocation, prefill staging, attention addressing and
+/// snapshots are shared; only encode/decode and the quantization range differ.
+enum class KvFormat : std::uint32_t { kF16 = 0, kQ8 = 1, kFp8 = 2 };
+
+/// True when `format` stores the shared blocked layout.
+[[nodiscard]] constexpr bool KvBlocked(KvFormat format) noexcept {
+  return format != KvFormat::kF16;
+}
+
+/// Element codec of a blocked layout: symmetric INT8 (amax/127) or OCP E4M3
+/// (amax/448). Both store a per-32-block f16 scale.
+enum class KvCodec { kQ8, kFp8 };
+
+/// Element codec for a blocked `format`. Only call with `KvBlocked(format)`.
+[[nodiscard]] constexpr KvCodec KvCodecOf(KvFormat format) noexcept {
+  return format == KvFormat::kFp8 ? KvCodec::kFp8 : KvCodec::kQ8;
+}
+
 /// Unpacks a stacked Q/gate/K/V projection, normalizes and rotates Q/K,
 /// and writes the F16 caches. Returns false for heads wider than 256.
 /// With zero query heads, packed contains only K/V and q/gate may be null.
@@ -416,14 +439,16 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
                       const qwen::vision::DeviceRope* rope = nullptr,
                       bool prefill = false);
 
-/// Q8 twin of PrepareAttention: identical math, K rows to Q8_0 blocks.
-/// V rows are quantized separately via QuantizeKvRowsQ8 over packed rows.
-bool PrepareAttentionQ8(
+/// Blocked twin of PrepareAttention: identical math, K and V rows written as
+/// `codec` blocks. V rows are written by the same kernel; plain Dense paths
+/// quantize them separately via QuantizeKvRows over packed rows.
+bool PrepareAttentionKv(
     const float* packed, std::uint32_t stride, const float* q_gamma,
-    const float* k_gamma, float* q, float* gate, std::int8_t* k_cache,
-    std::int8_t* v_cache, std::uint32_t n_tokens, std::uint32_t heads,
-    std::uint32_t kv_heads, std::uint32_t d, std::uint32_t rotary_dim,
-    const std::uint32_t* start_pos, float theta, float eps, hipStream_t stream,
+    const float* k_gamma, float* q, float* gate, std::uint8_t* k_cache,
+    std::uint8_t* v_cache, KvCodec codec, std::uint32_t n_tokens,
+    std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
+    std::uint32_t rotary_dim, const std::uint32_t* start_pos, float theta,
+    float eps, hipStream_t stream,
     const qwen::vision::DeviceRope* rope = nullptr, bool prefill = false);
 
 /// NEOX partial rotary on x [t][heads][d] at positions start_pos + t.
@@ -441,12 +466,13 @@ void StoreKv(const float* src, __half* cache, std::uint32_t n_tokens,
              std::uint32_t row_dim, const std::uint32_t* start_pos,
              hipStream_t stream);
 
-/// Symmetric INT8 quantize of float rows into Q8_0 blocks (see .hip).
-void QuantizeKvRowsQ8(const float* src, std::uint32_t src_tok_stride,
-                      std::uint32_t src_head_stride, std::int8_t* dst,
-                      std::uint32_t kv_width, std::uint32_t kv_heads,
-                      std::uint32_t d, std::uint32_t n_tokens,
-                      const std::uint32_t* start_pos, hipStream_t stream);
+/// Symmetric quantize of float rows into `codec` blocks (see .hip): 32 elements
+/// plus a per-32-block f16 scale. `codec` selects INT8 or E4M3 elements.
+void QuantizeKvRows(const float* src, std::uint32_t src_tok_stride,
+                    std::uint32_t src_head_stride, std::uint8_t* dst,
+                    std::uint32_t kv_width, std::uint32_t kv_heads,
+                    std::uint32_t d, std::uint32_t n_tokens, KvCodec codec,
+                    const std::uint32_t* start_pos, hipStream_t stream);
 /// Stores raw indexer rows in a power-of-two ring of `capacity` rows.
 void StoreRows(const float* src, float* dst, std::uint32_t n_tokens,
                std::uint32_t row_dim, const std::uint32_t* start_pos,
@@ -502,24 +528,25 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
 /// (mirrors AttentionF16Gemm; skips the s_.qg staging traffic in Q8 mode).
 bool AttentionQ8Gemm(const void* weights, const __half* input,
                      const float* q_gamma, const float* k_gamma, float* query,
-                     float* gate, std::int8_t* keys, std::int8_t* values,
+                     float* gate, std::uint8_t* keys, std::uint8_t* values,
                      std::uint32_t n_tokens, const std::uint32_t* position,
                      float theta, float eps, hipStream_t stream,
                      const qwen::vision::DeviceRope* rope);
 
-/// Dual-buffer Q8_0 -> F16 (one launch for K+V staging).
-bool DequantizeQ8KVRows(const std::int8_t* src_k, __half* dst_k,
-                        const std::int8_t* src_v, __half* dst_v,
-                        std::uint32_t n_rows, std::uint32_t row_elems,
-                        hipStream_t stream);
-/// Q8 twin: Q8_0 blocked INT8 caches, fused dequant on read.
-void AttentionQ8(const float* q, const std::int8_t* k_cache,
-                 const std::int8_t* v_cache, const std::uint32_t* mask,
+/// Dual-buffer blocked -> F16 (one launch for K+V staging). The byte layout is
+/// shared, so `codec` only selects how each element decodes.
+bool DequantizeKvRows(const std::uint8_t* src_k, __half* dst_k,
+                      const std::uint8_t* src_v, __half* dst_v,
+                      std::uint32_t n_rows, std::uint32_t row_elems,
+                      KvCodec codec, hipStream_t stream);
+/// Blocked twin of Attention: `codec` blocked caches, fused dequant on read.
+void AttentionKv(const float* q, const std::uint8_t* k_cache,
+                 const std::uint8_t* v_cache, const std::uint32_t* mask,
                  std::uint32_t mask_words, float* out, float* partials,
                  std::uint32_t splits, std::uint32_t n_tokens,
                  const std::uint32_t* start_pos, std::uint32_t heads,
                  std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
-                 hipStream_t stream);
+                 KvCodec codec, hipStream_t stream);
 
 /// One mixed-batch unit: packed rows from a single session. The kernel
 /// launch covers all (blk, kv-head-group) pairs; grid.y fans out over head
@@ -536,11 +563,10 @@ struct MixedBlk {
 /// rows from any number of sessions compute side by side in one launch, each
 /// block serving one MixedBlk with its own KV range and causal base. Returns
 /// false, launching nothing, on unsupported geometry.
-bool WmmaMixedAttention(const float* q, const float* gate,
-                        const MixedBlk* blks, std::uint32_t n_blks, float* out,
-                        std::uint32_t heads, std::uint32_t kv_heads,
-                        std::uint32_t d, std::uint32_t ratio,
-                        hipStream_t stream);
+bool WmmaMixedAttention(const float* q, const float* gate, const MixedBlk* blks,
+                        std::uint32_t n_blks, float* out, std::uint32_t heads,
+                        std::uint32_t kv_heads, std::uint32_t d,
+                        std::uint32_t ratio, hipStream_t stream);
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows
 /// Attention's block-selection contract (null for the dense window). Returns
