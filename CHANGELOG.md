@@ -4,6 +4,37 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## MBufo releases
+
+MBufo releases are tagged `mbufo-vX.Y.Z` and are listed here, above the upstream
+history they are based on. Upstream entries below are unchanged.
+
+### [0.18.0](https://github.com/dardeaw/MBufo/releases/tag/mbufo-v0.18.0) (2026-10-19)
+
+**Upstream base:** gufo `v0.17.1`, with upstream `main` merged at `e7730942`
+(2026-10-18) — 51 commits past the upstream release.
+
+#### Features
+
+* **qwen-flash:** add an opt-in FP8 KV cache (`--kv-quant fp8`). A software E4M3
+  codec with a per-32 f16 scale shares the Q8 34-byte block layout, behind a
+  generalized KV format and codec abstraction. `f16` remains the default; `fp8`
+  matches or slightly beats `q8` against the CPU reference and is the
+  recommended serving setting.
+* **serve:** merge upstream `main` at `e7730942`, adopting upstream prompt-lookup
+  drafting and structured-output vocabulary preparation while keeping MBufo's Q8
+  KV path and its mixed prefill/decode batching.
+* **docs:** rewrite the README around MBufo's features, the KV cache modes and
+  the upstream tracking point.
+
+#### Notes
+
+* Behavior is unchanged unless `--kv-quant fp8` is selected.
+* Conversation snapshots are versioned by KV format and are not reused across
+  formats.
+* The blocked-KV divergence from `f16` under greedy decoding is unchanged and
+  predates this release.
+
 ## [0.17.1](https://github.com/gufo-org/gufo/compare/v0.17.0...v0.17.1) (2026-10-18)
 
 
