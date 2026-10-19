@@ -1119,7 +1119,10 @@ int RunQwen38FlashNextBenchmark(
           std::cerr << "Qwen3.8-Flash-Next tg depth=" << depth
                     << " cycles=" << stats.cycles
                     << " drafted=" << stats.drafted
-                    << " accepted=" << stats.accepted << " widths=";
+                    << " accepted=" << stats.accepted
+                    << " lookup_proposed=" << stats.lookup
+                    << " lookup_accepted=" << stats.lookup_accepted
+                    << " widths=";
           for (std::size_t w = 0; w < std::size(stats.widths); ++w) {
             if (stats.widths[w] != 0)
               std::cerr << w << ':' << stats.widths[w] << ' ';

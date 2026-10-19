@@ -1,11 +1,21 @@
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -23,6 +33,9 @@ namespace {
 std::atomic<std::size_t> allocations{};
 std::atomic<std::size_t> host_allocations{};
 std::atomic<std::size_t> max_piece{};
+std::atomic<int> fail_populate_after{-1};
+std::atomic<void*> failed_page{};
+bool pins_denied{};
 bool fail_copy{}, fail_record{}, fail_query{}, fail_wait{}, fail_alloc{};
 int copies_before_failure{};
 thread_local bool fail_stream_new{}, observe_allocation_cleanup{};
@@ -47,6 +60,16 @@ void operator delete(void* memory, std::size_t) noexcept {
 // Observe the actual HIP allocation/creation entry points, not just a counter
 // maintained by the implementation. Host bookkeeping is permitted on requests.
 extern "C" {
+int __real_madvise(void*, std::size_t, int);
+int __wrap_madvise(void* data, std::size_t bytes, int advice) {
+  if (advice == MADV_POPULATE_WRITE && fail_populate_after.load() >= 0 &&
+      fail_populate_after.fetch_sub(1) == 0) {
+    failed_page.store(data);
+    errno = ENOMEM;
+    return -1;
+  }
+  return __real_madvise(data, bytes, advice);
+}
 hipError_t __real_hipHostMalloc(void**, std::size_t, unsigned);
 hipError_t __wrap_hipHostMalloc(void** p, std::size_t n, unsigned flags) {
   ++allocations;
@@ -264,17 +287,20 @@ void GroupedBacking() {
     hip::CommittedBackingPool pool(ledger, {capacity, block_bytes, headroom});
     auto first = pool.TryAcquire(Category::kPrivateState, 3 * block_bytes - 1);
     assert(first && first->Bytes().size() == 3 * block_bytes);
-    base = first->Bytes().data();
+    const auto* first_data = first->Bytes().data();
     std::fill(first->Bytes().begin(), first->Bytes().end(), std::byte{42});
     first->Convert();
     auto second = pool.TryAcquire(Category::kBackingAssigned, 9 * block_bytes);
-    assert(second && second->Bytes().data() == base + 3 * block_bytes);
+    assert(second);
+    base = std::min(first->Bytes().data(), second->Bytes().data());
+    assert(first_data + 3 * block_bytes == second->Bytes().data() ||
+           second->Bytes().data() + 9 * block_bytes == first_data);
     const auto full = host_allocations.load();
     assert(!pool.TryAcquire(Category::kPrivateTail, 2 * block_bytes));
     assert(host_allocations.load() == full);
     first.reset();
     auto reused = pool.TryAcquire(Category::kPrivateTail, 3 * block_bytes);
-    assert(reused && reused->Bytes().data() == base);
+    assert(reused && reused->Bytes().data() == first_data);
     reused.reset();
     second.reset();
     // Capacity released by a row group immediately serves a larger private
@@ -293,7 +319,9 @@ void GroupedBacking() {
       threads.emplace_back([&, thread] {
         const auto n = 2 + thread % 2;
         for (int iteration = 0; iteration < 100; ++iteration) {
-          auto group = pool.TryAcquire(Category::kPrivateTail, n * block_bytes);
+          auto group = pool.TryAcquire(
+              thread % 2 ? Category::kPrivateState : Category::kBackingAssigned,
+              n * block_bytes);
           if (!group)
             continue;
           const auto index = (group->Bytes().data() - base) / block_bytes;
@@ -314,6 +342,64 @@ void GroupedBacking() {
   base[4 * block_bytes - 1] = std::byte{17};
   assert(ledger.Snapshot().total_bytes == capacity);
   pin.reset();
+  assert(ledger.Snapshot().total_bytes == 0);
+}
+void CheckpointLifetimes() {
+  constexpr std::size_t pages = 12, headroom = 16 << 10;
+  constexpr std::size_t capacity = pages * block_bytes + headroom;
+  cache::ResourceLedger ledger(Limits(capacity));
+  {
+    hip::CommittedBackingPool pool(ledger, {capacity, block_bytes, headroom});
+    const auto physical = allocations.load();
+    std::vector<hip::BackingBlock> private_states, shared_rows;
+    // Adjacent checkpoints replace private state but keep sharing older KV
+    // rows. Even allocating each larger state first can scatter the holes
+    // between those long-lived rows when both use one allocation cursor.
+    for (unsigned checkpoint = 0; checkpoint < 3; ++checkpoint) {
+      auto state = pool.TryAcquire(Category::kPrivateState, 2 * block_bytes);
+      auto rows = pool.TryAcquire(Category::kBackingAssigned, block_bytes);
+      assert(state && rows);
+      state->Convert();
+      rows->Convert();
+      std::fill(rows->Bytes().begin(), rows->Bytes().end(),
+                std::byte(checkpoint + 1));
+      private_states.push_back(std::move(*state));
+      shared_rows.push_back(std::move(*rows));
+    }
+    // A restore joins chunks only when their logical order also advances
+    // through adjacent backing addresses. Reverse KV placement would turn
+    // one large transfer into one transfer per chunk.
+    for (std::size_t i = 1; i < shared_rows.size(); ++i)
+      assert(shared_rows[i].Bytes().data() ==
+                 shared_rows[i - 1].Bytes().data() + block_bytes &&
+             "KV placement prevented contiguous restore transfers");
+    private_states.clear();
+    assert(ledger.Snapshot()
+               .bytes[static_cast<std::size_t>(Category::kBackingFree)] ==
+           9 * block_bytes);
+    // All free capacity must remain usable by the next private state, with
+    // the same physical budget and the shared rows still live and unmodified.
+    auto replacement =
+        pool.TryAcquire(Category::kPrivateState, 9 * block_bytes);
+    assert(replacement && "shared rows fragmented released private states");
+    replacement->Convert();
+    std::fill(replacement->Bytes().begin(), replacement->Bytes().end(),
+              std::byte{0x7f});
+    for (unsigned i = 0; i < shared_rows.size(); ++i)
+      assert(std::all_of(
+          shared_rows[i].Bytes().begin(), shared_rows[i].Bytes().end(),
+          [&](std::byte value) { return value == std::byte(i + 1); }));
+    assert(allocations.load() == physical);
+    assert(!pool.TryAcquire(Category::kPrivateTail));
+    replacement.reset();
+    shared_rows.clear();
+    // Neither allocation category has a fixed share of the pool.
+    for (const auto category :
+         {Category::kBackingAssigned, Category::kPrivateTail}) {
+      auto whole = pool.TryAcquire(category, pages * block_bytes);
+      assert(whole);
+    }
+  }
   assert(ledger.Snapshot().total_bytes == 0);
 }
 void OnDemandBacking() {
@@ -351,7 +437,8 @@ void OnDemandBacking() {
     assert(pair && pool.BlockCount() == 4 && allocations == physical + 2);
     auto single = pool.TryAcquire(Category::kPrivateTail);
     assert(single && pool.BlockCount() == 4);
-    assert(single->Bytes().data() == first->Bytes().data() + block_bytes);
+    assert(single->Bytes().data() == first->Bytes().data() + block_bytes ||
+           first->Bytes().data() == single->Bytes().data() + block_bytes);
     // A refused segment leaves the pool as it is; capture is declined.
     admit = false;
     assert(!pool.TryAcquire(Category::kPrivateTail));
@@ -437,13 +524,13 @@ void OnDemandBacking() {
       {ahead_capacity, block_bytes, headroom, 2 * block_bytes, {}});
   auto held = ahead.TryAcquire(Category::kPrivateTail);
   assert(held && ahead.BlockCount() == 2);
-  ahead.GrowAhead();
+  ahead.GrowAhead(2 * block_bytes);
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (ahead.BlockCount() != 4 && std::chrono::steady_clock::now() < deadline)
     std::this_thread::yield();
   assert(ahead.BlockCount() == 4 && ahead.PageCommitAllocations() == 2);
-  ahead.GrowAhead();
+  ahead.GrowAhead(2 * block_bytes);
   assert(ahead.BlockCount() == 4);
   // A bounded startup reserve finishes before requests acquire its pages.
   // Observe real HIP allocations: neither request below may commit a segment.
@@ -451,10 +538,10 @@ void OnDemandBacking() {
   hip::CommittedBackingPool startup(
       startup_ledger,
       {ahead_capacity, block_bytes, headroom, 2 * block_bytes, {}});
-  startup.GrowAhead();
+  startup.GrowAhead(2 * block_bytes);
   startup.WaitForGrowth();
   assert(startup.BlockCount() == 2);
-  startup.GrowAhead(2);
+  startup.GrowAhead(4 * block_bytes);
   startup.WaitForGrowth();
   assert(startup.BlockCount() == 4 && startup.PageCommitAllocations() == 2);
   const auto committed_allocations = allocations.load();
@@ -464,6 +551,88 @@ void OnDemandBacking() {
       startup.TryAcquire(Category::kPrivateTail, 2 * block_bytes);
   assert(startup_first && startup_second &&
          allocations.load() == committed_allocations);
+  // A byte reserve need not be a segment multiple. It must not grow another
+  // segment just because the free backing is below a rounded-up threshold.
+  cache::ResourceLedger exact_ledger(Limits(many_capacity));
+  hip::CommittedBackingPool exact(
+      exact_ledger,
+      {many_capacity, block_bytes, many_headroom, 3 * block_bytes, {}});
+  exact.GrowAhead(0);
+  exact.WaitForGrowth();
+  assert(exact.BlockCount() == 0);
+  exact.GrowAhead(4 * block_bytes);
+  exact.WaitForGrowth();
+  assert(exact.BlockCount() == 6);
+  auto used = exact.TryAcquire(Category::kPrivateTail);
+  assert(used);
+  exact.GrowAhead(4 * block_bytes);
+  exact.WaitForGrowth();
+  assert(exact.BlockCount() == 6);
+  exact.GrowAhead(std::numeric_limits<std::size_t>::max());
+  exact.WaitForGrowth();
+  assert(exact.BlockCount() == many);
+}
+void CaptureCapacity() {
+  constexpr std::size_t pages = 6, headroom = 16 << 10;
+  constexpr std::size_t capacity = pages * block_bytes + headroom;
+  cache::ResourceLedger ledger(Limits(capacity));
+  hip::CommittedBackingPool pool(
+      ledger, {capacity, block_bytes, headroom, 3 * block_bytes, {}});
+  std::array<cache::PayloadRequest, 2> capture{{
+      {{1}, Category::kPrivateState, 0, 0, 2 * block_bytes - 1},
+      {{2}, Category::kBackingAssigned, 0, 8, block_bytes + 1},
+  }};
+  const auto before = ledger.Snapshot();
+  const auto physical = allocations.load(), host = host_allocations.load();
+  assert(pool.CanFit(capture));
+  assert(pool.CanFit({}));
+  // Capacity checks must neither commit pages nor allocate metadata.
+  assert(pool.BlockCount() == 0 && ledger.Snapshot() == before);
+  assert(allocations.load() == physical && host_allocations.load() == host);
+  auto first = pool.TryAcquire(Category::kPrivateState, 2 * block_bytes);
+  assert(first && pool.BlockCount() == 3 && pool.CanFit(capture));
+  auto second = pool.TryAcquire(Category::kPrivateTail, block_bytes);
+  assert(second && !pool.CanFit(capture));  // only three uncommitted blocks
+  first->Convert();
+  auto pin = std::optional(first->PinPersistence());
+  first.reset();
+  assert(!pool.CanFit(capture));  // persistence retains the assignment
+  pin.reset();
+  assert(pool.CanFit(capture));
+  // Released groups can serve a later capture without another page commit.
+  auto third = pool.TryAcquire(Category::kPrivateState, 3 * block_bytes);
+  assert(third && pool.BlockCount() == pages);
+  third.reset();
+  const auto saved = ledger.Snapshot();
+  assert(pool.CanFit(capture));
+  assert(ledger.Snapshot() == saved);
+  capture[0].bytes = 3 * block_bytes + 1;
+  assert(!pool.CanFit(capture));  // a payload cannot cross a segment
+  capture[0].bytes = std::numeric_limits<std::size_t>::max();
+  assert(!pool.CanFit(capture));
+  capture[0].bytes = 3 * block_bytes;
+  capture[1].bytes = 3 * block_bytes;
+  assert(!pool.CanFit(capture));
+  second.reset();
+  assert(pool.CanFit(capture));
+  const auto committed = allocations.load();
+  auto a = pool.TryAcquire(capture[0].category, capture[0].bytes);
+  auto b = pool.TryAcquire(capture[1].category, capture[1].bytes);
+  assert(a && b && !pool.CanFit(capture));
+  assert(allocations.load() == committed);
+  a.reset();
+  b.reset();
+  std::array<std::optional<hip::BackingBlock>, pages> scattered;
+  for (auto& block : scattered) {
+    block = pool.TryAcquire(Category::kPrivateTail);
+    assert(block);
+  }
+  for (const auto i : {1, 3, 5})
+    scattered[i].reset();
+  capture[0].bytes = 2 * block_bytes;
+  const auto fragmented = std::span(capture).first(1);
+  assert(pool.CanFit(fragmented));
+  assert(!pool.TryAcquire(capture[0].category, capture[0].bytes));
 }
 void Transfers() {
   cache::ResourceLedger ledger(Limits());
@@ -656,21 +825,241 @@ void AcquireAllocationFailure() {
   first.reset();
   assert(pool.TryAcquire());
 }
+void CheckBasePages(std::span<std::byte> data) {
+  constexpr std::size_t huge = 2ULL << 20;
+  assert(data.size() >= 2 * huge);
+  std::vector<unsigned char> resident(data.size() / 4096);
+  assert(mincore(data.data(), data.size(), resident.data()) == 0);
+  assert(std::all_of(resident.begin(), resident.end(),
+                     [](unsigned char page) { return page & 1; }));
+  assert(std::all_of(data.begin(), data.end(),
+                     [](std::byte b) { return b == std::byte{}; }));
+  const auto start = reinterpret_cast<std::uintptr_t>(data.data());
+  const auto aligned = (start + huge - 1) & ~(huge - 1);
+  assert(aligned + huge <= start + data.size());
+  errno = 0;
+  const auto collapse =
+      madvise(reinterpret_cast<void*>(aligned), huge, MADV_COLLAPSE);
+  const auto error = errno;
+  if (collapse != -1 || error != EINVAL)
+    std::fprintf(stderr, "cache backing collapse returned %d, errno %d\n",
+                 collapse, error);
+  assert(collapse == -1 && error == EINVAL);
+}
+void BasePageBacking() {
+  constexpr std::size_t bytes = 8ULL << 20;
+  cache::ResourceLedger ledger(Limits(bytes + metadata));
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+    auto block = pool.TryAcquire(Category::kPrivateState);
+    assert(block);
+    auto memory = block->Bytes();
+    CheckBasePages(memory);
+    void* device = nullptr;
+    assert(hipHostGetDevicePointer(&device, memory.data(), 0) == hipSuccess);
+    assert(hipMemset(device, 0x5a, memory.size()) == hipSuccess);
+    assert(hipDeviceSynchronize() == hipSuccess);
+    assert(std::all_of(memory.begin(), memory.end(),
+                       [](std::byte b) { return b == std::byte{0x5a}; }));
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
+std::size_t KernelPinnedBytes() {
+  auto* status = std::fopen("/proc/self/status", "r");
+  assert(status);
+  char line[256];
+  std::size_t kib = 0;
+  bool found = false;
+  while (std::fgets(line, sizeof(line), status))
+    if (std::sscanf(line, "VmPin: %zu kB", &kib) == 1) {
+      found = true;
+      break;
+    }
+  std::fclose(status);
+  assert(found);
+  return kib * 1024;
+}
+void LongTermPagePins() {
+  constexpr std::size_t bytes = 8ULL << 20;
+  const auto before = KernelPinnedBytes();
+  cache::ResourceLedger ledger(Limits(bytes + metadata));
+  std::optional<hip::BackingBlock> survivor;
+  bool pinned = false;
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+    pinned = pool.LongTermPinnedBytes() == bytes;
+    assert(!pins_denied || !pinned);
+    assert(pool.LongTermPinnedBytes() == (pinned ? bytes : 0));
+    survivor = pool.TryAcquire(Category::kPrivateState);
+    assert(survivor);
+    assert(KernelPinnedBytes() == before + (pinned ? bytes : 0));
+  }
+  // The allocation outlives its pool facade. Its kernel pins must do so too.
+  assert(KernelPinnedBytes() == before + (pinned ? bytes : 0));
+  void* device = nullptr;
+  auto memory = survivor->Bytes();
+  assert(hipHostGetDevicePointer(&device, memory.data(), 0) == hipSuccess);
+  assert(hipMemset(device, 0x67, memory.size()) == hipSuccess);
+  assert(hipDeviceSynchronize() == hipSuccess);
+  assert(std::all_of(memory.begin(), memory.end(),
+                     [](std::byte b) { return b == std::byte{0x67}; }));
+  survivor.reset();
+  assert(KernelPinnedBytes() == before);
+  assert(ledger.Snapshot().total_bytes == 0);
+  if (!pinned && !pins_denied)
+    std::puts("SKIP: long-term pin lifetime (io_uring or memlock restricted)");
+
+  // A failed GPU registration must release already-acquired Linux pins.
+  fail_alloc = true;
+  Throws<std::runtime_error>([&] {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+  });
+  fail_alloc = false;
+  assert(KernelPinnedBytes() == before);
+  assert(ledger.Snapshot().total_bytes == 0);
+
+  // A low soft memlock limit cannot remove the existing cache path. Restore
+  // it before returning, and ensure a refused pin does not poison later pools.
+  rlimit saved{};
+  assert(getrlimit(RLIMIT_MEMLOCK, &saved) == 0);
+  auto restricted = saved;
+  restricted.rlim_cur = 0;
+  assert(setrlimit(RLIMIT_MEMLOCK, &restricted) == 0);
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+    // CAP_IPC_LOCK can bypass the soft limit; either result remains usable.
+    auto block = pool.TryAcquire(Category::kPrivateState);
+    assert(block);
+    CheckBasePages(block->Bytes());
+    assert(hipHostGetDevicePointer(&device, block->Bytes().data(), 0) ==
+           hipSuccess);
+    assert(hipMemset(device, 0x38, bytes) == hipSuccess);
+    assert(hipDeviceSynchronize() == hipSuccess);
+    assert(std::all_of(block->Bytes().begin(), block->Bytes().end(),
+                       [](std::byte b) { return b == std::byte{0x38}; }));
+  }
+  assert(setrlimit(RLIMIT_MEMLOCK, &saved) == 0);
+  assert(KernelPinnedBytes() == before);
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, bytes, metadata});
+    assert(pool.LongTermPinnedBytes() == (pinned ? bytes : 0));
+  }
+  assert(KernelPinnedBytes() == before);
+  assert(ledger.Snapshot().total_bytes == 0);
+  // io_uring limits each iovec to 1 GiB, not the complete cache segment.
+  // Exercise a partial second range and release every pin together.
+  constexpr std::size_t large = (1ULL << 30) + 4096;
+  if (pinned && saved.rlim_cur >= large) {
+    cache::ResourceLedger large_ledger(Limits(large + metadata));
+    {
+      hip::CommittedBackingPool pool(large_ledger,
+                                     {large + metadata, large, metadata});
+      assert(pool.LongTermPinnedBytes() == large);
+      assert(KernelPinnedBytes() == before + large);
+      auto block = pool.TryAcquire(Category::kPrivateState);
+      assert(block);
+      assert(hipHostGetDevicePointer(&device, block->Bytes().data(), 0) ==
+             hipSuccess);
+      assert(hipMemset(static_cast<std::byte*>(device) + large - 4096, 0x19,
+                       4096) == hipSuccess);
+      assert(hipDeviceSynchronize() == hipSuccess);
+      assert(std::all_of(block->Bytes().end() - 4096, block->Bytes().end(),
+                         [](std::byte b) { return b == std::byte{0x19}; }));
+    }
+    assert(KernelPinnedBytes() == before);
+    assert(large_ledger.Snapshot().total_bytes == 0);
+  }
+}
+void PopulationFailure() {
+  for (const std::size_t bytes : {8ULL << 20, 256ULL << 20})
+    for (int after : {0, 3}) {
+      cache::ResourceLedger ledger(Limits(bytes + metadata));
+      const auto before = allocations.load();
+      // Fail before or after partial population, including parallel workers.
+      // No mapping may be registered or escape; every charge and page unwinds.
+      failed_page = nullptr;
+      fail_populate_after = after;
+      Throws<std::runtime_error>([&] {
+        hip::CommittedBackingPool pool(ledger,
+                                       {bytes + metadata, bytes, metadata});
+      });
+      assert(fail_populate_after < 0 && failed_page != nullptr &&
+             allocations == before);
+      unsigned char resident{};
+      assert(mincore(failed_page.load(), 4096, &resident) == -1 &&
+             errno == ENOMEM);
+      assert(ledger.Snapshot().total_bytes == 0);
+    }
+}
+void LargeBacking() {
+  constexpr std::size_t block = 64ULL << 20;
+  constexpr std::size_t bytes = 2 * block;
+  cache::ResourceLedger ledger(Limits(bytes + metadata));
+  {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, block, metadata});
+    auto backing = pool.TryAcquire(Category::kPrivateState, bytes);
+    assert(backing && backing->Bytes().size() == bytes);
+    auto memory = backing->Bytes();
+    CheckBasePages(memory);
+    void* device = nullptr;
+    assert(hipMalloc(&device, bytes) == hipSuccess);
+    assert(hipMemset(device, 0x5b, bytes) == hipSuccess);
+    assert(hipMemcpy(memory.data(), device, bytes, hipMemcpyDeviceToHost) ==
+           hipSuccess);
+    assert(std::all_of(memory.begin(), memory.end(),
+                       [](std::byte b) { return b == std::byte{0x5b}; }));
+    assert(hipFree(device) == hipSuccess);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+  fail_alloc = true;
+  Throws<std::runtime_error>([&] {
+    hip::CommittedBackingPool pool(ledger, {bytes + metadata, block, metadata});
+  });
+  fail_alloc = false;
+  assert(ledger.Snapshot().total_bytes == 0);
+}
 }  // namespace
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--deny-long-term-pins") == 0) {
+    // Match restrictive container policies in this process only, before HIP
+    // creates threads. Cache registration, transfers and cleanup must still
+    // work; no host policy is changed or bypassed.
+    sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_setup, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_register, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_enter, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)};
+    sock_fprog program{static_cast<unsigned short>(std::size(filter)), filter};
+    assert(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0);
+    assert(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) == 0);
+    pins_denied = true;
+  } else
+    assert(argc == 1);
   hipDeviceProp_t properties{};
   assert(hipGetDeviceProperties(&properties, 0) == hipSuccess);
   assert(std::strncmp(properties.gcnArchName, "gfx1151", 7) == 0);
   Backing();
   GroupedBacking();
+  CheckpointLifetimes();
   OnDemandBacking();
+  CaptureCapacity();
   Transfers();
   LifetimeAndFailures();
   PendingStreams();
   AcquireAllocationFailure();
   BorrowedPoolLifetime();
+  BasePageBacking();
+  LongTermPagePins();
+  PopulationFailure();
+  LargeBacking();
   std::puts(
       "PASS: precommitted and on-demand blocks, accounting, racing "
       "borrowers, pinned lifetime, bounded copies, leases and failure "
       "drains");
+  if (pins_denied)
+    std::puts("PASS: restricted io_uring retains registered cache backing");
 }

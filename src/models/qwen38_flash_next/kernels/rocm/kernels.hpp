@@ -191,6 +191,8 @@ void QuantizeQ8Tiled(const float* x, void* out, std::size_t batch,
 bool W8A8Gemm(const void* w, const void* x_tiled, float* out, std::size_t batch,
               std::size_t m, std::size_t k, hipStream_t stream);
 /// Native wave64 launch, selected by W8A8Gemm for wide output projections.
+/// Resolve the kernel before serving, without executing a projection.
+hipError_t PrepareW8A8GemmWave64();
 void W8A8GemmWave64(const void* w, const void* x_tiled, float* out,
                     std::size_t batch, std::size_t m, std::size_t k,
                     hipStream_t stream);
@@ -483,12 +485,19 @@ void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
 /// Per-token attention (decode and narrow batches). With `partials`
 /// (n_tokens * heads * splits * (d + 2) floats) the key tiles are split
 /// across `splits` blocks per row and merged in a second launch.
+/// With `lists` (n_tokens * list_capacity entries), `counts` (n_tokens) and a
+/// mask at ratio 4, each row's selected blocks are first compacted once into
+/// `lists`; `list_capacity` is the selection budget (blocks per row). The
+/// output is bitwise identical to the mask walk. Null lists use the mask walk.
 void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                const std::uint32_t* mask, std::uint32_t mask_words, float* out,
                float* partials, std::uint32_t splits, std::uint32_t n_tokens,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
-               hipStream_t stream);
+               hipStream_t stream, std::uint32_t* lists = nullptr,
+               std::uint32_t* counts = nullptr,
+               std::uint32_t list_capacity = 0);
+
 /// Fused Q/K/V projection + norm + RoPE + Q8_0 KV store for wide batches
 /// (mirrors AttentionF16Gemm; skips the s_.qg staging traffic in Q8 mode).
 bool AttentionQ8Gemm(const void* weights, const __half* input,

@@ -207,7 +207,10 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
 
             # No instruction is added: the prompt matches the control within
             # the spelling of the renamed keyword. The JSON instruction alone
-            # was about 45 tokens.
+            # was about 45 tokens. Schema rendering does not depend on the
+            # tool choice, so neighbors alternate which choice is controlled.
+            if choice != ("auto", "required")[index % 2]:
+                continue
             control = {**request, "tools": [*opencode_tools(), neighbor(name, True)],
                        "max_completion_tokens": 1}
             baseline = record(label + "_control", chat_result(client, control))
@@ -341,6 +344,44 @@ def check_finite_argument_types(client, model, checks, chat_result, image=None):
                 assert_native(result, label)
                 print(f"CHECK {label}", file=sys.stderr, flush=True)
     check_literal_history(client, model, checks, chat_result, image)
+    check_integer_history(client, model, checks, chat_result)
+
+
+def check_integer_history(client, model, checks, chat_result):
+    """Integers keep their decimal spelling, so replayed calls are reused (#611)."""
+    function = {"name": "read", "description": "Read a local text file.",
+                "parameters": {"type": "object", "properties": {
+                    "path": {"type": "string"}, "limit": {"type": "integer"}},
+                    "required": ["path", "limit"], "additionalProperties": False}}
+    # Both have a shorter exponent spelling (1e+05, 1e+06) than their decimal.
+    for limit in (100000, 1000000):
+        for stream in (False, True):
+            label = f"integer_history_{limit}_{stream}"
+            messages = [{"role": "user", "content":
+                         f"Call read once with path archive-01.txt and limit {limit}."}]
+            request = dict(model=model, messages=messages, temperature=0,
+                           reasoning_effort="none", max_completion_tokens=96,
+                           tools=[{"type": "function", "function": function}],
+                           tool_choice="required", parallel_tool_calls=False)
+            first = chat_result(client, request, stream)
+            checks[label + "_call"] = first
+            assert len(first["tools"]) == 1, (label, first)
+            call = first["tools"][0]
+            arguments = call["function"]["arguments"]
+            assert f'"limit":{limit}' in arguments, (label, arguments)
+            assert type(json.loads(arguments)["limit"]) is int, (label, arguments)
+            # Replay the call exactly as received, as an agent client does.
+            request["messages"] = [*messages, {
+                "role": "assistant", "content": first["text"] or None,
+                "reasoning_content": first["reasoning"], "tool_calls": [call]}, {
+                "role": "tool", "tool_call_id": call["id"], "content": "line 1"}]
+            # Keep tool_choice: changing it alone loses reuse (#619).
+            done = chat_result(client, request, True)
+            checks[label + "_continued"] = done
+            details = done["usage"].get("prompt_tokens_details") or {}
+            assert details.get("cached_tokens", 0) >= first["usage"]["total_tokens"], (
+                label, "replayed integer arguments invalidated the generated call", first, done)
+            print(f"CHECK {label}", file=sys.stderr, flush=True)
 
 
 def check_read_arguments(client, model, checks, chat_result):
@@ -350,8 +391,8 @@ def check_read_arguments(client, model, checks, chat_result):
                     "path": {"type": "string"},
                     "offset": {"type": "number"},
                     "limit": {"type": "number"}}, "required": ["path"]}}
-    # Omitted strict is normalized by Responses. Exercise that real client
-    # contract, not a hand-normalized schema or a one-parameter string tool.
+    # Pi omits strict. All three arguments are requested here, even though
+    # offset and limit remain optional in the supplied schema.
     prompt = "Read archive-00.txt with offset 1 and limit 2000. Use the read tool."
     for responses in (False, True):
         for stream in (False, True):
@@ -534,7 +575,7 @@ def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
     # required tool choice.
     typing = (
         ("str_null", {"type": ["string", "null"]}, "null", None,
-         "Call record with value set to the JSON null."),
+         "Call record with value set to the JSON null literal, not an empty string."),
         ("union_integer", {"anyOf": [{"type": "string"}, {"type": "integer"}]}, "7", 7,
          "Call record with value set to the integer 7."),
         ("all_of_string", {"allOf": [{"type": "string"}, {"minLength": 1}]}, "42", "42",

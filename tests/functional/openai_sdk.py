@@ -29,6 +29,8 @@ from tool_streaming import check_tool_streaming
 from discovery import check_discovery
 from image_inputs import check_image_count, check_image_inputs
 from tool_images import check_tool_images
+from tool_choice import check_tool_choice_cache
+from tool_parameter_order import check_tool_parameter_order
 from tool_native import check_finite_argument_types, check_native_tool_schemas
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
                         check_untyped_agent_tools, check_mixed_tool_schemas,
@@ -43,8 +45,10 @@ from cache_messages_loop import check_cache_messages_loop
 from system_injection import check_system_injection
 from cache_growth import check_cache_growth, check_unchanged_retry, log_offset
 from messages_tools import check_messages_tools
+from reasoning_budget import check_reasoning_budget
 from messages_count_tokens import check_messages_count_tokens, check_messages_image_counts
 from cache_depth import check_cache_depth
+from cache_stalls import check_cache_stalls
 from cache_rotation import check_cache_rotation
 from prefill_scheduling import check_prefill_scheduling
 
@@ -923,7 +927,7 @@ def check_conversations(client, model, checks, vision=False):
         assert warm["usage"]["cached_tokens"] > 0, warm
 
 
-def check_long_context(client, model, checks, context, vision=False):
+def check_long_context(client, model, checks, context, vision=False, server_log=None):
     """A bounded, multi-turn agent history; actual depth is retained in usage."""
     if context < 8192:
         raise ValueError("long-context requires a server context of at least 8192")
@@ -957,13 +961,20 @@ def check_long_context(client, model, checks, context, vision=False):
     def signature(result):
         return result["text"], result["reasoning"].strip(), result["finish"], result["tools"]
 
+    replay_start = log_offset(server_log)
     first = chat("long_schema_cold", request)
     assert json.loads(first["text"]) == {"keyword": "LANTERN"}, first
     depth = first["usage"]["prompt_tokens"]
     assert context // 4 <= depth < context - 512, depth
+    replay_end = log_offset(server_log)
     replay = chat("long_schema_cached", request, True)
     assert signature(replay) == signature(first), replay
-    assert replay["usage"]["gufo"]["prefill_tokens"] == 0, replay
+    usage = replay["usage"]
+    prefilled = usage["gufo"]["prefill_tokens"]
+    assert usage["prompt_tokens"] == depth, replay
+    assert usage["cached_tokens"] + prefilled == depth, replay
+    check_unchanged_retry("long_schema_cached", replay, prefilled,
+                          server_log, replay_start, replay_end)
 
     # Reuse the same multimodal history through the Responses SDK, with sampled
     # output and a new turn. JSON validity alone would not catch lost memory.
@@ -2649,10 +2660,10 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
 
 
 SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
-              "tool-reasoning", "tool-streaming", "reasoning-separator",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
+              "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
-              "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection")
+              "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection")
 
 
 def main():
@@ -2759,6 +2770,8 @@ def main():
             "reasoning-separator": lambda: check_reasoning_separator(
                 client, args.model, checks, chat_result, args.server_log),
             "tool-streaming": lambda: check_tool_streaming(client, args.model, checks, chat_result),
+            "reasoning-budget": lambda: check_reasoning_budget(
+                client, args.model, checks, chat_result),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
@@ -2777,6 +2790,10 @@ def main():
             "tool-native-types": lambda: check_finite_argument_types(
                 client, args.model, checks, chat_result,
                 image_content("red") if args.vision else None),
+            "tool-choice-cache": lambda: check_tool_choice_cache(
+                client, args.model, checks, chat_result, args.server_log),
+            "tool-parameter-order": lambda: check_tool_parameter_order(
+                client, args.model, checks, chat_result),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content, args.server_log),
             "state-edges": lambda: check_state_edges(
@@ -2788,7 +2805,7 @@ def main():
             "batch": lambda: check_batches(
                 client, args.model, checks, args.concurrency, args.vision, args.speculative),
             "long-context": lambda: check_long_context(
-                client, args.model, checks, args.context, args.vision),
+                client, args.model, checks, args.context, args.vision, args.server_log),
             "progress": lambda: check_prompt_progress(
                 client, args.model, checks, args.concurrency, args.vision,
                 args.allow_missing_progress, args.server_log),
@@ -2804,6 +2821,9 @@ def main():
                 client, args.model, checks, chat_result, args.server_log),
             "cache-depth": lambda: check_cache_depth(
                 client, args.model, checks, chat_result, args.concurrency, args.server_log),
+            "cache-stalls": lambda: check_cache_stalls(
+                client, args.model, checks, chat_result, args.concurrency, args.context,
+                args.server_log),
             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
             "cache-concurrency": lambda: check_cache_concurrency(
                 client, args.model, checks, chat_result, args.concurrency),
@@ -2823,7 +2843,7 @@ def main():
             "system-injection": lambda: check_system_injection(
                 client, args.model, checks, chat_result),
         }
-        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "prefill-scheduling")
+        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
                      and (name not in ("image-inputs", "image-count", "tool-images") or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])

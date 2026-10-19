@@ -17,8 +17,8 @@
 #include "src/models/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
-#include "src/models/qwen38_flash_next/lookup_draft.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
+#include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
 class GgufReader;
@@ -163,8 +163,9 @@ public:
   };
   /// Greedy decoding verifies deterministic drafts. Sampled decoding draws
   /// compact MTP proposals and uses target/draft rejection with a residual
-  /// correction. History contains only committed tokens; stochastic RNG
-  /// consumption includes proposal and verification draws. A
+  /// correction. Prompt lookup appends copied tokens to the chain as
+  /// point-mass proposals. History contains only committed tokens; stochastic
+  /// RNG consumption includes proposal and verification draws. A
   /// one-token budget or a model without MTP uses ordinary decoding.
   /// Benchmarks may continue past EOS by setting stop_at_eos to false.
   [[nodiscard]] bool DecodeStep(std::size_t max_tokens,
@@ -234,17 +235,16 @@ public:
     /// in this shape explains a change in throughput that drafted/accepted
     /// totals cannot.
     std::uint64_t widths[kMaxMtpDraftTokens + 1]{};
-    /// Cycles drafted from the token history instead of the MTP predictor.
-    std::uint64_t suffix_cycles{0};
-    std::uint64_t suffix_drafted{0};
-    std::uint64_t suffix_accepted{0};
+    /// Of drafted/accepted: proposals copied by prompt lookup.
+    std::uint64_t lookup{0};
+    std::uint64_t lookup_accepted{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
   }
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 17;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
@@ -271,6 +271,7 @@ private:
   friend class Model;
   friend class ContinuationAdapter;
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
+  void ResetImpl(bool reuse_mtp);
 
   using PrefillCapture = std::function<void(const rocm::PrefillCheckpoint&)>;
   bool SyncThroughComponents(std::span<const std::int32_t>, std::uint32_t,
@@ -300,7 +301,7 @@ private:
   bool DraftCatchUp(std::int32_t next_token, bool propose,
                     std::string* error_msg,
                     MtpCandidateLogits* candidates = nullptr,
-                    bool with_token = false, bool draft_subset = false);
+                    bool draft_subset = false);
   bool DraftReplay(std::int32_t next_token, std::vector<std::int32_t>* replay,
                    std::int32_t* hidden_row, std::string* error_msg) const;
   static bool DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
@@ -322,6 +323,9 @@ private:
                      std::string* error_msg, bool defer_head = false,
                      std::optional<std::uint32_t> batch_drafts = {});
   static void AppendDraft(PendingDecode& pending);
+  /// Appends copies within the prepared budget, stopping at EOG when enabled.
+  bool AppendLookup(PendingDecode& pending, bool stop_at_eos,
+                    std::size_t minimum = 1);
   bool FinishDecode(const DecodeRequest& request, const PendingDecode& pending,
                     std::string* error_msg);
 
@@ -333,19 +337,8 @@ private:
   std::vector<float> verify_logits_;
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
-  /// Retrieval drafts over tokens_; extended lazily by SyncLookup.
-  LookupIndex lookup_;
-  /// Position until which history drafts need a long match to be trusted again.
-  std::size_t suffix_cooldown_until_{0};
-  /// Position until which history drafting is switched off entirely, after a
-  /// run of near-fully-accepted retrieval cycles marked the context as an echo
-  /// loop. Absolute, because the token history only ever grows in a session.
-  std::size_t suffix_echo_disabled_until_{0};
-  /// Consecutive near-fully-accepted retrieval cycles (request ends excluded).
-  /// A deep run means the context is replaying an earlier answer, and the loop
-  /// feeds its own next draft, so the run switches the shortcut off.
-  std::size_t suffix_echo_run_{0};
-  void SyncLookup();
+  /// Index of tokens_ for prompt lookup (single-session MTP drafts).
+  PromptLookup lookup_;
   SpeculativeStats stats_;
   std::shared_ptr<const qwen::vision::Prompt> image_prompt_;
   [[nodiscard]] std::span<const std::uint8_t> ImageIdentity(

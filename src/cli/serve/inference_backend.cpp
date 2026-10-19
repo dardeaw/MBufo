@@ -33,11 +33,13 @@
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/generator.hpp"
+#include "src/models/qwen/vision/image_cache.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/core/hip/committed_backing.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
+#include "src/core/hip/host_allocations.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
@@ -78,8 +80,6 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
                                                   std::uint32_t max_context) {
   auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
                                                       request.add_vision_id);
-  options.require_tool_call =
-      request.tool_choice == ChatRequest::ToolChoice::kRequired;
   // gufo #285: the rendered prompt may be as long as the context can hold.
   options.max_output_bytes =
       tokenization::RenderedPromptBoundBytes(max_context);
@@ -89,7 +89,7 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
 std::optional<std::size_t> CountQwenPromptTokens(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
   const auto options = QwenChatOptions(request, max_context);
   const auto tools =
       request.tool_choice == ChatRequest::ToolChoice::kNone
@@ -110,14 +110,15 @@ std::optional<std::size_t> CountQwenPromptTokens(
   return models::qwen::vision::Prepare(
              tokenizer, request.messages, tools, options,
              encoder ? encoder->identity() : std::string_view{},
-             std::numeric_limits<std::int32_t>::max())
+             std::numeric_limits<std::int32_t>::max(),
+             request.cache_prompt ? &image_cache : nullptr)
       .tokens.size();
 }
 
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
   const auto options = QwenChatOptions(request, max_context);
@@ -129,7 +130,17 @@ TextPreparedPrompt PrepareQwenPrompt(
               : std::span<const tokenization::ChatTool>{request.tools},
           options,
           encoder && has_images ? encoder->identity() : std::string_view{},
-          max_context));
+          max_context, request.cache_prompt ? &image_cache : nullptr));
+  if (has_images && Logger::Enabled(LogLevel::kDebug)) {
+    const auto stats = image_cache.GetStats();
+    Logger::LogFormatted(LogLevel::kDebug, "vision",
+                         "event=image_cache enabled=%d entries=%zu "
+                         "pixel_bytes=%zu encoded_bytes=%zu "
+                         "hits=%zu misses=%zu evictions=%zu",
+                         static_cast<int>(request.cache_prompt), stats.entries,
+                         stats.pixel_bytes, stats.encoded_bytes, stats.hits,
+                         stats.misses, stats.evictions);
+  }
   const auto cache_prefix = prompt->stable_prefix_tokens;
   if (prompt->images.empty())
     return {std::move(prompt->tokens), {}, cache_prefix};
@@ -155,6 +166,38 @@ std::shared_ptr<const models::qwen::vision::Prompt> QwenPrompt(
   if (!image)
     throw std::invalid_argument("invalid Qwen prompt context");
   return image->prompt;
+}
+
+// Hash the sidecar and upload its weights while the model loads, before the
+// runner claims state capacity and the RAM cache is sized. Otherwise the first
+// image request hashes the whole sidecar in its queue time and uploads the
+// weights in its prefill, after admission and the cache were sized without
+// them.
+void PrepareVision(
+    const std::shared_ptr<models::qwen::vision::Encoder>& encoder) {
+  if (!encoder)
+    return;
+  const auto started = Clock::now();
+  (void)encoder->identity();
+  const auto hashed = Clock::now();
+  try {
+    encoder->Upload();
+  } catch (const std::exception& e) {
+    throw std::runtime_error(
+        std::string("could not upload the Qwen vision sidecar: ") + e.what());
+  }
+  const auto uploaded = Clock::now();
+  std::size_t heap_free = 0, heap_total = 0;
+  (void)hipMemGetInfo(&heap_free, &heap_total);
+  using Milliseconds = std::chrono::duration<double, std::milli>;
+  Logger::Info("loader",
+               "event=vision_prepared resident_bytes=" +
+                   std::to_string(encoder->ResidentBytes()) + " identity_ms=" +
+                   std::to_string(Milliseconds(hashed - started).count()) +
+                   " upload_ms=" +
+                   std::to_string(Milliseconds(uploaded - hashed).count()) +
+                   " device_heap_free_bytes=" + std::to_string(heap_free) +
+                   " " + Logger::MemoryStatus());
 }
 
 constexpr std::string_view kDeepSeekStateAbi =
@@ -1025,6 +1068,15 @@ public:
               tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
         });
   }
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return static_cast<std::uint32_t>(model_->GetTokenizer().GetVocabSize());
+  }
+
+  // llama.cpp's Qwen3-Coder format forces "\n</think>" and also ends
+  // reasoning at a tool call.
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"<think>", "\n</think>", {"</think>", "<tool_call>"}};
+  }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
@@ -1044,13 +1096,15 @@ public:
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->GetTokenizer(),
-                             model_->VisionEncoder(), max_context_);
+                             model_->VisionEncoder(), max_context_,
+                             image_cache_);
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
       const ChatRequest& request) const override {
     return CountQwenPromptTokens(request, model_->GetTokenizer(),
-                                 model_->VisionEncoder(), max_context_);
+                                 model_->VisionEncoder(), max_context_,
+                                 image_cache_);
   }
 
   void SetPromptContext(
@@ -1534,6 +1588,7 @@ private:
     return std::clamp<std::size_t>(max_context_ / rows_per_session, 1, 8);
   }
 
+  mutable models::qwen::vision::ImageCache image_cache_;
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model_;
   std::uint32_t max_context_;
@@ -1766,10 +1821,17 @@ public:
               model_->IsStopToken(static_cast<int>(id))};
         });
   }
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return static_cast<std::uint32_t>(model_->VocabSize());
+  }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     return DeepSeekRunnerTokens(model_->Tokenize(text));
+  }
+  [[nodiscard]] std::vector<TextRunnerToken> TokenizeControl(
+      std::string_view text) const override {
+    return DeepSeekRunnerTokens(model_->Tokenize(text, true));
   }
 
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
@@ -1824,8 +1886,6 @@ public:
     options.tools_present =
         !request.tools.empty() &&
         request.tool_choice != ChatRequest::ToolChoice::kNone;
-    options.require_tool_call =
-        request.tool_choice == ChatRequest::ToolChoice::kRequired;
     auto tokens =
         DeepSeekRunnerTokens(model_->EncodeChat(messages, tools, options));
     if (tokens.empty()) {
@@ -2502,18 +2562,16 @@ public:
         throw std::invalid_argument("insufficient component backing budget");
       const auto& allocation = plan.front();
       // Pages commit as captures need them. A payload cannot span segments,
-      // so the edge of each one strands space a ~140 MB private state cannot
-      // use; equal segments of about 1 GiB, and at least two private states,
-      // keep that small. Completed append rows prepare more backing; private
-      // and tail copies commit only when needed. Pinning ahead after a final
-      // private copy can delay decoder launches. Growth stops when the host
-      // keeps less than its reserve.
+      // so segments of about 128 MiB bound registration pauses and stranded
+      // edge space, fitting at least two of the largest payloads. Prefill
+      // chunks prepare backing before GPU work, after any fallback capture.
+      // Growth stops when the host keeps less than its reserve.
       std::size_t largest = 0;
       for (const auto& [id, bytes] : backing->component_classes)
         largest = std::max(largest, bytes);
       const auto block = allocation.block_bytes;
       const auto target =
-          std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
+          std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
       const auto parts =
           std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
       const auto segment = (allocation.blocks + parts - 1) / parts * block;
@@ -2564,12 +2622,25 @@ public:
                 return false;
               }});
       // Prepare a bounded reserve before readiness. The first shared-prefix
-      // capture needs more than one segment; preparing both avoids moving
+      // capture needs more than one segment; preparing 2 GiB avoids moving
       // registration onto that request's capture or decode path.
-      backing->pool->GrowAhead(2);
+      backing->pool->GrowAhead(2ULL << 30);
       backing->pool->WaitForGrowth();
+      Logger::Info(
+          "cache",
+          "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
+              std::to_string(backing->pool->CommittedBytes()) +
+              " long_term_pinned_bytes=" +
+              std::to_string(backing->pool->LongTermPinnedBytes()));
     };
-    result->prepare_prefill = [backing] { backing->pool->GrowAhead(2); };
+    result->prepare_prefill = [backing](std::size_t tokens) {
+      // Prepare after any fallback capture, alongside actual prefill work.
+      // Short turns need a smaller reserve for private states and row tails.
+      backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
+    };
+    result->can_capture = [backing](auto payloads) {
+      return backing->pool->CanFit(payloads);
+    };
     result->owner = backing;
     result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
       return backing->streams.TryAcquire();
@@ -2593,17 +2664,16 @@ public:
             "schema=component-cache-v1 event=backing_grown committed_bytes=" +
                 std::to_string(backing->pool->CommittedBytes()) + " segments=" +
                 std::to_string(backing->pool->PageCommitAllocations()) +
+                " long_term_pinned_bytes=" +
+                std::to_string(backing->pool->LongTermPinnedBytes()) +
                 " acquire_ms=" +
                 std::to_string(std::chrono::duration<double, std::milli>(
                                    std::chrono::steady_clock::now() - started)
                                    .count()));
       if (!block)
         throw cache::ResourceExhausted();
-      // Completed append rows prepare backing for subsequent prefill/guard
-      // work. Final private-state and partial-tail copies must not start
-      // speculative pinning that delays the next decode step.
-      if (request.category == cache::ResourceCategory::kBackingAssigned)
-        backing->pool->GrowAhead();
+      // Do not start registration between a capture's allocations and copies.
+      // Each prefill chunk prepares its own reserve before GPU work.
       auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
       return ComponentCaptureBuffer{
           owner->Bytes(),
@@ -2619,12 +2689,13 @@ public:
           }};
     };
     result->staging = [](std::size_t bytes) {
+      auto allocation = std::make_shared<hip::HostAllocations>();
       void* data = nullptr;
-      const auto status = hipHostMalloc(&data, bytes, hipHostMallocCoherent);
+      const auto status =
+          allocation->Allocate(&data, bytes, hipHostMallocCoherent);
       if (status != hipSuccess)
         throw std::runtime_error(hipGetErrorString(status));
-      auto owner = std::shared_ptr<void>(
-          data, [](void* value) { (void)hipHostFree(value); });
+      auto owner = std::shared_ptr<void>(std::move(allocation), data);
       std::memset(data, 0, bytes);
       return cache::StagingAllocation{
           std::move(owner), {static_cast<std::uint8_t*>(data), bytes}};
@@ -2717,6 +2788,15 @@ public:
               tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
         });
   }
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return static_cast<std::uint32_t>(model_->tokenizer().GetVocabSize());
+  }
+
+  // llama.cpp's Qwen3-Coder format forces "\n</think>" and also ends
+  // reasoning at a tool call.
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"<think>", "\n</think>", {"</think>", "<tool_call>"}};
+  }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
@@ -2736,13 +2816,15 @@ public:
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->tokenizer(),
-                             model_->VisionEncoder(), max_context_);
+                             model_->VisionEncoder(), max_context_,
+                             image_cache_);
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
       const ChatRequest& request) const override {
     return CountQwenPromptTokens(request, model_->tokenizer(),
-                                 model_->VisionEncoder(), max_context_);
+                                 model_->VisionEncoder(), max_context_,
+                                 image_cache_);
   }
 
   void SetPromptContext(
@@ -2969,10 +3051,9 @@ public:
     step.draft_rounds = stats_after.cycles - stats_before.cycles;
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
-    step.suffix_draft_tokens =
-        stats_after.suffix_drafted - stats_before.suffix_drafted;
-    step.suffix_accepted_tokens =
-        stats_after.suffix_accepted - stats_before.suffix_accepted;
+    step.lookup_tokens = stats_after.lookup - stats_before.lookup;
+    step.lookup_accepted_tokens =
+        stats_after.lookup_accepted - stats_before.lookup_accepted;
     return step;
   }
 
@@ -3126,10 +3207,11 @@ public:
       step.draft_rounds = stats.cycles - before[i].cycles;
       step.draft_tokens = stats.drafted - before[i].drafted;
       step.draft_accepted_tokens = stats.accepted - before[i].accepted;
-      step.suffix_draft_tokens =
-          stats.suffix_drafted - before[i].suffix_drafted;
-      step.suffix_accepted_tokens =
-          stats.suffix_accepted - before[i].suffix_accepted;
+      // A request whose peers dropped out runs a single-session step,
+      // which can use prompt lookup.
+      step.lookup_tokens = stats.lookup - before[i].lookup;
+      step.lookup_accepted_tokens =
+          stats.lookup_accepted - before[i].lookup_accepted;
     }
     return steps;
   }
@@ -3140,6 +3222,7 @@ public:
   }
 
 private:
+  mutable models::qwen::vision::ImageCache image_cache_;
   std::shared_ptr<QwenFlashNextModel> model_;
   std::uint32_t max_context_;
   bool use_mtp_;
@@ -3174,7 +3257,8 @@ struct InferenceBackend::Impl {
           request_(std::move(scheduled_request)),
           tool_format_(tool_format) {
       if (initial == InitialOutputState::kReasoning)
-        reasoning_end_ = state_->scheduler->runner().Tokenize("</think>");
+        reasoning_end_ =
+            state_->scheduler->runner().TokenizeControl("</think>");
     }
 
     Result Wait(const TokenCallback& on_token,
@@ -3573,6 +3657,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
       speculative_options.enable_adaptive_draft_length = false;
     }
 
+    PrepareVision(model->VisionEncoder());
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model =
         sampling::TextPreset(model->GetConfig());
@@ -3747,6 +3832,7 @@ bool InferenceBackend::load(
     return false;
   }
   try {
+    PrepareVision(model->VisionEncoder());
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
     new_state->sampling_defaults.supplied = {};
@@ -3972,12 +4058,18 @@ InferenceBackend::Result InferenceBackend::chat(
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return {};
   }
+  const auto initial =
+      state->scheduler->runner().InitialOutputState(effective_request);
+  if (request.reasoning.budget_tokens &&
+      initial == TextGenerationBackend::InitialOutputState::kReasoning)
+    effective_sampling.reasoning_budget =
+        state->scheduler->runner().BuildReasoningBudget(
+            *request.reasoning.budget_tokens, prompt->tokens);
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
       effective_sampling, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
-      prompt->cache_prefix_tokens, request.stop_sequences,
-      state->scheduler->runner().InitialOutputState(effective_request));
+      prompt->cache_prefix_tokens, request.stop_sequences, initial);
 #else
   (void)request;
   (void)max_tokens;
@@ -4051,6 +4143,13 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
         request, max_tokens, sampling_config, is_cancelled, stream_output);
   }
 
+  const auto initial =
+      state->scheduler->runner().InitialOutputState(effective_request);
+  if (request.reasoning.budget_tokens &&
+      initial == TextGenerationBackend::InitialOutputState::kReasoning)
+    effective_sampling.reasoning_budget =
+        state->scheduler->runner().BuildReasoningBudget(
+            *request.reasoning.budget_tokens, prompt->tokens);
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   auto scheduled_request = state->scheduler->Submit(
@@ -4067,9 +4166,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .return_progress = request.return_progress,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
-      state, std::move(scheduled_request),
-      state->scheduler->runner().InitialOutputState(effective_request),
-      tool_format);
+      state, std::move(scheduled_request), initial, tool_format);
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);
