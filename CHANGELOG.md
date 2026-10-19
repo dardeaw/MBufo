@@ -9,6 +9,42 @@ Notable user-facing changes are recorded here. Gufo follows
 MBufo releases are tagged `mbufo-vX.Y.Z` and are listed here, above the upstream
 history they are based on. Upstream entries below are unchanged.
 
+### [0.18.1](https://github.com/dardeaw/MBufo/releases/tag/mbufo-v0.18.1) (2026-10-20)
+
+**Upstream base:** unchanged from 0.18.0 (gufo `v0.17.1`, upstream `main` at
+`e7730942`).
+
+#### Fixes
+
+* **qwen-flash:** blocked (`q8`, `fp8`) KV caches now produce attention output
+  that matches the `f16` path. A prefill batch wider than one token routed the
+  blocked cache through transient `f16` staging and `WmmaCausalAttention`, and
+  that route was numerically wrong: logits measured KL 0.239 against `f16`,
+  versus 0.0166 for an exact emulation of the same quantization, and KL 0.63 at
+  position zero, where the cache holds a single row. Blocked prefill now uses
+  the fused blocked attention kernel that decode already used, which puts the
+  measured error at KL 0.0047, below the `f16` run-to-run noise floor of 0.0062.
+  The staging route remains reachable through `GUFO_KV_WMMA=1` for the
+  tensor-core work.
+* **qwen-flash:** with the above, `--kv-quant q8` and `--kv-quant fp8` are
+  interchangeable at the logit level for both prefill and decode. `q8` stays
+  the recommended setting: it shares the same 34-byte block layout, decodes with
+  native INT8 instructions rather than software E4M3, and measures slightly
+  better against the CPU reference. This supersedes the 0.18.0 note that called
+  `fp8` the recommended serving setting.
+* **serve:** prefill throughput is unchanged at 20K context (about 1,930 tok/s
+  for `q8` against 1,990 tok/s for `f16`); the attention kernel is not the
+  prefill bottleneck.
+
+#### Instrumentation
+
+* **qwen-flash:** offline KV audits are reproducible from the probe binaries.
+  `GUFO_KV_DUMP=<file>` appends the blocked cache rows a `PrepareAttentionKv`
+  call produced, `GUFO_KV_STAGE=<file>` appends the dequantized `f16` staging
+  rows, and `reference_probe` gained `--kv-q8`, `--kv-q8p16` and `--dump-k`
+  (per-layer post-RoPE K/V, raw indexer keys and pooled block keys as float32
+  binaries plus a JSON descriptor).
+
 ### [0.18.0](https://github.com/dardeaw/MBufo/releases/tag/mbufo-v0.18.0) (2026-10-19)
 
 **Upstream base:** gufo `v0.17.1`, with upstream `main` merged at `e7730942`
