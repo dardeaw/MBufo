@@ -2450,7 +2450,7 @@ __global__ void PrepareAttentionKvKernel(
     typename Codec::Elem* __restrict__ v_cache, std::uint32_t heads,
     std::uint32_t kv_heads, std::uint32_t d, std::uint32_t rotary,
     const std::uint32_t* start_pos, float theta, float eps,
-    const qwen::vision::DeviceRope* rope) {
+    float v_range, const qwen::vision::DeviceRope* rope) {
   __shared__ float partial[kHeadsPerBlock][8];
   __shared__ float norm[kHeadsPerBlock][256];
   const std::uint32_t t = blockIdx.x, first = blockIdx.y * kHeadsPerBlock,
@@ -2588,7 +2588,11 @@ __global__ void PrepareAttentionKvKernel(
       float mx = 0.0f;
       for (std::uint32_t k = 0; k < n; ++k)
         mx = fmaxf(mx, fabsf(vrow[base + k]));
-      const float sc = mx > 0.0f ? mx / Codec::kRange : 1.0f;
+      // Value rows quantize against `v_range`, not the codec range: a K8V4
+      // study passes 7 so V lands on a 4-bit grid while keys stay 8-bit.
+      // Decode is unchanged (element * scale), so the cache stays readable by
+      // every existing blocked kernel.
+      const float sc = mx > 0.0f ? mx / v_range : 1.0f;
       out[b * 34 + (i % 32)] = Codec::Encode(vrow[i] / sc);
       if (i % 32 == 0) {
         *reinterpret_cast<__half*>(out + std::size_t(b) * 34 + 32) =
@@ -2639,7 +2643,7 @@ __global__ void QuantizeKvRowsKernel(
     const float* __restrict__ src, std::uint32_t src_tok_stride,
     std::uint32_t src_head_stride, typename Codec::Elem* __restrict__ dst,
     std::uint32_t kv_width, std::uint32_t kv_heads, std::uint32_t d,
-    std::uint32_t n_tokens, const std::uint32_t* start_pos) {
+    std::uint32_t n_tokens, const std::uint32_t* start_pos, float range) {
   const std::uint32_t t = blockIdx.x, h = blockIdx.y;
   const std::uint32_t tid = threadIdx.x;
   const float* row =
@@ -2657,7 +2661,7 @@ __global__ void QuantizeKvRowsKernel(
     float mx = 0.0f;
     for (std::uint32_t k = 0; k < n; ++k)
       mx = fmaxf(mx, fabsf(row[base + k]));
-    const float sc = mx > 0.0f ? mx / Codec::kRange : 1.0f;
+    const float sc = mx > 0.0f ? mx / range : 1.0f;
     typename Codec::Elem* blk = out + std::size_t(b) * 34;
     for (std::uint32_t k = 0; k < n; ++k) {
       blk[k] = Codec::Encode(row[base + k] / sc);
@@ -8627,7 +8631,7 @@ void DispatchCodec(KvCodec codec, Fn&& fn) {
 bool PrepareAttentionKv(const float* packed, std::uint32_t stride,
                         const float* q_gamma, const float* k_gamma, float* q,
                         float* gate, std::uint8_t* k_cache,
-                        std::uint8_t* v_cache, KvCodec codec,
+                        std::uint8_t* v_cache, KvCodec codec, float v_range,
                         std::uint32_t n_tokens, std::uint32_t heads,
                         std::uint32_t kv_heads, std::uint32_t d,
                         std::uint32_t rotary_dim,
@@ -8650,12 +8654,12 @@ bool PrepareAttentionKv(const float* packed, std::uint32_t stride,
       hipLaunchKernelGGL((PrepareAttentionKvKernel<1, Codec>), grid,
                          dim3(kThreads), 0, stream, packed, stride, q_gamma,
                          k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
-                         rotary_dim, start_pos, theta, eps, rope);
+                         rotary_dim, start_pos, theta, eps, v_range, rope);
     else
       hipLaunchKernelGGL((PrepareAttentionKvKernel<4, Codec>), grid,
                          dim3(kThreads), 0, stream, packed, stride, q_gamma,
                          k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
-                          rotary_dim, start_pos, theta, eps, rope);
+                         rotary_dim, start_pos, theta, eps, v_range, rope);
   });
   if (const char* dump = std::getenv("GUFO_KV_DUMP")) {
     // Offline audit hook: append the raw blocked K/V rows written by this call
@@ -8749,7 +8753,8 @@ void QuantizeKvRows(const float* src, std::uint32_t src_tok_stride,
                     std::uint32_t src_head_stride, std::uint8_t* dst,
                     std::uint32_t kv_width, std::uint32_t kv_heads,
                     std::uint32_t d, std::uint32_t n_tokens, KvCodec codec,
-                    const std::uint32_t* start_pos, hipStream_t stream) {
+                    float range, const std::uint32_t* start_pos,
+                    hipStream_t stream) {
   if (n_tokens == 0 || kv_heads == 0 || d == 0)
     return;
   DispatchCodec(codec, [&](auto tag) {
@@ -8757,7 +8762,7 @@ void QuantizeKvRows(const float* src, std::uint32_t src_tok_stride,
     hipLaunchKernelGGL((QuantizeKvRowsKernel<Codec>), dim3(n_tokens, kv_heads),
                        dim3(kThreads), 0, stream, src, src_tok_stride,
                        src_head_stride, dst, kv_width, kv_heads, d, n_tokens,
-                       start_pos);
+                       start_pos, range);
   });
 }
 
