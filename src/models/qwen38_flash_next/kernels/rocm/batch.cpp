@@ -1196,7 +1196,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
               base.q, base.attn_gate, batch_mixed_,
               static_cast<std::uint32_t>(items.size()), base.ctx, c.num_heads,
               c.num_kv_heads, c.head_dim, c.compress_ratio,
-              kKvKeyBlockBytes, stream_);
+              kKvKeyBlockBytes, kKvKeyBlockBytes, stream_);
           fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d\n", il, rows,
                   items.size(), (int)mx_ok);
           if (!mx_ok) {

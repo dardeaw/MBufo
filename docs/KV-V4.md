@@ -98,3 +98,44 @@ any served instance first.
 path behind it, and no fallback if the value grid is too coarse for a given
 prompt. It is documented so it can be measured, not so it can be switched on
 blindly.
+
+## 4-bit keys (`GUFO_KV_Q4`)
+
+Keys use the same 18-byte block as values once `GUFO_KV_Q4` is set: 16 packed
+nibble bytes (element `2b` in the low nibble, `2b+1` in the high) followed by
+an f16 scale at offset 16. One lane owns a whole 32-element block, so both
+nibbles of a payload byte are written by the same lane and no read-modify-write
+window exists. Keys are range 7 (4-bit signed) in this mode instead of range
+127.
+
+The switch only applies to `--kv-quant q8`. With it unset the engine is
+byte-identical to a build without the key path (verified by comparing logit
+dumps: identical md5). Because keys and values now select their precision
+independently, four configurations are reachable: K8V8, K4V8, K8V4, K4V4.
+
+### Measured cost
+
+`qwen3.8-flash-next`, three 400-token contexts, 64 sampled prefill rows and 98
+matched-token decode steps per context, mean over the three contexts:
+
+| config | prefill KL | decode KL | decode max KL | decode argmax | KV bytes/pos |
+|---|---|---|---|---|---|
+| K8V8 | - | - | - | - | 1088 |
+| K4V8 | 0.01770 | 0.02139 | 0.258 | 90.5 % | 832 |
+| K8V4 | 0.01970 | 0.02093 | 0.120 | 93.2 % | 832 |
+| K4V4 | 0.02701 | 0.03351 | 0.411 | 89.8 % | 576 |
+
+Two observations worth keeping:
+
+* K4V8 and K8V4 occupy the same memory (832 bytes per position). Moving
+  precision from one axis to the other buys nothing; only K4V4 reduces the
+  footprint.
+* On a 33-token prompt K4V4 measured the same mean KL as K8V4 (0.0274). That
+  coincidence is a cancellation artifact of a tiny sample: the per-position
+  errors of the two axes are nearly uncorrelated, some positions improve when
+  both are quantised, and the average hides it. At 400 tokens, and in the
+  decode phase, K4V4 is clearly worse (+60 % KL, 3.4x tail). Do not gate KV
+  precision on short prefill probes.
+
+Keys and values do not add in quadrature at these bit widths; the decode table
+is the one to trust.
