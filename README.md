@@ -64,6 +64,7 @@ behavior exactly.
 | `f16` | default | Reference numerics. No quantization of the KV cache. |
 | `q8` | supported | Blocked Q8 with a per-32 f16 scale (34 bytes per 32 elements). |
 | `fp8` | supported, recommended | Software E4M3 with a per-32 f16 scale, same 34-byte block layout as Q8. |
+| `q8` + `GUFO_KV_V4=1` | supported, opt-in | 8-bit keys, 4-bit values in an 18-byte block: 23.5% smaller KV, mean KL 0.027 vs `q8`. See [docs/KV-V4.md](docs/KV-V4.md). |
 
 **Recommendation: use `--kv-quant fp8`.** It is bit-exact at the codec level and
 matches or slightly beats `q8` end to end, at the same memory footprint as
