@@ -416,6 +416,7 @@ enum class KvFormat : std::uint32_t { kF16 = 0, kQ8 = 1, kFp8 = 2 };
 /// (32 codec bytes + an f16 scale). Values may pack 32 signed 4-bit codes
 /// ahead of the f16 scale (16 bytes + 2) when the 4-bit value grid is on.
 inline constexpr std::uint32_t kKvKeyBlockBytes = 34;
+inline constexpr std::uint32_t kKvKey4BitBlockBytes = 18;
 inline constexpr std::uint32_t kKvValue4BitBlockBytes = 18;
 
 /// Bytes of one blocked row of `d` elements at `block_bytes` per 32-element
@@ -453,15 +454,16 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
                       bool prefill = false);
 
 /// Blocked twin of PrepareAttention: identical math, K and V rows written as
-/// `codec` blocks. V rows use `v_range` for their block scale. Keys always
-/// occupy 34 bytes per block; `value_block_bytes` selects the value block
+/// `codec` blocks. K and V rows use `k_range` / `v_range` for their block
+/// scale. `key_block_bytes` / `value_block_bytes` select each side's block
 /// layout (34 = 8-bit codes, 18 = packed 4-bit codes). Plain Dense paths
 /// quantize them separately via QuantizeKvRows over packed rows.
 bool PrepareAttentionKv(
     const float* packed, std::uint32_t stride, const float* q_gamma,
     const float* k_gamma, float* q, float* gate, std::uint8_t* k_cache,
-    std::uint8_t* v_cache, KvCodec codec, float v_range,
-    std::uint32_t value_block_bytes, std::uint32_t n_tokens,
+    std::uint8_t* v_cache, KvCodec codec, float k_range, float v_range,
+    std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
+    std::uint32_t n_tokens,
     std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
     std::uint32_t rotary_dim, const std::uint32_t* start_pos, float theta,
     float eps, hipStream_t stream,
@@ -560,16 +562,19 @@ bool AttentionQ8Gemm(const void* weights, const __half* input,
 bool DequantizeKvRows(const std::uint8_t* src_k, __half* dst_k,
                       const std::uint8_t* src_v, __half* dst_v,
                       std::uint32_t n_rows, std::uint32_t row_elems,
+                      std::uint32_t key_block_bytes,
                       std::uint32_t value_block_bytes, KvCodec codec,
                       hipStream_t stream);
 /// Blocked twin of Attention: `codec` blocked caches, fused dequant on read.
-/// Keys are 34-byte blocks; `value_block_bytes` selects the value layout.
+/// `key_block_bytes` / `value_block_bytes` select each side's layout
+/// (34 = 8-bit codes, 18 = packed 4-bit codes).
 void AttentionKv(const float* q, const std::uint8_t* k_cache,
                  const std::uint8_t* v_cache, const std::uint32_t* mask,
                  std::uint32_t mask_words, float* out, float* partials,
                  std::uint32_t splits, std::uint32_t n_tokens,
                  const std::uint32_t* start_pos, std::uint32_t heads,
                  std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
+                 std::uint32_t key_block_bytes,
                  std::uint32_t value_block_bytes, KvCodec codec,
                  hipStream_t stream);
 
@@ -587,13 +592,15 @@ struct MixedBlk {
 /// Mixed-batch varlen twin of WmmaCausalAttention (dense only). Packed Q
 /// rows from any number of sessions compute side by side in one launch, each
 /// block serving one MixedBlk with its own KV range and causal base. V rows
-/// are F16 staging in the blocked path; `value_block_bytes` (34 = 8-bit
-/// blocked, 18 = packed 4-bit blocked) is applied when a blocked pointer is
-/// supplied. Returns false, launching nothing, on unsupported geometry.
+/// are F16 staging in the blocked path; `key_block_bytes` /
+/// `value_block_bytes` (34 = 8-bit blocked, 18 = packed 4-bit blocked) are
+/// applied when a blocked pointer is supplied. Returns false, launching
+/// nothing, on unsupported geometry.
 bool WmmaMixedAttention(const float* q, const float* gate, const MixedBlk* blks,
                         std::uint32_t n_blks, float* out, std::uint32_t heads,
                         std::uint32_t kv_heads, std::uint32_t d,
-                        std::uint32_t ratio, std::uint32_t value_block_bytes,
+                        std::uint32_t ratio, std::uint32_t key_block_bytes,
+                        std::uint32_t value_block_bytes,
                         hipStream_t stream);
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows
