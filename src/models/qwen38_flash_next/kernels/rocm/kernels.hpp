@@ -440,12 +440,15 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
                       bool prefill = false);
 
 /// Blocked twin of PrepareAttention: identical math, K and V rows written as
-/// `codec` blocks. V rows are written by the same kernel; plain Dense paths
-/// quantize them separately via QuantizeKvRows over packed rows.
+/// `codec` blocks. V rows use `v_range` for their block scale, so a narrower
+/// value grid costs no layout change; pass the codec range to keep parity.
+/// Plain Dense paths quantize them separately via QuantizeKvRows over packed
+/// rows.
 bool PrepareAttentionKv(
     const float* packed, std::uint32_t stride, const float* q_gamma,
     const float* k_gamma, float* q, float* gate, std::uint8_t* k_cache,
-    std::uint8_t* v_cache, KvCodec codec, std::uint32_t n_tokens,
+    std::uint8_t* v_cache, KvCodec codec, float v_range,
+    std::uint32_t n_tokens,
     std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
     std::uint32_t rotary_dim, const std::uint32_t* start_pos, float theta,
     float eps, hipStream_t stream,
@@ -468,11 +471,14 @@ void StoreKv(const float* src, __half* cache, std::uint32_t n_tokens,
 
 /// Symmetric quantize of float rows into `codec` blocks (see .hip): 32 elements
 /// plus a per-32-block f16 scale. `codec` selects INT8 or E4M3 elements.
+/// `range` is the quantization numerator (127 for INT8, 448 for E4M3); value
+/// caches may pass a smaller range to study narrower value precision.
 void QuantizeKvRows(const float* src, std::uint32_t src_tok_stride,
                     std::uint32_t src_head_stride, std::uint8_t* dst,
                     std::uint32_t kv_width, std::uint32_t kv_heads,
                     std::uint32_t d, std::uint32_t n_tokens, KvCodec codec,
-                    const std::uint32_t* start_pos, hipStream_t stream);
+                    float range, const std::uint32_t* start_pos,
+                    hipStream_t stream);
 /// Stores raw indexer rows in a power-of-two ring of `capacity` rows.
 void StoreRows(const float* src, float* dst, std::uint32_t n_tokens,
                std::uint32_t row_dim, const std::uint32_t* start_pos,

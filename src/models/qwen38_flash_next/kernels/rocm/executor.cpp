@@ -191,6 +191,24 @@ class SnapshotDeviceExhausted : public std::runtime_error {
 public:
   using std::runtime_error::runtime_error;
 };
+
+/// Quantization numerator of a blocked codec: the element grid's peak.
+[[nodiscard]] float KvCodecRange(KvCodec codec) {
+  return codec == KvCodec::kFp8 ? 448.0F : 127.0F;
+}
+
+/// Block scale numerator for value rows. Values are far less sensitive than
+/// keys, so int8 keys with a narrower value grid is the one lever left for a
+/// smaller cache. `GUFO_KV_V4` re-encodes values on a 4-bit grid (range 7)
+/// while the layout, decode and every blocked kernel stay untouched; it is a
+/// study hook, off unless set, and only meaningful for the int8 codec.
+[[nodiscard]] float KvValueRange(KvFormat format) {
+  const auto codec = KvCodecOf(format);
+  if (format != KvFormat::kQ8) return KvCodecRange(codec);
+  const char* v4 = std::getenv("GUFO_KV_V4");
+  return v4 != nullptr && *v4 != '\0' && *v4 != '0' ? 7.0F
+                                                    : KvCodecRange(codec);
+}
 }  // namespace
 // Legacy hipFree synchronizes unrelated inference streams. Pool allocations
 // have stream-ordered release, so evicting a checkpoint cannot stall a peer.
@@ -2552,7 +2570,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         prepared = PrepareAttentionKv(
             s_.qg, l.attn_qkv.rows, l.attn_q_norm.f32(), l.attn_k_norm.f32(),
             s_.q, s_.attn_gate, s.k_cache_kv, s.v_cache_kv,
-            rocm::KvCodecOf(options_.kv_format), n_tokens, c.num_heads,
+            rocm::KvCodecOf(options_.kv_format),
+            KvValueRange(options_.kv_format), n_tokens, c.num_heads,
             c.num_kv_heads, c.head_dim, c.rotary_dim, pos, c.rope_theta,
             c.rms_eps, stream_, s.rope, prefill_phase);
       } else {
@@ -2591,10 +2610,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     if (KvBlocked(options_.kv_format)) {
       QuantizeKvRows(s_.k, kv_row, c.head_dim, s.k_cache_kv, kv_row,
                      c.num_kv_heads, c.head_dim, n_tokens,
-                     rocm::KvCodecOf(options_.kv_format), pos, stream_);
+                     rocm::KvCodecOf(options_.kv_format),
+                     KvCodecRange(rocm::KvCodecOf(options_.kv_format)), pos,
+                     stream_);
       QuantizeKvRows(s_.v, kv_row, c.head_dim, s.v_cache_kv, kv_row,
                      c.num_kv_heads, c.head_dim, n_tokens,
-                     rocm::KvCodecOf(options_.kv_format), pos, stream_);
+                     rocm::KvCodecOf(options_.kv_format),
+                     KvValueRange(options_.kv_format), pos, stream_);
     } else {
       StoreKv(s_.k, s.k_cache, n_tokens, kv_row, pos, stream_);
       StoreKv(s_.v, s.v_cache, n_tokens, kv_row, pos, stream_);
@@ -4564,7 +4586,8 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
       if (!PrepareAttentionKv(
               s_.qg, kv.rows, nullptr, l.attn_k_norm.f32(), nullptr, nullptr,
               attn.k_cache_kv, attn.v_cache_kv,
-              rocm::KvCodecOf(options_.kv_format), n, 0, c.num_kv_heads,
+              rocm::KvCodecOf(options_.kv_format),
+              KvValueRange(options_.kv_format), n, 0, c.num_kv_heads,
               c.head_dim, c.rotary_dim, &session.control_->mtp_position,
               c.rope_theta, c.rms_eps, stream_, attn.rope)) {
         AssignError(error_msg, "MTP cache projection failed");
