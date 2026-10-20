@@ -1190,10 +1190,13 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           }
           UseScratch(base);
         } else {
+          // Blocked sessions read F16 staging (see EnsureKvStaging above), so
+          // the mixed kernel always takes its 34-byte / F16 value path here.
           const bool mx_ok = WmmaMixedAttention(
               base.q, base.attn_gate, batch_mixed_,
               static_cast<std::uint32_t>(items.size()), base.ctx, c.num_heads,
-              c.num_kv_heads, c.head_dim, c.compress_ratio, stream_);
+              c.num_kv_heads, c.head_dim, c.compress_ratio,
+              kKvKeyBlockBytes, stream_);
           fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d\n", il, rows,
                   items.size(), (int)mx_ok);
           if (!mx_ok) {
