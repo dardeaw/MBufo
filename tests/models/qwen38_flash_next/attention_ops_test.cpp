@@ -781,7 +781,7 @@ double CompareMixed(std::uint32_t seed) {
   Upload(&d_blks, blks);
   if (!q::WmmaMixedAttention(d_q.get(), d_gate.get(), d_blks.get(), 2,
                              d_out.get(), kHeads, kKvHeads, kDim, kRatio,
-                             nullptr)) {
+                             q::kKvKeyBlockBytes, nullptr)) {
     throw std::runtime_error("mixed attention rejected the geometry");
   }
   CheckHip(hipDeviceSynchronize(), "mixed attention synchronization");

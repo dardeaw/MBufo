@@ -627,9 +627,11 @@ at reduced precision with `--kv-quant`. Two layouts exist:
 - `f16`: two bytes per element, written by `PrepareAttention` /
   `StoreKvKernel`.
 - `q8` and `fp8`: the blocked layout, written by `PrepareAttentionKv` /
-  `QuantizeKvRowsKernel`. Each 32-element block is 34 bytes: 32 one-byte codes
-  followed by one `f16` scale. `q8` uses symmetric INT8 levels over
+  `QuantizeKvRowsKernel`. Each 32-element key block is 34 bytes: 32 one-byte
+  codes followed by one `f16` scale. `q8` uses symmetric INT8 levels over
   `max|block| / 127`; `fp8` uses the OCP E4M3 grid over `max|block| / 448`.
+  Value blocks are 34 bytes by default and 18 bytes (16 packed nibble bytes
+  plus the `f16` scale) when `GUFO_KV_V4` selects 4-bit values; see below.
   The indexer keys and pooled block keys stay `f32`/`f16` and are not affected.
 
 Decode reads the blocked layout directly in the fused attention kernel. Prefill
@@ -644,6 +646,23 @@ same quantization) whenever the prefill batch was wider than one token. See the
 cost, not size: `q8` decodes with native INT8 instructions, while E4M3 is
 emulated in software on targets without an FP8 conversion instruction.
 
+### Narrow value precision (`GUFO_KV_V4`)
+
+Keys are far more sensitive than values; value errors average out across the
+residual stream while a key error moves every score. That asymmetry is what
+makes a narrower value grid worth measuring. With `GUFO_KV_V4` set (and
+`--kv-quant q8`), value blocks store signed 4-bit codes on a `max|block| / 7`
+grid: 16 packed bytes, element `2b` in the low nibble and `2b + 1` in the high
+nibble of byte `b`, followed by the same `f16` scale at offset 16. A value row
+drops from 544 to 288 bytes, so K plus V drops from 1088 to 832 bytes per
+position (23.5% less KV). Keys keep the 34-byte INT8 block.
+
+The hook is off unless set, and it is only meaningful for `q8`. Measured
+against `q8` on the 33-token probe prompt: mean KL 0.0274, max KL 0.0755,
+argmax agreement 32/33 - identical to the same quantization applied without
+packing, which is the check that the nibble path is exact rather than merely
+close. The setting is a precision trade, not a free win: it is not the default.
+
 ### Auditing the blocked cache offline
 
 Three env-gated hooks keep this class of regression measurable. They are inert
@@ -652,7 +671,7 @@ produces one record per call.
 
 | variable | writes |
 | --- | --- |
-| `GUFO_KV_DUMP=<file>` | the blocked K/V rows a `PrepareAttentionKv` call produced: `u32 n_tokens, kv_heads, d, row_bytes, start_pos`, then `row_bytes * n_tokens` of K followed by the same amount of V |
+| `GUFO_KV_DUMP=<file>` | the blocked K/V rows a `PrepareAttentionKv` call produced: `u32 n_tokens, kv_heads, d, k_row_bytes, v_row_bytes, start_pos`, then `k_row_bytes * n_tokens` of K followed by `v_row_bytes * n_tokens` of V (the two row sizes differ under `GUFO_KV_V4`) |
 | `GUFO_KV_STAGE=<file>` | the dequantized `f16` staging rows of an `EnsureKvStaging` call: `u32 need, kv_row, base`, then the K and V halves |
 
 The reference side of the comparison comes from the probe binary:

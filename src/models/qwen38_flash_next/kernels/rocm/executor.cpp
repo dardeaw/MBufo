@@ -199,15 +199,23 @@ public:
 
 /// Block scale numerator for value rows. Values are far less sensitive than
 /// keys, so int8 keys with a narrower value grid is the one lever left for a
-/// smaller cache. `GUFO_KV_V4` re-encodes values on a 4-bit grid (range 7)
-/// while the layout, decode and every blocked kernel stay untouched; it is a
+/// smaller cache. `GUFO_KV_V4` packs values on a 4-bit grid (range 7); it is a
 /// study hook, off unless set, and only meaningful for the int8 codec.
-[[nodiscard]] float KvValueRange(KvFormat format) {
-  const auto codec = KvCodecOf(format);
-  if (format != KvFormat::kQ8) return KvCodecRange(codec);
+[[nodiscard]] bool KvValueIs4Bit(KvFormat format) {
+  if (format != KvFormat::kQ8) return false;
   const char* v4 = std::getenv("GUFO_KV_V4");
-  return v4 != nullptr && *v4 != '\0' && *v4 != '0' ? 7.0F
-                                                    : KvCodecRange(codec);
+  return v4 != nullptr && *v4 != '\0' && *v4 != '0';
+}
+
+[[nodiscard]] float KvValueRange(KvFormat format) {
+  return KvValueIs4Bit(format) ? 7.0F
+                               : KvCodecRange(KvCodecOf(format));
+}
+
+/// Bytes of one 32-element value block: 18 when the 4-bit value grid is on
+/// (16 packed nibble bytes + f16 scale), else the 34-byte 8-bit block.
+[[nodiscard]] std::uint32_t KvValueBlockBytes(KvFormat format) {
+  return KvValueIs4Bit(format) ? kKvValue4BitBlockBytes : kKvKeyBlockBytes;
 }
 }  // namespace
 // Legacy hipFree synchronizes unrelated inference streams. Pool allocations
@@ -1291,13 +1299,16 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       auto& at = s->attention_[il];
       if (KvBlocked(s->kv_format_)) {
         // Blocked rows; the element codec's scale lives inside each block.
-        const std::size_t kv_blocked_row =
-            (static_cast<std::size_t>(kv_row) + 31) / 32 * 34;
+        // Keys are 34 bytes per 32 elements; values may pack 4-bit codes (18).
+        const std::size_t kv_key_row =
+            KvBlockedRowBytes(kv_row, kKvKeyBlockBytes);
+        const std::size_t kv_value_row =
+            KvBlockedRowBytes(kv_row, KvValueBlockBytes(s->kv_format_));
         at.k_cache_kv = Alloc<std::uint8_t>(
-            a, static_cast<std::size_t>(max_context) * kv_blocked_row,
+            a, static_cast<std::size_t>(max_context) * kv_key_row,
             error_msg, &s->allocated_bytes_);
         at.v_cache_kv = Alloc<std::uint8_t>(
-            a, static_cast<std::size_t>(max_context) * kv_blocked_row,
+            a, static_cast<std::size_t>(max_context) * kv_value_row,
             error_msg, &s->allocated_bytes_);
       } else {
         at.k_cache =
@@ -1329,13 +1340,15 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
         error_msg, &s->allocated_bytes_);
     if (KvBlocked(s->kv_format_)) {
       // Blocked rows; the element codec's scale lives inside each block.
-      const std::size_t mtp_kv_blocked_row =
-          (static_cast<std::size_t>(kv_row) + 31) / 32 * 34;
+      const std::size_t mtp_kv_key_row =
+          KvBlockedRowBytes(kv_row, kKvKeyBlockBytes);
+      const std::size_t mtp_kv_value_row =
+          KvBlockedRowBytes(kv_row, KvValueBlockBytes(s->kv_format_));
       s->mtp_.k_cache_kv = Alloc<std::uint8_t>(
-          a, static_cast<std::size_t>(max_context) * mtp_kv_blocked_row,
+          a, static_cast<std::size_t>(max_context) * mtp_kv_key_row,
           error_msg, &s->allocated_bytes_);
       s->mtp_.v_cache_kv = Alloc<std::uint8_t>(
-          a, static_cast<std::size_t>(max_context) * mtp_kv_blocked_row,
+          a, static_cast<std::size_t>(max_context) * mtp_kv_value_row,
           error_msg, &s->allocated_bytes_);
     } else {
       s->mtp_.k_cache =
@@ -1507,12 +1520,15 @@ std::size_t Executor::SessionBytes(
       c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
   const std::size_t kv_elem =
       KvBlocked(options_.kv_format) ? 1 : sizeof(__half);
-  // Blocked rows: 32 elements + fp16 scale = 34 bytes per block.
-  const std::size_t kv_blocked_row =
-      (std::size_t{c.AttentionKvDim()} + 31) / 32 * 34;
+  // Blocked rows: 32 elements + fp16 scale. Keys use 34-byte blocks; values
+  // use 18-byte blocks when the 4-bit value grid is active.
+  const std::size_t kv_key_row =
+      KvBlockedRowBytes(c.AttentionKvDim(), kKvKeyBlockBytes);
+  const std::size_t kv_value_row = KvBlockedRowBytes(
+      c.AttentionKvDim(), KvValueBlockBytes(options_.kv_format));
   const std::size_t kv =
       KvBlocked(options_.kv_format)
-          ? 2 * std::size_t{max_context} * kv_blocked_row
+          ? std::size_t{max_context} * (kv_key_row + kv_value_row)
           : 2 * std::size_t{max_context} * c.AttentionKvDim() * sizeof(__half);
   const std::size_t index =
       std::size_t{IndexerCapacity(c, options_.max_batch, max_context)} *
@@ -2436,7 +2452,10 @@ bool Executor::EnsureKvStaging(Session& session, Session::AttentionState& s,
                                std::uint32_t need, std::uint32_t kv_row,
                                std::string* error) const {
   const std::size_t row_bytes = std::size_t(kv_row) * sizeof(__half);
-  const std::size_t kv_blocked_row = (std::size_t{kv_row} + 31) / 32 * 34;
+  const std::size_t kv_key_row =
+      KvBlockedRowBytes(kv_row, kKvKeyBlockBytes);
+  const std::size_t kv_value_row =
+      KvBlockedRowBytes(kv_row, KvValueBlockBytes(options_.kv_format));
   // Persistent per-session staging: reused across prefill chunks and
   // dequantized incrementally (only rows [valid, need) are converted).
   // The source pointers disambiguate trunk vs draft caches; snapshot
@@ -2484,11 +2503,12 @@ bool Executor::EnsureKvStaging(Session& session, Session::AttentionState& s,
   if (need > session.kv_stage_valid_) {
     const std::uint32_t base = session.kv_stage_valid_;
     if (!rocm::DequantizeKvRows(
-            s.k_cache_kv + std::size_t{base} * kv_blocked_row,
+            s.k_cache_kv + std::size_t{base} * kv_key_row,
             session.kv_stage_k_ + std::size_t{base} * kv_row,
-            s.v_cache_kv + std::size_t{base} * kv_blocked_row,
+            s.v_cache_kv + std::size_t{base} * kv_value_row,
             session.kv_stage_v_ + std::size_t{base} * kv_row, need - base,
-            kv_row, rocm::KvCodecOf(options_.kv_format), stream_)) {
+            kv_row, KvValueBlockBytes(options_.kv_format),
+            rocm::KvCodecOf(options_.kv_format), stream_)) {
       return false;
     }
     session.kv_stage_valid_ = need;
@@ -2534,10 +2554,12 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   bool prepared = false;
   if (!l.attn_qkv.empty()) {
     // The fused GEMM variants write the cache directly: F16 into the half
-    // cache, Q8 into blocked INT8 rows. FP8 has no fused variant yet, so it
-    // takes the Dense + PrepareAttentionKv route instead.
+    // cache, Q8 into blocked INT8 rows. FP8 has no fused variant yet, and the
+    // 4-bit value layout needs the per-block packing of PrepareAttentionKv, so
+    // both take the Dense + PrepareAttentionKv route instead.
     const bool fused_projection =
-        options_.kv_format != rocm::KvFormat::kFp8 && !projections_ready &&
+        options_.kv_format != rocm::KvFormat::kFp8 &&
+        !KvValueIs4Bit(options_.kv_format) && !projections_ready &&
         n_tokens >= 1024 && n_tokens <= options_.max_batch &&
         DenseF16Route(l.attn_qkv, n_tokens) && l.attn_qkv.rows == 13312 &&
         l.attn_qkv.cols == 2560 && c.num_heads == 24 && c.num_kv_heads == 2 &&
@@ -2571,7 +2593,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
             s_.qg, l.attn_qkv.rows, l.attn_q_norm.f32(), l.attn_k_norm.f32(),
             s_.q, s_.attn_gate, s.k_cache_kv, s.v_cache_kv,
             rocm::KvCodecOf(options_.kv_format),
-            KvValueRange(options_.kv_format), n_tokens, c.num_heads,
+            KvValueRange(options_.kv_format),
+            KvValueBlockBytes(options_.kv_format), n_tokens, c.num_heads,
             c.num_kv_heads, c.head_dim, c.rotary_dim, pos, c.rope_theta,
             c.rms_eps, stream_, s.rope, prefill_phase);
       } else {
@@ -2611,12 +2634,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
       QuantizeKvRows(s_.k, kv_row, c.head_dim, s.k_cache_kv, kv_row,
                      c.num_kv_heads, c.head_dim, n_tokens,
                      rocm::KvCodecOf(options_.kv_format),
-                     KvCodecRange(rocm::KvCodecOf(options_.kv_format)), pos,
-                     stream_);
+                     KvCodecRange(rocm::KvCodecOf(options_.kv_format)),
+                     kKvKeyBlockBytes, pos, stream_);
       QuantizeKvRows(s_.v, kv_row, c.head_dim, s.v_cache_kv, kv_row,
                      c.num_kv_heads, c.head_dim, n_tokens,
                      rocm::KvCodecOf(options_.kv_format),
-                     KvValueRange(options_.kv_format), pos, stream_);
+                     KvValueRange(options_.kv_format),
+                     KvValueBlockBytes(options_.kv_format), pos, stream_);
     } else {
       StoreKv(s_.k, s.k_cache, n_tokens, kv_row, pos, stream_);
       StoreKv(s_.v, s.v_cache, n_tokens, kv_row, pos, stream_);
@@ -2806,8 +2830,9 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
       rocm::AttentionKv(s_.q, s.k_cache_kv, s.v_cache_kv, mask, mask_words_,
                         s_.ctx, split ? s_.attn_partials : nullptr, kAttnSplits,
                         n_tokens, pos, c.num_heads, c.num_kv_heads, c.head_dim,
-                        c.compress_ratio, rocm::KvCodecOf(options_.kv_format),
-                        stream_);
+                        c.compress_ratio,
+                        KvValueBlockBytes(options_.kv_format),
+                        rocm::KvCodecOf(options_.kv_format), stream_);
     }
   } else {
     rocm::Attention(
@@ -3690,11 +3715,19 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
   }
   const std::uint64_t kv_elem =
       h.kv_elem_bytes != 0 ? h.kv_elem_bytes : sizeof(__half);
-  // Blocked rows (Q8_0 or FP8 E4M3): 34 bytes per 32-elem block.
+  // Blocked rows: 34 bytes per 32-element block for keys; values use 18
+  // bytes when the stored format carries the 4-bit value grid.
   const std::uint64_t kv_row_bytes =
       h.kv_elem_bytes == 1 ? (std::uint64_t{h.kv_row} + 31) / 32 * 34
                            : std::uint64_t{h.kv_row} * kv_elem;
+  const std::uint64_t kv_value_row_bytes =
+      h.kv_elem_bytes == 1
+          ? (std::uint64_t{h.kv_row} + 31) / 32 *
+                KvValueBlockBytes(static_cast<KvFormat>(h.kv_format))
+          : std::uint64_t{h.kv_row} * kv_elem;
   const std::uint64_t kv_bytes = std::uint64_t{h.position} * kv_row_bytes;
+  const std::uint64_t kv_value_bytes =
+      std::uint64_t{h.position} * kv_value_row_bytes;
   const std::uint64_t index_row_bytes =
       std::uint64_t{h.indexer_head_dim} * sizeof(float);
   const std::uint32_t index_begin = h.blocks * h.compress_ratio;
@@ -3714,7 +3747,7 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
               blocked
                   ? static_cast<void*>(at != nullptr ? at->v_cache_kv : nullptr)
                   : static_cast<void*>(at != nullptr ? at->v_cache : nullptr),
-              kv_bytes, "V cache", kv_row_bytes)) {
+              kv_value_bytes, "V cache", kv_value_row_bytes)) {
         return 0;
       }
       // Serialize only unpooled rows, in chronological order. The physical
@@ -3764,8 +3797,15 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
     const std::uint64_t mtp_row_bytes =
         h.kv_elem_bytes == 1 ? (std::uint64_t{h.kv_row} + 31) / 32 * 34
                              : std::uint64_t{h.kv_row} * kv_elem;
+    const std::uint64_t mtp_value_row_bytes =
+        h.kv_elem_bytes == 1
+            ? (std::uint64_t{h.kv_row} + 31) / 32 *
+                  KvValueBlockBytes(static_cast<KvFormat>(h.kv_format))
+            : std::uint64_t{h.kv_row} * kv_elem;
     const std::uint64_t mtp_kv_bytes =
         std::uint64_t{h.mtp_position} * mtp_row_bytes;
+    const std::uint64_t mtp_value_kv_bytes =
+        std::uint64_t{h.mtp_position} * mtp_value_row_bytes;
     const bool mtp_blocked = h.kv_elem_bytes == 1;
     if (!region(
             mtp_blocked
@@ -3776,7 +3816,7 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
             mtp_blocked
                 ? static_cast<void*>(mtp != nullptr ? mtp->v_cache_kv : nullptr)
                 : static_cast<void*>(mtp != nullptr ? mtp->v_cache : nullptr),
-            mtp_kv_bytes, "draft V cache", mtp_row_bytes, true)) {
+            mtp_value_kv_bytes, "draft V cache", mtp_value_row_bytes, true)) {
       return 0;
     }
     if (!region(
@@ -4587,7 +4627,8 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
               s_.qg, kv.rows, nullptr, l.attn_k_norm.f32(), nullptr, nullptr,
               attn.k_cache_kv, attn.v_cache_kv,
               rocm::KvCodecOf(options_.kv_format),
-              KvValueRange(options_.kv_format), n, 0, c.num_kv_heads,
+              KvValueRange(options_.kv_format),
+              KvValueBlockBytes(options_.kv_format), n, 0, c.num_kv_heads,
               c.head_dim, c.rotary_dim, &session.control_->mtp_position,
               c.rope_theta, c.rms_eps, stream_, attn.rope)) {
         AssignError(error_msg, "MTP cache projection failed");
