@@ -52,7 +52,10 @@ upstream state this tree contains.
   (`TryStepMixedBatch`). Every layer can degrade independently, and any refusal
   falls back to the legacy pair.
 - **KV cache quantization.** Upstream's blocked Q8 KV path is generalized behind
-  a format/codec abstraction, and an opt-in FP8 cache is added alongside it.
+  a format/codec abstraction, an FP8 cache is added alongside it, and both axes
+  can be narrowed to a packed 4-bit block (18 bytes per 32 elements) behind
+  opt-in hooks. Keys and values select their precision independently, so K8V8,
+  K4V8, K8V4 and K4V4 are all reachable.
 
 Mixed batches are on by default. Set `GUFO_MIXED_BATCH=0` to restore upstream
 behavior exactly.
@@ -62,15 +65,62 @@ behavior exactly.
 | Mode | Status | Notes |
 | --- | --- | --- |
 | `f16` | default | Reference numerics. No quantization of the KV cache. |
-| `q8` | supported | Blocked Q8 with a per-32 f16 scale (34 bytes per 32 elements). |
-| `fp8` | supported, recommended | Software E4M3 with a per-32 f16 scale, same 34-byte block layout as Q8. |
-| `q8` + `GUFO_KV_V4=1` | supported, opt-in | 8-bit keys, 4-bit values in an 18-byte block: 23.5% smaller KV, mean KL 0.027 vs `q8`. See [docs/KV-V4.md](docs/KV-V4.md). |
+| `q8` | supported | Blocked 8-bit with a per-32 f16 scale (34 bytes per 32 elements). |
+| `fp8` | supported | Software E4M3 with a per-32 f16 scale, same 34-byte block layout as `q8`. |
+| `q8` + `GUFO_KV_V4=1` | opt-in, K8V4 | 4-bit values packed into 18 bytes, 8-bit keys. |
+| `q8` + `GUFO_KV_Q4=1` | opt-in, K4V8 | 4-bit keys packed into 18 bytes, 8-bit values. |
+| `q8` + both | opt-in, K4V4 | 4-bit keys and values. |
 
-**Recommendation: use `--kv-quant fp8`.** It is bit-exact at the codec level and
-matches or slightly beats `q8` end to end, at the same memory footprint as
-`q8` and half the footprint of `f16`.
+**Recommendation: `q8` or `fp8`.** Both blocked modes are bit-exact at the codec
+level and interchangeable in practice; `f16` stays the default and the
+reference. The 4-bit paths are opt-in environment hooks for machines where KV
+memory is the binding constraint. They are not `--kv-quant` formats, they do not
+change any default, and with the hooks unset the engine is byte-identical to a
+build that lacks them (verified by matching logit dump hashes). Full detail in
+[docs/KV-V4.md](docs/KV-V4.md).
 
-What was measured, against the CPU f16 reference:
+### Correctness first
+
+Bytes per position, and the total for one session at `-c 262144` across the 12
+attention layers of Qwen3.8 Flash-Next:
+
+| Mode | Bytes per position | One session at 262144 |
+| --- | --- | --- |
+| `f16` | 2048 | 6.44 GB |
+| `q8` / `fp8` | 1088 | 3.42 GB |
+| K8V4 / K4V8 | 832 | 2.62 GB |
+| K4V4 | 576 | 1.81 GB |
+
+Accuracy against `q8`, three unrelated 400-token contexts, 98 matched-token
+decode steps each, averaged over the three contexts:
+
+| Mode | Decode KL | Decode max KL | Greedy argmax agreement |
+| --- | --- | --- | --- |
+| K4V8 | 0.0214 | 0.258 | 90.5% |
+| K8V4 | 0.0209 | 0.120 | 93.2% |
+| K4V4 | 0.0335 | 0.411 | 89.8% |
+
+What that table means before enabling anything narrower than `q8`:
+
+- **K4V8 and K8V4 occupy identical memory.** Keys are 512 elements, so 4-bit
+  keys plus 8-bit values and 8-bit keys plus 4-bit values both land on 832
+  bytes. Moving precision from one axis to the other buys nothing and costs
+  about 2.7 points of greedy agreement, so K4V8 has no use.
+- **Only K4V4 reduces the footprint**, and it costs 60% more decode KL plus a
+  3.4x larger tail: roughly one greedy decision in ten changes. That is a
+  deliberate memory trade, not a free win.
+- **Never gate KV precision on a short prefill probe.** On a 33-token prompt
+  K4V4 measured the same mean KL as K8V4 (0.0274). Per-position errors from the
+  two axes are nearly uncorrelated and partially cancel when both are
+  quantized, so a small sample hides the damage. Only multi-context,
+  decode-phase numbers rank these modes correctly.
+- The 4-bit block is the GGML `q4_0` layout (16 packed nibbles plus an f16
+  scale) and per-axis precision selection already exists upstream as
+  `--cache-type-k` / `--cache-type-v`. What is specific to this engine is that
+  both are carried through the blocked kernels, the mixed-batch path and the
+  snapshot identity, and that the cost is measured rather than assumed.
+
+What was measured for `fp8`, against the CPU f16 reference:
 
 - The E4M3 encoder reproduces all 21 OCP format-table entries (including
   boundaries and subnormals) and every representable code round-trips exactly.
@@ -84,10 +134,11 @@ What was measured, against the CPU f16 reference:
   outlier-heavy data, which is the distribution that dominates post-RoPE keys.
   That is why the end-to-end result tracks `q8` rather than trailing it.
 
-Caveat, stated plainly: both blocked modes (`q8` and `fp8`) diverge from `f16`
-under greedy decoding more than a pure numerical-error argument would suggest.
-This is a property of the existing blocked-KV design, not something FP8
-introduced, and it is tracked separately.
+Caveat, stated plainly: the blocked modes diverge from `f16` under greedy
+decoding more than a pure numerical-error argument would suggest. This is a
+property of the existing blocked-KV design, not something FP8 or the 4-bit
+blocks introduced, and it is tracked separately. Stacking 4-bit blocks on top
+of it widens that gap rather than compounding gracefully.
 
 ## Quickstart
 
