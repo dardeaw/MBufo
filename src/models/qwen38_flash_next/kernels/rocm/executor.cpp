@@ -2628,10 +2628,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     // cache, Q8 into blocked INT8 rows. FP8 has no fused variant yet, and the
     // 4-bit value layout needs the per-block packing of PrepareAttentionKv, so
     // both take the Dense + PrepareAttentionKv route instead.
+    const bool q8_fused_ok =
+        options_.kv_format != rocm::KvFormat::kQ8 || n_tokens >= 1024;
     const bool fused_projection =
         options_.kv_format != rocm::KvFormat::kFp8 &&
         !KvValueIs4Bit(options_.kv_format) && !projections_ready &&
-        WidePrefill(n_tokens) && n_tokens <= options_.max_batch &&
+        q8_fused_ok && WidePrefill(n_tokens) &&
+        n_tokens <= options_.max_batch &&
         DenseF16Route(l.attn_qkv, n_tokens) && l.attn_qkv.rows == 13312 &&
         l.attn_qkv.cols == 2560 && c.num_heads == 24 && c.num_kv_heads == 2 &&
         c.head_dim == 256 && c.rotary_dim == 64;
