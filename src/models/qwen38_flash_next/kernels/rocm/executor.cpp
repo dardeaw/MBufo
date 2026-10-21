@@ -115,6 +115,7 @@ bool UnpaddedQ8(std::uint32_t k) {
 
 /// Key-tile splits per row of a narrow attention batch (decode at depth).
 constexpr std::uint32_t kAttnSplits = 8;
+constexpr std::uint32_t kAttnTile = 256;
 /// Wide dense Q8_0 projections take the F16 WMMA GEMM (F16 activation
 /// rows, weights dequantized as they are staged, no per-block scaling) when
 /// its 256-row tiles fill the device and the K sweep is short enough that
@@ -2899,6 +2900,10 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // Narrow batches split each row's key tiles over kAttnSplits blocks so a
   // decode step at depth fills the device.
   const bool split = !MatrixRows(n_tokens);
+  const std::uint32_t use_splits =
+      split ? std::max<std::uint32_t>(1, std::min(kAttnSplits,
+                  (start_pos + n_tokens + kAttnTile - 1) / kAttnTile))
+            : kAttnSplits;
   if (KvBlocked(options_.kv_format)) {
     // Wide batches used to ride the tensor cores via transient F16 staging.
     // The staging route is gated behind GUFO_KV_WMMA until its prefill numerics
@@ -2909,7 +2914,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     const bool wmma = wmma_enabled && !split && wmma_kv(0, n_tokens, last_only);
     if (!wmma) {
       rocm::AttentionKv(s_.q, s.k_cache_kv, s.v_cache_kv, mask, mask_words_,
-                        s_.ctx, split ? s_.attn_partials : nullptr, kAttnSplits,
+                        s_.ctx, split ? s_.attn_partials : nullptr, use_splits,
                         n_tokens, pos, c.num_heads, c.num_kv_heads, c.head_dim,
                         c.compress_ratio,
                         KvKeyBlockBytes(options_.kv_format),
@@ -2919,7 +2924,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   } else {
     rocm::Attention(
         s_.q, s.k_cache, s.v_cache, mask, mask_words_, s_.ctx,
-        split ? s_.attn_partials : nullptr, kAttnSplits, n_tokens, pos,
+        split ? s_.attn_partials : nullptr, use_splits, n_tokens, pos,
         c.num_heads, c.num_kv_heads, c.head_dim, c.compress_ratio, stream_,
         split ? s_.attn_lists : nullptr, split ? s_.attn_counts : nullptr,
         c.compress_ratio > 0 ? c.indexer_top_k / c.compress_ratio : 0);
