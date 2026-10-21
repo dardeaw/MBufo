@@ -162,7 +162,7 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    "Speculative", &opt.mtp_model_path);
   parser.AddCustomOption(
       "-d", "--draft-tokens", "N",
-      "Maximum speculative draft tokens evaluated per step (default: 7)",
+      "Maximum speculative draft tokens evaluated per step (default: 5)",
       "Speculative",
       [&opt](std::string_view, std::string_view value,
              std::string* error) -> bool {
