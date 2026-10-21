@@ -282,6 +282,10 @@ std::size_t Session::AllocatedBytes() const noexcept {
   return session_->AllocatedBytes();
 }
 
+NgramTotals Session::NgramRowTotals() const noexcept {
+  return session_->NgramRowTotals();
+}
+
 bool Session::MtpEnabled() const noexcept {
   return session_->mtp_enabled();
 }
@@ -848,6 +852,7 @@ struct Session::PendingDecode {
   /// Identical copy budget in isolated and batched execution; zero on the
   /// request's first speculative step.
   std::size_t lookup_cap{0};
+  std::uint32_t policy_concurrency{0};
 };
 
 void Session::AppendDraft(PendingDecode& pending) {
@@ -909,7 +914,8 @@ bool Session::AppendLookup(PendingDecode& pending, bool stop_at_eos,
 bool Session::PrepareDecode(const DecodeRequest& request,
                             PendingDecode* pending, std::string* error_msg,
                             bool defer_head,
-                            std::optional<std::uint32_t> batch_drafts) {
+                            std::optional<std::uint32_t> batch_drafts,
+                            std::uint32_t occupancy) {
   const auto max_tokens = request.max_tokens;
   auto& sampler = *request.sampler;
   auto* result = request.result;
@@ -929,23 +935,30 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   const std::size_t cap =
       std::min<std::size_t>({max_tokens, room, exec.max_speculative()});
   const auto concurrency = model_->DecodeConcurrency();
-  // C1 sampled requests use the subset, including penalties and constraints;
-  // verification corrects their proposals against the full target distribution.
-  // Greedy penalties/constraints retain the full head. Unplanned multi-session
-  // requests also retain it so changed proposal chains cannot delay peers.
-  // Every request keeps the established length controller and AR backoff.
+  // Head eligibility is MtpDraftSubsetAllowed. Sampled cohorts are never
+  // jointly planned (DecodeBatchImpl), so a sampled request decides the same
+  // way alone and in any batch. Every request keeps the established length
+  // controller and AR backoff.
   const bool unmodified = !sampler.config().uses_random_sampling() &&
                           !sampler.config().penalties_enabled() &&
                           !sampler.config().constraint;
   const bool allow_subset =
-      (unmodified && (concurrency == 1 || batch_drafts.has_value())) ||
-      (concurrency == 1 && sampler.config().uses_random_sampling());
+      MtpDraftSubsetAllowed(sampler.config().uses_random_sampling(), unmodified,
+                            concurrency, batch_drafts.has_value());
+  // Unplanned greedy cycles are priced at the requests decoding now. Sampled
+  // ones keep the configured concurrency so a seeded request replays the same
+  // widths, and a planned batch keeps the row its plan used.
+  pending->policy_concurrency =
+      sampler.config().uses_random_sampling() || batch_drafts.has_value()
+          ? 0
+          : occupancy;
   const std::size_t width =
       MtpEnabled() && cap > 1
           ? 1 + (batch_drafts ? std::min<std::uint32_t>(*batch_drafts, cap - 1)
                               : draft_length_.Choose(
                                     static_cast<std::uint32_t>(cap - 1),
-                                    static_cast<std::uint32_t>(tokens_.size())))
+                                    static_cast<std::uint32_t>(tokens_.size()),
+                                    pending->policy_concurrency))
           : cap;
   if (width == 0) {
     result->stop = true;
@@ -1175,7 +1188,8 @@ bool Session::FinishDecode(const DecodeRequest& request,
   // A target stop ends the request; it does not classify the remaining
   // proposals as failed predictions.
   draft_length_.Observe(observed,
-                        result->stop || mtp_all ? observed : mtp_drafts, base);
+                        result->stop || mtp_all ? observed : mtp_drafts, base,
+                        pending.policy_concurrency);
 
   // The next call knows the next sampled anchor. Defer draft catch-up until
   // then, retaining this session's target hidden rows across interleaving.
@@ -1190,7 +1204,8 @@ bool Session::FinishDecode(const DecodeRequest& request,
 
 bool Session::DecodeStep(std::size_t max_tokens,
                          sampling::SamplerState& sampler, DecodeResult* result,
-                         std::string* error_msg, bool stop_at_eos) {
+                         std::string* error_msg, bool stop_at_eos,
+                         std::uint32_t occupancy) {
   if (continuation_hooks_)
     continuation_hooks_->BeforeExecution();
   if (!valid_) {
@@ -1201,7 +1216,8 @@ bool Session::DecodeStep(std::size_t max_tokens,
   valid_ = false;
   const DecodeRequest request{this, max_tokens, &sampler, result, stop_at_eos};
   PendingDecode pending;
-  if (!PrepareDecode(request, &pending, error_msg)) {
+  if (!PrepareDecode(request, &pending, error_msg, false, std::nullopt,
+                     occupancy)) {
     return false;
   }
   if (pending.chain.empty()) {
@@ -1391,8 +1407,9 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
   for (std::size_t i = 0; i < requests.size(); ++i) {
     const auto& r = requests[i];
     try {
-      if (!r.session->PrepareDecode(r, &pending[i], &r.outcome->error, true,
-                                    batch_drafts))
+      if (!r.session->PrepareDecode(
+              r, &pending[i], &r.outcome->error, true, batch_drafts,
+              static_cast<std::uint32_t>(requests.size())))
         pending[i] = {};
     } catch (const std::exception& exception) {
       r.outcome->error = exception.what();

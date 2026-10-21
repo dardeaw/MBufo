@@ -3,6 +3,53 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+Qwen 27B deep-history recovery uses separate, explicitly selected workloads:
+
+```sh
+python3 tests/functional/deep_peers_qwen.py \
+  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --mode ar --source-revision BUILD_SHA --expect-component --out /tmp/qwen-deep
+python3 tests/functional/over_ram_qwen.py \
+  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --mode dflash2 --draft /path/to/dflash2.gguf \
+  --source-revision BUILD_SHA --expect-component --out /tmp/qwen-over-ram
+```
+
+Each starts its own loopback server, retains responses, loaded mode, actual draft
+counts and process/host memory samples, and removes only its owned disk cache
+after retaining an inventory. Use a new output directory for every invocation.
+The deep workload verifies 140K+ tokens, observes a published checkpoint before
+SIGKILL, checks newest compatible checkpoint selection after restarts and peers,
+and compares recovery with `cache_prompt: false` at temperature zero. The over-RAM
+workload verifies a completed cancellation frontier survives short peers and
+requires a rewritten final message to wait for successful deeper publication.
+That edited fork must select the observed published frontier; it cannot require
+a previous live boundary that has no restorable checkpoint.
+It fails if that publication race was not exercised. These are correctness
+workloads outside hosted model CI; retained phase times do not qualify speed.
+CPU evidence-refusal checks run with
+`python3 -m unittest discover -s tests/functional -p test_qwen_recovery.py`;
+they do not establish model correctness.
+
+Qwen 27B cancellation inside a prefill pass has a focused latency regression
+check. It disconnects both a cold prompt and a partially completed prompt,
+serves a short cached peer, then verifies retained work and resumed output:
+
+```sh
+nix develop -c python3 tests/functional/qwen_prefill_cancel.py \
+  --output /tmp/qwen-prefill-cancel -- \
+  /path/to/production/gufo serve llm --model /path/to/qwen27b.gguf \
+  --speculative dflash2 --dflash-model /path/to/draft.gguf
+```
+
+Use `--speculative off` for AR. The test owns its loopback server, records each
+request's phase timings and rejects a multi-second prefill blocking the short
+peer. Apply the usual matched 5% and 3 ms timing gates to its retained results.
+Add `--deep-peers` before `--` and serve with `--sessions 4` to fill the other
+slots with duplicate deep conversations. This checks that a short request
+after cancellation can reuse a redundant slot while another live copy retains
+the generated frontier. It also rejects the roughly 280 ms restore stall.
+
 Flash-Next prompt lookup has a focused MTP runner. It requires actual accepted
 copies, compares isolated and C2/C4/C6/C8 requests under greedy and the model's
 default sampling, mixes greedy copies with new text at C8, and checks stops
@@ -57,7 +104,10 @@ nix develop -c python3 tests/functional/cache_startup.py \
 ```
 
 Run again with `--speculative off` for AR. `--case ram` or `--case disk` selects
-only that lifecycle. Commands, startup times, request timings, responses and logs
+only that lifecycle. For Qwen 27B, add `--model-kind qwen27b` before `--`,
+use its target weights, and select `--speculative off` or
+`--speculative dflash2 --dflash-model /path/to/draft.gguf` in the server command.
+Commands, startup times, request timings, responses and logs
 remain in the output directory. This check stays outside hosted model CI.
 
 The cluster workflow uses [impact.json](impact.json) to select suites from changed
@@ -74,9 +124,20 @@ priority rules contribute a union. Unknown paths expand to all compatible
 coverage. Suite metadata must cover every name in `run.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
+`--tier pr` plans the per-PR set. Suites marked `"tier": "release"` (the deep
+cache histories, `cache-stalls`, `long-context` and `reasoning-budget`) then move
+to `release_only` unless a changed path matches their `escalate` patterns: cache
+code, the suite's own module, or Flash-Next model code for depth checks. `run.py
+--tier pr` also trims transport matrices that a case does not depend on:
+`tool-reasoning` keeps the streamed mode, whose partial parses end in the same
+final parse a buffered reply uses, and `tool-native-schemas` rotates endpoint,
+stream and tool choice across cases. `--tier full` (the default for manual runs)
+keeps every suite and combination.
+
 `Devlab functional checks` runs on every push to a non-draft PR, like `CI`
 (`pull_request`), and fork PRs follow the same repository approval policy; a
-newer push cancels the PR's earlier run. Maintain/Admin users can also dispatch
+newer push cancels the PR's earlier run. PRs run the `pr` tier; release-please
+PRs and dispatches (unless they choose `tier: pr`) run `full`. Maintain/Admin users can also dispatch
 it with a PR number. It pins
 the event's PR head and merge base on `main`, plans on a hosted runner,
 and allocates the cluster only for affected Flash-Next MTP coverage (or an
@@ -84,13 +145,18 @@ explicit benchmark request). AR suites run only when a dispatch sets `ar`, which
 plans with `--model flash-next-q4`; the default is `--model flash-next-q4/mtp`.
 `--model` accepts a model or a single `model/mode` profile. The workflow, harness
 and production binary all come from the PR, as in `CI`.
-It fetches the pinned Q4 shards, MTP sidecar and vision projector into a persistent
+While it builds, it fetches the pinned Q4 shards, MTP sidecar and vision projector
+in the background into a persistent
 cache under `$GUFO_CI_CACHE` (default `$RUNNER_TOOL_CACHE/gufo`; the weights need
 about 110 GiB free), and retains reports and selection reasons as artifacts.
 Weight and `ccache` reuse depend on the cluster preserving that directory on the
-allocated machine. A benchmark request also builds the merge base and runs the
-same AR sweep on it first, so the report shows per-depth deltas; one sweep per
-revision is an observation, not a qualified timing regression.
+allocated machine. The job also builds the merge base. After the suites,
+`phases.py` alternates base and PR servers (two arms each, after GPU cool-down)
+through startup and a cold, long and follow-up MTP request, and the comment draws
+each phase as a Mermaid pipeline colored by its paired verdict: a phase is slower
+or faster only when every repeat moves by more than 5% and 3 ms. A benchmark
+request also runs the same AR sweep on the merge base first, so the report shows
+per-depth deltas. Both are observations, not qualified timing regressions.
 
 The cluster installs the client from `requirements.txt`, pinned to the flake's
 versions, because newer unpinned SDKs break every suite inside the client. Keep it
@@ -99,9 +165,14 @@ to catch gaps.
 
 A hosted `report` job then renders results, failure log tails and benchmark
 deltas into the run summary. For branches in this repository and dispatches it
-also updates a single PR comment and sets the `devlab/functional` commit status;
-a fork PR's token is read-only, so its result stays in the job checks. The check
-is advisory: it is not required, so a broken cluster never blocks merging. Suite
+also updates a single PR comment and sets the `devlab/functional` commit status.
+A fork PR's token is read-only, so the job uploads the rendered report and
+`devlab-comment.yml` publishes it from a `workflow_run` in the base repository,
+without checking out PR code. While any PR run is in progress, the same
+workflow keeps a placeholder in that comment with a link to cancel the run.
+It only runs from `main`. The check
+is advisory on PRs, so a broken cluster never blocks an ordinary merge; the
+automatic release merge requires it (see [releasing](../../docs/RELEASING.md)). Suite
 failures report `failure`; cluster or harness problems (authorization, build,
 download, cancellation) report `error`. The PR write token stays on the hosted
 runner.
@@ -191,6 +262,12 @@ Each invocation tests **one model and one mode**. Model-specific changes need
 only the affected target/modes. For shared text changes, run the affected suites
 once per row/mode below; no full benchmark sweep is needed.
 
+For correctness capture of slow cold prompts, `--request-timeout SECONDS` sets
+the SDK deadline (default 120); `--suite-timeout SECONDS` separately bounds the
+whole suite (default 900). The request deadline is retained in both reports and
+must match for baseline comparison. Longer deadlines do not change assertions
+or timing margins; retain the original timeout failure when investigating it.
+
 | Target | `--speculative` modes | Sidecar option |
 | --- | --- | --- |
 | Qwen27B Q4_K_XL | `off`, `dflash2` | `--dflash-model` |
@@ -247,7 +324,7 @@ RAM, disk and restart settings once their contracts pass.
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops (including inside quoted calls), image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
 | `sampling-defaults`, `sampling-ranges` | CLI/request overrides, partial/null settings and range validation |
-| `batch` | Independent requests across Chat, Responses and Completions; sessions 1–8 |
+| `batch` | Independent requests across Chat, Responses and Completions; batched short greedy replies match serial ones; sessions 1–8 |
 | `progress` | Opt-in progress on all text endpoints; output/sampling equality, limits, stops, images, batching and cancel/resume |
 | `stream-start` | Plain streams on all text endpoints send headers before a cold prefill completes; a stream queued behind every session sends them after the five-second bound |
 | `prefill-scheduling` | Short arrival during a cold prefill: work-aligned arrival, independent per-request timings, unchanged output and no repeated prefill. Requires sessions ≥2 and context ≥16384; not in `all` |
@@ -552,10 +629,14 @@ HTTP requests/responses and timings. It removes its own cache after each case.
 Use `--case bound --expect cap` only for a matched pre-fix main timing control;
 candidate correctness uses the default `bounded` expectation. The bound case
 schedules release after 130 seconds and releases earlier if the waiter finishes;
-the child-only helper has a longer safety timeout. The publication case waits
-for the scheduler's actual park before starting its 250 ms release timer, then
-checks the matching request/checkpoint release before its deadline and a disk
-restore. These checks stay outside hosted CI and the routine API suites.
+the child-only helper has a longer safety timeout. The bound waiter re-prefills
+from the deepest checkpoint it can restore. When RAM is tight, that can be a
+shallow seed on disk, so the waiter must match the cold answer and reasoning
+mode, not the full reasoning text. The retry must still match cold exactly. The
+publication case waits for the scheduler's actual park before starting its
+250 ms release timer, then checks the matching request/checkpoint release before
+its deadline and a disk restore. These checks stay outside hosted CI and the
+routine API suites.
 
 Unchanged retries must reproduce the complete output with zero prefill. After a
 restart, disk restores may re-prefill less than one 2048-token disk step;
