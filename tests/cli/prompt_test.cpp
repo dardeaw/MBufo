@@ -20,7 +20,7 @@ void TestDefaultOptions() {
   assert(opt->reasoning_effort == "auto");
   assert(opt->preserve_thinking == "auto");
   assert(!opt->verbose);
-  assert(opt->draft_tokens == 7);
+  assert(opt->draft_tokens == 5);
   assert(opt->min_draft_tokens == 1);
 }
 

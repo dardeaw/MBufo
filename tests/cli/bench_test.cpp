@@ -25,7 +25,7 @@ void TestDefaultOptions() {
   Expect(options->n_depths == std::vector<std::size_t>{0},
          "default depth is zero");
   Expect(options->repetitions == 1, "default is one repetition");
-  Expect(options->draft_tokens == 7, "default draft ceiling is seven");
+  Expect(options->draft_tokens == 5, "default draft ceiling is five");
   Expect(options->min_draft_tokens == 1, "default minimum draft is one");
   Expect(options->sampling.temperature == 0.0F && options->sampling.seed == 0,
          "benchmark sampling defaults remain greedy");

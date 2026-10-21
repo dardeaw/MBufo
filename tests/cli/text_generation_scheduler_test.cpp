@@ -1077,6 +1077,7 @@ void TestRequestTotalsDoNotNeedAConsumer() {
 void TestMultiTokenRunnerCanSwitchToBatchedExecution() {
   auto control = std::make_shared<FakeControl>();
   control->multi_token_decode = true;
+  control->batched_multi_token_decode = true;
   control->prefix_reuse = false;
   control->supports_batched_advance = true;
   control->block_prefill_label = 1;
