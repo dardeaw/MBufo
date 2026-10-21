@@ -468,9 +468,10 @@ public:
   /// backends that fuse the batch override it. Plain advances only.
   [[nodiscard]] virtual bool AdvanceBatchWithPrefillChunk(
       std::span<const TextRunnerAdvance> advances,
-      std::span<std::exception_ptr> advance_failures, TextRunnerState& prefill_state,
-      std::span<const TextRunnerToken> prompt, std::size_t offset,
-      std::size_t max_input_tokens, TextPrefillStep& chunk_step) const {
+      std::span<std::exception_ptr> advance_failures,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens,
+      TextPrefillStep& chunk_step) const {
     (void)advances;
     (void)advance_failures;
     (void)prefill_state;

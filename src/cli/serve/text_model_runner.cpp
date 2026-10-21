@@ -1723,8 +1723,8 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
   bool merged = false;
   try {
     merged = impl_->runner->AdvanceBatchWithPrefillChunk(
-        advances, coworker_failures, state, impl_->prompt, impl_->prefill_offset,
-        max_input_tokens, step);
+        advances, coworker_failures, state, impl_->prompt,
+        impl_->prefill_offset, max_input_tokens, step);
   } catch (const MixedBatchRefused&) {
     return std::nullopt;
   }
@@ -1750,7 +1750,6 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
   impl_->state_reusable = true;
   return step;
 }
-
 
 TextDecodeSelection TextRunnerPool::Request::SelectNext() {
   if (!*this) {

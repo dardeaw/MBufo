@@ -1351,8 +1351,7 @@ struct TextGenerationScheduler::Impl {
       const double step_ms =
           std::chrono::duration<double, std::milli>(Clock::now() - start)
               .count();
-      FinishPrefillStep(request, step, step_ms, decoder_runnable,
-                        peer_waiting);
+      FinishPrefillStep(request, step, step_ms, decoder_runnable, peer_waiting);
     } catch (...) {
       const auto failure = std::current_exception();
       if (!CompleteIfStopped(request)) {
@@ -2003,7 +2002,8 @@ struct TextGenerationScheduler::Impl {
         bounded_prefill ? prefill_policy.decode_active_tokens
                         : prefill_req->runner_request.prompt_tokens();
     if ((runner_pool->capacity() > 1) && !incremental_prefill_supported) {
-      prefill_req->result.prefill_fallback_reason = "incremental_prefill_unavailable";
+      prefill_req->result.prefill_fallback_reason =
+          "incremental_prefill_unavailable";
     }
     const auto start = Clock::now();
     std::optional<TextPrefillStep> step;

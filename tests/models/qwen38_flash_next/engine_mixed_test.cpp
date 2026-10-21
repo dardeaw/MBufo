@@ -46,7 +46,9 @@ int main(int argc, char** argv) {
     }
   }
   if (model_path.empty()) {
-    std::fprintf(stderr, "usage: engine_mixed_test --model M [--mtp-model MTP] [--chunk N]\n");
+    std::fprintf(
+        stderr,
+        "usage: engine_mixed_test --model M [--mtp-model MTP] [--chunk N]\n");
     return 2;
   }
   qfn::ModelOptions options;
@@ -59,8 +61,9 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "load failed: %s\n", error.c_str());
     return 1;
   }
-  const auto mode = !mtp_path.empty() ? gufo::core::SessionMode::kSpeculative
-                                      : gufo::core::SessionMode::kAutoregressive;
+  const auto mode = !mtp_path.empty()
+                        ? gufo::core::SessionMode::kSpeculative
+                        : gufo::core::SessionMode::kAutoregressive;
   auto make = [&](const char* what) {
     auto s = model->CreateSession(mode, 2048, &error);
     if (!s)
@@ -103,7 +106,7 @@ int main(int argc, char** argv) {
   // Test: one merged call.
   qfn::Session::BatchOutcome o0, o1;
   std::vector<qfn::Session::AdvanceRequest> adv = {{d0.get(), tok, &o0},
-                                                  {d1.get(), tok, &o1}};
+                                                   {d1.get(), tok, &o1}};
   const auto bt0 = std::chrono::steady_clock::now();
   if (!qfn::Session::EvaluateBatchWithChunk(adv, sc.get(), chunk, &error))
     throw std::runtime_error("EvaluateBatchWithChunk failed: " + error);
@@ -112,7 +115,8 @@ int main(int argc, char** argv) {
     throw std::runtime_error("advance outcomes incomplete");
   // Exact bookkeeping checks.
   if (sc->Tokens().size() != rc->Tokens().size() ||
-      !std::equal(sc->Tokens().begin(), sc->Tokens().end(), rc->Tokens().begin()))
+      !std::equal(sc->Tokens().begin(), sc->Tokens().end(),
+                  rc->Tokens().begin()))
     throw std::runtime_error("chunk tokens diverge from legacy Sync");
   if (sc->Position() != rc->Position())
     throw std::runtime_error("chunk position diverges from legacy Sync");
@@ -139,7 +143,7 @@ int main(int argc, char** argv) {
   // Second chunk: exercises the DraftCatchUp protocol on MTP sessions.
   {
     std::vector<qfn::Session::AdvanceRequest> adv2 = {{d0.get(), tok, &o0},
-                                                     {d1.get(), tok, &o1}};
+                                                      {d1.get(), tok, &o1}};
     o0 = {};
     o1 = {};
     std::vector<std::int32_t> full2(rc->Tokens().begin(), rc->Tokens().end());
@@ -167,16 +171,15 @@ int main(int argc, char** argv) {
     std::int32_t t0 = tok, t1 = tok;
     for (int step = 0; step < 10; ++step) {
       std::vector<qfn::Session::AdvanceRequest> ad = {{d0.get(), t0, &o0},
-                                                     {d1.get(), t1, &o1}};
+                                                      {d1.get(), t1, &o1}};
       o0 = {};
       o1 = {};
       std::vector<std::int32_t> one(&t0, &t0 + 1);
       if (!qfn::Session::EvaluateBatchWithChunk(ad, sc.get(), one, &error))
         throw std::runtime_error("teacher batch failed: " + error);
       if (!o0.completed || !o1.completed)
-        throw std::runtime_error(
-            std::string("teacher advance incomplete: ") + o0.error + " / " +
-            o1.error);
+        throw std::runtime_error(std::string("teacher advance incomplete: ") +
+                                 o0.error + " / " + o1.error);
       auto argmax = [&](const std::vector<float>& v) {
         std::uint32_t b = 0;
         for (std::uint32_t i = 1; i < v.size(); ++i)
@@ -204,10 +207,10 @@ int main(int argc, char** argv) {
   // big-batch MoE (vec vs WMMA) preserves confident argmaxes under identical
   // histories. Chunk token pool must cover 5*64 rows past position 128.
   {
-    const auto sharpA =
-        model->Tokenize("What is 17 times 23? Reply with the number only. 391.");
-    const auto sharpB =
-        model->Tokenize("What is 19 times 21? Reply with the number only. 399.");
+    const auto sharpA = model->Tokenize(
+        "What is 17 times 23? Reply with the number only. 391.");
+    const auto sharpB = model->Tokenize(
+        "What is 19 times 21? Reply with the number only. 399.");
     auto qd0 = make("qd0");
     auto qd1 = make("qd1");
     auto qr0 = make("qr0");
@@ -238,7 +241,7 @@ int main(int argc, char** argv) {
       koff += chunk_rows;
       qfn::Session::BatchOutcome q0, q1;
       std::vector<qfn::Session::AdvanceRequest> ad = {{qd0.get(), u0, &q0},
-                                                     {qd1.get(), u1, &q1}};
+                                                      {qd1.get(), u1, &q1}};
       if (!qfn::Session::EvaluateBatchWithChunk(ad, sc.get(), kchunk, &error))
         throw std::runtime_error("sharp batch failed: " + error);
       if (!q0.completed || !q1.completed)

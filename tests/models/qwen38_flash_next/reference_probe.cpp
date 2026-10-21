@@ -181,12 +181,11 @@ int main(int argc, char** argv) {
     dump.open(dump_path, std::ios::binary);
   }
 
-  q::ReferenceModel model(
-      *weights, ngram.get(),
-      static_cast<std::uint32_t>(tokens.size()) + generate,
-      kv_q8p16 ? q::ReferenceModel::Storage::kQ8p16
-      : kv_q8  ? q::ReferenceModel::Storage::kQ8
-               : q::ReferenceModel::Storage::kFloat32);
+  q::ReferenceModel model(*weights, ngram.get(),
+                          static_cast<std::uint32_t>(tokens.size()) + generate,
+                          kv_q8p16 ? q::ReferenceModel::Storage::kQ8p16
+                          : kv_q8  ? q::ReferenceModel::Storage::kQ8
+                                   : q::ReferenceModel::Storage::kFloat32);
   std::vector<float> logits(c.vocab_size);
   const std::size_t total = tokens.size() + static_cast<std::size_t>(generate);
   for (std::size_t i = 0; i < total; ++i) {

@@ -209,7 +209,8 @@ public:
 /// smaller cache. `GUFO_KV_V4` packs values on a 4-bit grid (range 7); it is a
 /// study hook, off unless set, and only meaningful for the int8 codec.
 [[nodiscard]] bool KvValueIs4Bit(KvFormat format) {
-  if (format != KvFormat::kQ8) return false;
+  if (format != KvFormat::kQ8)
+    return false;
   const char* v4 = std::getenv("GUFO_KV_V4");
   return v4 != nullptr && *v4 != '\0' && *v4 != '0';
 }
@@ -217,7 +218,8 @@ public:
 /// Block scale numerator for key rows. `GUFO_KV_Q4` drops keys onto the same
 /// 4-bit grid values use, which is the K4V4 question; off unless set.
 [[nodiscard]] bool KvKeyIs4Bit(KvFormat format) {
-  if (format != KvFormat::kQ8) return false;
+  if (format != KvFormat::kQ8)
+    return false;
   const char* q4 = std::getenv("GUFO_KV_Q4");
   return q4 != nullptr && *q4 != '\0' && *q4 != '0';
 }
@@ -233,8 +235,7 @@ public:
 }
 
 [[nodiscard]] float KvValueRange(KvFormat format) {
-  return KvValueIs4Bit(format) ? 7.0F
-                               : KvCodecRange(KvCodecOf(format));
+  return KvValueIs4Bit(format) ? 7.0F : KvCodecRange(KvCodecOf(format));
 }
 
 /// Bytes of one 32-element value block: 18 when the 4-bit value grid is on
@@ -1337,11 +1338,11 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
         const std::size_t kv_value_row =
             KvBlockedRowBytes(kv_row, KvValueBlockBytes(s->kv_format_));
         at.k_cache_kv = Alloc<std::uint8_t>(
-            a, static_cast<std::size_t>(max_context) * kv_key_row,
-            error_msg, &s->allocated_bytes_);
+            a, static_cast<std::size_t>(max_context) * kv_key_row, error_msg,
+            &s->allocated_bytes_);
         at.v_cache_kv = Alloc<std::uint8_t>(
-            a, static_cast<std::size_t>(max_context) * kv_value_row,
-            error_msg, &s->allocated_bytes_);
+            a, static_cast<std::size_t>(max_context) * kv_value_row, error_msg,
+            &s->allocated_bytes_);
       } else {
         at.k_cache =
             Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
@@ -1377,8 +1378,8 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       const std::size_t mtp_kv_value_row =
           KvBlockedRowBytes(kv_row, KvValueBlockBytes(s->kv_format_));
       s->mtp_.k_cache_kv = Alloc<std::uint8_t>(
-          a, static_cast<std::size_t>(max_context) * mtp_kv_key_row,
-          error_msg, &s->allocated_bytes_);
+          a, static_cast<std::size_t>(max_context) * mtp_kv_key_row, error_msg,
+          &s->allocated_bytes_);
       s->mtp_.v_cache_kv = Alloc<std::uint8_t>(
           a, static_cast<std::size_t>(max_context) * mtp_kv_value_row,
           error_msg, &s->allocated_bytes_);
@@ -1554,8 +1555,8 @@ std::size_t Executor::SessionBytes(
       KvBlocked(options_.kv_format) ? 1 : sizeof(__half);
   // Blocked rows: 32 elements + fp16 scale. Keys use 34-byte blocks; values
   // use 18-byte blocks when the 4-bit value grid is active.
-  const std::size_t kv_key_row =
-      KvBlockedRowBytes(c.AttentionKvDim(), KvKeyBlockBytes(options_.kv_format));
+  const std::size_t kv_key_row = KvBlockedRowBytes(
+      c.AttentionKvDim(), KvKeyBlockBytes(options_.kv_format));
   const std::size_t kv_value_row = KvBlockedRowBytes(
       c.AttentionKvDim(), KvValueBlockBytes(options_.kv_format));
   const std::size_t kv =
@@ -2591,10 +2592,10 @@ bool Executor::EnsureKvStaging(Session& session, Session::AttentionState& s,
       const std::size_t bytes = std::size_t{need} * kv_row * sizeof(__half);
       void* host = std::malloc(2 * bytes);
       if (host != nullptr &&
-          hipMemcpy(host, session.kv_stage_k_, bytes,
-                    hipMemcpyDeviceToHost) == hipSuccess &&
-          hipMemcpy(static_cast<char*>(host) + bytes, session.kv_stage_v_, bytes,
-                    hipMemcpyDeviceToHost) == hipSuccess) {
+          hipMemcpy(host, session.kv_stage_k_, bytes, hipMemcpyDeviceToHost) ==
+              hipSuccess &&
+          hipMemcpy(static_cast<char*>(host) + bytes, session.kv_stage_v_,
+                    bytes, hipMemcpyDeviceToHost) == hipSuccess) {
         if (std::FILE* f = std::fopen(dump, "ab")) {
           const std::uint32_t header[3] = {need, kv_row, base};
           std::fwrite(header, sizeof(header), 1, f);
@@ -2634,10 +2635,10 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         options_.kv_format != rocm::KvFormat::kFp8 &&
         !KvValueIs4Bit(options_.kv_format) && !projections_ready &&
         q8_fused_ok && WidePrefill(n_tokens) &&
-        n_tokens <= options_.max_batch &&
-        DenseF16Route(l.attn_qkv, n_tokens) && l.attn_qkv.rows == 13312 &&
-        l.attn_qkv.cols == 2560 && c.num_heads == 24 && c.num_kv_heads == 2 &&
-        c.head_dim == 256 && c.rotary_dim == 64;
+        n_tokens <= options_.max_batch && DenseF16Route(l.attn_qkv, n_tokens) &&
+        l.attn_qkv.rows == 13312 && l.attn_qkv.cols == 2560 &&
+        c.num_heads == 24 && c.num_kv_heads == 2 && c.head_dim == 256 &&
+        c.rotary_dim == 64;
     if (fused_projection) {
       PrepareHalfInput(x, n_tokens, l.attn_qkv.cols);
       if (options_.kv_format == rocm::KvFormat::kQ8) {
@@ -2666,8 +2667,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         prepared = PrepareAttentionKv(
             s_.qg, l.attn_qkv.rows, l.attn_q_norm.f32(), l.attn_k_norm.f32(),
             s_.q, s_.attn_gate, s.k_cache_kv, s.v_cache_kv,
-            rocm::KvCodecOf(options_.kv_format),
-            KvKeyRange(options_.kv_format), KvValueRange(options_.kv_format),
+            rocm::KvCodecOf(options_.kv_format), KvKeyRange(options_.kv_format),
+            KvValueRange(options_.kv_format),
             KvKeyBlockBytes(options_.kv_format),
             KvValueBlockBytes(options_.kv_format), n_tokens, c.num_heads,
             c.num_kv_heads, c.head_dim, c.rotary_dim, pos, c.rope_theta,
@@ -2818,9 +2819,12 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         const std::uint32_t need = pos0 + rows;
         if (need == 0)
           return false;
-        const bool i8_kv = KvBlocked(options_.kv_format) && options_.kv_format == KvFormat::kQ8 && UseWmmaI8();
-        const std::uint32_t kbb = i8_kv ? KvKeyBlockBytes(options_.kv_format) : 0;
-        const std::uint32_t vbb = i8_kv ? KvValueBlockBytes(options_.kv_format) : 0;
+        const bool i8_kv = KvBlocked(options_.kv_format) &&
+                           options_.kv_format == KvFormat::kQ8 && UseWmmaI8();
+        const std::uint32_t kbb =
+            i8_kv ? KvKeyBlockBytes(options_.kv_format) : 0;
+        const std::uint32_t vbb =
+            i8_kv ? KvValueBlockBytes(options_.kv_format) : 0;
         const __half* kk = nullptr;
         const __half* vv = nullptr;
         if (i8_kv) {
@@ -2842,21 +2846,21 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
               mask != nullptr && pos0 < c.indexer_top_k
                   ? std::min(rows, c.indexer_top_k - pos0)
                   : 0;
-          ok = (dense_rows == rows ||
-                WmmaCausalAttention(
-                    s_.q + at(dense_rows), s_.attn_gate + at(dense_rows),
-                    kk, vv,
-                    mask ? mask + std::size_t{first + dense_rows} * mask_words_
-                         : nullptr,
-                    mask_words_, s_.ctx + at(dense_rows), rows - dense_rows,
-                    pos0 + dense_rows, c.num_heads, c.num_kv_heads, c.head_dim,
-                    c.compress_ratio, stream_, last, kbb, vbb, i8_kv)) &&
-               (dense_rows == 0 || (last && dense_rows != rows) ||
-                WmmaCausalAttention(s_.q + at(0), s_.attn_gate + at(0), kk,
-                                    vv, nullptr, mask_words_,
-                                    s_.ctx + at(0), dense_rows, pos0,
-                                    c.num_heads, c.num_kv_heads, c.head_dim,
-                                    c.compress_ratio, stream_, last, kbb, vbb, i8_kv));
+          ok =
+              (dense_rows == rows ||
+               WmmaCausalAttention(
+                   s_.q + at(dense_rows), s_.attn_gate + at(dense_rows), kk, vv,
+                   mask ? mask + std::size_t{first + dense_rows} * mask_words_
+                        : nullptr,
+                   mask_words_, s_.ctx + at(dense_rows), rows - dense_rows,
+                   pos0 + dense_rows, c.num_heads, c.num_kv_heads, c.head_dim,
+                   c.compress_ratio, stream_, last, kbb, vbb, i8_kv)) &&
+              (dense_rows == 0 || (last && dense_rows != rows) ||
+               WmmaCausalAttention(s_.q + at(0), s_.attn_gate + at(0), kk, vv,
+                                   nullptr, mask_words_, s_.ctx + at(0),
+                                   dense_rows, pos0, c.num_heads,
+                                   c.num_kv_heads, c.head_dim, c.compress_ratio,
+                                   stream_, last, kbb, vbb, i8_kv));
         }
         return ok;
       };
@@ -2904,9 +2908,11 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // decode step at depth fills the device.
   const bool split = !MatrixRows(n_tokens);
   const std::uint32_t use_splits =
-      split ? std::max<std::uint32_t>(1, std::min(kAttnSplits,
-                  (start_pos + n_tokens + kAttnTile - 1) / kAttnTile))
-            : kAttnSplits;
+      split
+          ? std::max<std::uint32_t>(
+                1, std::min(kAttnSplits,
+                            (start_pos + n_tokens + kAttnTile - 1) / kAttnTile))
+          : kAttnSplits;
   if (KvBlocked(options_.kv_format)) {
     // Wide batches used to ride the tensor cores via transient F16 staging.
     // The staging route is gated behind GUFO_KV_WMMA until its prefill numerics
@@ -2919,8 +2925,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
       rocm::AttentionKv(s_.q, s.k_cache_kv, s.v_cache_kv, mask, mask_words_,
                         s_.ctx, split ? s_.attn_partials : nullptr, use_splits,
                         n_tokens, pos, c.num_heads, c.num_kv_heads, c.head_dim,
-                        c.compress_ratio,
-                        KvKeyBlockBytes(options_.kv_format),
+                        c.compress_ratio, KvKeyBlockBytes(options_.kv_format),
                         KvValueBlockBytes(options_.kv_format),
                         rocm::KvCodecOf(options_.kv_format), stream_);
     }

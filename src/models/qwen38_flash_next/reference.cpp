@@ -149,25 +149,30 @@ bool ReferenceModel::DumpAttentionState(const std::string& prefix,
     if (s.k.empty() && s.index_k.empty()) {
       continue;  // linear (gated DeltaNet) layer, no KV cache
     }
-    const std::size_t positions = head_stride == 0 ? 0 : s.k.size() / head_stride;
+    const std::size_t positions =
+        head_stride == 0 ? 0 : s.k.size() / head_stride;
     std::snprintf(name, sizeof(name), "layer%02zu_k.bin", il);
     if (!write(name, s.k)) {
-      if (error_msg != nullptr) *error_msg = std::string("cannot write ") + name;
+      if (error_msg != nullptr)
+        *error_msg = std::string("cannot write ") + name;
       return false;
     }
     std::snprintf(name, sizeof(name), "layer%02zu_v.bin", il);
     if (!write(name, s.v)) {
-      if (error_msg != nullptr) *error_msg = std::string("cannot write ") + name;
+      if (error_msg != nullptr)
+        *error_msg = std::string("cannot write ") + name;
       return false;
     }
     std::snprintf(name, sizeof(name), "layer%02zu_index_k.bin", il);
     if (!write(name, s.index_k)) {
-      if (error_msg != nullptr) *error_msg = std::string("cannot write ") + name;
+      if (error_msg != nullptr)
+        *error_msg = std::string("cannot write ") + name;
       return false;
     }
     std::snprintf(name, sizeof(name), "layer%02zu_block_k.bin", il);
     if (!write(name, s.block_k)) {
-      if (error_msg != nullptr) *error_msg = std::string("cannot write ") + name;
+      if (error_msg != nullptr)
+        *error_msg = std::string("cannot write ") + name;
       return false;
     }
     if (!first) {
@@ -179,7 +184,8 @@ bool ReferenceModel::DumpAttentionState(const std::string& prefix,
   }
   meta << "\n  ]\n}\n";
   if (!meta) {
-    if (error_msg != nullptr) *error_msg = "cannot write metadata";
+    if (error_msg != nullptr)
+      *error_msg = "cannot write metadata";
     return false;
   }
   return true;

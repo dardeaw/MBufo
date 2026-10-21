@@ -1238,8 +1238,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           const bool mx_ok = WmmaMixedAttention(
               base.q, base.attn_gate, batch_mixed_,
               static_cast<std::uint32_t>(items.size()), base.ctx, c.num_heads,
-              c.num_kv_heads, c.head_dim, c.compress_ratio,
-              mx_kbb, mx_vbb, stream_, i8_mixed);
+              c.num_kv_heads, c.head_dim, c.compress_ratio, mx_kbb, mx_vbb,
+              stream_, i8_mixed);
           fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d i8=%d\n", il,
                   rows, items.size(), (int)mx_ok, (int)i8_mixed);
           if (!mx_ok) {

@@ -3,11 +3,11 @@
 
 #include <algorithm>
 #include <cmath>
-#include <iomanip>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -773,12 +773,18 @@ double CompareMixed(std::uint32_t seed) {
   Upload(&d_kB, khB);
   Upload(&d_vB, vhB);
   std::vector<q::MixedBlk> blks(2);
-  blks[0] = {0, reinterpret_cast<std::uint64_t>(d_kA.get()),
-             reinterpret_cast<std::uint64_t>(d_vA.get()), kKvA,
-             kKvA - 1, 1};
-  blks[1] = {1, reinterpret_cast<std::uint64_t>(d_kB.get()),
-             reinterpret_cast<std::uint64_t>(d_vB.get()), kKvB,
-             kKvB - kChunk, kChunk};
+  blks[0] = {0,
+             reinterpret_cast<std::uint64_t>(d_kA.get()),
+             reinterpret_cast<std::uint64_t>(d_vA.get()),
+             kKvA,
+             kKvA - 1,
+             1};
+  blks[1] = {1,
+             reinterpret_cast<std::uint64_t>(d_kB.get()),
+             reinterpret_cast<std::uint64_t>(d_vB.get()),
+             kKvB,
+             kKvB - kChunk,
+             kChunk};
   Upload(&d_blks, blks);
   if (!q::WmmaMixedAttention(d_q.get(), d_gate.get(), d_blks.get(), 2,
                              d_out.get(), kHeads, kKvHeads, kDim, kRatio,
@@ -789,19 +795,18 @@ double CompareMixed(std::uint32_t seed) {
   const auto out = Download(&d_out, q_count);
   // Reference: row 0 is A's decode token (absolute query kKvA - 1 over A's
   // own cache); rows 1..4 are B's chunk (absolute queries kKvB - kChunk + r).
-  const auto refA = Fp64Attention(
-      std::vector<float>(qv.begin(), qv.begin() + kQWidth),
-      std::vector<float>(gate.begin(), gate.begin() + kQWidth), khA, vhA,
-      nullptr, 0, 1, kKvA - 1);
-  const auto refB = Fp64Attention(
-      std::vector<float>(qv.begin() + kQWidth, qv.end()),
-      std::vector<float>(gate.begin() + kQWidth, gate.end()), khB, vhB,
-      nullptr, 0, kChunk, kKvB - kChunk);
+  const auto refA =
+      Fp64Attention(std::vector<float>(qv.begin(), qv.begin() + kQWidth),
+                    std::vector<float>(gate.begin(), gate.begin() + kQWidth),
+                    khA, vhA, nullptr, 0, 1, kKvA - 1);
+  const auto refB =
+      Fp64Attention(std::vector<float>(qv.begin() + kQWidth, qv.end()),
+                    std::vector<float>(gate.begin() + kQWidth, gate.end()), khB,
+                    vhB, nullptr, 0, kChunk, kKvB - kChunk);
   double worst = 0.0;
   for (std::size_t i = 0; i < q_count; ++i) {
-    const double e = (i < static_cast<std::size_t>(kQWidth))
-                         ? refA[i]
-                         : refB[i - kQWidth];
+    const double e =
+        (i < static_cast<std::size_t>(kQWidth)) ? refA[i] : refB[i - kQWidth];
     worst = std::max(worst, std::abs(static_cast<double>(out[i]) - e));
   }
   std::cout << "  mixed attention worst absolute error " << worst << '\n';
@@ -841,8 +846,10 @@ double CompareMixedI8(std::uint32_t seed) {
       for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
         float m = 0.0F;
         for (std::uint32_t i = 0; i < 32; ++i) {
-          m = fmaxf(m, fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                                (b * 32) + i]));
+          m = fmaxf(
+              m,
+              fabsf(
+                  vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
         }
         const float d = m / 127.0F;
         const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
@@ -882,8 +889,10 @@ double CompareMixedI8(std::uint32_t seed) {
       for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
         float m = 0.0F;
         for (std::uint32_t i = 0; i < 32; ++i) {
-          m = fmaxf(m, fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) +
-                                (b * 32) + i]));
+          m = fmaxf(
+              m,
+              fabsf(
+                  kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
         }
         const float d = m / 127.0F;
         const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
@@ -919,12 +928,18 @@ double CompareMixedI8(std::uint32_t seed) {
   Upload(&d_vA, vbA);
   Upload(&d_vB, vbB);
   std::vector<q::MixedBlk> blks(2);
-  blks[0] = {0, reinterpret_cast<std::uint64_t>(d_kA.get()),
-             reinterpret_cast<std::uint64_t>(d_vA.get()), kKvA,
-             kKvA - 1, 1};
-  blks[1] = {1, reinterpret_cast<std::uint64_t>(d_kB.get()),
-             reinterpret_cast<std::uint64_t>(d_vB.get()), kKvB,
-             kKvB - kChunk, kChunk};
+  blks[0] = {0,
+             reinterpret_cast<std::uint64_t>(d_kA.get()),
+             reinterpret_cast<std::uint64_t>(d_vA.get()),
+             kKvA,
+             kKvA - 1,
+             1};
+  blks[1] = {1,
+             reinterpret_cast<std::uint64_t>(d_kB.get()),
+             reinterpret_cast<std::uint64_t>(d_vB.get()),
+             kKvB,
+             kKvB - kChunk,
+             kChunk};
   Upload(&d_blks, blks);
   if (!q::WmmaMixedAttention(d_q.get(), d_gate.get(), d_blks.get(), 2,
                              d_out.get(), kHeads, kKvHeads, kDim, kRatio,
@@ -933,14 +948,14 @@ double CompareMixedI8(std::uint32_t seed) {
   }
   CheckHip(hipDeviceSynchronize(), "mixed attention (i8) synchronization");
   const auto out = Download(&d_out, q_count);
-  const auto refA = Fp64Attention(
-      std::vector<float>(qv.begin(), qv.begin() + kQWidth),
-      std::vector<float>(gate.begin(), gate.begin() + kQWidth), khA, vhA,
-      nullptr, 0, 1, kKvA - 1);
-  const auto refB = Fp64Attention(
-      std::vector<float>(qv.begin() + kQWidth, qv.end()),
-      std::vector<float>(gate.begin() + kQWidth, gate.end()), khB, vhB,
-      nullptr, 0, kChunk, kKvB - kChunk);
+  const auto refA =
+      Fp64Attention(std::vector<float>(qv.begin(), qv.begin() + kQWidth),
+                    std::vector<float>(gate.begin(), gate.begin() + kQWidth),
+                    khA, vhA, nullptr, 0, 1, kKvA - 1);
+  const auto refB =
+      Fp64Attention(std::vector<float>(qv.begin() + kQWidth, qv.end()),
+                    std::vector<float>(gate.begin() + kQWidth, gate.end()), khB,
+                    vhB, nullptr, 0, kChunk, kKvB - kChunk);
   // Host simulation of the kernel's own per-32-dim Q quantization.
   auto qquant = [&](const std::vector<float>& qin) {
     std::vector<float> qout(qin.size());
@@ -955,8 +970,7 @@ double CompareMixedI8(std::uint32_t seed) {
         for (std::uint32_t i = 0; i < 32; ++i) {
           const float x = qin[r * kDim + b * 32 + i];
           qout[r * kDim + b * 32 + i] =
-              static_cast<float>(static_cast<std::int8_t>(roundf(x * id))) *
-              d;
+              static_cast<float>(static_cast<std::int8_t>(roundf(x * id))) * d;
         }
       }
     }
@@ -967,9 +981,9 @@ double CompareMixedI8(std::uint32_t seed) {
   const auto refAq = Fp64Attention(
       qA, std::vector<float>(gate.begin(), gate.begin() + kQWidth), khA, vhA,
       nullptr, 0, 1, kKvA - 1);
-  const auto refBq = Fp64Attention(
-      qB, std::vector<float>(gate.begin() + kQWidth, gate.end()), khB, vhB,
-      nullptr, 0, kChunk, kKvB - kChunk);
+  const auto refBq =
+      Fp64Attention(qB, std::vector<float>(gate.begin() + kQWidth, gate.end()),
+                    khB, vhB, nullptr, 0, kChunk, kKvB - kChunk);
   double worst = 0.0, worst_q = 0.0, worst_qq = 0.0;
   for (std::size_t i = 0; i < q_count; ++i) {
     const bool first = (i < static_cast<std::size_t>(kQWidth));
@@ -984,8 +998,6 @@ double CompareMixedI8(std::uint32_t seed) {
             << '\n';
   return worst;
 }
-
-
 
 double CompareMixedI8Deep(std::uint32_t seed) {
   // Production-fidelity: deep context decode + outlier spikes.
@@ -1008,9 +1020,12 @@ double CompareMixedI8Deep(std::uint32_t seed) {
   auto vfB = MakeValues(static_cast<std::size_t>(kKvB) * kKvWidth,
                         seed ^ 0xCCCCU, 1.0F);
   // Outlier spikes: every 97th Q element x13, every 131st V element x9.
-  for (std::size_t i = 0; i < q_count; i += 97) qv[i] *= 13.0F;
-  for (std::size_t i = 0; i < vfA.size(); i += 131) vfA[i] *= 9.0F;
-  for (std::size_t i = 0; i < vfB.size(); i += 131) vfB[i] *= 9.0F;
+  for (std::size_t i = 0; i < q_count; i += 97)
+    qv[i] *= 13.0F;
+  for (std::size_t i = 0; i < vfA.size(); i += 131)
+    vfA[i] *= 9.0F;
+  for (std::size_t i = 0; i < vfB.size(); i += 131)
+    vfB[i] *= 9.0F;
   std::vector<__half> vhA(vfA.size()), vhB(vfB.size());
   std::vector<std::uint8_t> vbA(static_cast<std::size_t>(kKvA) * kBlksPerRow *
                                 18),
@@ -1021,8 +1036,10 @@ double CompareMixedI8Deep(std::uint32_t seed) {
       for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
         float m = 0.0F;
         for (std::uint32_t i = 0; i < 32; ++i) {
-          m = fmaxf(m, fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                                (b * 32) + i]));
+          m = fmaxf(
+              m,
+              fabsf(
+                  vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
         }
         const float d = m / 127.0F;
         const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
@@ -1059,8 +1076,10 @@ double CompareMixedI8Deep(std::uint32_t seed) {
       for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
         float m = 0.0F;
         for (std::uint32_t i = 0; i < 32; ++i) {
-          m = fmaxf(m, fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) +
-                                (b * 32) + i]));
+          m = fmaxf(
+              m,
+              fabsf(
+                  kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
         }
         const float d = m / 127.0F;
         const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
@@ -1096,15 +1115,24 @@ double CompareMixedI8Deep(std::uint32_t seed) {
   Upload(&d_vA, vbA);
   Upload(&d_vB, vbB);
   std::vector<q::MixedBlk> blks(3);
-  blks[0] = {0, reinterpret_cast<std::uint64_t>(d_kA.get()),
-             reinterpret_cast<std::uint64_t>(d_vA.get()), kKvA,
-             kKvA - 1, 1};
-  blks[1] = {1, reinterpret_cast<std::uint64_t>(d_kB.get()),
-             reinterpret_cast<std::uint64_t>(d_vB.get()), kKvB,
-             kKvB - kChunk, kChunk};
-  blks[2] = {1 + kChunk, reinterpret_cast<std::uint64_t>(d_kB.get()),
-             reinterpret_cast<std::uint64_t>(d_vB.get()), kKvB,
-             kKvB - kFull, kFull};
+  blks[0] = {0,
+             reinterpret_cast<std::uint64_t>(d_kA.get()),
+             reinterpret_cast<std::uint64_t>(d_vA.get()),
+             kKvA,
+             kKvA - 1,
+             1};
+  blks[1] = {1,
+             reinterpret_cast<std::uint64_t>(d_kB.get()),
+             reinterpret_cast<std::uint64_t>(d_vB.get()),
+             kKvB,
+             kKvB - kChunk,
+             kChunk};
+  blks[2] = {1 + kChunk,
+             reinterpret_cast<std::uint64_t>(d_kB.get()),
+             reinterpret_cast<std::uint64_t>(d_vB.get()),
+             kKvB,
+             kKvB - kFull,
+             kFull};
   Upload(&d_blks, blks);
   if (!q::WmmaMixedAttention(d_q.get(), d_gate.get(), d_blks.get(), 3,
                              d_out.get(), kHeads, kKvHeads, kDim, kRatio,
@@ -1120,34 +1148,30 @@ double CompareMixedI8Deep(std::uint32_t seed) {
       khB, vhB, nullptr, 0, kFull, kKvB - kFull);
   double worstC = 0.0;
   for (std::size_t i = (1 + kChunk) * kQWidth; i < q_count; ++i) {
-    worstC = std::max(
-        worstC, std::abs(static_cast<double>(out[i]) - refC[i - (1 + kChunk) * kQWidth]));
+    worstC = std::max(worstC, std::abs(static_cast<double>(out[i]) -
+                                       refC[i - (1 + kChunk) * kQWidth]));
   }
-  std::cout << "  mixed attention (i8 deep full-tile) worst abs err "
-            << worstC << '\n';
-  const auto refA = Fp64Attention(
-      std::vector<float>(qv.begin(), qv.begin() + kQWidth),
-      std::vector<float>(gate.begin(), gate.begin() + kQWidth), khA, vhA,
-      nullptr, 0, 1, kKvA - 1);
-  const auto refB = Fp64Attention(
-      std::vector<float>(qv.begin() + kQWidth, qv.end()),
-      std::vector<float>(gate.begin() + kQWidth, gate.end()), khB, vhB,
-      nullptr, 0, kChunk, kKvB - kChunk);
+  std::cout << "  mixed attention (i8 deep full-tile) worst abs err " << worstC
+            << '\n';
+  const auto refA =
+      Fp64Attention(std::vector<float>(qv.begin(), qv.begin() + kQWidth),
+                    std::vector<float>(gate.begin(), gate.begin() + kQWidth),
+                    khA, vhA, nullptr, 0, 1, kKvA - 1);
+  const auto refB =
+      Fp64Attention(std::vector<float>(qv.begin() + kQWidth, qv.end()),
+                    std::vector<float>(gate.begin() + kQWidth, gate.end()), khB,
+                    vhB, nullptr, 0, kChunk, kKvB - kChunk);
   double worst = 0.0;
-  const std::size_t q_head =
-      static_cast<std::size_t>(1 + kChunk) * kQWidth;
+  const std::size_t q_head = static_cast<std::size_t>(1 + kChunk) * kQWidth;
   for (std::size_t i = 0; i < q_head; ++i) {
-    const double e = (i < static_cast<std::size_t>(kQWidth))
-                         ? refA[i]
-                         : refB[i - kQWidth];
+    const double e =
+        (i < static_cast<std::size_t>(kQWidth)) ? refA[i] : refB[i - kQWidth];
     worst = std::max(worst, std::abs(static_cast<double>(out[i]) - e));
   }
   std::cout << "  mixed attention (i8 deep+outliers) worst abs err " << worst
             << '\n';
   return worst;
 }
-
-
 
 double CompareMixedI8Early() {
   // Early-prefill geometry: queries start at position 0 over a small live
@@ -1182,8 +1206,10 @@ double CompareMixedI8Early() {
       for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
         float m = 0.0F;
         for (std::uint32_t i = 0; i < 32; ++i) {
-          m = fmaxf(m, fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                                (b * 32) + i]));
+          m = fmaxf(
+              m,
+              fabsf(
+                  vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
         }
         const float d = m / 127.0F;
         const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
@@ -1220,8 +1246,10 @@ double CompareMixedI8Early() {
       for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
         float m = 0.0F;
         for (std::uint32_t i = 0; i < 32; ++i) {
-          m = fmaxf(m, fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) +
-                                (b * 32) + i]));
+          m = fmaxf(
+              m,
+              fabsf(
+                  kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
         }
         const float d = m / 127.0F;
         const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
@@ -1257,10 +1285,18 @@ double CompareMixedI8Early() {
   Upload(&d_vA, vbA);
   Upload(&d_vB, vbB);
   std::vector<q::MixedBlk> blks(2);
-  blks[0] = {0, reinterpret_cast<std::uint64_t>(d_kA.get()),
-             reinterpret_cast<std::uint64_t>(d_vA.get()), kKvA, 0, kRowsA};
-  blks[1] = {kRowsA, reinterpret_cast<std::uint64_t>(d_kB.get()),
-             reinterpret_cast<std::uint64_t>(d_vB.get()), kKvB, 0, kRowsB};
+  blks[0] = {0,
+             reinterpret_cast<std::uint64_t>(d_kA.get()),
+             reinterpret_cast<std::uint64_t>(d_vA.get()),
+             kKvA,
+             0,
+             kRowsA};
+  blks[1] = {kRowsA,
+             reinterpret_cast<std::uint64_t>(d_kB.get()),
+             reinterpret_cast<std::uint64_t>(d_vB.get()),
+             kKvB,
+             0,
+             kRowsB};
   Upload(&d_blks, blks);
   if (!q::WmmaMixedAttention(d_q.get(), d_gate.get(), d_blks.get(), 2,
                              d_out.get(), kHeads, kKvHeads, kDim, kRatio,
@@ -1275,8 +1311,8 @@ double CompareMixedI8Early() {
       vhA, nullptr, 0, kRowsA, 0);
   const auto refB = Fp64Attention(
       std::vector<float>(qv.begin() + kRowsA * kQWidth, qv.end()),
-      std::vector<float>(gate.begin() + kRowsA * kQWidth, gate.end()), khB,
-      vhB, nullptr, 0, kRowsB, 0);
+      std::vector<float>(gate.begin() + kRowsA * kQWidth, gate.end()), khB, vhB,
+      nullptr, 0, kRowsB, 0);
   double worst = 0.0;
   for (std::size_t i = 0; i < q_count; ++i) {
     const double e = (i < static_cast<std::size_t>(kRowsA) * kQWidth)
@@ -1284,12 +1320,9 @@ double CompareMixedI8Early() {
                          : refB[i - kRowsA * kQWidth];
     worst = std::max(worst, std::abs(static_cast<double>(out[i]) - e));
   }
-  std::cout << "  mixed attention (i8 early) worst abs err " << worst
-            << '\n';
+  std::cout << "  mixed attention (i8 early) worst abs err " << worst << '\n';
   return worst;
 }
-
-
 
 static std::vector<std::uint8_t> LoadBytes(const char* path,
                                            std::size_t expect) {
@@ -1314,19 +1347,27 @@ double CompareMixedReplayIdx(int idx) {
   constexpr std::uint32_t kKvW = kKvHeads * kDim;
   constexpr std::uint32_t kBlksPerRow = kKvW / 32;
   const std::size_t q_count = static_cast<std::size_t>(kRows) * kQDim;
-  const auto qb = LoadBytes((std::string("/tmp/mx_") + "q" + std::to_string(idx) + ".bin").c_str(), q_count * 4);
-  const auto gb = LoadBytes((std::string("/tmp/mx_") + "gate" + std::to_string(idx) + ".bin").c_str(), q_count * 4);
+  const auto qb = LoadBytes(
+      (std::string("/tmp/mx_") + "q" + std::to_string(idx) + ".bin").c_str(),
+      q_count * 4);
+  const auto gb = LoadBytes(
+      (std::string("/tmp/mx_") + "gate" + std::to_string(idx) + ".bin").c_str(),
+      q_count * 4);
   std::vector<float> qv(q_count), gate(q_count);
   std::memcpy(qv.data(), qb.data(), qb.size());
   std::memcpy(gate.data(), gb.data(), gb.size());
-  const auto kbA = LoadBytes((std::string("/tmp/mx_k") + std::to_string(idx) + "_0.bin").c_str(),
-                             static_cast<std::size_t>(kKvA) * kBlksPerRow * 34);
-  const auto kbB = LoadBytes((std::string("/tmp/mx_k") + std::to_string(idx) + "_1.bin").c_str(),
-                             static_cast<std::size_t>(kKvB) * kBlksPerRow * 34);
-  const auto vbA = LoadBytes((std::string("/tmp/mx_v") + std::to_string(idx) + "_0.bin").c_str(),
-                             static_cast<std::size_t>(kKvA) * kBlksPerRow * 18);
-  const auto vbB = LoadBytes((std::string("/tmp/mx_v") + std::to_string(idx) + "_1.bin").c_str(),
-                             static_cast<std::size_t>(kKvB) * kBlksPerRow * 18);
+  const auto kbA = LoadBytes(
+      (std::string("/tmp/mx_k") + std::to_string(idx) + "_0.bin").c_str(),
+      static_cast<std::size_t>(kKvA) * kBlksPerRow * 34);
+  const auto kbB = LoadBytes(
+      (std::string("/tmp/mx_k") + std::to_string(idx) + "_1.bin").c_str(),
+      static_cast<std::size_t>(kKvB) * kBlksPerRow * 34);
+  const auto vbA = LoadBytes(
+      (std::string("/tmp/mx_v") + std::to_string(idx) + "_0.bin").c_str(),
+      static_cast<std::size_t>(kKvA) * kBlksPerRow * 18);
+  const auto vbB = LoadBytes(
+      (std::string("/tmp/mx_v") + std::to_string(idx) + "_1.bin").c_str(),
+      static_cast<std::size_t>(kKvB) * kBlksPerRow * 18);
   // Host dequant (mirrors DequantizeKvRowsKernel: codes-first).
   std::vector<__half> khA(kKvA * kKvW), khB(kKvB * kKvW);
   std::vector<__half> vhA(kKvA * kKvW), vhB(kKvB * kKvW);
@@ -1386,10 +1427,18 @@ double CompareMixedReplayIdx(int idx) {
   Upload(&d_svB, vhB);
   // i8 route over blocked caches.
   std::vector<q::MixedBlk> blkI8(2);
-  blkI8[0] = {0, reinterpret_cast<std::uint64_t>(d_kA.get()),
-              reinterpret_cast<std::uint64_t>(d_vA.get()), kKvA, kKvA - 1, 1};
-  blkI8[1] = {1, reinterpret_cast<std::uint64_t>(d_kB.get()),
-              reinterpret_cast<std::uint64_t>(d_vB.get()), kKvB, kKvB - 4, 4};
+  blkI8[0] = {0,
+              reinterpret_cast<std::uint64_t>(d_kA.get()),
+              reinterpret_cast<std::uint64_t>(d_vA.get()),
+              kKvA,
+              kKvA - 1,
+              1};
+  blkI8[1] = {1,
+              reinterpret_cast<std::uint64_t>(d_kB.get()),
+              reinterpret_cast<std::uint64_t>(d_vB.get()),
+              kKvB,
+              kKvB - 4,
+              4};
   Upload(&d_blks, blkI8);
   if (!q::WmmaMixedAttention(d_q.get(), d_gate.get(), d_blks.get(), 2,
                              d_out.get(), kHeads, kKvHeads, kDim, kRatio,
@@ -1400,10 +1449,18 @@ double CompareMixedReplayIdx(int idx) {
   const auto outI8 = Download(&d_out, q_count);
   // f16 route over staged (dequantized) caches.
   std::vector<q::MixedBlk> blkF(2);
-  blkF[0] = {0, reinterpret_cast<std::uint64_t>(d_skA.get()),
-             reinterpret_cast<std::uint64_t>(d_svA.get()), kKvA, kKvA - 1, 1};
-  blkF[1] = {1, reinterpret_cast<std::uint64_t>(d_skB.get()),
-             reinterpret_cast<std::uint64_t>(d_svB.get()), kKvB, kKvB - 4, 4};
+  blkF[0] = {0,
+             reinterpret_cast<std::uint64_t>(d_skA.get()),
+             reinterpret_cast<std::uint64_t>(d_svA.get()),
+             kKvA,
+             kKvA - 1,
+             1};
+  blkF[1] = {1,
+             reinterpret_cast<std::uint64_t>(d_skB.get()),
+             reinterpret_cast<std::uint64_t>(d_svB.get()),
+             kKvB,
+             kKvB - 4,
+             4};
   Upload(&d_blks, blkF);
   if (!q::WmmaMixedAttention(d_q.get(), d_gate.get(), d_blks.get(), 2,
                              d_out.get(), kHeads, kKvHeads, kDim, kRatio,
@@ -1413,19 +1470,19 @@ double CompareMixedReplayIdx(int idx) {
   CheckHip(hipDeviceSynchronize(), "replay f16 sync");
   const auto outF = Download(&d_out, q_count);
   // Host scalar reference on dequantized caches.
-  const auto refA = Fp64Attention(
-      std::vector<float>(qv.begin(), qv.begin() + kQDim),
-      std::vector<float>(gate.begin(), gate.begin() + kQDim), khA, vhA,
-      nullptr, 0, 1, kKvA - 1);
-  const auto refB = Fp64Attention(
-      std::vector<float>(qv.begin() + kQDim, qv.end()),
-      std::vector<float>(gate.begin() + kQDim, gate.end()), khB, vhB,
-      nullptr, 0, 4, kKvB - 4);
+  const auto refA =
+      Fp64Attention(std::vector<float>(qv.begin(), qv.begin() + kQDim),
+                    std::vector<float>(gate.begin(), gate.begin() + kQDim), khA,
+                    vhA, nullptr, 0, 1, kKvA - 1);
+  const auto refB =
+      Fp64Attention(std::vector<float>(qv.begin() + kQDim, qv.end()),
+                    std::vector<float>(gate.begin() + kQDim, gate.end()), khB,
+                    vhB, nullptr, 0, 4, kKvB - 4);
   double wI8 = 0.0, wF = 0.0, wIF = 0.0;
   double mI8 = 0.0, mF = 0.0, mIF = 0.0;
   for (std::size_t i = 0; i < q_count; ++i) {
-    const double e = (i < static_cast<std::size_t>(kQDim)) ? refA[i]
-                                                          : refB[i - kQDim];
+    const double e =
+        (i < static_cast<std::size_t>(kQDim)) ? refA[i] : refB[i - kQDim];
     const double dI8 = static_cast<double>(outI8[i]) - e;
     const double dF = static_cast<double>(outF[i]) - e;
     const double dIF = static_cast<double>(outI8[i]) - outF[i];
@@ -1444,8 +1501,6 @@ double CompareMixedReplayIdx(int idx) {
             << mIF << '\n';
   return wIF;
 }
-
-
 
 double CompareMixedStress() {
   // 128-tile sweep, 1-row decode at depth: 3 consecutive launches on the
@@ -1468,15 +1523,19 @@ double CompareMixedStress() {
     for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
       float m = 0.0F;
       for (std::uint32_t i = 0; i < 32; ++i)
-        m = fmaxf(m, fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                              (b * 32) + i]));
+        m = fmaxf(
+            m,
+            fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
       const float d = m / 127.0F;
       const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-      std::uint8_t* blk = &vb[(static_cast<std::size_t>(k) * kBlksPerRow + b) * 18];
+      std::uint8_t* blk =
+          &vb[(static_cast<std::size_t>(k) * kBlksPerRow + b) * 18];
       *reinterpret_cast<__half*>(blk + 16) = __float2half(d);
       for (std::uint32_t i = 0; i < 32; i += 2) {
-        const float x0 = vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i];
-        const float x1 = vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i + 1];
+        const float x0 =
+            vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i];
+        const float x1 =
+            vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i + 1];
         int q0 = static_cast<int>(static_cast<std::int8_t>(roundf(x0 * id)));
         int q1 = static_cast<int>(static_cast<std::int8_t>(roundf(x1 * id)));
         q0 = q0 < -8 ? -8 : (q0 > 7 ? 7 : q0);
@@ -1489,19 +1548,24 @@ double CompareMixedStress() {
       }
     }
   }
-  std::vector<std::uint8_t> kb(static_cast<std::size_t>(kKv) * kBlksPerRow * 34);
+  std::vector<std::uint8_t> kb(static_cast<std::size_t>(kKv) * kBlksPerRow *
+                               34);
   std::vector<__half> kh(kf.size());
   for (std::uint32_t k = 0; k < kKv; ++k) {
     for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
       float m = 0.0F;
       for (std::uint32_t i = 0; i < 32; ++i)
-        m = fmaxf(m, fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
+        m = fmaxf(
+            m,
+            fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
       const float d = m / 127.0F;
       const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-      std::uint8_t* blk = &kb[(static_cast<std::size_t>(k) * kBlksPerRow + b) * 34];
+      std::uint8_t* blk =
+          &kb[(static_cast<std::size_t>(k) * kBlksPerRow + b) * 34];
       *reinterpret_cast<__half*>(blk + 32) = __float2half(d);
       for (std::uint32_t i = 0; i < 32; ++i) {
-        const float x = kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i];
+        const float x =
+            kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i];
         const auto c = static_cast<std::int8_t>(roundf(x * id));
         blk[i] = static_cast<std::uint8_t>(c);
         kh[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i] =
@@ -1520,8 +1584,12 @@ double CompareMixedStress() {
   Upload(&d_k, kb);
   Upload(&d_v, vb);
   std::vector<q::MixedBlk> blks(1);
-  blks[0] = {0, reinterpret_cast<std::uint64_t>(d_k.get()),
-             reinterpret_cast<std::uint64_t>(d_v.get()), kKv, kKv - 1, 1};
+  blks[0] = {0,
+             reinterpret_cast<std::uint64_t>(d_k.get()),
+             reinterpret_cast<std::uint64_t>(d_v.get()),
+             kKv,
+             kKv - 1,
+             1};
   Upload(&d_blks, blks);
   std::vector<float> outs[3];
   for (int r = 0; r < 3; ++r) {
@@ -1535,8 +1603,10 @@ double CompareMixedStress() {
   }
   double worst = 0.0;
   for (std::size_t i = 0; i < q_count; ++i) {
-    worst = std::max(worst, std::abs(static_cast<double>(outs[0][i]) - outs[1][i]));
-    worst = std::max(worst, std::abs(static_cast<double>(outs[0][i]) - outs[2][i]));
+    worst =
+        std::max(worst, std::abs(static_cast<double>(outs[0][i]) - outs[1][i]));
+    worst =
+        std::max(worst, std::abs(static_cast<double>(outs[0][i]) - outs[2][i]));
   }
   std::cout << "  mixed stress (128 tiles x3) max run-to-run diff "
             << std::scientific << std::setprecision(17) << worst << '\n';
@@ -1555,18 +1625,15 @@ double CompareMixedStress() {
     }
     throw std::runtime_error("mixed stress: nondeterministic kernel!");
   }
-  const auto refS = Fp64Attention(
-      qv, gate, kh, vh, nullptr, 0, kRows, kKv - kRows);
+  const auto refS =
+      Fp64Attention(qv, gate, kh, vh, nullptr, 0, kRows, kKv - kRows);
   double wref = 0.0;
   for (std::size_t i = 0; i < q_count; ++i) {
-    wref = std::max(wref,
-                    std::abs(static_cast<double>(outs[0][i]) - refS[i]));
+    wref = std::max(wref, std::abs(static_cast<double>(outs[0][i]) - refS[i]));
   }
   std::cout << "  mixed stress (128 tiles) vs-ref " << wref << '\n';
   return wref;
 }
-
-
 
 double CompareCausalI8(std::uint32_t seed) {
   // Dense causal int8: blocked K34 + blocked V18 straight into the
@@ -1591,8 +1658,9 @@ double CompareCausalI8(std::uint32_t seed) {
     for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
       float m = 0.0F;
       for (std::uint32_t i = 0; i < 32; ++i)
-        m = fmaxf(m, fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) +
-                              (b * 32) + i]));
+        m = fmaxf(
+            m,
+            fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
       const float d = m / 127.0F;
       const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
       std::uint8_t* blk =
@@ -1615,11 +1683,13 @@ double CompareCausalI8(std::uint32_t seed) {
     for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
       float m = 0.0F;
       for (std::uint32_t i = 0; i < 32; ++i)
-        m = fmaxf(m, fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                              (b * 32) + i]));
+        m = fmaxf(
+            m,
+            fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
       const float d = m / 127.0F;
       const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-      std::uint8_t* blk = &vb[(static_cast<std::size_t>(k) * kBlksPerRow + b) * 18];
+      std::uint8_t* blk =
+          &vb[(static_cast<std::size_t>(k) * kBlksPerRow + b) * 18];
       *reinterpret_cast<__half*>(blk + 16) = __float2half(d);
       for (std::uint32_t i = 0; i < 32; i += 2) {
         const float x0 =
@@ -1656,19 +1726,16 @@ double CompareCausalI8(std::uint32_t seed) {
   }
   CheckHip(hipDeviceSynchronize(), "causal attention (i8) sync");
   const auto out = Download(&d_out, q_count);
-  const auto ref = Fp64Attention(qv, gate, kh, vh, nullptr, 0, kTokens,
-                                 kStart);
+  const auto ref = Fp64Attention(qv, gate, kh, vh, nullptr, 0, kTokens, kStart);
   double worst = 0.0;
   for (std::size_t i = 0; i < q_count; ++i)
     worst = std::max(worst, std::abs(static_cast<double>(out[i]) - ref[i]));
-  std::cout << "  causal attention (i8) worst absolute error " << worst
-            << '\n';
+  std::cout << "  causal attention (i8) worst absolute error " << worst << '\n';
   return worst;
 }
 
-
-double CompareCausalI8Sparse(std::uint32_t n_tokens,
-                               std::uint32_t start_pos, std::uint32_t seed) {
+double CompareCausalI8Sparse(std::uint32_t n_tokens, std::uint32_t start_pos,
+                             std::uint32_t seed) {
   // Sparse/packed causal int8: blocked K34 + V18 straight into the WMMA
   // cores with a block-selection mask (the indexer path production takes
   // past top_k), vs Fp64 on the dequantized blocks with the same mask.
@@ -1691,8 +1758,9 @@ double CompareCausalI8Sparse(std::uint32_t n_tokens,
     for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
       float m = 0.0F;
       for (std::uint32_t i = 0; i < 32; ++i)
-        m = fmaxf(m, fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) +
-                              (b * 32) + i]));
+        m = fmaxf(
+            m,
+            fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
       const float d = m / 127.0F;
       const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
       std::uint8_t* blk =
@@ -1715,11 +1783,13 @@ double CompareCausalI8Sparse(std::uint32_t n_tokens,
     for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
       float m = 0.0F;
       for (std::uint32_t i = 0; i < 32; ++i)
-        m = fmaxf(m, fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                              (b * 32) + i]));
+        m = fmaxf(
+            m,
+            fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
       const float d = m / 127.0F;
       const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-      std::uint8_t* blk = &vb[(static_cast<std::size_t>(k) * kBlksPerRow + b) * 18];
+      std::uint8_t* blk =
+          &vb[(static_cast<std::size_t>(k) * kBlksPerRow + b) * 18];
       *reinterpret_cast<__half*>(blk + 16) = __float2half(d);
       for (std::uint32_t i = 0; i < 32; i += 2) {
         const float x0 =
@@ -1777,9 +1847,9 @@ double CompareCausalI8Sparse(std::uint32_t n_tokens,
   return worst;
 }
 
-double CompareCausalI8Layout(std::uint32_t n_tokens,
-                               std::uint32_t start_pos, std::uint32_t seed,
-                               bool k4, bool v4, bool sparse) {
+double CompareCausalI8Layout(std::uint32_t n_tokens, std::uint32_t start_pos,
+                             std::uint32_t seed, bool k4, bool v4,
+                             bool sparse) {
   // Causal int8 direct path over every K/V block layout the cache can hold:
   // K34/K18 x V34/V18, dense or with a block-selection mask. Reference is
   // Fp64 on the dequantized blocks, so this measures kernel numerics only.
@@ -1807,8 +1877,9 @@ double CompareCausalI8Layout(std::uint32_t n_tokens,
     for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
       float m = 0.0F;
       for (std::uint32_t i = 0; i < 32; ++i)
-        m = fmaxf(m, fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) +
-                              (b * 32) + i]));
+        m = fmaxf(
+            m,
+            fabsf(kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
       const float d = (m != 0.0F) ? (m / k_range) : 1.0F;
       const float id = 1.0F / d;
       std::uint8_t* blk =
@@ -1816,13 +1887,12 @@ double CompareCausalI8Layout(std::uint32_t n_tokens,
       if (k4) {
         *reinterpret_cast<__half*>(blk + 16) = __float2half(d);
         for (std::uint32_t e = 0; e < 16; ++e) {
-          int q0 = static_cast<int>(
-              roundf(kf[(static_cast<std::size_t>(k) * kKvWidth) +
-                        (b * 32) + e * 2] *
-                     id));
+          int q0 = static_cast<int>(roundf(
+              kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + e * 2] *
+              id));
           int q1 = static_cast<int>(
-              roundf(kf[(static_cast<std::size_t>(k) * kKvWidth) +
-                        (b * 32) + e * 2 + 1] *
+              roundf(kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) +
+                        e * 2 + 1] *
                      id));
           q0 = q0 > k_clamp ? k_clamp : (q0 < -k_clamp ? -k_clamp : q0);
           q1 = q1 > k_clamp ? k_clamp : (q1 < -k_clamp ? -k_clamp : q1);
@@ -1835,10 +1905,9 @@ double CompareCausalI8Layout(std::uint32_t n_tokens,
       } else {
         *reinterpret_cast<__half*>(blk + 32) = __float2half(d);
         for (std::uint32_t i = 0; i < 32; ++i) {
-          int q = static_cast<int>(
-              roundf(kf[(static_cast<std::size_t>(k) * kKvWidth) +
-                        (b * 32) + i] *
-                     id));
+          int q = static_cast<int>(roundf(
+              kf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i] *
+              id));
           q = q > k_clamp ? k_clamp : (q < -k_clamp ? -k_clamp : q);
           blk[i] = static_cast<std::uint8_t>(q);
           kh[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i] =
@@ -1854,8 +1923,9 @@ double CompareCausalI8Layout(std::uint32_t n_tokens,
     for (std::uint32_t b = 0; b < kBlksPerRow; ++b) {
       float m = 0.0F;
       for (std::uint32_t i = 0; i < 32; ++i)
-        m = fmaxf(m, fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                              (b * 32) + i]));
+        m = fmaxf(
+            m,
+            fabsf(vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i]));
       const float d = (m != 0.0F) ? (m / v_range) : 1.0F;
       const float id = 1.0F / d;
       std::uint8_t* blk =
@@ -1863,13 +1933,12 @@ double CompareCausalI8Layout(std::uint32_t n_tokens,
       if (v4) {
         *reinterpret_cast<__half*>(blk + 16) = __float2half(d);
         for (std::uint32_t e = 0; e < 16; ++e) {
-          int q0 = static_cast<int>(
-              roundf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                        (b * 32) + e * 2] *
-                     id));
+          int q0 = static_cast<int>(roundf(
+              vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + e * 2] *
+              id));
           int q1 = static_cast<int>(
-              roundf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                        (b * 32) + e * 2 + 1] *
+              roundf(vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) +
+                        e * 2 + 1] *
                      id));
           q0 = q0 > v_clamp ? v_clamp : (q0 < -v_clamp ? -v_clamp : q0);
           q1 = q1 > v_clamp ? v_clamp : (q1 < -v_clamp ? -v_clamp : q1);
@@ -1882,10 +1951,9 @@ double CompareCausalI8Layout(std::uint32_t n_tokens,
       } else {
         *reinterpret_cast<__half*>(blk + 32) = __float2half(d);
         for (std::uint32_t i = 0; i < 32; ++i) {
-          int q = static_cast<int>(
-              roundf(vf[(static_cast<std::size_t>(k) * kKvWidth) +
-                        (b * 32) + i] *
-                     id));
+          int q = static_cast<int>(roundf(
+              vf[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i] *
+              id));
           q = q > v_clamp ? v_clamp : (q < -v_clamp ? -v_clamp : q);
           blk[i] = static_cast<std::uint8_t>(q);
           vh[(static_cast<std::size_t>(k) * kKvWidth) + (b * 32) + i] =
@@ -1894,9 +1962,8 @@ double CompareCausalI8Layout(std::uint32_t n_tokens,
       }
     }
   }
-  std::vector<std::uint32_t> mask(static_cast<std::size_t>(n_tokens) *
-                                  mask_words,
-                                  0xFFFFFFFFU);
+  std::vector<std::uint32_t> mask(
+      static_cast<std::size_t>(n_tokens) * mask_words, 0xFFFFFFFFU);
   if (sparse) {
     std::uint32_t state = seed ^ 0x77777777U;
     for (std::uint32_t& word : mask) {
@@ -1917,9 +1984,9 @@ double CompareCausalI8Layout(std::uint32_t n_tokens,
   Upload(&d_mask, mask);
   if (!q::WmmaCausalAttention(
           d_q.get(), d_gate.get(), reinterpret_cast<__half*>(d_k.get()),
-          reinterpret_cast<__half*>(d_v.get()),
-          sparse ? d_mask.get() : nullptr, mask_words, d_out.get(), n_tokens,
-          start_pos, kHeads, kKvHeads, kDim, kRatio, nullptr, false,
+          reinterpret_cast<__half*>(d_v.get()), sparse ? d_mask.get() : nullptr,
+          mask_words, d_out.get(), n_tokens, start_pos, kHeads, kKvHeads, kDim,
+          kRatio, nullptr, false,
           k4 ? q::kKvKey4BitBlockBytes : q::kKvKeyBlockBytes,
           v4 ? q::kKvValue4BitBlockBytes : q::kKvKeyBlockBytes, true)) {
     throw std::runtime_error("causal attention (i8 layout) rejected geometry");
@@ -1933,10 +2000,10 @@ double CompareCausalI8Layout(std::uint32_t n_tokens,
   double worst = 0.0;
   for (std::size_t i = 0; i < q_count; ++i)
     worst = std::max(worst, std::abs(static_cast<double>(out[i]) - ref[i]));
-  std::cout << "  causal attention (i8 K" << (k4 ? 4 : 8) << "V"
-            << (v4 ? 4 : 8) << (sparse ? " sparse" : " dense") << " n="
-            << n_tokens << " start=" << start_pos
-            << ") worst absolute error " << worst << '\n';
+  std::cout << "  causal attention (i8 K" << (k4 ? 4 : 8) << "V" << (v4 ? 4 : 8)
+            << (sparse ? " sparse" : " dense") << " n=" << n_tokens
+            << " start=" << start_pos << ") worst absolute error " << worst
+            << '\n';
   return worst;
 }
 
@@ -1951,8 +2018,8 @@ int main() {
     const double mixed_deep = CompareMixedI8Deep(0xC0FFEEU);
     const double mixed_early = CompareMixedI8Early();
     const double causal_i8 = CompareCausalI8(0xC0FFEEU);
-    std::cout << "WMMA causal attention (i8) worst absolute error "
-              << causal_i8 << '\n';
+    std::cout << "WMMA causal attention (i8) worst absolute error " << causal_i8
+              << '\n';
     if (causal_i8 > 2e-2)
       throw std::runtime_error("causal attention (i8) exceeds its envelope");
     const double causal_i8_sp1 = CompareCausalI8Sparse(8, 9000, 0x5EA5E5U);
@@ -1962,22 +2029,23 @@ int main() {
     if (std::max(causal_i8_sp1, causal_i8_sp2) > 2e-2)
       throw std::runtime_error("causal attention (i8 sparse) exceeds envelope");
     double layoutWorst = 0.0;
-    layoutWorst = std::max(
-        layoutWorst,
-        CompareCausalI8Layout(5, 32, 0xBEEF00U, false, false, false));
-    layoutWorst = std::max(
-        layoutWorst,
-        CompareCausalI8Layout(5, 32, 0xBEEF01U, true, true, false));
-    layoutWorst = std::max(
-        layoutWorst,
-        CompareCausalI8Layout(5, 32, 0xBEEF02U, true, false, false));
-    layoutWorst = std::max(
-        layoutWorst,
-        CompareCausalI8Layout(8, 9000, 0xBEEF03U, true, true, true));
+    layoutWorst =
+        std::max(layoutWorst,
+                 CompareCausalI8Layout(5, 32, 0xBEEF00U, false, false, false));
+    layoutWorst =
+        std::max(layoutWorst,
+                 CompareCausalI8Layout(5, 32, 0xBEEF01U, true, true, false));
+    layoutWorst =
+        std::max(layoutWorst,
+                 CompareCausalI8Layout(5, 32, 0xBEEF02U, true, false, false));
+    layoutWorst =
+        std::max(layoutWorst,
+                 CompareCausalI8Layout(8, 9000, 0xBEEF03U, true, true, true));
     std::cout << "WMMA causal attention (i8 layouts) worst " << layoutWorst
               << '\n';
     if (layoutWorst > 2e-2)
-      throw std::runtime_error("causal attention (i8 layouts) exceeds envelope");
+      throw std::runtime_error(
+          "causal attention (i8 layouts) exceeds envelope");
     const double stress = CompareMixedStress();
     std::cout << "WMMA mixed stress 128-tile vs-ref " << stress << '\n';
     if (stress > 2e-2)
@@ -1987,12 +2055,11 @@ int main() {
       const double r = CompareMixedReplayIdx(li);
       replayWorst = std::max(replayWorst, r);
     }
-    std::cout << "WMMA mixed replay i8-vs-f16 worst12 " << replayWorst
-              << '\n';
+    std::cout << "WMMA mixed replay i8-vs-f16 worst12 " << replayWorst << '\n';
     if (replayWorst > 2e-2)
       throw std::runtime_error("replay i8-vs-f16 exceeds envelope");
-    std::cout << "WMMA mixed attention (i8 early) worst abs err "
-              << mixed_early << '\n';
+    std::cout << "WMMA mixed attention (i8 early) worst abs err " << mixed_early
+              << '\n';
     if (mixed_early > 2e-2)
       throw std::runtime_error("mixed attention (i8 early) exceeds envelope");
     std::cout << "WMMA mixed attention (i8 deep) worst abs err " << mixed_deep
@@ -2000,8 +2067,8 @@ int main() {
     if (mixed_deep > 2e-2)
       throw std::runtime_error("mixed attention (i8 deep) exceeds envelope");
     const double mixed_i8 = CompareMixedI8(0xC0FFEEU);
-    std::cout << "WMMA mixed attention (i8 K) worst absolute error "
-              << mixed_i8 << '\n';
+    std::cout << "WMMA mixed attention (i8 K) worst absolute error " << mixed_i8
+              << '\n';
     if (mixed_i8 > 2e-2)
       throw std::runtime_error(
           "mixed attention (i8) exceeds its FP64 envelope");

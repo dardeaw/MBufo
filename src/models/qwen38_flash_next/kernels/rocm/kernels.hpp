@@ -463,10 +463,9 @@ bool PrepareAttentionKv(
     const float* k_gamma, float* q, float* gate, std::uint8_t* k_cache,
     std::uint8_t* v_cache, KvCodec codec, float k_range, float v_range,
     std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
-    std::uint32_t n_tokens,
-    std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
-    std::uint32_t rotary_dim, const std::uint32_t* start_pos, float theta,
-    float eps, hipStream_t stream,
+    std::uint32_t n_tokens, std::uint32_t heads, std::uint32_t kv_heads,
+    std::uint32_t d, std::uint32_t rotary_dim, const std::uint32_t* start_pos,
+    float theta, float eps, hipStream_t stream,
     const qwen::vision::DeviceRope* rope = nullptr, bool prefill = false);
 
 /// NEOX partial rotary on x [t][heads][d] at positions start_pos + t.
@@ -574,9 +573,8 @@ void AttentionKv(const float* q, const std::uint8_t* k_cache,
                  std::uint32_t splits, std::uint32_t n_tokens,
                  const std::uint32_t* start_pos, std::uint32_t heads,
                  std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
-                 std::uint32_t key_block_bytes,
-                 std::uint32_t value_block_bytes, KvCodec codec,
-                 hipStream_t stream);
+                 std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
+                 KvCodec codec, hipStream_t stream);
 
 /// One mixed-batch unit: packed rows from a single session. The kernel
 /// launch covers all (blk, kv-head-group) pairs; grid.y fans out over head
@@ -600,8 +598,7 @@ bool WmmaMixedAttention(const float* q, const float* gate, const MixedBlk* blks,
                         std::uint32_t n_blks, float* out, std::uint32_t heads,
                         std::uint32_t kv_heads, std::uint32_t d,
                         std::uint32_t ratio, std::uint32_t key_block_bytes,
-                        std::uint32_t value_block_bytes,
-                        hipStream_t stream,
+                        std::uint32_t value_block_bytes, hipStream_t stream,
                         bool i8 = false);
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows
@@ -618,8 +615,7 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t ratio, hipStream_t stream,
                          bool last_only = false,
                          std::uint32_t k_block_bytes = 0,
-                         std::uint32_t v_block_bytes = 0,
-                         bool i8 = false);
+                         std::uint32_t v_block_bytes = 0, bool i8 = false);
 
 /// counts[e] = number of (token, slot) pairs routed to expert e.
 void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
