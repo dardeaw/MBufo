@@ -18,6 +18,7 @@
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
+#include "src/models/qwen38_flash_next/ngram.hpp"
 #include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
@@ -28,7 +29,6 @@ namespace gufo::models::qwen38_flash_next {
 
 struct ModelWeights;
 struct MtpWeights;
-class NgramTable;
 struct MtpCandidateLogits;
 class ContinuationAdapter;
 class ContinuationHooks;
@@ -176,11 +176,14 @@ public:
   /// RNG consumption includes proposal and verification draws. A
   /// one-token budget or a model without MTP uses ordinary decoding.
   /// Benchmarks may continue past EOS by setting stop_at_eos to false.
+  /// A greedy step prices its drafts as one of `occupancy` decoding requests,
+  /// as DecodeBatch does for an unplanned cohort of that width.
   [[nodiscard]] bool DecodeStep(std::size_t max_tokens,
                                 sampling::SamplerState& sampler,
                                 DecodeResult* result,
                                 std::string* error_msg = nullptr,
-                                bool stop_at_eos = true);
+                                bool stop_at_eos = true,
+                                std::uint32_t occupancy = 1);
   struct BatchOutcome {
     bool completed{false};
     std::string error{};
@@ -250,6 +253,9 @@ public:
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
   }
+  /// PLE rows gathered by this execution slot since creation; zero without
+  /// a PLE table.
+  [[nodiscard]] NgramTotals NgramRowTotals() const noexcept;
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
   static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
@@ -329,7 +335,8 @@ private:
   struct PendingDecode;
   bool PrepareDecode(const DecodeRequest& request, PendingDecode* pending,
                      std::string* error_msg, bool defer_head = false,
-                     std::optional<std::uint32_t> batch_drafts = {});
+                     std::optional<std::uint32_t> batch_drafts = {},
+                     std::uint32_t occupancy = 1);
   static void AppendDraft(PendingDecode& pending);
   /// Appends copies within the prepared budget, stopping at EOG when enabled.
   bool AppendLookup(PendingDecode& pending, bool stop_at_eos,

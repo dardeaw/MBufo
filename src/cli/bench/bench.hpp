@@ -26,7 +26,7 @@ struct BenchOptions {
   std::string dflash_model_path;
   std::string draft_policy;
   std::string dspark_model_path;
-  std::uint32_t draft_tokens{7};
+  std::uint32_t draft_tokens{5};
   std::uint32_t min_draft_tokens{1};
   sampling::SamplingConfig sampling{.seed = 0};
   bool verbose{false};

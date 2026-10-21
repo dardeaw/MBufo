@@ -98,6 +98,10 @@ public:
   std::uint32_t max_context() const override { return 65536; }
   std::vector<SessionState> session_states() const override { return sessions; }
   std::vector<SessionState> sessions;
+  std::string model_path() const override { return served_path; }
+  std::string build_info() const override { return served_build; }
+  std::string served_path;
+  std::string served_build;
   std::shared_ptr<GenerationRequest> start_complete(
       std::string_view prompt, std::size_t max_tokens,
       const gufo::sampling::SamplingConfig& sampling,
@@ -763,6 +767,46 @@ void TestFramingAndMetrics() {
   assert(timings->member_double("prompt_per_token_ms") == 2);
 }
 
+// curl sends "Expect: 100-continue" before a body over 1 MiB and waits for
+// the interim response; without it, every large upload stalls for a second.
+void TestExpectContinue() {
+  RunningServer server({.max_request_body_bytes = 8192});
+  for (const std::string expect :
+       {"Expect: 100-continue", "expect: 100-Continue"}) {
+    const int fd = server.Connect();
+    const std::string head =
+        "POST /echo HTTP/1.1\r\n" + expect + "\r\nContent-Length: 5\r\n\r\n";
+    assert(::send(fd, head.data(), head.size(), MSG_NOSIGNAL) ==
+           static_cast<ssize_t>(head.size()));
+    // The interim response arrives before any body byte is sent.
+    const std::string_view interim = "HTTP/1.1 100 Continue\r\n\r\n";
+    std::string response;
+    char buffer[4096];
+    while (response.size() < interim.size()) {
+      const auto count = ::read(fd, buffer, interim.size() - response.size());
+      assert(count > 0);
+      response.append(buffer, static_cast<std::size_t>(count));
+    }
+    assert(response == interim);
+    assert(::send(fd, "hello", 5, MSG_NOSIGNAL) == 5);
+    response.clear();
+    for (;;) {
+      const auto count = ::read(fd, buffer, sizeof(buffer));
+      assert(count >= 0);
+      if (count == 0)
+        break;
+      response.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(fd);
+    ExpectStatus(response, 200);
+    assert(response.substr(response.find("\r\n\r\n") + 4) == "hello");
+  }
+  // An oversized body gets its final status instead of the interim one.
+  ExpectStatus(server.Send("POST /echo HTTP/1.1\r\nExpect: 100-continue\r\n"
+                           "Content-Length: 8193\r\n\r\n"),
+               413);
+}
+
 void TestFallbackBackendMetrics() {
   namespace metrics = gufo::server::detail;
   RunningServer server;
@@ -842,6 +886,52 @@ void TestFallbackBackendMetrics() {
            prompt_before + test.expected_prompt);
     assert(metrics::TotalGenTokens().load() == generated_before + 2);
   }
+}
+
+// /props reports what the server runs, as llama-server's does, so a client
+// can record which model, build and settings answered it.
+void TestLlamaProps() {
+  RunningServer server;
+  const auto props = [&](const std::string& path) {
+    const auto response = server.Send("GET " + path + " HTTP/1.1\r\n\r\n");
+    ExpectStatus(response, 200);
+    return gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+  };
+
+  // Nothing is invented for what the backend does not report.
+  const auto bare = props("/props");
+  assert(bare.member_str("model") == "test");
+  assert(bare.member_str("model_alias") == "test");
+  assert(!bare.contains("model_path"));
+  assert(!bare.contains("build_info"));
+  assert(!bare.contains("total_slots"));
+  const auto* generation = bare.find("default_generation_settings");
+  assert(generation != nullptr && generation->member_size("n_ctx") == 65536);
+  const auto* params = generation->find("params");
+  assert(params->contains("temperature"));
+  assert(params->find("n_predict")->as_double() == -1.0);
+  assert(params->find("max_tokens")->as_double() == -1.0);
+  assert(!bare.find("modalities")->find("vision")->as_bool(true));
+
+  server.backend->served_path = "/models/model-00001-of-00002.gguf";
+  server.backend->served_build = "0.2.0 (abc1234)";
+  server.backend->sessions.resize(2);
+  server.backend->image_support = true;
+  server.backend->defaults.max_tokens = 512;
+  const auto full = props("/props");
+  assert(full.member_str("model_path") == "/models/model-00001-of-00002.gguf");
+  assert(full.member_str("build_info") == "0.2.0 (abc1234)");
+  assert(full.member_size("total_slots") == 2);
+  assert(full.find("default_generation_settings")
+             ->find("params")
+             ->member_size("n_predict") == 512);
+  assert(full.find("modalities")->find("vision")->as_bool());
+
+  // ?model= is accepted and not required, as outside llama-server router mode.
+  const auto named = props("/props?model=alias");
+  assert(named.member_str("model") == "alias");
+  assert(named.member_str("model_alias") == "test");
+  assert(named.member_str("build_info") == "0.2.0 (abc1234)");
 }
 
 void TestLlamaSlotsAndMetrics() {
@@ -3003,7 +3093,9 @@ int main() {
   TestQueryParameters();
   TestAuthorization();
   TestFramingAndMetrics();
+  TestExpectContinue();
   TestFallbackBackendMetrics();
+  TestLlamaProps();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
   TestTextOnlyBackendRefusesImagesBeforeReading();

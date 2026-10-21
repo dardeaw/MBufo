@@ -594,7 +594,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
-    std::size_t draft_tokens = 7;
+    std::size_t draft_tokens = 5;
     std::size_t min_draft_tokens = 1;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
@@ -679,7 +679,7 @@ void PrintServeHelp(std::string_view program_name,
                      "Speculative", &mtp_model_path);
     parser.AddOption(
         "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
+        "Maximum speculative draft tokens evaluated per step (default: 5)",
         "Speculative", &draft_tokens);
 
     parser.AddOption("", "--min-draft-tokens", "N",
@@ -1146,7 +1146,7 @@ int RunServe(std::span<const char* const> args) {
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
-    std::size_t draft_tokens = 7;
+    std::size_t draft_tokens = 5;
     std::size_t min_draft_tokens = 1;
     std::string kv_cache_quant = "f16";
     std::size_t prefill_chunk_tokens =
@@ -1227,7 +1227,7 @@ int RunServe(std::span<const char* const> args) {
         "Speculative", &mtp_model_path);
     llm_parser.AddOption(
         "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
+        "Maximum speculative draft tokens evaluated per step (default: 5)",
         "Speculative", &draft_tokens);
 
     llm_parser.AddOption("", "--min-draft-tokens", "N",
@@ -1468,6 +1468,9 @@ int RunServe(std::span<const char* const> args) {
       return 1;
     }
     backend->set_model_id(served_model_name);
+    // As `gufo --version` prints it; CMake defines both for this target.
+    backend->set_served_artifact(model,
+                                 GUFO_RELEASE_VERSION " (" GUFO_REVISION ")");
     backend->set_sampling_defaults(
         max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
         sampling_config, SamplingOptionsSupplied(llm_parser));

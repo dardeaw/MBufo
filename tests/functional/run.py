@@ -44,7 +44,7 @@ SAMPLING = {
     "--repeat-penalty": ("repeat_penalty", float),
     "--repeat-last-n": ("repeat_last_n", int),
 }
-COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides",
+COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "request_timeout", "tier",
                      "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256",
                      "expected_input_modalities")
 
@@ -176,7 +176,9 @@ def compare_runs(baseline_dir, candidate_dir):
         if report.get("functional_status", report["status"]) != "passed":
             raise ValueError("functional checks did not pass")
     for key in (*COMPARISON_FIELDS, "through_case"):
-        if baseline.get(key) != candidate.get(key):
+        # Reports from before tiers always ran the full matrix.
+        default = "full" if key == "tier" else None
+        if baseline.get(key, default) != candidate.get(key, default):
             raise ValueError(f"unmatched baseline {key}")
     if list(baseline["suites"]) != list(candidate["suites"]):
         raise ValueError("unmatched baseline suites")
@@ -248,8 +250,12 @@ def main():
                         help="Repeat to select affected suites; use all for an explicit full run")
     parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
                         help="Expected loaded inputs for the discovery suite")
+    parser.add_argument("--tier", choices=("pr", "full"), default="full",
+                        help="pr trims each suite's transport matrix; full runs every combination")
     parser.add_argument("--startup-timeout", type=float, default=240)
     parser.add_argument("--suite-timeout", type=float, default=900)
+    parser.add_argument("--request-timeout", type=float, default=120,
+                        help="SDK request deadline in seconds; recorded separately from timing qualification")
     qualification = parser.add_mutually_exclusive_group(required=True)
     qualification.add_argument("--baseline", type=Path,
                                help="Matched previous run directory; compare every HTTP request")
@@ -262,6 +268,8 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- ./result/bin/gufo serve llm --model PATH [server options]")
     args = parser.parse_args()
+    if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
+        parser.error("--request-timeout must be finite and positive")
     if set(args.suite) & {"discovery", "messages-image-counts", "all"} and args.expected_input_modalities is None:
         parser.error("discovery and messages-image-counts require --expected-input-modalities text or text,image")
     if args.allow_missing_progress and not args.record_baseline:
@@ -306,6 +314,8 @@ def main():
     except (ValueError, OSError) as error:
         parser.error(str(error))
     output = args.output.resolve()
+    # Every suite process inherits the tier; see tier.py.
+    os.environ["GUFO_FUNCTIONAL_TIER"] = args.tier
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
         port = reserve.getsockname()[1]
@@ -333,6 +343,7 @@ def main():
               "binary": str(Path(command[0]).resolve()),
               "mode": "baseline" if args.record_baseline else "qualification",
               "sampling_preset": args.sampling_preset, "sampling_overrides": overrides,
+              "request_timeout": args.request_timeout, "tier": args.tier,
               "vision": vision, "speculative": speculative,
               "suites": {}, "through_case": args.through_case,
               "allow_missing_progress": args.allow_missing_progress,
@@ -421,6 +432,7 @@ def main():
                             "--suite", suite, "--output", str(output / (suite + ".json")),
                             "--sampling-preset", args.sampling_preset,
                             "--sampling-overrides", json.dumps(overrides),
+                            "--request-timeout", str(args.request_timeout),
                             "--concurrency", str(sessions), "--speculative", speculative,
                             "--context", option(command, "--context"),
                             "--server-log", str(output / "server.log")]

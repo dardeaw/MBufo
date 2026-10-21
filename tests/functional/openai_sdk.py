@@ -10,6 +10,7 @@ import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 from pathlib import Path
 import struct
 import sys
@@ -734,8 +735,37 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
     assert rejected[1:] == expected[1:], (rejected, expected)
     checks[f"batch_c{width}_rejected_peer_isolation"] = rejected
 
+    # Short greedy answers end at EOS inside a speculative block. A batched
+    # row must stop there exactly as its serial run does (#612).
+    words = ("BRAVO KILO", "CHARLIE ROMEO", "GOLF FOXTROT", "KILO NOVEMBER",
+             "SIERRA JULIET", "ALPHA DELTA", "JULIET GOLF", "TANGO QUEBEC")
+    short = [dict(model=model, temperature=0, seed=42, max_completion_tokens=32,
+                  messages=[{"role": "user", "content":
+                             f"Reply with exactly the words: {pair}"}],
+                  extra_body={"cache_prompt": False,
+                              "chat_template_kwargs": {"enable_thinking": False}})
+             for pair in words]
+    serial = [chat_result(client, body) for body in short]
+    batched, references = [], []
+    for offset in (0, 1):
+        indices = [(index + offset) % len(short) for index in range(len(short))]
+        for group in range(0, len(indices) - width + 1, width):
+            members = indices[group:group + width]
+            barrier = threading.Barrier(width)
+            def together(index):
+                barrier.wait(timeout=30)
+                return chat_result(client, short[index], True)
+            with ThreadPoolExecutor(width) as pool:
+                batched += list(pool.map(together, members))
+            references += [serial[index] for index in members]
+    assert max(row["usage"]["gufo"]["physical_execution_width"] for row in batched) > 1, batched
+    for row, reference in zip(batched, references, strict=True):
+        assert (row["text"], row["finish"]) == (reference["text"], reference["finish"]), (
+            row, reference)
+    checks[f"batch_c{width}_greedy_short_replies_match_serial"] = batched
 
-def check_conversations(client, model, checks, vision=False):
+
+def check_conversations(client, model, checks, vision=False, server_log=None):
     """Exercise thinking controls and cache reuse after a client disconnect."""
 
     def signature(result):
@@ -881,17 +911,24 @@ def check_conversations(client, model, checks, vision=False):
             cold = chat("vision_" + color + "_cold", request)
             assert color in cold["text"].lower() and not cold["reasoning"], cold
             request["extra_body"]["cache_prompt"] = True
+            replay_start = log_offset(server_log)
             warm = chat("vision_" + color + "_warm", request)
+            replay_end = log_offset(server_log)
             repeated = chat("vision_" + color + "_replay", request, True)
             assert signature(cold) == signature(warm) == signature(repeated), (
                 cold,
                 warm,
                 repeated,
             )
-            assert (
-                repeated["usage"]["cached_tokens"] > 0
-                and repeated["usage"]["gufo"]["prefill_tokens"] == 0
-            ), repeated
+            usage = repeated["usage"]
+            prefilled = usage["gufo"]["prefill_tokens"]
+            assert usage["prompt_tokens"] == cold["usage"]["prompt_tokens"], repeated
+            assert usage["cached_tokens"] > 0, repeated
+            assert usage["cached_tokens"] + prefilled == usage["prompt_tokens"], repeated
+            # A refused full-prompt copy may leave only the stable image prefix.
+            # Require the preceding request's capacity refusal and a short tail.
+            check_unchanged_retry("vision_" + color + "_replay", repeated, prefilled,
+                                  server_log, replay_start, replay_end)
             candidates.append((request, cold))
         with ThreadPoolExecutor(2) as pool:
             results = list(
@@ -1742,6 +1779,36 @@ def check_tool_edges(client, model, checks, sampling_preset=None):
             if sampling_preset == "deepseek4" and "tool" in order:
                 assert "text" not in order[order.index("tool"):], result
 
+    # The newline a model writes between parallel calls is layout, not a reply.
+    # The turn has no text, as with one call, with or without thinking (#673).
+    pair = [{"name": name, "description": f"Return {name[4:]}.",
+             "parameters": {"type": "object", "properties": {}}}
+            for name in ("get_alpha", "get_beta")]
+    prompt = "Call both tools in one parallel block: get_alpha and get_beta."
+    for effort in ("none", "low"):
+        for endpoint in ("chat", "responses"):
+            for stream in (False, True):
+                if endpoint == "chat":
+                    result = chat_result(client, dict(
+                        **common, messages=[{"role": "user", "content": prompt}],
+                        tools=[{"type": "function", "function": tool} for tool in pair],
+                        tool_choice="auto", parallel_tool_calls=True,
+                        reasoning_effort=effort, max_completion_tokens=1024), stream)
+                else:
+                    result = response_result(client, dict(
+                        **common, input=prompt,
+                        tools=[{"type": "function", **tool} for tool in pair],
+                        tool_choice="auto", parallel_tool_calls=True,
+                        reasoning={"effort": effort}, max_output_tokens=1024,
+                        store=False), stream)
+                name = f"parallel_separator_{endpoint}_{effort}_stream{stream}"
+                checks[name] = result
+                print(f"CHECK {name}", file=sys.stderr, flush=True)
+                assert result["finish"] == "tool_calls", result
+                assert sorted(call["function"]["name"] for call in result["tools"]) == [
+                    "get_alpha", "get_beta"], result
+                assert not result["text"] or result["text"].strip(), result
+
 
 def check_state_edges(client, model, checks, speculative, vision=False, server_log=None):
     """Mode proof and request-local grammar state across limits, errors and reuse."""
@@ -2405,7 +2472,8 @@ def check_prompt_progress(client, model, checks, width, vision, allow_missing, s
 
     if vision:
         image_request = {**cached, "messages": [{"role": "user", "content": [
-            image_content("red"), {"type": "text", "text": "Name the color of this image."}]}]}
+            image_content("red"),
+            {"type": "text", "text": "Name the color of this image. Reply in one lowercase word."}]}]}
         a = chat("progress_image_off", image_request, False)
         b = chat("progress_image_on_cached", image_request)
         assert signature(a) == signature(b) and "red" in b["text"].lower()
@@ -2672,6 +2740,8 @@ def main():
                         help="Expected loaded inputs for the discovery suite")
     parser.add_argument("--base-url", required=True, help="http://127.0.0.1:PORT/v1")
     parser.add_argument("--model", required=True, help="Gufo served model name")
+    parser.add_argument("--request-timeout", type=float, default=120,
+                        help="Finite positive SDK request deadline in seconds")
     parser.add_argument("--expect-reasoning", action="store_true")
     parser.add_argument("--suite", choices=("all", *SDK_SUITES), default="all")
     parser.add_argument("--vision", action="store_true",
@@ -2721,11 +2791,14 @@ def main():
     async def async_local_only(request):
         local_only(request)
 
+    if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
+        parser.error("--request-timeout must be finite and positive")
     options = dict(api_key="local-test", base_url=args.base_url, max_retries=0,
-                   timeout=120, _strict_response_validation=True)
+                   timeout=args.request_timeout, _strict_response_validation=True)
     report = {"sdk": openai.__version__, "model": args.model, "suite": args.suite,
               "vision": args.vision, "speculative": args.speculative,
               "sampling_preset": args.sampling_preset,
+              "request_timeout": args.request_timeout,
               "sampling_overrides": args.sampling_overrides, "suites": {},
               "through_case": args.through_case, "status": "running"}
     report["expected_input_modalities"] = args.expected_input_modalities
@@ -2750,7 +2823,8 @@ def main():
             "responses": lambda: check_responses(client, args.model, checks, options,
                                                    async_local_only, args.expect_reasoning),
             "stops": lambda: check_stops(client, args.model, checks),
-            "conversation": lambda: check_conversations(client, args.model, checks, args.vision),
+            "conversation": lambda: check_conversations(
+                client, args.model, checks, args.vision, args.server_log),
             "image-inputs": lambda: check_image_inputs(
                 client, args.model, checks, image_content, chat_result, response_result),
             "image-count": lambda: check_image_count(
