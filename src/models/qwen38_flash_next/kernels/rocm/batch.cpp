@@ -36,6 +36,27 @@ bool UseMixedBatch() {
   }();
   return on;
 }
+// int8 WMMA mixed path (blocked K/V read directly, no F16 staging).
+// Gated behind GUFO_KV_I8 (separate from GUFO_KV_WMMA so single-session
+// routing is untouched during validation); only the int8 codec layout is
+// supported (E4M3 bytes are not int8 codes, so kFp8 keeps staging).
+bool UseWmmaI8() {
+  static const bool on = [] {
+    const char* e = std::getenv("GUFO_KV_I8");
+    return e != nullptr && e[0] != '\0' && e[0] != '0';
+  }();
+  return on;
+}
+[[nodiscard]] std::uint32_t MixedKvKeyBytes() {
+  const char* q4 = std::getenv("GUFO_KV_Q4");
+  const bool is_q4 = q4 != nullptr && *q4 != '\0' && *q4 != '0';
+  return is_q4 ? kKvKey4BitBlockBytes : kKvKeyBlockBytes;
+}
+[[nodiscard]] std::uint32_t MixedKvValueBytes() {
+  const char* v4 = std::getenv("GUFO_KV_V4");
+  const bool is_v4 = v4 != nullptr && *v4 != '\0' && *v4 != '0';
+  return is_v4 ? kKvValue4BitBlockBytes : kKvKeyBlockBytes;
+}
 }  // namespace
 
 bool Fail(std::string* error, const std::string& message) {
@@ -1066,6 +1087,13 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           }
         }
       }
+      // The int8 route needs blocked int8 caches (kQ8) and reads them
+      // directly; every other layout keeps the F16 staging route below.
+      const bool i8_mixed = use_mixed && UseWmmaI8() &&
+                            KvBlocked(options_.kv_format) &&
+                            options_.kv_format == KvFormat::kQ8;
+      const std::uint32_t i8_kbb = MixedKvKeyBytes();
+      const std::uint32_t i8_vbb = MixedKvValueBytes();
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto& item = items[i];
         auto& session = *item.session;
@@ -1146,17 +1174,25 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           const __half* k_ptr = ks.k_cache;
           const __half* v_ptr = ks.v_cache;
           if (KvBlocked(options_.kv_format)) {
-            // Blocked sessions read their persistent F16 staging; ensure it
-            // covers the live rows first, else the whole batch falls back.
-            const std::uint32_t need = session.position_ + n;
-            if (!EnsureKvStaging(session,
-                                 const_cast<Session::AttentionState&>(ks), need,
-                                 kv_row, error)) {
-              use_mixed = false;
-              break;
+            if (i8_mixed) {
+              // int8 WMMA reads the blocked caches directly: no staging
+              // traffic, and the pointers are reinterpreted by block bytes.
+              k_ptr = reinterpret_cast<const __half*>(ks.k_cache_kv);
+              v_ptr = reinterpret_cast<const __half*>(ks.v_cache_kv);
+            } else {
+              // Blocked sessions read their persistent F16 staging; ensure
+              // it covers the live rows first, else the whole batch falls
+              // back.
+              const std::uint32_t need = session.position_ + n;
+              if (!EnsureKvStaging(session,
+                                   const_cast<Session::AttentionState&>(ks),
+                                   need, kv_row, error)) {
+                use_mixed = false;
+                break;
+              }
+              k_ptr = session.kv_stage_k_;
+              v_ptr = session.kv_stage_v_;
             }
-            k_ptr = session.kv_stage_k_;
-            v_ptr = session.kv_stage_v_;
           }
           batch_mixed_host_[i] = {offsets[i],
                                   reinterpret_cast<std::uint64_t>(k_ptr),
@@ -1190,15 +1226,18 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           }
           UseScratch(base);
         } else {
-          // Blocked sessions read F16 staging (see EnsureKvStaging above), so
-          // the mixed kernel always takes its 34-byte / F16 value path here.
+          // Blocked sessions read F16 staging (see EnsureKvStaging above),
+          // so the mixed kernel takes its 34-byte / F16 value path there;
+          // the i8 route instead reads blocked caches directly.
+          const std::uint32_t mx_kbb = i8_mixed ? i8_kbb : kKvKeyBlockBytes;
+          const std::uint32_t mx_vbb = i8_mixed ? i8_vbb : kKvKeyBlockBytes;
           const bool mx_ok = WmmaMixedAttention(
               base.q, base.attn_gate, batch_mixed_,
               static_cast<std::uint32_t>(items.size()), base.ctx, c.num_heads,
               c.num_kv_heads, c.head_dim, c.compress_ratio,
-              kKvKeyBlockBytes, kKvKeyBlockBytes, stream_);
-          fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d\n", il, rows,
-                  items.size(), (int)mx_ok);
+              mx_kbb, mx_vbb, stream_, i8_mixed);
+          fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d i8=%d\n", il,
+                  rows, items.size(), (int)mx_ok, (int)i8_mixed);
           if (!mx_ok) {
             for (std::size_t i = 0; i < items.size(); ++i) {
               const auto& item = items[i];

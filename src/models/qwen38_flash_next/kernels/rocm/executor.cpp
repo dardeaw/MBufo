@@ -235,6 +235,13 @@ public:
 [[nodiscard]] std::uint32_t KvValueBlockBytes(KvFormat format) {
   return KvValueIs4Bit(format) ? kKvValue4BitBlockBytes : kKvKeyBlockBytes;
 }
+
+/// int8 WMMA causal path: reads blocked int8 caches directly (no F16
+/// staging). Gated behind GUFO_KV_I8; only the int8 codec qualifies.
+[[nodiscard]] bool UseWmmaI8() {
+  const char* e = std::getenv("GUFO_KV_I8");
+  return e != nullptr && *e != '\0' && e[0] != '0';
+}
 }  // namespace
 // Legacy hipFree synchronizes unrelated inference streams. Pool allocations
 // have stream-ordered release, so evicting a checkpoint cannot stall a peer.
@@ -2763,11 +2770,21 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         const std::uint32_t need = pos0 + rows;
         if (need == 0)
           return false;
-        if (!EnsureKvStaging(session, s, need, kv_row, error_msg)) {
-          return false;
+        const bool i8_kv = KvBlocked(options_.kv_format) && options_.kv_format == KvFormat::kQ8 && UseWmmaI8();
+        const std::uint32_t kbb = i8_kv ? KvKeyBlockBytes(options_.kv_format) : 0;
+        const std::uint32_t vbb = i8_kv ? KvValueBlockBytes(options_.kv_format) : 0;
+        const __half* kk = nullptr;
+        const __half* vv = nullptr;
+        if (i8_kv) {
+          kk = reinterpret_cast<const __half*>(s.k_cache_kv);
+          vv = reinterpret_cast<const __half*>(s.v_cache_kv);
+        } else {
+          if (!EnsureKvStaging(session, s, need, kv_row, error_msg)) {
+            return false;
+          }
+          kk = session.kv_stage_k_;
+          vv = session.kv_stage_v_;
         }
-        __half* stage_k = session.kv_stage_k_;
-        __half* stage_v = session.kv_stage_v_;
         bool ok = false;
         {
           const auto at = [&](std::uint32_t row) {
@@ -2780,18 +2797,18 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
           ok = (dense_rows == rows ||
                 WmmaCausalAttention(
                     s_.q + at(dense_rows), s_.attn_gate + at(dense_rows),
-                    stage_k, stage_v,
+                    kk, vv,
                     mask ? mask + std::size_t{first + dense_rows} * mask_words_
                          : nullptr,
                     mask_words_, s_.ctx + at(dense_rows), rows - dense_rows,
                     pos0 + dense_rows, c.num_heads, c.num_kv_heads, c.head_dim,
-                    c.compress_ratio, stream_, last)) &&
+                    c.compress_ratio, stream_, last, kbb, vbb, i8_kv)) &&
                (dense_rows == 0 || (last && dense_rows != rows) ||
-                WmmaCausalAttention(s_.q + at(0), s_.attn_gate + at(0), stage_k,
-                                    stage_v, nullptr, mask_words_,
+                WmmaCausalAttention(s_.q + at(0), s_.attn_gate + at(0), kk,
+                                    vv, nullptr, mask_words_,
                                     s_.ctx + at(0), dense_rows, pos0,
                                     c.num_heads, c.num_kv_heads, c.head_dim,
-                                    c.compress_ratio, stream_, last));
+                                    c.compress_ratio, stream_, last, kbb, vbb, i8_kv));
         }
         return ok;
       };

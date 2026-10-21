@@ -601,7 +601,8 @@ bool WmmaMixedAttention(const float* q, const float* gate, const MixedBlk* blks,
                         std::uint32_t kv_heads, std::uint32_t d,
                         std::uint32_t ratio, std::uint32_t key_block_bytes,
                         std::uint32_t value_block_bytes,
-                        hipStream_t stream);
+                        hipStream_t stream,
+                        bool i8 = false);
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows
 /// Attention's block-selection contract (null for the dense window). Returns
@@ -615,7 +616,10 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t start_pos, std::uint32_t heads,
                          std::uint32_t kv_heads, std::uint32_t d,
                          std::uint32_t ratio, hipStream_t stream,
-                         bool last_only = false);
+                         bool last_only = false,
+                         std::uint32_t k_block_bytes = 0,
+                         std::uint32_t v_block_bytes = 0,
+                         bool i8 = false);
 
 /// counts[e] = number of (token, slot) pairs routed to expert e.
 void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
