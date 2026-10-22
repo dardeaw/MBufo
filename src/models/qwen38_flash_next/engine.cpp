@@ -28,7 +28,25 @@ namespace {
 // chunk's n-gram gather doubles; next-chunk prefetch overlaps that read.
 // Prefill logits do not depend on the chunk size
 // (pre-budget queries always take the dense attention tiles).
-constexpr std::uint32_t kPrefillChunkTokens = 4096;
+// A wider prefill tile borrowed from a sibling fork (UD-IQ4_XS 40K: 8192
+// +3.2%) does not reproduce here: on UD-Q4_K_XL this box measured 4096 vs
+// 8192 within run-to-run noise at 24K (1390 vs 1369) and 48K (1333 vs
+// 1351), and 16384 is no better. 4096 stays the default; GUFO_PREFILL_TILE
+// overrides it for re-measurement.
+std::uint32_t PrefillChunkTokens() {
+  static const std::uint32_t value = [] {
+    const char* const raw = std::getenv("GUFO_PREFILL_TILE");
+    if (raw != nullptr && raw[0] != '\0') {
+      char* end = nullptr;
+      const unsigned long parsed = std::strtoul(raw, &end, 10);
+      if (end != nullptr && *end == '\0' && parsed > 0) {
+        return static_cast<std::uint32_t>(parsed);
+      }
+    }
+    return 4096u;
+  }();
+  return value;
+}
 // A prompt ending this close past a chunk finishes in that chunk: a separate
 // tail pass costs about as much as this many more chunk rows.
 constexpr std::uint32_t kPrefillTailTokens = 128;
@@ -240,11 +258,11 @@ std::uint32_t Model::VocabSize() const noexcept {
 }
 
 std::uint32_t Model::PrefillCapacity() const noexcept {
-  return std::min(kPrefillChunkTokens, options_.max_context);
+  return std::min(PrefillChunkTokens(), options_.max_context);
 }
 
 std::uint32_t Model::PrefillThroughCapacity() const noexcept {
-  return std::min(kPrefillChunkTokens + kPrefillTailTokens,
+  return std::min(PrefillChunkTokens() + kPrefillTailTokens,
                   options_.max_context);
 }
 
