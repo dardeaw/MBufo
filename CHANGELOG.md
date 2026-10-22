@@ -37,7 +37,7 @@
 - **4-bit KV**：`GUFO_KV_Q4`（4-bit key）、`GUFO_KV_V4`（4-bit value pack 18B）。
 - **Mixed batch**：P0–P3（envelope 32 sessions/1024 rows、MTP parity、mixed 預設開）。
 - **MTP**：draft depth、ngram 預取、取樣開銷優化。
-- **FP8 KV**：`--kv-quant fp8` opt-in（gfx1151 無 fp8 WMMA，僅快取格式）。
+- KV 唯一推薦 `q8`（`--kv-quant fp8` 已移除；gfx1151 無 fp8 WMMA，且 Q8 + Q4_1 副本已達 +17% decode）。
 
 ## 環境開關速查（config A 預設全開）
 `GUFO_KV_WMMA=1`、`GUFO_KV_I8=1`、`GUFO_KV_Q4=1`、`GUFO_KV_V4=1`；

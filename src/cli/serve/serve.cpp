@@ -1234,7 +1234,7 @@ int RunServe(std::span<const char* const> args) {
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
     llm_parser.AddOption("", "--kv-quant", "MODE",
-                         "KV cache precision: f16, q8 or fp8 (default: f16)",
+                         "KV cache precision: f16 or q8 (default: f16)",
                          "Model", &kv_cache_quant);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
@@ -1399,9 +1399,8 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;
     }
-    if (kv_cache_quant != "f16" && kv_cache_quant != "q8" &&
-        kv_cache_quant != "fp8") {
-      std::cerr << "Error: --kv-quant must be f16, q8 or fp8\n";
+    if (kv_cache_quant != "f16" && kv_cache_quant != "q8") {
+      std::cerr << "Error: --kv-quant must be f16 or q8 (fp8 removed, use q8)\n";
       return 2;
     }
     if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&

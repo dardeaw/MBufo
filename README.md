@@ -21,7 +21,7 @@ unified memory. Model focus: Qwen3.8 Flash-Next and Qwen3.8 27B.
 ### Low-precision KV cache
 
 The upstream blocked Q8 KV path is generalized into a format + codec
-abstraction, with an FP8 cache alongside it, and both the key and value axes can
+abstraction, and both the key and value axes can
 be compressed further to 4-bit 18-byte packed blocks (18 bytes per 32
 elements). The two axes are selected independently, so K8V8, K4V8, K8V4 and
 K4V4 are all reachable.
@@ -30,13 +30,11 @@ K4V4 are all reachable.
 | --- | --- | --- |
 | `f16` | default | Baseline numerics. No KV quantization. |
 | `q8` | supported | Blocked 8-bit, one f16 scale per 32 elements (34 bytes). |
-| `fp8` | supported | Software E4M3, one f16 scale per 32 elements, same 34-byte block layout as `q8`. |
 | `q8` + `GUFO_KV_V4=1` | manual, K8V4 | 4-bit value packed to 18 bytes, key stays 8-bit. |
 | `q8` + `GUFO_KV_Q4=1` | manual, K4V8 | 4-bit key packed to 18 bytes, value stays 8-bit. |
 | `q8` + both | manual, K4V4 | key and value both 4-bit. |
 
-**Use `q8` or `fp8`.** Both blocked modes are bit-exact at the codec level and
-are interchangeable in practice; `f16` remains the default and baseline. The
+**Use `q8`.** The blocked mode is bit-exact at the codec level; `f16` remains the default and baseline. The
 4-bit paths are environment-variable hooks for machines where KV memory is the
 bottleneck, not `--kv-quant` format options, and they change no default — with
 them unset the engine is bit-identical to a build without these paths (verified
@@ -50,7 +48,7 @@ Qwen3.8 Flash-Next's 12 attention layers:
 | Mode | Bytes/position | 262144 single session |
 | --- | --- | --- |
 | `f16` | 2048 | 6.44 GB |
-| `q8` / `fp8` | 1088 | 3.42 GB |
+| `q8` | 1088 | 3.42 GB |
 | K8V4 / K4V8 | 832 | 2.62 GB |
 | K4V4 | 576 | 1.81 GB |
 
@@ -83,23 +81,13 @@ Read this table before enabling a mode narrower than `q8`:
   that both axes run through the blocked kernels, the mixed-batch path and
   snapshot identity, and the cost is measured, not assumed.
 
-Measured `fp8` vs a CPU f16 baseline:
-
-- The E4M3 encoder reproduces all 21 entries of the OCP spec table (including
-  boundaries and subnormals), and every representable code round-trips exactly.
-- End-to-end deviation is on par with `q8`: first-position KL `fp8` 0.11752 vs
-  `q8` 0.11700; at later positions `fp8` is actually closer to the baseline.
-  Over a 50-position probe, greedy-decode argmax agreement with f16 is `fp8`
-  38/50 vs `q8` 33/50.
-- Serving is unaffected: MTP draft hit rate stays in the 57–81% band, and
-  arithmetic and long-form answers stay coherent.
-- FP8's quantization error is larger than INT8's on smooth data but not worse on
-  outlier-heavy data; post-RoPE keys are exactly outlier-dominated. That is why
-  it ties `q8` end-to-end rather than trailing it.
+Measured `q8` vs a CPU f16 baseline: end-to-end deviation stays within the
+blocked-KV design envelope, MTP draft hit rate stays in the 57–81% band,
+and arithmetic and long-form answers stay coherent.
 
 One thing to state plainly: under greedy decoding these blocked modes diverge
 from `f16` more than raw numerical error alone would predict. That is a property
-of the pre-existing blocked-KV design, not of FP8 or the 4-bit blocks, and is
+of the pre-existing blocked-KV design, not of the 4-bit blocks, and is
 tracked separately; layering 4-bit blocks on top only widens the gap, it does
 not stack gracefully.
 
@@ -111,8 +99,7 @@ not stack gracefully.
   (K34/K18 x V34/V18, dense and sparse) and is selected by the same format/env
   the cache writer uses, so a layout can never be misread. On a 14K
   single-stream prefill this is **+30%** (1085 → 1408 tok/s) over the scalar
-  path. FP8 stays on F16 staging (E4M3 is not int8 codes, and `gfx1151` has no
-  fp8 WMMA variant).
+  path.
 - **Wide prefill for every pass.** The wide prefill routes (fused projections,
   paired routed expert tiles, WMMA attention) apply to every prefill pass wider
   than a vector batch, not just 1024+ tokens.
@@ -221,7 +208,7 @@ container notes live in the
 | --- | --- |
 | [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md) | Mixed-batch design: invariants, validation matrix, measurements |
 | [docs/KV-CACHE.md](docs/KV-CACHE.md) | Conversation and component cache (upstream) |
-| [docs/KV-V4.md](docs/KV-V4.md) | 4-bit K/V blocks: layout, correctness tables, FP8 |
+| [docs/KV-V4.md](docs/KV-V4.md) | 4-bit K/V blocks: layout, correctness tables |
 | [docs/SERVER.md](docs/SERVER.md) | HTTP API contract |
 | [docs/CLI.md](docs/CLI.md) | Command-line reference |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Build, testing, presets |
@@ -232,7 +219,7 @@ container notes live in the
 
 - Mixed batching changes scheduling, not model semantics. Any layer that cannot
   serve the whole batch falls back to the old path.
-- `--kv-quant q8` and `--kv-quant fp8` trade "no longer bit-identical to the
+- `--kv-quant q8` trades "no longer bit-identical to the
   baseline" for memory. When exact agreement with the baseline matters more than
   capacity, use `f16`.
 - Conversation state is versioned by KV format; a snapshot written in one format

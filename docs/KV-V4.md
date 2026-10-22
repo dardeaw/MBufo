@@ -48,8 +48,7 @@ PID=$(systemctl show -p MainPID --value gufo)
 tr '\0' '\n' < /proc/$PID/environ | grep GUFO_KV_V4
 ```
 
-It only takes effect with `--kv-quant q8`. `f16` has no blocked layout to pack
-and `fp8` already spends its bits on exponent range, so both ignore the flag.
+It only takes effect with `--kv-quant q8`. `f16` has no blocked layout to pack, so it ignores the flag.
 
 ## What was measured
 

@@ -638,10 +638,9 @@ at reduced precision with `--kv-quant`. Two layouts exist:
 
 - `f16`: two bytes per element, written by `PrepareAttention` /
   `StoreKvKernel`.
-- `q8` and `fp8`: the blocked layout, written by `PrepareAttentionKv` /
+- `q8`: the blocked layout, written by `PrepareAttentionKv` /
   `QuantizeKvRowsKernel`. Each 32-element key block is 34 bytes: 32 one-byte
-  codes followed by one `f16` scale. `q8` uses symmetric INT8 levels over
-  `max|block| / 127`; `fp8` uses the OCP E4M3 grid over `max|block| / 448`.
+  symmetric INT8 codes over `max|block| / 127` followed by one `f16` scale.
   Value blocks are 34 bytes by default and 18 bytes (16 packed nibble bytes
   plus the `f16` scale) when `GUFO_KV_V4` selects 4-bit values; see below.
   The indexer keys and pooled block keys stay `f32`/`f16` and are not affected.
@@ -654,9 +653,7 @@ that disagreed with `f16` (KL 0.239 against 0.0166 for an exact emulation of the
 same quantization) whenever the prefill batch was wider than one token. See the
 0.18.1 changelog entry.
 
-`q8` and `fp8` occupy the same 34-byte block, so the choice is about decode
-cost, not size: `q8` decodes with native INT8 instructions, while E4M3 is
-emulated in software on targets without an FP8 conversion instruction.
+`q8` uses the 34-byte blocked layout and decodes with native INT8 instructions.
 
 ### Narrow value precision (`GUFO_KV_V4`)
 

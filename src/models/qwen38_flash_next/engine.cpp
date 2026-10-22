@@ -97,9 +97,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     AssignError(error_msg, "decode concurrency must be between one and eight");
     return nullptr;
   }
-  if (options.kv_cache_quant != "f16" && options.kv_cache_quant != "q8" &&
-      options.kv_cache_quant != "fp8") {
-    AssignError(error_msg, "kv cache quant must be f16, q8 or fp8");
+  if (options.kv_cache_quant != "f16" && options.kv_cache_quant != "q8") {
+    AssignError(error_msg, "kv cache quant must be f16 or q8 (fp8 removed, use q8)");
     return nullptr;
   }
   if (options.max_draft_tokens == 0) {

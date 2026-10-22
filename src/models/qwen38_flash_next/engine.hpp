@@ -51,8 +51,8 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
-  /// KV cache precision: "f16" (default), "q8" (per-32-element block
-  /// symmetric INT8) or "fp8" (per-32-element block E4M3).
+  /// KV cache precision: "f16" (default) or "q8" (per-32-element block
+  /// symmetric INT8).
   std::string kv_cache_quant = "f16";
 };
 
@@ -94,9 +94,8 @@ public:
   [[nodiscard]] bool KvCacheBlocked() const noexcept {
     return options_.kv_cache_quant != "f16";
   }
-  /// Raw KV precision selector ("f16" / "q8" / "fp8"). Part of cache
-  /// identity: blocked Q8 and FP8 rows are byte-compatible but not
-  /// interchangeable, so snapshots must never be mixed across formats.
+  /// Raw KV precision selector ("f16" / "q8"). Part of cache identity,
+  /// so snapshots must never be mixed across formats.
   [[nodiscard]] const std::string& KvCacheQuant() const noexcept {
     return options_.kv_cache_quant;
   }

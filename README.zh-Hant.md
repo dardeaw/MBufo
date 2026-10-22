@@ -18,7 +18,7 @@ gufo-org 及所有貢獻者。
 
 ### 低精度 KV 快取
 
-上游的 blocked Q8 KV 路徑被泛化成「格式加編解碼器」抽象，旁邊加入 FP8 快取，
+上游的 blocked Q8 KV 路徑被泛化成「格式加編解碼器」抽象，
 且 key 與 value 兩軸都可再壓成 4-bit 的 18-byte 打包區塊（每 32 個元素 18
 位元組）。兩軸精度獨立選擇，因此 K8V8、K4V8、K8V4、K4V4 四種組合都可達成。
 
@@ -26,12 +26,11 @@ gufo-org 及所有貢獻者。
 | --- | --- | --- |
 | `f16` | 預設 | 基準數值。KV 快取不做量化。 |
 | `q8` | 支援 | Blocked 8-bit，每 32 個元素配一個 f16 尺度（34 位元組）。 |
-| `fp8` | 支援 | 軟體實作 E4M3，每 32 個元素配一個 f16 尺度，區塊佈局與 `q8` 相同（34 位元組）。 |
 | `q8` + `GUFO_KV_V4=1` | 手動開啟，K8V4 | 4-bit value 打包成 18 位元組，key 維持 8-bit。 |
 | `q8` + `GUFO_KV_Q4=1` | 手動開啟，K4V8 | 4-bit key 打包成 18 位元組，value 維持 8-bit。 |
 | `q8` + 兩者同時 | 手動開啟，K4V4 | key 與 value 都是 4-bit。 |
 
-**建議使用 `q8` 或 `fp8`。** 兩種 blocked 模式在編解碼層級都是位元精確的，
+**建議使用 `q8`。** blocked 模式在編解碼層級是位元精確的，
 實務上可互換；`f16` 仍是預設與基準。4-bit 路徑是給「KV 記憶體成為瓶頸」的
 機器手動開啟的環境變數鉤子，不是 `--kv-quant` 的格式選項，也不會改變任何預設
 值——未設定時引擎與不含這些路徑的版本位元相同（以 logit dump 雜湊比對驗證）。
@@ -45,7 +44,7 @@ gufo-org 及所有貢獻者。
 | 模式 | 每位置位元組 | 262144 單一 session |
 | --- | --- | --- |
 | `f16` | 2048 | 6.44 GB |
-| `q8` / `fp8` | 1088 | 3.42 GB |
+| `q8` | 1088 | 3.42 GB |
 | K8V4 / K4V8 | 832 | 2.62 GB |
 | K4V4 | 576 | 1.81 GB |
 
@@ -75,21 +74,10 @@ matched-token decode、對三個上下文取平均：
   引擎特有的地方在於：兩軸都貫通 blocked kernel、混合批次路徑與 snapshot 身分，
   而且代價是量出來的、不是假設的。
 
-`fp8` 對照 CPU f16 基準的實測結果：
-
-- E4M3 編碼器重現了 OCP 規格表全部 21 個項目（含邊界值與次正規數），且每個可
-  表示的碼都精確往返（encode 後 decode 再 encode 完全一致）。
-- 端到端偏差與 `q8` 相當：第一個位置的 KL 為 `fp8` 0.11752、`q8` 0.11700；
-  後段位置 `fp8` 反而更接近基準。在 50 個位置的探測中，貪婪解碼的 argmax 與
-  f16 一致率為 `fp8` 38/50、`q8` 33/50。
-- 服務層不受影響：MTP draft 命中率維持在 57% 至 81% 區間，算術題與長文生成的
-  回答都保持通順連貫。
-- FP8 的量化誤差在平滑資料上比 INT8 大，但在離群值偏重的資料上並不較差；而
-  post-RoPE 的 key 正是以離群值為主。這就是它端到端能與 `q8` 打平、而非落後
-  的原因。
+`q8` 對照 CPU f16 基準：端到端偏差維持在 blocked-KV 設計範圍內，MTP draft 命中率維持在 57% 至 81% 區間，算術題與長文生成保持通順。
 
 必須直說的一點：這些 blocked 模式在貪婪解碼下與 `f16` 的分歧，都比單純用數值
-誤差能解釋的程度來得大。這是既有 blocked-KV 設計的性質，不是 FP8 或 4-bit
+誤差能解釋的程度來得大。這是既有 blocked-KV 設計的性質，不是 4-bit
 區塊造成的，已另案追蹤；而在它之上再疊 4-bit 區塊，只會把差距放大，不會優雅
 地疊加。
 
@@ -100,8 +88,7 @@ matched-token decode、對三個上下文取平均：
   反量化。它覆蓋快取能持有的所有 KV 區塊佈局（K34/K18 x V34/V18，dense 與
   sparse），且由與快取寫入端相同的格式/環境變數選取，因此任何佈局都不會被誤
   讀。在 14K 單流 prefill 上比 scalar 路徑**快 30%**（1085 → 1408 tok/s）。
-  FP8 維持走 F16 staging（E4M3 不是 int8 codes，且 `gfx1151` 沒有 fp8 WMMA
-  變體）。
+
 - **每個 prefill pass 都走 wide 路徑。** wide prefill 路徑（融合投影、成對
   routed expert tile、WMMA attention）適用於所有寬於一個 vector batch 的
   prefill pass，不再只限 1024+ token。
@@ -201,7 +188,7 @@ cmake --build --preset release --parallel 4
 | --- | --- |
 | [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md) | 混合批次設計：鐵律、驗證矩陣、量測數據 |
 | [docs/KV-CACHE.md](docs/KV-CACHE.md) | 對話與元件快取（上游） |
-| [docs/KV-V4.md](docs/KV-V4.md) | 4-bit K/V 區塊：佈局、正確性表、FP8 |
+| [docs/KV-V4.md](docs/KV-V4.md) | 4-bit K/V 區塊：佈局、正確性表 |
 | [docs/SERVER.md](docs/SERVER.md) | HTTP API 契約 |
 | [docs/CLI.md](docs/CLI.md) | 命令列參照 |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 建置、測試、preset |
@@ -211,7 +198,7 @@ cmake --build --preset release --parallel 4
 ## 相容性與限制
 
 - 混合批次改變的是排程，不是模型語意。任何無法服務整批的層都會退回舊路徑。
-- `--kv-quant q8` 與 `--kv-quant fp8` 是以「不再與基準完全一致」換取記憶體。
+- `--kv-quant q8` 是以「不再與基準完全一致」換取記憶體。
   當與基準的精確一致性比容量更重要時，請用 `f16`。
 - 對話狀態以 KV 格式區分版本；用某一種格式寫出的快照不會被另一種格式重用。
 - 上游的 release 標籤不可變，也不會被當成 MBufo 的標籤重複使用。
