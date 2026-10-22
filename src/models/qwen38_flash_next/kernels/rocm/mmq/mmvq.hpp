@@ -25,6 +25,12 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                             const block_q8_1* input, float* output,
                             int k, int rows, int tokens, int input_stride,
                             hipStream_t stream);
+// Generic dense decode GEMV for a low-bit (Q4_1/Q5_1) copy of a large Q8_0
+// matrix: one wave per weight row, up to eight tokens.
+void mul_mat_vec_dense_dispatch(const void* weights, ggml_type type,
+                                const block_q8_1* input, float* output, int k,
+                                int rows, int tokens, int input_stride,
+                                hipStream_t stream);
 void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                              const block_q8_1* input, const int32_t* ids, float* output,
                              int k, int rows, int tokens, int experts_used,

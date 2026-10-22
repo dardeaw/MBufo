@@ -6845,6 +6845,13 @@ struct Q5_1Block {
 };
 static_assert(sizeof(Q5_1Block) == 24, "block_q5_1 must be 24 bytes");
 
+struct Q4_1Block {
+  __half d;
+  __half m;
+  std::uint8_t qs[16];
+};
+static_assert(sizeof(Q4_1Block) == 20, "block_q4_1 must be 20 bytes");
+
 // Routed F16 WMMA expert GEMM. The int8 kernel above pays a float epilogue
 // and an activation-sum correction every K block because the per-32 scales
 // of both operands sit outside the integer dot product; here the weights are
@@ -9065,6 +9072,98 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                      dim3(kThreads), 0, stream, w,
                      static_cast<const __half*>(x), out, batch, m, k);
   return true;
+}
+
+/// One thread re-encodes one Q8_0 block as Q4_1 with ggml's reference
+/// quantizer: 16 levels over the block's own [min, max].
+__global__ void RequantQ8ToQ4_1Kernel(const Q8_0Block* __restrict__ src,
+                                      Q4_1Block* __restrict__ dst,
+                                      std::size_t blocks) {
+  const std::size_t b = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  if (b >= blocks) {
+    return;
+  }
+  const Q8_0Block in = src[b];
+  const float scale = __half2float(in.d);
+  float x[32];
+  float lo = INFINITY;
+  float hi = -INFINITY;
+#pragma unroll
+  for (int j = 0; j < 32; ++j) {
+    x[j] = scale * static_cast<float>(in.qs[j]);
+    lo = fminf(lo, x[j]);
+    hi = fmaxf(hi, x[j]);
+  }
+  const float d = (hi - lo) / 15.0F;
+  const float inv = d != 0.0F ? 1.0F / d : 0.0F;
+  Q4_1Block out;
+  out.d = __float2half(d);
+  out.m = __float2half(lo);
+#pragma unroll
+  for (int j = 0; j < 16; ++j) {
+    const auto q0 = static_cast<std::uint32_t>((x[j] - lo) * inv + 0.5F);
+    const auto q1 = static_cast<std::uint32_t>((x[j + 16] - lo) * inv + 0.5F);
+    out.qs[j] = static_cast<std::uint8_t>((q0 & 0x0FU) | ((q1 & 0x0FU) << 4U));
+  }
+  dst[b] = out;
+}
+
+bool RequantQ8_0ToQ4_1(const void* src, void* dst, std::size_t blocks,
+                       hipStream_t stream) {
+  if (blocks == 0) {
+    return false;
+  }
+  hipLaunchKernelGGL(
+      RequantQ8ToQ4_1Kernel, dim3(Blocks(blocks)), dim3(kThreads), 0, stream,
+      static_cast<const Q8_0Block*>(src), static_cast<Q4_1Block*>(dst), blocks);
+  return hipGetLastError() == hipSuccess;
+}
+
+/// One thread re-encodes one Q8_0 block as Q5_1: 32 levels over [min, max].
+__global__ void RequantQ8ToQ5_1Kernel(const Q8_0Block* __restrict__ src,
+                                      Q5_1Block* __restrict__ dst,
+                                      std::size_t blocks) {
+  const std::size_t b = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  if (b >= blocks) {
+    return;
+  }
+  const Q8_0Block in = src[b];
+  const float scale = __half2float(in.d);
+  float x[32];
+  float lo = INFINITY;
+  float hi = -INFINITY;
+#pragma unroll
+  for (int j = 0; j < 32; ++j) {
+    x[j] = scale * static_cast<float>(in.qs[j]);
+    lo = fminf(lo, x[j]);
+    hi = fmaxf(hi, x[j]);
+  }
+  const float d = (hi - lo) / 31.0F;
+  const float inv = d != 0.0F ? 1.0F / d : 0.0F;
+  Q5_1Block out;
+  out.d = __float2half(d);
+  out.m = __float2half(lo);
+  out.qh = 0;
+#pragma unroll
+  for (int j = 0; j < 16; ++j) {
+    const auto q0 = static_cast<std::uint32_t>((x[j] - lo) * inv + 0.5F);
+    const auto q1 = static_cast<std::uint32_t>((x[j + 16] - lo) * inv + 0.5F);
+    out.qs[j] = static_cast<std::uint8_t>((q0 & 0x0FU) | ((q1 & 0x0FU) << 4U));
+    out.qh |= ((q0 & 0x10U) >> 4U) << j;
+    out.qh |= ((q1 & 0x10U) >> 4U) << (j + 16);
+  }
+  dst[b] = out;
+}
+
+bool RequantQ8_0ToQ5_1(const void* src, void* dst, std::size_t blocks,
+                       hipStream_t stream) {
+  if (blocks == 0) {
+    return false;
+  }
+  hipLaunchKernelGGL(
+      RequantQ8ToQ5_1Kernel, dim3(Blocks(blocks)), dim3(kThreads), 0, stream,
+      static_cast<const Q8_0Block*>(src), static_cast<Q5_1Block*>(dst), blocks);
+  return hipGetLastError() == hipSuccess;
 }
 
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,

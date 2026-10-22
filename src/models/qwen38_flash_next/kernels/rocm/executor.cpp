@@ -1699,6 +1699,26 @@ bool Executor::Quantize(const float* x, std::uint32_t n_tokens, std::uint32_t k,
 
 bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
                      std::string* error_msg) const {
+  if (w.decode_data != nullptr && q.data != nullptr && q.n <= kVecBatch) {
+    if (w.cols != q.k) {
+      AssignError(error_msg, "quantized input width mismatch");
+      return false;
+    }
+    const int rc = w.decode_type == GgmlType::kQ4_1
+                       ? qfn_mmq_q4_1_dense_vec_preq(
+                             w.decode_data, q.data, out,
+                             static_cast<int>(w.rows), static_cast<int>(q.n),
+                             static_cast<int>(w.cols), stream_)
+                       : qfn_mmq_q5_1_dense_vec_preq(
+                             w.decode_data, q.data, out,
+                             static_cast<int>(w.rows), static_cast<int>(q.n),
+                             static_cast<int>(w.cols), stream_);
+    if (rc != 0) {
+      AssignError(error_msg, "decode GEMV failed");
+      return false;
+    }
+    return true;
+  }
   if (w.type == GgmlType::kQ8_0 && q.data != nullptr) {
     if (w.cols != q.k) {
       AssignError(error_msg, "quantized input width mismatch");

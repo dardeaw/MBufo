@@ -20,6 +20,11 @@ struct DeviceTensor {
   std::uint32_t cols{0};
   std::uint32_t rows{0};
   std::uint32_t experts{1};
+  /// A Q4_1 (or Q5_1 when GUFO_DECODE_Q4=0) re-encoding of a large Q8_0
+  /// matrix that the decode GEMV reads in place of `data` (prefill keeps the
+  /// Q8_0 rows); null when there is none.
+  void* decode_data{nullptr};
+  core::GgmlType decode_type{core::GgmlType::kQ5_1};
 
   [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
   [[nodiscard]] const float* f32() const noexcept {
