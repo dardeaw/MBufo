@@ -21,7 +21,8 @@ bool IsPool(ContinuationPart part) {
 
 ContinuationLayout::ContinuationLayout(const Config& c, bool mtp,
                                        std::uint32_t context,
-                                       std::uint32_t kept_rows, bool kv_int8)
+                                       std::uint32_t kept_rows, bool kv_int8,
+                                       bool kv_key_4bit, bool kv_value_4bit)
     : context_(context), ratio_(c.compress_ratio), mtp_(mtp) {
   if (!context || context > c.context_length || !ratio_ ||
       !c.full_attention_interval || !c.num_layers || !c.AttentionKvDim() ||
@@ -30,9 +31,17 @@ ContinuationLayout::ContinuationLayout(const Config& c, bool mtp,
       (mtp && !kept_rows))
     throw std::invalid_argument("invalid Flash-Next continuation geometry");
   raw_capacity_ = std::min(context, std::max(c.indexer_top_k, ratio_ - 1));
-  // Q8_0 blocked rows: 34 bytes per 32 elements; scales live in the blocks.
-  const std::size_t kv_row =
-      kv_int8 ? (static_cast<std::size_t>(c.AttentionKvDim()) + 31) / 32 * 34
+  // Blocked rows are 34 bytes per 32 elements, or 18 on a packed 4-bit grid.
+  // Keys and values may use different grids, so they get independent rows.
+  const auto blocked_row = [&](bool four_bit) {
+    return (static_cast<std::size_t>(c.AttentionKvDim()) + 31) / 32 *
+           (four_bit ? 18 : 34);
+  };
+  const std::size_t kv_key_row =
+      kv_int8 ? blocked_row(kv_key_4bit)
+              : std::size_t{c.AttentionKvDim()} * 2;
+  const std::size_t kv_value_row =
+      kv_int8 ? blocked_row(kv_value_4bit)
               : std::size_t{c.AttentionKvDim()} * 2;
   const auto add = [&](ContinuationPart part, std::size_t row,
                        std::size_t state, std::uint32_t layer = 0) {
@@ -61,8 +70,8 @@ ContinuationLayout::ContinuationLayout(const Config& c, bool mtp,
               sizeof(float),
           layer);
     } else {
-      add(ContinuationPart::kKey, kv_row, 0, layer);
-      add(ContinuationPart::kValue, kv_row, 0, layer);
+      add(ContinuationPart::kKey, kv_key_row, 0, layer);
+      add(ContinuationPart::kValue, kv_value_row, 0, layer);
       add(ContinuationPart::kPooledKeys, std::size_t{c.indexer_head_dim} * 2, 0,
           layer);
       add(ContinuationPart::kRawKeys, 0,
@@ -74,8 +83,8 @@ ContinuationLayout::ContinuationLayout(const Config& c, bool mtp,
     add(ContinuationPart::kPleHistory, 0,
         std::size_t{c.PleConvHistory()} * c.HcDim() * sizeof(float));
   if (mtp) {
-    add(ContinuationPart::kDraftKey, kv_row, 0);
-    add(ContinuationPart::kDraftValue, kv_row, 0);
+    add(ContinuationPart::kDraftKey, kv_key_row, 0);
+    add(ContinuationPart::kDraftValue, kv_value_row, 0);
     add(ContinuationPart::kDraftPooledKeys, std::size_t{c.indexer_head_dim} * 2,
         0);
     add(ContinuationPart::kDraftRawKeys, 0,

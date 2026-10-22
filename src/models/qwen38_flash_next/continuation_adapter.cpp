@@ -222,7 +222,9 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
       layout_(model_ ? model_->config() : Config{},
               mode == core::SessionMode::kSpeculative, context,
               model_ ? model_->executor_->max_speculative() : 0,
-              model_ ? model_->KvCacheBlocked() : false),
+              model_ ? model_->KvCacheBlocked() : false,
+              model_ ? model_->KvKey4Bit() : false,
+              model_ ? model_->KvValue4Bit() : false),
       identity_(std::move(identity)) {
   if ((mode != core::SessionMode::kAutoregressive &&
        mode != core::SessionMode::kSpeculative) ||

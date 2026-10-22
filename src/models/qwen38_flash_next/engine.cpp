@@ -265,6 +265,16 @@ std::uint32_t Model::PrefillThroughCapacity() const noexcept {
                   options_.max_context);
 }
 
+bool Model::KvKey4Bit() const noexcept {
+  const char* value = std::getenv("GUFO_KV_Q4");
+  return options_.kv_cache_quant == "q8" && value != nullptr &&
+         *value != '\0' && *value != '0';
+}
+bool Model::KvValue4Bit() const noexcept {
+  const char* value = std::getenv("GUFO_KV_V4");
+  return options_.kv_cache_quant == "q8" && value != nullptr &&
+         *value != '\0' && *value != '0';
+}
 bool Model::HasMtp() const noexcept {
   return device_->has_mtp();
 }

@@ -49,8 +49,12 @@ struct ContinuationBackingClass {
 
 class ContinuationLayout {
 public:
+  // `kv_key_4bit` / `kv_value_4bit` select the 18-byte packed grids on top of
+  // the blocked codec; keys and values must be sized independently because the
+  // value grid can be narrower than the key grid (GUFO_KV_V4).
   ContinuationLayout(const Config&, bool mtp, std::uint32_t context,
-                     std::uint32_t kept_rows, bool kv_int8 = false);
+                     std::uint32_t kept_rows, bool kv_int8 = false,
+                     bool kv_key_4bit = false, bool kv_value_4bit = false);
   [[nodiscard]] std::span<const ContinuationComponent> Components() const {
     return components_;
   }

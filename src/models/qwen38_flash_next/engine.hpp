@@ -94,6 +94,10 @@ public:
   [[nodiscard]] bool KvCacheBlocked() const noexcept {
     return options_.kv_cache_quant != "f16";
   }
+  /// Packed 4-bit key grid (GUFO_KV_Q4); only the blocked Q8 codec has it.
+  [[nodiscard]] bool KvKey4Bit() const noexcept;
+  /// Packed 4-bit value grid (GUFO_KV_V4); only the blocked Q8 codec has it.
+  [[nodiscard]] bool KvValue4Bit() const noexcept;
   /// Raw KV precision selector ("f16" / "q8"). Part of cache identity,
   /// so snapshots must never be mixed across formats.
   [[nodiscard]] const std::string& KvCacheQuant() const noexcept {
@@ -257,7 +261,7 @@ public:
   [[nodiscard]] NgramTotals NgramRowTotals() const noexcept;
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 19;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(

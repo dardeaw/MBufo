@@ -3,6 +3,18 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.20.6（2026-10-22）
+- 修正 `GUFO_KV_V4` 下連續性快照把 **value 列誤用 key 列寬度**（544 B）的問題：
+  `ContinuationLayout` 現在分別取 key/value 列寬（V4 為 288 B），capture/restore
+  不再越界讀取 value 快取。
+- 症狀：prompt ≥ ~139k tokens（超過 `max_context × 288 / 544`）的請求回 200 後
+  服務 SIGABRT，日誌 `Memory access fault ... Page not present`；關閉 decode 副本
+  仍重現。根因是 value 快照每列多讀 256 B，154k 時越過 72 MiB 的 V 快取配置。
+- 修正後 154k prompt 可完整 capture（快照 3.11 GB → 2.60 GB）並正常 restore
+  （turn2 0.32 s，答案正確）。`kSnapshotPayloadVersion` 18 → 19，舊快照自動失效。
+- 驗證：154k prefill + 兩輪對話、154k 快照 restore、16K 快取測試全過；
+  `build/gpu-test` 僅 `kernel_resources_test`（WMMA scratch 基線）失敗，與本修正無關。
+
 ## v0.20.5（2026-10-22）
 - Decode 大型 dense 投影改讀 Q4_1 副本（`ssm_in/out`、`attn_qkv/out`，20 B/block，
   較 Q8_0 少 41% 位元組；prefill 仍走 Q8_0）。
