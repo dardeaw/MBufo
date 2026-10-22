@@ -177,8 +177,17 @@ images, function tools, structured output and streaming; see the
 | Goal | Setting |
 | --- | --- |
 | Single stream, max context | `--sessions 1 -c 262144 --kv-quant q8` |
-| High concurrency | `--sessions 16 -c 32768` (about 99 GB; 32K caps the KV size) |
+| High concurrency | `--sessions 16 -c 65536 --kv-quant q8` (about 103 GB; 20 GB left) |
+| Many small sessions | `--sessions 32 -c 32768 --kv-quant q8` (about 107 GB; 16 GB left) |
 | Restore upstream scheduling | env `GUFO_MIXED_BATCH=0` |
+
+Sessions times context is what the loader bounds, not context alone. The
+largest combination verified on a 128 GB Strix Halo with the blocked Q8 cache
+and 4-bit value rows is one million token slots: `16 x 65536` and `32 x 32768`
+both load, while `16 x 98304`, `24 x 65536` and `32 x 65536` are refused with
+`text runner request-state claim exceeds state capacity`. Measurements use
+UD-Q4_K_XL plus the MTP Q8_0 sidecar and BF16 mmproj, so the old 32K cap no
+longer applies; reach for 64K per session when clients are few and long.
 
 ## Build from source
 

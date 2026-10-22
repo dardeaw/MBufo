@@ -159,8 +159,16 @@ function tools、結構化輸出與串流；詳見[API 契約](docs/SERVER.md)�
 | 目標 | 設定 |
 | --- | --- |
 | 單路、最大上下文 | `--sessions 1 -c 262144 --kv-quant q8` |
-| 高併發 | `--sessions 16 -c 32768`（約佔 99 GB；32K 用來限制 KV 大小） |
+| 高併發 | `--sessions 16 -c 65536 --kv-quant q8`（約 103 GB，餘 20 GB） |
+| 多個小 session | `--sessions 32 -c 32768 --kv-quant q8`（約 107 GB，餘 16 GB） |
 | 還原上游排程 | 環境變數 `GUFO_MIXED_BATCH=0` |
+
+載入器限制的是「session 數 × 上下文」，不是單一上下文。在 128 GB Strix Halo
+上以 blocked Q8 快取＋4-bit value 列實測，可通過的組合上限是 100 萬個 token
+slot：`16 × 65536` 與 `32 × 32768` 都能載入，`16 × 98304`、`24 × 65536`、
+`32 × 65536` 會以 `text runner request-state claim exceeds state capacity`
+拒載。量測條件為 UD-Q4_K_XL ＋ MTP Q8_0 sidecar ＋ BF16 mmproj，因此舊的
+32K 上限已不成立；客戶端不多但對話長時可直接用 64K。
 
 ## 從原始碼建置
 

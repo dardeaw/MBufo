@@ -3,6 +3,13 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.20.7（2026-10-22）
+- 文件：更新高併發建議。舊的 `--sessions 16 -c 32768` 已非上限；q8 KV＋4-bit
+  value 列下實測 `16 × 65536` 載入 102.9 GB（餘 20 GB）、`32 × 32768`
+  107.4 GB（餘 15.5 GB）。載入器真正的上限是 session×context 約 100 萬 token
+  slot：`16 × 98304`、`24 × 65536`、`32 × 65536` 均以
+  `text runner request-state claim exceeds state capacity` 拒載。README 中英同步。
+
 ## v0.20.6（2026-10-22）
 - 修正 `GUFO_KV_V4` 下連續性快照把 **value 列誤用 key 列寬度**（544 B）的問題：
   `ContinuationLayout` 現在分別取 key/value 列寬（V4 為 288 B），capture/restore
