@@ -3,6 +3,20 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.22.1（2026-10-23）
+- 併入上游 `gufo-org/gufo` v0.22.0（v0.21.0＋v0.22.0，共 14 commits）：
+  - #714 indexer BF16 投影改純 K-order 求和——token 分數不再受 batch 位置／
+    prefill chunk 邊界影響（top-k 接近平手時不再因 KV 重用選到不同 key）。
+  - #707 每條 HIP stream 獨立 qfn_mmq scratch arena。
+  - #350 opt-in YaRN 長 context；啟用 YaRN 時 KV 強制 f16（blocked Q8 kernel
+    尚未支援 YaRN 頻率縮放）。
+  - #703 unseeded sampled MTP draft 依目前 decode occupancy 計價。
+- Snapshot header 同時帶 rope 欄位與 `kv_format`（`payload_bytes` 偏移 112），
+  `kSnapshotPayloadVersion` 19→20（舊快照一律拒收）。
+- 64k 工具梯子回歸：生產配置（`GUFO_KV_WMMA=1 GUFO_KV_I8=1 GUFO_KV_V4=1`）
+  **30/30**。
+
+
 ## v0.20.8（2026-10-23）
 - 修正 blocked-WMMA 路徑的 **double-gate**：`WmmaCausalAttentionKernel` 已在 kernel
   內施加 `SigmoidF(gate)`（kernel 5583 行註明 epilogue apply sigmoid output gate），
