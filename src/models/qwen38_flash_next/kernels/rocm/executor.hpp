@@ -796,6 +796,36 @@ private:
   mutable std::span<const std::int32_t> prefetch_next_;
   // Pinned host staging the launched (or captured) work reads and writes.
   Session::Control* control_host_{nullptr};
+  /// Serializes round entries (Forward, MtpForward and the batch variants):
+  /// the pinned host staging is shared across sessions and read
+  /// asynchronously by launched work, so one round must submit, sync and
+  /// read back before the next round overwrites it. The outermost entry
+  /// drains work queued by paths that returned without syncing.
+  class RoundsGuard {
+   public:
+    explicit RoundsGuard(const Executor& e) : e_(e) {
+      e_.rounds_mutex_.lock();
+      outer_ = !e_.rounds_held_;
+      if (outer_) {
+        e_.rounds_held_ = true;
+        if (e_.stream_ != nullptr)
+          (void)hipStreamSynchronize(e_.stream_);
+      }
+    }
+    RoundsGuard(const RoundsGuard&) = delete;
+    RoundsGuard& operator=(const RoundsGuard&) = delete;
+    ~RoundsGuard() {
+      if (outer_)
+        e_.rounds_held_ = false;
+      e_.rounds_mutex_.unlock();
+    }
+
+   private:
+    const Executor& e_;
+    bool outer_{false};
+  };
+  mutable std::recursive_mutex rounds_mutex_;
+  mutable bool rounds_held_{false};
   std::int32_t* tokens_host_{nullptr};
   std::uint32_t* counts_host_{nullptr};
   std::int32_t* tiles_host_{nullptr};         ///< routed tile map staging

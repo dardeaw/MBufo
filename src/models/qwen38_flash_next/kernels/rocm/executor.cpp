@@ -3439,6 +3439,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                        std::uint32_t n_logits, float* logits, ForwardMode mode,
                        std::string* error_msg, PrefillCheckpoint* checkpoint,
                        std::span<const std::int32_t> next) const {
+  RoundsGuard rounds(*this);
   // Only this call's PLE layer may start the prefetch of `next`.
   struct NextHint {
     std::span<const std::int32_t>& hint;
@@ -4771,6 +4772,7 @@ bool Executor::MtpForward(Session& session,
                           std::int32_t hidden_row, MtpOutput output,
                           std::string* error_msg,
                           const float* hidden_source) const {
+  RoundsGuard rounds(*this);
   DropReadyQ8();
   const auto n = static_cast<std::uint32_t>(tokens.size());
   if (session.owner_ != this ||

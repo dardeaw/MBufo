@@ -3,6 +3,21 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.22.2（2026-10-24）
+- 修正 **blocked(q8) KV × MTP × 兩路以上並發解碼 100% 崩潰**（GPU page fault，
+  定址 ~0x212000）。根因：批次 MTP catch-up（`MtpForwardBatch` 的 cache-only
+  投影）把 draft K/V 寫進 F16 draft cache，但 blocked KV 下該指標為 null，
+  kernel 直接寫未映射頁面。單 session 走 per-session `MtpForward`（有 blocked
+  分支）所以生產串行從未觸發；兩路常駐改走 `DraftCatchUpBatch` 即必崩。
+  修法：依 `KvBlocked` 改寫入 blocked draft rows（`k_cache_kv`/`v_cache_kv`，
+  codec／range／block bytes 與單 session 路徑一致）。
+- 防禦性加固：`RoundsGuard`（recursive mutex＋最外層 entry stream sync）串行化
+  round 提交——pinned host staging（control／tokens／logits）跨 session 共享且
+  被非同步發射的工作讀取。
+- 驗證：C2／C4@2K、C4@16K、**C4×250K 四路 262K 併發**全數 0 errors 0 faults
+  （修前 C2 起 100% 崩潰）；64k 工具梯子 6/6；stdbench 無回歸
+  （decode 46.8 tok/s、16K cache turn2 1.46s）。
+
 ## v0.22.1（2026-10-23）
 - 併入上游 `gufo-org/gufo` v0.22.0（v0.21.0＋v0.22.0，共 14 commits）：
   - #714 indexer BF16 投影改純 K-order 求和——token 分數不再受 batch 位置／

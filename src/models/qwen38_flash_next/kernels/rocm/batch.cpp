@@ -57,6 +57,18 @@ bool UseWmmaI8() {
   const bool is_v4 = v4 != nullptr && *v4 != '\0' && *v4 != '0';
   return is_v4 ? kKvValue4BitBlockBytes : kKvKeyBlockBytes;
 }
+[[nodiscard]] float MixedKvKeyRange(KvFormat format) {
+  if (format == KvFormat::kFp8)
+    return 448.0F;
+  const char* q4 = std::getenv("GUFO_KV_Q4");
+  return (q4 != nullptr && *q4 != '\0' && *q4 != '0') ? 7.0F : 127.0F;
+}
+[[nodiscard]] float MixedKvValueRange(KvFormat format) {
+  if (format == KvFormat::kFp8)
+    return 448.0F;
+  const char* v4 = std::getenv("GUFO_KV_V4");
+  return (v4 != nullptr && *v4 != '\0' && *v4 != '0') ? 7.0F : 127.0F;
+}
 }  // namespace
 
 bool Fail(std::string* error, const std::string& message) {
@@ -219,6 +231,7 @@ void Executor::CombineBatch(float* res, const float* gamma,
 
 bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                                std::string* error) const {
+  RoundsGuard rounds(*this);
   const Config& c = config();
   DropReadyQ8();
   if (!has_mtp() || items.empty() || items.size() > kBatchSessions) {
@@ -356,12 +369,30 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
         session.mtp_.residual_valid = false;
         const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
         const auto capacity = session.index_capacity_;
-        if (!PrepareAttention(
-                base.qg + std::size_t{offsets[i]} * kv.rows, kv.rows, nullptr,
-                l.attn_k_norm.f32(), nullptr, nullptr, session.mtp_.k_cache,
-                session.mtp_.v_cache, n, 0, c.num_kv_heads, c.head_dim,
-                c.rotary_dim, &session.control_->mtp_position, c.rope_theta,
-                c.rms_eps, stream_, session.vision_input_.rope()))
+        // Blocked KV has no F16 draft caches: quantize into the blocked
+        // draft rows like the single-session catch-up does, else the F16
+        // pointers are null and the kernel writes into unmapped pages.
+        const bool proj_ok =
+            KvBlocked(options_.kv_format)
+                ? PrepareAttentionKv(
+                      base.qg + std::size_t{offsets[i]} * kv.rows, kv.rows,
+                      nullptr, l.attn_k_norm.f32(), nullptr, nullptr,
+                      session.mtp_.k_cache_kv, session.mtp_.v_cache_kv,
+                      KvCodecOf(options_.kv_format),
+                      MixedKvKeyRange(options_.kv_format),
+                      MixedKvValueRange(options_.kv_format),
+                      MixedKvKeyBytes(), MixedKvValueBytes(), n, 0,
+                      c.num_kv_heads, c.head_dim, c.rotary_dim,
+                      &session.control_->mtp_position, c.rope_theta, c.rms_eps,
+                      stream_, session.vision_input_.rope())
+                : PrepareAttention(
+                      base.qg + std::size_t{offsets[i]} * kv.rows, kv.rows,
+                      nullptr, l.attn_k_norm.f32(), nullptr, nullptr,
+                      session.mtp_.k_cache, session.mtp_.v_cache, n, 0,
+                      c.num_kv_heads, c.head_dim, c.rotary_dim,
+                      &session.control_->mtp_position, c.rope_theta, c.rms_eps,
+                      stream_, session.vision_input_.rope());
+        if (!proj_ok)
           return Fail(error, "batched MTP cache projection failed");
         StoreRows(base.ik + std::size_t{offsets[i]} * c.indexer_head_dim,
                   session.mtp_.index_k, n, c.indexer_head_dim,
@@ -904,6 +935,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
 
 bool Executor::ForwardBatch(std::span<const BatchItem> items,
                             std::string* error) const {
+  RoundsGuard rounds(*this);
   selected_logits_ = nullptr;
   DropReadyQ8();
   const Config& c = config();
