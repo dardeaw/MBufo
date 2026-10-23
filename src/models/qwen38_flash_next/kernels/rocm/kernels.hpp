@@ -9,6 +9,7 @@
 
 #include "src/core/sampling.hpp"
 #include "src/models/qwen/vision/rope.hpp"
+#include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 /// Model-private HIP launchers for everything outside the quantized GEMM
 /// tier. Activations are row-major float32 [tokens][dim] unless noted; every
@@ -207,12 +208,14 @@ bool HcDownF16Gemm(const void* w, const void* x_tiled, __half* out,
 /// Fixed geometry: 24 query heads, two KV heads, 256 dimensions, 64 rotary.
 /// Requires at least 1024 tokens; cache capacity must include position +
 /// tokens.
+/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
 bool AttentionF16Gemm(const void* weights, const __half* input,
                       const float* q_gamma, const float* k_gamma, float* query,
                       float* gate, __half* keys, __half* values,
                       std::uint32_t n_tokens, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
-                      const qwen::vision::DeviceRope* rope = nullptr);
+                      const qwen::vision::DeviceRope* rope = nullptr,
+                      const YarnRope& yarn = {});
 
 /// Exact Q8_0 HC up projection and F16-input mixer for the Flash Next
 /// 2560-hidden, rank-320 geometry. Returns false below 96 tokens or for other
@@ -239,9 +242,8 @@ bool RequantQ8_0ToQ4_1(const void* src, void* dst, std::size_t blocks,
 bool RequantQ8_0ToQ5_1(const void* src, void* dst, std::size_t blocks,
                        hipStream_t stream);
 /// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
-/// F32 K16 chain per output. Token t's chain starts ((t / 32) % 4) * 128
-/// elements into K and wraps: hipBLASLt's MT32x32x64 order (BlasLt::Gemm).
-/// out is [batch][m].
+/// F32 K16 chain per output, in K order for every token: a row's result does
+/// not depend on its position in the batch (BlasLt::Gemm). out is [batch][m].
 bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
@@ -449,6 +451,7 @@ enum class KvCodec { kQ8, kFp8 };
 /// Unpacks a stacked Q/gate/K/V projection, normalizes and rotates Q/K,
 /// and writes the F16 caches. Returns false for heads wider than 256.
 /// With zero query heads, packed contains only K/V and q/gate may be null.
+/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
 bool PrepareAttention(const float* packed, std::uint32_t stride,
                       const float* q_gamma, const float* k_gamma, float* q,
                       float* gate, __half* k_cache, __half* v_cache,
@@ -457,7 +460,7 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
                       std::uint32_t rotary_dim, const std::uint32_t* start_pos,
                       float theta, float eps, hipStream_t stream,
                       const qwen::vision::DeviceRope* rope = nullptr,
-                      bool prefill = false);
+                      bool prefill = false, const YarnRope& yarn = {});
 
 /// Blocked twin of PrepareAttention: identical math, K and V rows written as
 /// `codec` blocks. K and V rows use `k_range` / `v_range` for their block
@@ -478,10 +481,12 @@ bool PrepareAttentionKv(
 /// Positions are read from device memory (`start_pos` points at the
 /// session's control block) so a captured decode graph replays at any
 /// position.
+/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
 void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
           std::uint32_t d, std::uint32_t rotary_dim,
           const std::uint32_t* start_pos, float theta, hipStream_t stream,
-          const qwen::vision::DeviceRope* rope = nullptr);
+          const qwen::vision::DeviceRope* rope = nullptr,
+          const YarnRope& yarn = {});
 
 /// Stores f32 rows into the f16 cache at positions start_pos + t:
 /// cache[(start_pos + t)][row_dim].
@@ -511,13 +516,15 @@ void StoreRows(const float* src, float* dst, std::uint32_t n_tokens,
 /// block start position, then round once to F16 for scoring.
 /// `grid_blocks` bounds how many blocks one launch
 /// can pool (a device-side bound is not available at launch time).
+/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
 void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        __half* blocks, const std::uint32_t* first_block,
                        const std::uint32_t* start_pos, std::uint32_t n_tokens,
                        std::uint32_t grid_blocks, std::uint32_t ratio,
                        std::uint32_t dim, std::uint32_t rotary_dim, float theta,
                        float eps, std::uint32_t capacity, hipStream_t stream,
-                       const qwen::vision::DeviceRope* rope = nullptr);
+                       const qwen::vision::DeviceRope* rope = nullptr,
+                       const YarnRope& yarn = {});
 
 /// Per query t (position *start_pos + first_token + t): scores every
 /// complete block below its own tail, keeps the `budget` highest, and
@@ -606,12 +613,20 @@ bool WmmaMixedAttention(const float* q, const float* gate, const MixedBlk* blks,
                         std::uint32_t ratio, std::uint32_t key_block_bytes,
                         std::uint32_t value_block_bytes, hipStream_t stream,
                         bool i8 = false);
+/// Maximum visible sparse context for this WMMA geometry, or zero when the
+/// geometry is unsupported. Checkpoint planning uses the same dispatch limit.
+[[nodiscard]] std::uint32_t WmmaCausalAttentionContextLimit(
+    std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
+    std::uint32_t ratio);
+
 /// Fused causal attention on the WMMA cores for wide batches: scores, online
 /// softmax, PV and the sigmoid output gate in one launch. `mask` follows
 /// Attention's block-selection contract (null for the dense window). Returns
 /// false, launching nothing, when the geometry is not the model's 24 x 256
 /// heads over two KV heads. `last_only` computes only the final dense query
 /// tile, retaining its key sweep and leaving earlier output rows untouched.
+/// Returns false when the visible extent exceeds 262,144 tokens; the caller
+/// falls back to Attention.
 bool WmmaCausalAttention(const float* q, const float* gate,
                          const __half* k_cache, const __half* v_cache,
                          const std::uint32_t* mask, std::uint32_t mask_words,

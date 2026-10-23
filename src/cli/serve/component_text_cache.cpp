@@ -205,18 +205,21 @@ struct ComponentTextCache::Impl {
   std::array<std::shared_ptr<DurableCapture>, 2 * kPersistenceDepth>
       pending_durable;
   std::size_t disk_capacity{}, disk_step{};
+  // The cache's own RAM budget. The ledger limit adds what the slots pinned.
+  std::size_t budget{};
   cache::ResourceCharge metadata;
 
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
-       std::size_t ram,
+       std::size_t ram, std::size_t slot_ceiling,
        const std::optional<TextRunnerDiskCacheOptions>& options,
        bool automatic_ram)
       : runner(std::move(runner)),
         // Disk transfers lease one fixed pinned staging buffer. Its size does
         // not change restore or write speed (#562), and a larger one only
         // takes pinned RAM and device heap from the cache and the sessions.
-        ledger({ram + (options ? cache::kDefaultDiskStagingBytes : 0), ram,
-                options ? cache::kDefaultDiskStagingBytes : 0, ram}),
+        ledger({slot_ceiling + (options ? cache::kDefaultDiskStagingBytes : 0),
+                slot_ceiling, options ? cache::kDefaultDiskStagingBytes : 0,
+                slot_ceiling}),
         resources(this->runner->CreateComponentCacheResources(ledger, ram)),
         identity(resources->adapter->CompatibilityIdentity()),
         index(ledger),
@@ -265,12 +268,19 @@ struct ComponentTextCache::Impl {
                                  resources->reassignment_batch_size});
       entries.push_back(std::move(entry));
     }
-    std::size_t automatic_bytes{}, max_bytes{};
+    std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
     if (resources->commit_backing) {
       const auto claim = this->runner->ResourceClaim();
-      const auto automatic = claim.retained_snapshot_capacity_bytes.value_or(0);
+      // The claim measures the host after the slots allocated, so bytes they
+      // pinned are missing from it. Add them back: in full to the ceiling,
+      // and half to the automatic budget, which is half the available RAM.
+      // The ledger charges them on top of the cache's own budget.
+      const auto pinned =
+          resources->pinned_bytes ? resources->pinned_bytes() : 0;
+      const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
+      const auto automatic = measured + pinned / 2;
       const auto ceiling =
-          claim.retained_snapshot_ceiling_bytes.value_or(automatic);
+          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
       automatic_bytes =
           std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
       // Staging is pinned host memory too, so the host keeps its reserve
@@ -280,9 +290,21 @@ struct ComponentTextCache::Impl {
       ram = std::min(ram, max_bytes);
       if (automatic_ram)
         ram = std::min(ram, automatic);
-      ledger.ConstrainLimits({ram + staging, ram, staging, ram});
+      // Within the host ceiling and the limit the slots allocated under. Other
+      // charges above the budget are refused here, as without pins.
+      const auto limit =
+          std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
+      ledger.ConstrainLimits({limit + staging, limit, staging, limit});
+      ram = std::min(ram, limit > pinned ? limit - pinned : 0);
       resources->commit_backing(ram);
+      slot_pinned_bytes = pinned;
+    } else {
+      // Slots allocated under the host ceiling; return to the budget. This
+      // ignores pinned_bytes: a runner that pins must commit backing.
+      const auto staging = ledger.Limits().staging_bytes;
+      ledger.ConstrainLimits({ram + staging, ram, staging, ram});
     }
+    budget = ram;
     if (options) {
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index);
       for (const auto& durable : disk->Entries()) {
@@ -406,7 +428,8 @@ struct ComponentTextCache::Impl {
                      std::to_string(ledger.Limits().staging_bytes) +
                      " automatic_bytes=" + std::to_string(automatic_bytes) +
                      " max_bytes=" + std::to_string(max_bytes) +
-                     " disk_capacity_bytes=" + std::to_string(disk_capacity));
+                     " disk_capacity_bytes=" + std::to_string(disk_capacity) +
+                     " slot_pinned_bytes=" + std::to_string(slot_pinned_bytes));
   }
   ~Impl() {
     // Settle immutable-source readers before slots/resources/index unwind.
@@ -791,8 +814,7 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
             : private_file ? cache::ResourceCategory::kPrivateTail
                            : cache::ResourceCategory::kBackingAssigned,
             first, end, bytes};
-        copies.push_back(
-            {request, cache->resources->allocate(request), file, private_file});
+        copies.push_back({request, {}, file, private_file});
       }
       return cache::DiskPayload{file, bytes, 0};
     };
@@ -807,6 +829,54 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
         component.tail = capture(completed, p->valid_rows, true);
     }
     manifest.components.push_back(std::move(component));
+  }
+  // Private states, tails, and rows the slot cannot lend are staged in RAM
+  // backing. Allocate them largest first, as Capture does. Reclaim for the
+  // staged bytes only, because Reclaim refuses a request larger than RAM. The
+  // disk checkpoint does not replace a retained one, so keep the source.
+  std::vector<cache::PayloadRequest> requests;
+  requests.reserve(copies.size());
+  std::size_t staged = 0;
+  for (const auto& copy : copies) {
+    requests.push_back(copy.request);
+    staged += copy.request.bytes;
+  }
+  std::vector<std::size_t> allocation_order(copies.size());
+  std::iota(allocation_order.begin(), allocation_order.end(), 0);
+  std::ranges::sort(allocation_order, [&](auto a, auto b) {
+    return requests[a].bytes != requests[b].bytes
+               ? requests[a].bytes > requests[b].bytes
+               : a < b;
+  });
+  auto retain = Retain(capture_tokens, staged);
+  retain.preserve_source = true;
+  // Nearby retry copies may replace their source even with preserve_source.
+  // Disk staging publishes no RAM replacement, so protect it explicitly along
+  // with this turn's edit boundaries.
+  std::array<cache::CheckpointId, cache::RetentionPolicy::kRecordLimit + 1>
+      protected_checkpoints{};
+  auto protected_count = retain.protected_checkpoints.size();
+  std::ranges::copy(retain.protected_checkpoints,
+                    protected_checkpoints.begin());
+  if (retain.source.value)
+    protected_checkpoints[protected_count++] = retain.source;
+  retain.protected_checkpoints =
+      std::span(protected_checkpoints).first(protected_count);
+  while (!copies.empty()) {
+    try {
+      if (cache->resources->can_capture &&
+          !cache->resources->can_capture(requests))
+        throw cache::ResourceExhausted();
+      for (const auto i : allocation_order)
+        copies[i].buffer = cache->resources->allocate(requests[i]);
+      break;
+    } catch (const cache::ResourceExhausted&) {
+      for (auto& copy : copies)
+        copy.buffer = {};
+      const std::lock_guard lock(cache->mutex);
+      if (!cache->retention.Reclaim(retain))
+        throw;
+    }
   }
   TransferBatch transfers(cache->resources->transfer_batch_size);
   for (auto& copy : copies) {
@@ -854,8 +924,10 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
 
 ComponentTextCache::ComponentTextCache(
     std::shared_ptr<TextModelRunner> runner, std::size_t count, std::size_t ram,
-    const std::optional<TextRunnerDiskCacheOptions>& disk, bool automatic_ram)
-    : impl_(std::make_unique<Impl>(std::move(runner), count, ram, disk,
+    const std::optional<TextRunnerDiskCacheOptions>& disk, bool automatic_ram,
+    std::size_t ceiling)
+    : impl_(std::make_unique<Impl>(std::move(runner), count, ram,
+                                   std::max(ram, ceiling), disk,
                                    automatic_ram)) {}
 ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
@@ -1341,7 +1413,7 @@ bool ComponentTextCache::Lease::TryReserveSnapshot(
     std::size_t bytes, std::size_t boundary, bool preserve,
     SnapshotPurpose purpose, std::span<const ContinuationToken> tokens) {
   if (!boundary || boundary > impl_->prompt.size() ||
-      (bytes > impl_->cache->ledger.Limits().ram_bytes &&
+      (bytes > impl_->cache->budget &&
        (!impl_->cache->queue || purpose == SnapshotPurpose::kHistory)))
     return false;
   impl_->capture_boundary = boundary;
@@ -1386,8 +1458,29 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
       cache.resources->adapter->Positions(request.slot.Execution());
   const auto bytes = request.entry->history->NewPayloadBytes(positions);
   const auto retain = request.Retain(request.capture_tokens, bytes);
-  if (bytes > cache.ledger.Limits().ram_bytes)
-    return request.CaptureDurable();
+  const auto refused = [&] {
+    Logger::Info("cache",
+                 "schema=component-cache-v1 event=capture_refused "
+                 "reason=byte_capacity tokens=" +
+                     std::to_string(request.capture_tokens.size()));
+  };
+  const auto failed = [](const std::exception& error) {
+    Logger::Info(
+        "cache",
+        std::string("schema=component-cache-v1 event=capture_failed reason=") +
+            error.what());
+  };
+  if (bytes > cache.budget) {
+    try {
+      return request.CaptureDurable();
+    } catch (const cache::ResourceExhausted&) {
+      refused();
+      throw;
+    } catch (const std::exception& error) {
+      failed(error);
+      throw;
+    }
+  }
   const auto reclaim = [&] {
     const std::lock_guard lock(cache.mutex);
     return cache.retention.Reclaim(retain);
@@ -1518,23 +1611,24 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
       break;
     } catch (const cache::ResourceExhausted&) {
       if (!reclaim()) {
-        if (cache.queue && request.purpose != SnapshotPurpose::kHistory)
-          if (auto durable = request.CaptureDurable())
-            return durable;
+        if (cache.queue && request.purpose != SnapshotPurpose::kHistory) {
+          try {
+            if (auto durable = request.CaptureDurable())
+              return durable;
+          } catch (const cache::ResourceExhausted&) {
+            // Staging for disk did not fit either. Refuse below.
+          } catch (const std::exception& error) {
+            failed(error);
+            throw;
+          }
+        }
         // RAM refused the copy; the disk fallback, when there is one, already
         // holds a checkpoint within its step of this boundary.
-        Logger::Info("cache",
-                     "schema=component-cache-v1 event=capture_refused "
-                     "reason=byte_capacity tokens=" +
-                         std::to_string(request.capture_tokens.size()));
+        refused();
         throw;
       }
     } catch (const std::exception& error) {
-      Logger::Info(
-          "cache",
-          std::string(
-              "schema=component-cache-v1 event=capture_failed reason=") +
-              error.what());
+      failed(error);
       throw;
     }
   }
@@ -1652,8 +1746,7 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
        true,
        false,
        {},
-       cache::GridLimit(impl_->cache->ledger.Limits().ram_bytes,
-                        private_bytes)});
+       cache::GridLimit(impl_->cache->budget, private_bytes)});
   std::vector<std::size_t> boundaries;
   for (const auto& capture : plan)
     if (!capture.required &&

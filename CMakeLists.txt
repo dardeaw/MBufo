@@ -143,6 +143,10 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 add_library(gufo_core STATIC
+  src/core/platform/net.cpp
+  src/core/platform/shutdown_signal.cpp
+  src/core/platform/publish.cpp
+  src/core/platform/os_info.cpp
   src/core/image.cpp
   src/core/crypto/sha256.cpp
   src/core/gguf_reader.cpp
@@ -219,10 +223,9 @@ endif()
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp)
-target_link_libraries(gufo_llm_cli PUBLIC gufo_core)
+target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next)
 if(ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash
-    gufo_qwen38_flash_next)
+  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash)
 endif()
 
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
@@ -864,6 +867,20 @@ if (BUILD_TESTING)
   add_test(NAME kernel_bench_test COMMAND kernel_bench_test)
   set_tests_properties(kernel_bench_test PROPERTIES
     LABELS "cpu;benchmarks;statistics;json")
+
+  add_executable(platform_publish_test
+    tests/core/platform_publish_test.cpp src/core/platform/publish.cpp)
+  target_link_libraries(platform_publish_test PRIVATE Threads::Threads)
+  if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(platform_publish_test PRIVATE "-Wl,--wrap=fsync")
+  endif()
+  add_test(NAME platform_publish_test COMMAND platform_publish_test)
+  set_tests_properties(platform_publish_test PROPERTIES LABELS "cpu;platform")
+
+  add_executable(platform_prefault_test tests/core/platform_prefault_test.cpp)
+  target_link_libraries(platform_prefault_test PRIVATE Threads::Threads)
+  add_test(NAME platform_prefault_test COMMAND platform_prefault_test)
+  set_tests_properties(platform_prefault_test PROPERTIES LABELS "cpu;platform")
 
   add_executable(hipblaslt_plan_cache_test
     tests/core/hipblaslt_plan_cache_test.cpp)

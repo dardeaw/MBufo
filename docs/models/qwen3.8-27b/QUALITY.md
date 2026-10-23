@@ -15,6 +15,168 @@ parity remain unqualified.
 | Target verification, widths 2–8 and ragged cohorts | Full logits/features match scalar | Full logits/features match scalar |
 | Serving and state | Cancellation, continuation, RAM/disk restore and seeded replay pass | Same; also eight 32K continuation forks |
 
+## Draft integration on October 21
+
+Rebased onto main `e060aeed` (#699), preserving Flash-Next's requirement for
+an established accepted copy before skipping a sampled neural proposal.
+The shared lookup's source predicate and resume requirement have a combined
+regression test. After rebasing, the Flash-Next lookup tests and Qwen27B
+DFlash2 lookup, private RNG, request reset and restore checks pass. The
+affected Flash-Next engine and continuation adapter also compile.
+
+The serving measurements below predate this rebase. These focused integration
+checks do not replace the remaining latency qualification or a full sweep.
+
+## October 21 coding and prose follow-up
+
+The retained change affects only five-token IQ4_XS FFN projections. It keeps
+both original lane partials and their reduction order; three unused output
+columns are zero and never read or write extra token rows. Actual 17408/34816
+by 5120 gate/up and 5120 by 17408 down projections match scalar decode
+byte-for-byte, including output guards. The independent CPU-qualified IQ4_XS
+scalar error is 2.38e-7 against the existing 1e-6 limit. Cold read-only mapped
+weights exceeding 128 MiB and three input scales also match exactly.
+
+Native C2–C8 checks pass exact layers, logits, selector probabilities, private
+RNG/controller state, mixed widths/positions and persistent replay. The final
+HTTP default-sampling history through `sampling_concurrent_thinkingFalse`
+passes all 467 timing checks against `77c82ecb`, without output, work or
+coverage changes. Scalar AR, wide prefill, sampling policy and lookup state
+have no new implementation changes.
+
+The sampled coding/prose requests match the previous branch's complete text,
+reasoning, tool/finish fields and draft/cache counts. Independently checked
+generated interval code passes its own tests, 300 half-integer coverage cases,
+input-preservation and invalid-input checks. Generated retry code passes
+exact call/delay counts, capped delays, successful return, original last-error
+identity, nonretryable errors and invalid configuration. Both main and the
+candidate needed a larger output budget for the complete thinking example:
+the retained 4096-token-budget run finishes at 3377 identical tokens.
+The earlier 1536/3072-token truncations are retained, not counted as completed
+task passes. [The functional checker](../../../tests/functional/generation_quality.py)
+requires completed responses.
+
+The prose example is a speed and output-consistency control. Both original
+main and the previous branch make numerical mistakes in their queueing
+examples; this is not a factual-quality pass. The kernel change preserves
+the previous branch's text and does not alter the target distribution.
+
+One coding maximum-token-pause comparison is **inconclusive**:
+138.43 → 155.87 ms, despite unchanged total decode time. An earlier two-kernel
+candidate also reached 157.92 ms. A later retained-candidate run measured
+137.69 ms; the focused identical-history replay measured candidate 137.72 ms
+versus previous-branch 137.93 ms, with every request/phase check passing.
+The outlier's cause is not established. The earlier cache/snapshot timing
+limitations below remain unresolved; no stall-free claim is made.
+
+Standard mixed d0/32K pp2048/tg128 controls preserve original main's complete
+output and prompt/cache/draft counts. Q8 serving and full benchmark sweeps
+were not repeated. Reports, commands, inputs and rejected experiments remain
+under `/tmp/gufo-qwen27b-dflash2-20261021` on the development host.
+
+## October 21 prefill and sampling review
+
+Main `0c03748a` and `perf/qwen27b-dflash2-speed` use the same release toolchain,
+Q4 target and Q4 DFlash2 draft. All six measured C1 AR/DFlash2 d0/32K
+completions and prompt/cache counts match exactly. The candidate does not
+change weights, cache precision, attention arithmetic or the target sampling
+distribution. Draft probabilities change when numeric penalties or prompt
+lookup apply; ordinary p/q acceptance and residual correction remain intact.
+
+The native target prefill checks pass on Q4/Q8. Q4's cropped final output
+tile matches forced full-layer capture for full-vocabulary logits and
+continued cache state, including 2,048 rows at d0 and 1,025 rows at d8K.
+The attention operator retains its independent FP64 checks; skipped query
+rows remain untouched and the retained output/LSE bytes match full execution
+across workspace head groups. Sampling passes 216 policies, including
+speculative rejection/residual correction. New candidate-order tests compare
+against both the original full GPU sort and independent CPU stable ordering
+for vocabulary sizes 1,023/1,024/1,025/32,769/248,320, top counts
+1/20/32/33/64, ties, signed zero and nonfinite inputs.
+
+The second-stage checks cover four changes:
+
+- Native replay of the exact 34,822-token repetitive history matches AR,
+  including every proposal/acceptance round after memory restore, serialized
+  restore and independent draft re-priming. Its lower neural acceptance is
+  reproducible without a stale draft cache; this is evidence for that history.
+- DFlash2 reuses Flash-Next's token-history index with private request and
+  resume state. Copies report point-mass q and consume no draft RNG. Native
+  memory/persistent/component restoration, old snapshot formats, request reset
+  and invalid restored boundaries pass. HTTP C1/C2/C4 default sampling,
+  greedy, mixed cohorts, stop, image cancellation and replay pass with 1,596
+  actually accepted lookup tokens. Flash-Next's index tests still pass.
+  Greedy requests allow a shorter initial match only when existing private
+  neural acceptance falls below its neutral estimate; sampled requests retain
+  24 tokens. This decision uses snapshotted state, without timing or new RNG.
+  Its native test checks adaptive versus fixed-policy gates and exact
+  pre-copy replay after memory and persistent restore. An independent source
+  fixture contains real message, thinking and tool tokens: a continuation
+  crossing a message boundary must select an earlier source, while thinking
+  and tool tokens remain copyable. Flash-Next's default source selection is
+  unchanged and tested separately.
+- Eight independent CPU oracles qualify conditional draft probabilities with
+  repeat-window expiry and positive/negative frequency/presence penalties.
+  Native C2–C8 controls retain each request's exact layers, logits, selector
+  probabilities, RNG and restored state. The original 216 sampling policies
+  and target verification tests pass. Additional top-k/top-p/min-p filtering
+  was rejected: it added a verification round to a short sampled request.
+- Q4 four-token verification preserves every scalar output byte on real
+  gate/up/down shapes, with three/eight-token controls. The independent CPU-qualified
+  scalar relative error is 8.18e-8 against a 1e-6 limit. Cold mapped-weight
+  controls cover three input scales; other width/format schedules are retained.
+
+Selected Q4 HTTP `sampling-defaults`, `long-context`, `state-edges` and `cache`
+checks pass correctness, including thinking, cancellation and RAM/disk restart.
+After removing the sampled filtering and the overly permissive greedy lookup
+gate, the focused long-context rerun passes all 124 timings with identical
+output and work. Final default sampling has no output/history or coverage
+changes from its matched first-stage control. Q8 serving and the full depth
+sweep were not repeated.
+
+The later matched lookup control exposed and fixed a real slowdown. Copying
+the prompt's message-end tag and assistant header repeatedly wasted
+verification: a default-sampled copy needed 24 rounds instead of main's 17.
+Disabling lookup alone restored all 110 accepted proposals; disabling draft
+penalties did not help. Selecting an earlier source without message framing
+restores 17 rounds and 110/110 acceptance while skipping neural draft work.
+C1/C2/C4 copies, mixed greedy peers, image copying and stop/resume all retain
+main's exact output, request history and cache work. Their final comparison
+passes all prefill/decode timings: 413 total pass, with five queue timings
+inconclusive. The rejected implementation's 47 timing flags are retained.
+
+Timing remains **inconclusive** for some concurrent/cache observations.
+Final default sampling passes 1,401 timings and leaves 11 inconclusive around
+admission, snapshot work, token gaps and differing physical cohort widths.
+One width-one request has a 347.68 ms snapshot and 317.08 ms token gap, without
+slower decode. A focused main/candidate replay retaining its preceding history
+passes all 467 timings, with width two and token gaps around 158–163 ms. It
+does not reproduce or qualify the original width-one spike. Earlier unchanged
+main also reached a 219.75 ms gap at width one; that is not evidence for the
+larger 317 ms observation's cause. Admission pauses remain about 189–206 ms
+on both. The original first-stage comparison also left two disk-restore flags,
+which were not repeated and remain unqualified. No margin was widened; these
+results are not a blanket latency pass.
+
+Public workflow substitutes pass exact record extraction and generated URI
+tests, including three injected bugs. The file-edit fixture fails on both
+main and candidate solely because the identical tool-generated contents omit
+the required final newline. Literal thinking/tool tags are preserved. The
+fixture remains strict; its subsequent edit/thinking loop is not qualified.
+
+Raw profiles, binaries and all observations are retained outside Git under
+`/tmp/gufo-qwen27b-dflash2-20261021` on the test host, with reports copied to
+the editing host's `qwen27b-dflash2-20261021` directory. The principal records
+are `bench-main-q4`, `bench-v3-q4`, `bench-v7-final-q4`, `bench-v8-q4`,
+`acceptance-d32767.json`, `long-control-v3`, `long-control-v7`,
+`sampling-v8-final`, both `snapshot-control-*` directories, `lookup-v8-q4`,
+`lookup-main-control-q4`, `lookup-timing-pair`, `workflows-main` and
+`workflows-v8-final`.
+Superseded experiments and every timing flag remain retained. The focused
+[performance table](BENCHMARKS.md#october-21-focused-prefill-and-sampling-comparison)
+keeps the dated main/candidate results; the older full sweep and llama.cpp
+measurements are unchanged. Feature capture/storage work in #688 is separate.
+
 ## October 19 wave64 verification review
 
 The wave64 verification attention (#660) reproduces the scalar decode bits.

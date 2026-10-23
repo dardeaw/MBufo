@@ -74,6 +74,7 @@ Text serving defaults match llama.cpp for context and generation length:
 | Setting | Default |
 | --- | --- |
 | `--context` | `0`: native context from model metadata, per session |
+| `--enable-yarn` | Off; Flash-Next requires it for `--context` above 262144 |
 | `--max-tokens` | `-1`: until EOS or remaining context is exhausted |
 | `--sessions` | `1` |
 | Thinking / reasoning effort | Enabled; Qwen `xhigh`, DeepSeek `high` |
@@ -171,6 +172,17 @@ configured ceiling. Sampled MTP proposals use p/q acceptance and residual
 correction; greedy verification follows target argmax. Draft and verification
 work can batch across ready requests. See the
 [Flash-Next benchmark and quality contract](models/qwen3.8-flash-next/BENCHMARKS.md).
+Flash-Next's native context is 262144. `--context` above it requires
+`--enable-yarn`, which enables static YaRN with factor context / 262144; the
+server refuses to start without the flag, and the flag is an error at or below
+262144. The factor applies to every request, including short ones; see the
+[measurements](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323981940),
+the
+[opt-in proposal](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323982386),
+the
+[accuracy check](https://github.com/gufo-org/gufo/pull/350#issuecomment-6234093998)
+and [Qwen3.8 Flash-Next](models/qwen3.8-flash-next/README.md) for the memory
+cost.
 
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
@@ -655,8 +667,9 @@ association and output parts; the custom call's free-form `input` is retained
 as literal tool-history data. This does not enable custom-tool generation.
 Chat Completions also accepts `image_url` parts in `role:"tool"` content.
 Existing text-string outputs keep their prompt representation. Images remain
-unsupported in assistant/system/developer messages; only `detail:"auto"` is
-accepted, and file IDs and `input_file` parts remain unsupported.
+unsupported in assistant/system/developer messages. Image resolution is
+model-owned: `detail` accepts `auto`, `low`, `high` and `original`, and all of
+them behave as `auto`. File IDs and `input_file` parts remain unsupported.
 
 Responses report `incomplete` with reason `max_output_tokens` when generation
 hits its limit. Otherwise they report `completed`. `stream: true` sends typed

@@ -37,9 +37,10 @@ struct Metadata {
 };
 static_assert(sizeof(Metadata) <= kContinuationMetadataBytes);
 struct DraftMetadata {
-  std::uint32_t version{1}, injected{}, pending_rows{}, primed{};
+  std::uint32_t version{2}, injected{}, pending_rows{}, primed{};
   float controller{};
   std::uint32_t last_full_width{};
+  speculative::PromptLookup<tokenization::TokenId>::State lookup;
 };
 static_assert(sizeof(DraftMetadata) <= kContinuationMetadataBytes);
 struct FrontierMetadata {
@@ -63,6 +64,8 @@ public:
         draft(std::move(draft)) {
     this->executor->continuation_hooks_ = this;
     this->executor->vision_input_.continuation_hooks_ = this;
+    pinned_capture = this->executor->PromptHiddenChargedBytes();
+    adapter.pinned_capture_bytes_ += pinned_capture;
     if (this->draft) {
       this->draft->continuation_hooks_ = this;
       this->draft->executor_->continuation_hooks_ = this;
@@ -113,6 +116,7 @@ public:
     }
     executor->continuation_hooks_ = nullptr;
     executor->vision_input_.continuation_hooks_ = nullptr;
+    adapter.pinned_capture_bytes_ -= pinned_capture;
   }
   bool IsValid() const noexcept override {
     return guarding || (!restoring && !failed && !executor->reset_failure_);
@@ -234,6 +238,7 @@ public:
   cache::MutationGuard& guard;
   std::shared_ptr<hip::QwenGpuExecutor> executor;
   std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
+  std::size_t pinned_capture{};
   std::uint32_t position{};
   std::optional<std::uint32_t> prefill_position;
   bool prefill_logits{};
@@ -256,10 +261,11 @@ ContinuationAdapter::ContinuationAdapter(
     std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t context,
     cache::Identity identity, hip::QwenExecutionPolicy policy,
     std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model,
-    hip::QwenDFlashGpuDraftConfig draft_config)
+    hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger)
     : model_(std::move(model)),
       draft_model_(std::move(draft_model)),
       draft_config_(draft_config),
+      ledger_(ledger),
       policy_(policy),
       context_(context),
       layout_(model_ ? model_->GetConfig() : core::ModelConfig{}, policy,
@@ -374,7 +380,7 @@ void ContinuationAdapter::RollbackPrefill(cache::Slot& slot) {
   // Prefill cancellation is checked before the vocabulary head and before
   // draft catch-up. Only the other recurrent buffer and suffix KV changed.
   executor.arena_.RestoreState();
-  executor.h_prompt_hidden_.clear();
+  executor.h_prompt_hidden_.Clear();
   state.position = *state.prefill_position;
   state.logits_valid = state.prefill_logits;
   state.failed = false;
@@ -404,6 +410,8 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
                                                    &error);
     if (!draft)
       throw std::runtime_error("cannot create component draft: " + error);
+    executor->ReservePromptHiddenCapture(draft->TargetHiddenLayerIds().size(),
+                                         ledger_);
   }
   return std::make_unique<State>(*this, guard, std::move(executor),
                                  std::move(draft));
@@ -604,6 +612,7 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     metadata.primed = draft.primed_;
     metadata.controller = draft.controller_.State();
     metadata.last_full_width = draft.controller_.LastFullWidth();
+    metadata.lookup = draft.lookup_.Save();
     std::memcpy(host.data(), &metadata, sizeof(metadata));
     source = host.data();
     is_host = true;
@@ -909,12 +918,18 @@ bool ContinuationAdapter::Validate(
                   sizeof(draft_metadata));
       auto& draft = *state.draft;
       const auto width = draft.executor_->GetTargetFeaturesSize();
-      if (draft_metadata.version != 1 || draft_metadata.primed > 1 ||
+      if ((draft_metadata.version != 1 && draft_metadata.version != 2) ||
+          draft_metadata.primed > 1 ||
           draft_metadata.injected > metadata.position ||
           draft_metadata.pending_rows > 8 ||
           draft_metadata.pending_rows !=
               metadata.position - draft_metadata.injected ||
           (!draft_metadata.primed && metadata.position))
+        return refuse();
+      if (draft_metadata.version == 1)
+        draft_metadata.lookup = {};
+      if (!speculative::PromptLookup<tokenization::TokenId>::Valid(
+              draft_metadata.lookup, metadata.position))
         return refuse();
       for (std::size_t i = layout_.Components().size(); i < components_.size();
            ++i)
@@ -933,6 +948,8 @@ bool ContinuationAdapter::Validate(
                     draft.pending_target_features_.size() * sizeof(float));
       draft.executor_->injected_context_len_ = draft_metadata.injected;
       draft.controller_ = controller;
+      draft.lookup_.Restore(draft_metadata.lookup);
+      draft.lookup_proposal_ = false;
       draft.primed_ = draft_metadata.primed;
       draft.proposal_active_ = false;
       draft.proposed_tokens_.clear();
@@ -972,7 +989,7 @@ bool ContinuationAdapter::Validate(
   executor.next_token_ =
       metadata.has_next ? std::optional<tokenization::TokenId>{metadata.next}
                         : std::nullopt;
-  executor.h_prompt_hidden_.clear();
+  executor.h_prompt_hidden_.Clear();
   executor.h_verification_hidden_.clear();
   executor.h_verification_logits_.clear();
   executor.h_last_hidden_.clear();

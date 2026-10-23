@@ -1,9 +1,6 @@
 #include "src/cli/serve/websocket.hpp"
 
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <openssl/evp.h>
-#include <sys/socket.h>
 
 #include <array>
 #include <cctype>
@@ -12,6 +9,7 @@
 #include <cstring>
 
 #include "src/cli/serve/audio_stream.hpp"
+#include "src/core/platform/net.hpp"
 #include "src/core/utf8.hpp"
 
 namespace gufo::server {
@@ -87,13 +85,10 @@ WebSocket::WebSocket(int fd, std::string buffered)
     : fd_(fd), buffered_(std::move(buffered)) {
   // Frame headers and audio payloads are separate writes; do not wait for a
   // delayed TCP acknowledgement before sending the payload.
-  const int no_delay = 1;
-  (void)::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &no_delay,
-                     sizeof(no_delay));
+  (void)net::SetNoDelay(fd_);
   // Bound backpressure from a client that stops consuming audio. Read timeout
   // stays at the server's idle timeout.
-  const timeval timeout{5, 0};
-  (void)::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  (void)net::SetSendTimeout(fd_, 5'000);
   timeval idle{};
   socklen_t idle_size = sizeof(idle);
   if (::getsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &idle, &idle_size) == 0)
@@ -159,7 +154,8 @@ bool WebSocket::Send(std::uint8_t opcode, std::string_view bytes) {
   }
   for (auto part : {std::string_view(header), bytes}) {
     while (!part.empty()) {
-      const auto count = ::send(fd_, part.data(), part.size(), MSG_NOSIGNAL);
+      const auto count = static_cast<long long>(
+          net::SendNoSignal(fd_, part.data(), part.size()));
       if (count < 0 && errno == EINTR)
         continue;
       if (count <= 0) {

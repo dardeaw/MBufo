@@ -50,8 +50,8 @@ slots with duplicate deep conversations. This checks that a short request
 after cancellation can reuse a redundant slot while another live copy retains
 the generated frontier. It also rejects the roughly 280 ms restore stall.
 
-Flash-Next prompt lookup has a focused MTP runner. It requires actual accepted
-copies, compares isolated and C2/C4/C6/C8 requests under greedy and the model's
+Flash-Next MTP and Qwen27B DFlash2 prompt lookup have a focused runner. It
+requires actual accepted copies, compares isolated and C2/C4/C6/C8 requests under greedy and the model's
 default sampling, mixes greedy copies with new text at C8, and checks stops
 followed by full replay. It also checks top-k 64/65, disabled top-k and a
 65-token minimum support across warm replay and stops, covering compact
@@ -64,7 +64,11 @@ nix develop -c python3 tests/functional/prompt_lookup.py \
   --speculative mtp --mtp-model /path/to/mtp.gguf
 ```
 
-The runner owns eight sessions and the loopback listener. It retains individual
+For Qwen27B, substitute `--speculative dflash2 --dflash-model /path/to/draft.gguf`.
+Use `--max-concurrency 4` before `--` for a focused C2/C4 check; the default
+covers C2/C4/C6/C8.
+
+The runner owns its sessions and the loopback listener. It retains individual
 request timings and server logs, and stays outside hosted CI and `--suite all`.
 The native Flash-Next session test additionally checks full logits, RNG and
 snapshot restoration into previously used sessions.
@@ -72,6 +76,22 @@ Pass `--mmproj /path/to/mmproj.gguf` with the server command to add image-backed
 greedy and sampled copies. These cases require accepted lookup tokens before
 client cancellation, confirm the server observed cancellation, and replay the
 same output from the cached image prompt without prefill.
+
+`generation_quality.py` validates reviewed coding responses from the sampled
+Qwen27B generation controls. It checks generated interval tests plus independent
+coverage/input-preservation cases, and retry call counts, delay caps and error behavior.
+It requires completed output, so a truncated thinking response cannot pass:
+
+```sh
+nix develop -c python3 tests/functional/generation_quality.py \
+  /tmp/generation/results.json \
+  --thinking-results /tmp/completed-thinking/results.json
+```
+
+The reports contain `code` and `code-think` entries from `chat_result`, including
+text and finish reason. This executes the reviewed generated Python on the
+development host. The requests and measurement scope are recorded in the
+[Qwen27B quality notes](../../docs/models/qwen3.8-27b/QUALITY.md#october-21-coding-and-prose-follow-up).
 
 `prompt_lookup_workflows.py` checks extraction, generated URI tests and edits
 after a long source archive against an already running Flash-Next MTP server:
@@ -639,6 +659,22 @@ publication case waits for the scheduler's actual park before starting its
 250 ms release timer, then checks the matching request/checkpoint release before
 its deadline and a disk restore. These checks stay outside hosted CI and the
 routine API suites.
+
+PR #677's staging-reclamation regression reuses this runner with `--case reclaim`
+before `--`. It defaults to a 256 MiB RAM cache, requires a retained checkpoint
+to release RAM during the deep request, then verifies publication and restoration
+of the exact held 50K+ token checkpoint. It also checks the loaded speculative
+mode, actual draft work, fewer than 64 prefill tokens and output against a cold
+control. A run that never reclaims RAM fails rather than passing on disk use
+alone. For example:
+
+```sh
+nix develop -c python3 tests/functional/publication_wait.py \
+  --case reclaim --output /tmp/publication-reclaim \
+  --fault-library build/cpu-test/libcache_disk_faults.so -- \
+  /path/to/production/gufo serve llm --model /path/to/flash-next.gguf \
+  --mtp-model /path/to/mtp.gguf --speculative mtp --sessions 1 --context 65536
+```
 
 Unchanged retries must reproduce the complete output with zero prefill. After a
 restart, disk restores may re-prefill less than one 2048-token disk step;

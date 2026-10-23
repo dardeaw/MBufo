@@ -17,6 +17,93 @@ throughput tables retain their dates and do not qualify the new cache wiring.
 Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md) · [Model identities](artifacts/model-identities.json)
 
+## October 21 focused prefill and sampling comparison
+
+Main `0c03748a` versus `perf/qwen27b-dflash2-speed`, with the same production
+CMake release preset, Nix toolchain (GCC 15.3 / ROCm 7.2.3), weights and
+HTTP benchmark. Q4 target / Q4 DFlash2 draft, C1, pp2048/tg128, greedy,
+thinking off; one warmed sample per cell. Context capacity is 133760.
+This is a two-depth comparison; the October 19 sweep and llama.cpp data below
+retain their original date.
+
+| Mode / workload | Cached depth | Main pp (tok/s) | Candidate pp (tok/s) | Main tg (tok/s) | Candidate tg (tok/s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 0 | 634.59 | 635.34 | 12.37 | 12.37 |
+| AR | 32,768 | 452.62 | 460.92 | 11.13 | 11.13 |
+| DFlash2 mixed | 0 | 585.54 | 582.53 | 26.98 | 26.91 |
+| DFlash2 mixed | 32,768 | 413.72 | 422.05 | 21.75 | 21.74 |
+| DFlash2 repetitive | 0 | 584.43 | 576.56 | 64.96 | 76.51 |
+| DFlash2 repetitive | 32,768 | 442.15 | 450.42 | 24.02 | 53.93 |
+
+Every completion hash and prompt/cache count matches main. Prompt lookup
+skips neural drafting for verified copies: repetitive generation improves
+17.8% at d0 and 124.5% at 32K. Mixed generation stays within 0.3%; prefill
+changes range from −1.3% to +2.0%. AR retains the first-stage measurements;
+the later changes affect speculative proposals and four-token verification.
+Mixed rows retain the pre-boundary-fix measurements: those requests have no
+lookup copies. Repetitive rows use the final build.
+The bounded sampling selector separately takes 84–86 µs versus 125–128 µs
+for the full vocabulary sort; these greedy rows do not measure that gain.
+
+Default-sampled public workflow substitutes use the same frozen 8K archive.
+Extraction produces the same 720 tokens at 68.90 → 68.95 tok/s. Generated URI
+tests pass against correct code and three injected bugs at 59.48 → 62.59
+tok/s (465 → 449 output tokens). A file-edit tool call produces identical
+187-token contents at 55.83 → 59.84 tok/s; both builds omit the required final
+newline, so that strict fixture fails and its later agent steps are unqualified.
+These observations are not a complete agent benchmark.
+
+A separate matched default-sampled copying fixture improves 70.40 → 77.15
+tok/s. Two/four concurrent copies improve approximately 50.4 → 54.9 and
+27.5 → 30.0 tok/s per request, with identical outputs and cache work.
+
+The older repetitive 32K row below is a different history and completion:
+32,733 cached / 2,023 prefilled tokens and 109/114 accepted drafts, versus
+32,767 / 2,055 and 84/182 on current main. The candidate accepts 108/120
+proposals on that same current history. The older 51.20 tok/s therefore
+is not a matched control for current main's 24.02 tok/s.
+Functional timing limitations are recorded in [QUALITY.md](QUALITY.md#october-21-prefill-and-sampling-review).
+
+## October 21 sampled coding and prose follow-up
+
+The five-token IQ4_XS verification change is measured against the previous
+branch commit `77c82ecb`, with the same Q4 target/draft, release toolchain,
+HTTP requests, seed 31 and default sampling. Thinking is off for these two
+requests; each follows a one-token warm request and completes before its
+1,536-token output limit. These are fresh code/prose generation, not literal
+copying workloads.
+
+| Request | Output tokens | Previous branch tg (tok/s) | Candidate tg (tok/s) |
+| --- | ---: | ---: | ---: |
+| Implement interval merging and its tests | 720 | 54.07 | 54.12 |
+| Explain throughput and latency | 347 | 24.67 | 24.84 |
+
+Outputs, draft counts and cache work are identical. Coding remains effectively
+flat; prose improves about 0.7%. A focused coding replay measures
+54.09 → 54.16 tok/s. Its earlier maximum-token-pause flag remains inconclusive;
+see [quality](QUALITY.md#october-21-coding-and-prose-follow-up).
+The request-bounded diagnostic profiles account for roughly 97% of wall time
+in kernels. Faster cold-weight five-token FFN projections therefore translate
+to a small complete-model gain, not their isolated 7–14% improvement.
+
+Against original main `0c03748a`, the complete branch measures code generation
+at 54.91 → 54.11 tok/s (817 → 720 output tokens) and prose at
+21.99 → 24.81 tok/s (348 → 347 tokens). Those sampled completions differ;
+they are workload observations, not the identical-output kernel comparison
+above. A finished thinking/code request matches main exactly at 3,377 tokens,
+47.46 → 47.53 tok/s. The interval and retry implementations pass independent
+behavior checks.
+
+The final standard pp2048/tg128 mixed controls retain main's complete output,
+prompt/cache and draft counts. No full sweep was repeated:
+
+| Cached depth | Main pp (tok/s) | Candidate pp (tok/s) | Main tg (tok/s) | Candidate tg (tok/s) |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 585.54 | 579.34 | 26.98 | 27.01 |
+| 32,768 | 413.72 | 420.90 | 21.75 | 21.83 |
+
+The October 19 sweep and all llama.cpp rows remain unchanged.
+
 ## Single user, autoregressive
 
 Approximately pp2048 / tg128; depth is the cached prefix in tokens.

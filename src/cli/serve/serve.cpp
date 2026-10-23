@@ -613,6 +613,7 @@ void PrintServeHelp(std::string_view program_name,
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    bool enable_yarn = false;
     std::string trace_path;
 
     gufo::cli::ArgParser parser(
@@ -632,6 +633,10 @@ void PrintServeHelp(std::string_view program_name,
         "-c", "--context", "N",
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
+    parser.AddFlag("", "--enable-yarn",
+                   "Flash-Next: static YaRN, required for --context above the "
+                   "native 262144; it applies to every request",
+                   "Model", &enable_yarn);
 
     // Sampling Defaults
     parser.AddOption(
@@ -1167,6 +1172,7 @@ int RunServe(std::span<const char* const> args) {
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    bool enable_yarn = false;
     std::string trace_path;
 
     gufo::cli::ArgParser llm_parser(
@@ -1185,6 +1191,10 @@ int RunServe(std::span<const char* const> args) {
         "-c", "--context", "N",
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
+    llm_parser.AddFlag("", "--enable-yarn",
+                       "Flash-Next: static YaRN, required for --context above "
+                       "the native 262144; it applies to every request",
+                       "Model", &enable_yarn);
     llm_parser.AddOption(
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
@@ -1460,7 +1470,7 @@ int RunServe(std::span<const char* const> args) {
         },
         vision_model_path,
         server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes},
-        kv_cache_quant);
+        kv_cache_quant, enable_yarn);
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
