@@ -69,6 +69,15 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
     case GgmlType::kIQ4_NL:
       gufo::quant::DequantizeIQ4_NL(src, out, k);
       break;
+    case GgmlType::kQ4_0_ROCMFP4:
+      gufo::quant::DequantizeQ4_0_ROCMFP4(src, out, k);
+      break;
+    case GgmlType::kQ4_0_ROCMFP4_FAST:
+      gufo::quant::DequantizeQ4_0_ROCMFP4_FAST(src, out, k);
+      break;
+    case GgmlType::kQ3_0_ROCMFPX:
+      gufo::quant::DequantizeQ3_0_ROCMFPX(src, out, k);
+      break;
     case GgmlType::kQ4_K:
       gufo::quant::DequantizeQ4_K(src, out, k);
       break;

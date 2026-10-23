@@ -467,6 +467,74 @@ void TestCounters() {
 }
 }  // namespace
 
+
+void TestFp3Rows() {
+  const auto path =
+      std::filesystem::temp_directory_path() / "qwen38_ngram_fp3.bin";
+  constexpr std::uint32_t dim = 160;
+  constexpr std::uint32_t rows = 129;
+  constexpr std::uint64_t offset = 4096 + 90;
+  constexpr std::array<float, 8> values{0.0F, 1.0F, 2.0F, 4.0F,
+                                        0.0F, -1.0F, -2.0F, -4.0F};
+  {
+    std::ofstream file(path, std::ios::binary);
+    file.seekp(offset);
+    for (std::uint32_t row = 0; row < rows; ++row) {
+      for (std::uint32_t block = 0; block < dim / 32; ++block) {
+        std::uint8_t qs[12];
+        for (std::uint32_t group = 0; group < 4; ++group) {
+          std::uint8_t c[8];
+          for (std::uint32_t j = 0; j < 8; ++j) {
+            c[j] = static_cast<std::uint8_t>((row + block + group * 8 + j) % 8);
+          }
+          qs[group * 3 + 0] = static_cast<std::uint8_t>(
+              c[0] | (c[1] << 3) | ((c[2] & 3U) << 6));
+          qs[group * 3 + 1] = static_cast<std::uint8_t>(
+              (c[2] >> 2) | (c[3] << 1) | (c[4] << 4) | ((c[5] & 1U) << 7));
+          qs[group * 3 + 2] = static_cast<std::uint8_t>(
+              (c[5] >> 1) | (c[6] << 2) | (c[7] << 5));
+        }
+        file.write(reinterpret_cast<const char*>(qs), sizeof(qs));
+        const std::uint8_t scales[2] = {0x40, 0x41};  // 1.0 and 1.125
+        file.write(reinterpret_cast<const char*>(scales), sizeof(scales));
+      }
+    }
+    Check(file.good(), "ROCmFP3 fixture written");
+  }
+  std::string error;
+  auto table = OpenTable(path, offset, rows, dim,
+                         gufo::core::GgmlType::kQ3_0_ROCMFPX, &error);
+  Check(table != nullptr, error.c_str());
+  if (table) {
+    const std::array<std::uint32_t, 6> ids{0, 7, 128, 7, 0, 32};
+    std::vector<float> out(ids.size() * dim + 16, -123.0F);
+    q::NgramCounters counters;
+    const std::array owners{q::NgramGatherOwner{
+        static_cast<std::uint32_t>(ids.size()), &counters}};
+    Check(table->StartRead(ids, std::span(out).first(ids.size() * dim),
+                           owners) &&
+              table->WaitRead(),
+          "ROCmFP3 gather completes");
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      for (std::uint32_t col = 0; col < dim; ++col) {
+        const auto code = static_cast<std::size_t>(
+            (ids[i] + col / 32 + col % 32) % 8);
+        const float scale = (col % 32) < 16 ? 1.0F : 1.125F;
+        Check(out[i * dim + col] == values[code] * scale,
+              "ROCmFP3 exact decoded value");
+      }
+    }
+    for (std::size_t i = ids.size() * dim; i < out.size(); ++i) {
+      Check(out[i] == -123.0F, "ROCmFP3 output guard");
+    }
+    const auto totals = counters.Load();
+    Check(totals.rows == totals.dedup_rows + totals.cache_hits +
+                             totals.disk_reads,
+          "ROCmFP3 counter identity");
+  }
+  std::filesystem::remove(path);
+}
+
 int main() {
   TestReplacedPath();
   TestHash();
@@ -474,6 +542,7 @@ int main() {
   TestQuantizedRows();
   TestDistantRows();
   TestCounters();
+  TestFp3Rows();
   if (failures != 0) {
     std::fprintf(stderr, "%d failures\n", failures);
     return 1;

@@ -3,6 +3,25 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.23.0（2026-10-24）
+- 移植 **ROCmFP4 / ROCmFPx 量化家族**（規格與參考實作：agentionai/llama.cpp，MIT）：
+  - `GgmlType` 新增 `kQ4_0_ROCMFP4=100`（18B/32 雙 UE4M3 scale）、
+    `kQ4_0_ROCMFP4_FAST=101`（17B/32 單 scale＝4.25bpw）、`kQ3_0_ROCMFPX=104`
+    （14B/32＝3.5bpw，8 codes 塞 3 bytes）。
+  - CPU 參考路徑：`DequantizeQ4_0_ROCMFP4[_FAST]`／`DequantizeQ3_0_ROCMFPX`＋
+    DotProduct＋scale 驗證；codebook（E2M1 頂階 12→10 AMD 調校）與 UE4M3
+    scale 逐位元對抄 rocmfp4.c/rocmfpx.c，golden vectors 由參考實作直接產出
+    （bit-exact 比對）。
+  - NgramTable 支援 type 104 表（PLE 3.5bpw）；O_DIRECT 非對齊 70B row 走
+    既有 page-window 讀取路徑，測試含 unaligned offset 與 counter 恆等式。
+  - Flash-Next loader 白名單放行 ROCmFP4-FAST 工件（experts/mixer/dense/ssm/
+    ple）；`cpu_ops` 反量化分派補三型別。
+  - `tools/qwen-flash/rocmfp4_v2_repack.cpp`：v2 工件 Q6_K→Q8_0 離線重打包
+    （gufo kernel 不收 Q6_K embedding/dense/routed；解碼用 gufo 自己的
+    `DequantizeQ6_K`，重量化採 q8_0 參考語意，對 Q6_K 內容等同無損）。
+- HIP kernel（down experts FAST GEMV、prefill GEMM）尚未接，載入與 weight
+  驗證已通過（v2q8 94.5G、sessions 2、262144、MTP）。
+
 ## v0.22.2（2026-10-24）
 - 修正 **blocked(q8) KV × MTP × 兩路以上並發解碼 100% 崩潰**（GPU page fault，
   定址 ~0x212000）。根因：批次 MTP catch-up（`MtpForwardBatch` 的 cache-only

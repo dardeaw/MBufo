@@ -80,9 +80,16 @@ std::unique_ptr<NgramTable> NgramTable::Open(
     int file_descriptor, std::uint64_t file_offset, std::uint64_t rows,
     std::uint32_t row_dim, core::GgmlType type, std::string* error_msg) {
   std::unique_ptr<NgramTable> t(new NgramTable());
-  const std::size_t block = type == core::GgmlType::kIQ4_NL ? 32 : 1;
-  const std::size_t block_bytes = type == core::GgmlType::kIQ4_NL ? 18 : 2;
-  if ((type != core::GgmlType::kIQ4_NL && type != core::GgmlType::kBF16) ||
+  const std::size_t block =
+      type == core::GgmlType::kIQ4_NL || type == core::GgmlType::kQ3_0_ROCMFPX
+          ? 32
+          : 1;
+  const std::size_t block_bytes =
+      type == core::GgmlType::kIQ4_NL      ? 18
+      : type == core::GgmlType::kQ3_0_ROCMFPX ? 14
+                                              : 2;
+  if ((type != core::GgmlType::kIQ4_NL && type != core::GgmlType::kBF16 &&
+       type != core::GgmlType::kQ3_0_ROCMFPX) ||
       row_dim == 0 || row_dim % block != 0) {
     if (error_msg != nullptr) {
       *error_msg = "unsupported n-gram table format";
@@ -121,6 +128,8 @@ std::unique_ptr<NgramTable> NgramTable::Open(
 void NgramTable::DecodeRow(const std::uint8_t* src, float* dst) const {
   if (type_ == core::GgmlType::kIQ4_NL) {
     gufo::quant::DequantizeIQ4_NL(src, dst, row_dim_);
+  } else if (type_ == core::GgmlType::kQ3_0_ROCMFPX) {
+    gufo::quant::DequantizeQ3_0_ROCMFPX(src, dst, row_dim_);
   } else {
     for (std::uint32_t i = 0; i < row_dim_; ++i) {
       std::uint16_t bits = 0;

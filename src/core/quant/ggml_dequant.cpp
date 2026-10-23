@@ -216,6 +216,15 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kIQ3_S:
       block_bytes = sizeof(block_iq3_s);
       break;
+    case core::GgmlType::kQ4_0_ROCMFP4:
+      block_bytes = sizeof(block_q4_0_rocmfp4);
+      break;
+    case core::GgmlType::kQ4_0_ROCMFP4_FAST:
+      block_bytes = sizeof(block_q4_0_rocmfp4_fast);
+      break;
+    case core::GgmlType::kQ3_0_ROCMFPX:
+      block_bytes = sizeof(block_q3_0_rocmfpx);
+      break;
     default:
       return 0;
   }
@@ -671,6 +680,197 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
     }
   }
   return sum;
+}
+
+// ROCmFPx family (agentionai/llama.cpp, MIT). Semantics transcribed from
+// rocmfp4.c/rocmfpx.c: codebook values, UE4M3 scale decode and nibble/
+// bit-packing order must match the reference bit for bit.
+
+namespace {
+
+// E2M1-derived grid with the top step clamped 12 -> 10 (AMD tuning).
+// Index 8 encodes -0 and decodes to 0 like the reference table.
+constexpr std::int8_t kRocmFp4Codebook[16] = {0,  1,  2,  3,  4,  6,  8,  10,
+                                              0, -1, -2, -3, -4, -6, -8, -10};
+
+constexpr std::int8_t kRocmFp3Magnitudes[4] = {0, 1, 2, 4};
+
+// Unpacks 8 three-bit codes from 3 bytes (little-endian bit order,
+// reference rocmfpx_fp3_unpack8).
+void UnpackRocmFp3(const std::uint8_t* src, std::uint8_t* codes) noexcept {
+  codes[0] = src[0] & 7U;
+  codes[1] = (src[0] >> 3) & 7U;
+  codes[2] = ((src[0] >> 6) & 3U) | ((src[1] & 1U) << 2);
+  codes[3] = (src[1] >> 1) & 7U;
+  codes[4] = (src[1] >> 4) & 7U;
+  codes[5] = ((src[1] >> 7) & 1U) | ((src[2] & 3U) << 1);
+  codes[6] = (src[2] >> 2) & 7U;
+  codes[7] = (src[2] >> 5) & 7U;
+}
+
+}  // namespace
+
+float Ue4m3ScaleToFloat(std::uint8_t e) noexcept {
+  if (e > 0x7EU)
+    return 0.0F;
+  const int exp = e >> 3;
+  const int mant = e & 0x07;
+  if (exp == 0)
+    return static_cast<float>(mant) * 0x1p-10f;
+  return static_cast<float>(8 + mant) * std::ldexp(1.0F, exp - 11);
+}
+
+std::int8_t RocmFp4Value(std::uint8_t code) noexcept {
+  return kRocmFp4Codebook[code & 0x0FU];
+}
+
+float RocmFp3Value(std::uint8_t code) noexcept {
+  const float mag = static_cast<float>(kRocmFp3Magnitudes[code & 3U]);
+  return (code & 4U) ? -mag : mag;
+}
+
+void DequantizeQ4_0_ROCMFP4(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q4_0_rocmfp4*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d0 = Ue4m3ScaleToFloat(blocks[b].e[0]);
+    const float d1 = Ue4m3ScaleToFloat(blocks[b].e[1]);
+    for (std::size_t i = 0; i < 16; ++i) {
+      dst[b * 32 + i] =
+          static_cast<float>(RocmFp4Value(blocks[b].qs[i] & 0x0FU)) * d0;
+      dst[b * 32 + i + 16] =
+          static_cast<float>(RocmFp4Value(blocks[b].qs[i] >> 4)) * d1;
+    }
+  }
+}
+
+void DequantizeQ4_0_ROCMFP4_FAST(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q4_0_rocmfp4_fast*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Ue4m3ScaleToFloat(blocks[b].e);
+    for (std::size_t i = 0; i < 16; ++i) {
+      dst[b * 32 + i] =
+          static_cast<float>(RocmFp4Value(blocks[b].qs[i] & 0x0FU)) * d;
+      dst[b * 32 + i + 16] =
+          static_cast<float>(RocmFp4Value(blocks[b].qs[i] >> 4)) * d;
+    }
+  }
+}
+
+void DequantizeQ3_0_ROCMFPX(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q3_0_rocmfpx*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    std::uint8_t codes[32];
+    UnpackRocmFp3(blocks[b].qs, codes);
+    UnpackRocmFp3(blocks[b].qs + 3, codes + 8);
+    UnpackRocmFp3(blocks[b].qs + 6, codes + 16);
+    UnpackRocmFp3(blocks[b].qs + 9, codes + 24);
+    for (std::size_t half = 0; half < 2; ++half) {
+      const float scale = Ue4m3ScaleToFloat(blocks[b].e[half]);
+      for (std::size_t j = 0; j < 16; ++j) {
+        dst[b * 32 + half * 16 + j] =
+            RocmFp3Value(codes[half * 16 + j]) * scale;
+      }
+    }
+  }
+}
+
+float DotProductQ4_0_ROCMFP4(const void* row_data, std::span<const float> vec,
+                             std::size_t k) {
+  const auto* blocks = static_cast<const block_q4_0_rocmfp4*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float* v = vec.data() + (b * 32);
+    const float d0 = Ue4m3ScaleToFloat(blocks[b].e[0]);
+    const float d1 = Ue4m3ScaleToFloat(blocks[b].e[1]);
+    for (std::size_t i = 0; i < 16; ++i) {
+      sum += static_cast<float>(RocmFp4Value(blocks[b].qs[i] & 0x0FU)) * d0 *
+             v[i];
+      sum += static_cast<float>(RocmFp4Value(blocks[b].qs[i] >> 4)) * d1 *
+             v[i + 16];
+    }
+  }
+  return sum;
+}
+
+float DotProductQ4_0_ROCMFP4_FAST(const void* row_data,
+                                  std::span<const float> vec, std::size_t k) {
+  const auto* blocks = static_cast<const block_q4_0_rocmfp4_fast*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float* v = vec.data() + (b * 32);
+    const float d = Ue4m3ScaleToFloat(blocks[b].e);
+    for (std::size_t i = 0; i < 16; ++i) {
+      sum += static_cast<float>(RocmFp4Value(blocks[b].qs[i] & 0x0FU)) * d *
+             v[i];
+      sum += static_cast<float>(RocmFp4Value(blocks[b].qs[i] >> 4)) * d *
+             v[i + 16];
+    }
+  }
+  return sum;
+}
+
+float DotProductQ3_0_ROCMFPX(const void* row_data, std::span<const float> vec,
+                             std::size_t k) {
+  const auto* blocks = static_cast<const block_q3_0_rocmfpx*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float* v = vec.data() + (b * 32);
+    std::uint8_t codes[32];
+    UnpackRocmFp3(blocks[b].qs, codes);
+    UnpackRocmFp3(blocks[b].qs + 3, codes + 8);
+    UnpackRocmFp3(blocks[b].qs + 6, codes + 16);
+    UnpackRocmFp3(blocks[b].qs + 9, codes + 24);
+    for (std::size_t half = 0; half < 2; ++half) {
+      const float scale = Ue4m3ScaleToFloat(blocks[b].e[half]);
+      for (std::size_t j = 0; j < 16; ++j) {
+        sum += RocmFp3Value(codes[half * 16 + j]) * scale *
+               v[half * 16 + j];
+      }
+    }
+  }
+  return sum;
+}
+
+bool ValidateQ4_0_ROCMFP4(const void* data, std::size_t nbytes) {
+  if (nbytes % sizeof(block_q4_0_rocmfp4) != 0)
+    return false;
+  const auto* blocks = static_cast<const block_q4_0_rocmfp4*>(data);
+  const std::size_t nb = nbytes / sizeof(block_q4_0_rocmfp4);
+  for (std::size_t i = 0; i < nb; ++i) {
+    if (blocks[i].e[0] > 0x7EU || blocks[i].e[1] > 0x7EU)
+      return false;
+  }
+  return true;
+}
+
+bool ValidateQ4_0_ROCMFP4_FAST(const void* data, std::size_t nbytes) {
+  if (nbytes % sizeof(block_q4_0_rocmfp4_fast) != 0)
+    return false;
+  const auto* blocks = static_cast<const block_q4_0_rocmfp4_fast*>(data);
+  const std::size_t nb = nbytes / sizeof(block_q4_0_rocmfp4_fast);
+  for (std::size_t i = 0; i < nb; ++i) {
+    if (blocks[i].e > 0x7EU)
+      return false;
+  }
+  return true;
+}
+
+bool ValidateQ3_0_ROCMFPX(const void* data, std::size_t nbytes) {
+  if (nbytes % sizeof(block_q3_0_rocmfpx) != 0)
+    return false;
+  const auto* blocks = static_cast<const block_q3_0_rocmfpx*>(data);
+  const std::size_t nb = nbytes / sizeof(block_q3_0_rocmfpx);
+  for (std::size_t i = 0; i < nb; ++i) {
+    if (blocks[i].e[0] > 0x7EU || blocks[i].e[1] > 0x7EU)
+      return false;
+  }
+  return true;
 }
 
 }  // namespace gufo::quant
