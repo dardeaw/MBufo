@@ -2680,7 +2680,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         options_.kv_format != rocm::KvFormat::kQ8 || n_tokens >= 1024;
     const bool fused_projection =
         options_.kv_format != rocm::KvFormat::kFp8 &&
-        !KvValueIs4Bit(options_.kv_format) && !projections_ready &&
+        !KvValueIs4Bit(options_.kv_format) &&
+    !KvKeyIs4Bit(options_.kv_format) && !projections_ready &&
         q8_fused_ok && WidePrefill(n_tokens) &&
         n_tokens <= options_.max_batch && DenseF16Route(l.attn_qkv, n_tokens) &&
         l.attn_qkv.rows == 13312 && l.attn_qkv.cols == 2560 &&
@@ -2767,6 +2768,56 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     } else {
       StoreKv(s_.k, s.k_cache, n_tokens, kv_row, pos, stream_);
       StoreKv(s_.v, s.v_cache, n_tokens, kv_row, pos, stream_);
+    }
+  }
+
+  if (const char* ref = std::getenv("GUFO_KV_REF")) {
+    if (n_tokens > 0 && pos != nullptr) {
+      std::uint32_t base_pos = 0;
+      if (hipStreamSynchronize(stream_) == hipSuccess &&
+          hipMemcpy(&base_pos, pos, sizeof(base_pos),
+                    hipMemcpyDeviceToHost) == hipSuccess) {
+        const std::size_t elems = std::size_t{kv_row};
+        std::size_t k_row = 0, v_row = 0;
+        if (KvBlocked(options_.kv_format)) {
+          k_row = KvBlockedRowBytes(kv_row, KvKeyBlockBytes(options_.kv_format));
+          v_row =
+              KvBlockedRowBytes(kv_row, KvValueBlockBytes(options_.kv_format));
+        } else {
+          k_row = elems * sizeof(__half);
+          v_row = k_row;
+        }
+        const std::size_t kb = k_row * n_tokens, vb = v_row * n_tokens;
+        void* host = std::malloc(kb + vb);
+        if (host != nullptr &&
+            hipMemcpy(host, KvBlocked(options_.kv_format)
+                                ? static_cast<const void*>(
+                                      s.k_cache_kv + std::size_t{base_pos} * k_row)
+                                : static_cast<const void*>(
+                                      s.k_cache + std::size_t{base_pos} * kv_row),
+                       kb, hipMemcpyDeviceToHost) == hipSuccess &&
+            hipMemcpy(static_cast<char*>(host) + kb,
+                      KvBlocked(options_.kv_format)
+                          ? static_cast<const void*>(
+                                s.v_cache_kv + std::size_t{base_pos} * v_row)
+                          : static_cast<const void*>(
+                                s.v_cache + std::size_t{base_pos} * kv_row),
+                      vb, hipMemcpyDeviceToHost) == hipSuccess) {
+          const std::uint32_t header[7] = {
+              base_pos, n_tokens, kv_row,
+              static_cast<std::uint32_t>(k_row),
+              static_cast<std::uint32_t>(v_row),
+              static_cast<std::uint32_t>(KvBlocked(options_.kv_format) ? 1u : 0u),
+              static_cast<std::uint32_t>(static_cast<int>(options_.kv_format))};
+          if (std::FILE* f = std::fopen(ref, "ab")) {
+            std::fwrite(header, sizeof(header), 1, f);
+            std::fwrite(host, 1, kb + vb, f);
+            std::fclose(f);
+          }
+        }
+        if (host != nullptr)
+          std::free(host);
+      }
     }
   }
 
@@ -2934,6 +2985,26 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                                 dense_rows, pos, c.num_heads, c.num_kv_heads,
                                 c.head_dim, c.compress_ratio, stream_, last));
   };
+  const auto dump_attn = [&](std::uint32_t rows) {
+    if (const char* dump = std::getenv("GUFO_ATTN_OUT")) {
+      const std::uint32_t qd = c.AttentionQDim();
+      const std::size_t bytes = std::size_t{rows} * qd * sizeof(float);
+      void* host = std::malloc(2 * bytes);
+      if (hipStreamSynchronize(stream_) == hipSuccess && host != nullptr &&
+          hipMemcpy(host, s_.q, bytes, hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(static_cast<char*>(host) + bytes, s_.ctx, bytes,
+                    hipMemcpyDeviceToHost) == hipSuccess) {
+        const std::uint32_t aheader[6] = {start_pos, rows, qd, 4u, 4u, 1u};
+        if (std::FILE* f = std::fopen(dump, "ab")) {
+          std::fwrite(aheader, sizeof(aheader), 1, f);
+          std::fwrite(host, 1, 2 * bytes, f);
+          std::fclose(f);
+        }
+      }
+      if (host != nullptr)
+        std::free(host);
+    }
+  };
   if (!KvBlocked(options_.kv_format) && checkpoint_tokens != 0 &&
       checkpoint_tokens < n_tokens) {
     // Sparse tiles compact the union of their queries' selected keys.
@@ -2943,11 +3014,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
       AssignError(error_msg, "checkpoint attention geometry is unsupported");
       return false;
     }
+    dump_attn(n_tokens);
     return !project_output ||
            Dense(l.attn_out, s_.ctx, out, n_tokens, error_msg);
   }
   if (!KvBlocked(options_.kv_format) && MatrixRows(n_tokens) &&
       attend(0, n_tokens, last_only)) {
+    dump_attn(n_tokens);
     return !project_output ||
            Dense(l.attn_out, s_.ctx, out, n_tokens, error_msg);
   }
@@ -2960,15 +3033,16 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                 1, std::min(kAttnSplits,
                             (start_pos + n_tokens + kAttnTile - 1) / kAttnTile))
           : kAttnSplits;
-  if (KvBlocked(options_.kv_format)) {
+    bool wmma_used = false;
+if (KvBlocked(options_.kv_format)) {
     // Wide batches used to ride the tensor cores via transient F16 staging.
     // The staging route is gated behind GUFO_KV_WMMA until its prefill numerics
     // match the fused blocked kernel: the offline audit measured KL 0.63 at
     // position 0 through staging versus 0.03 through the fused kernel for the
     // same cache bytes, so correctness takes the fused path by default.
     static const bool wmma_enabled = std::getenv("GUFO_KV_WMMA") != nullptr;
-    const bool wmma = wmma_enabled && !split && wmma_kv(0, n_tokens, last_only);
-    if (!wmma) {
+    wmma_used = wmma_enabled && !split && wmma_kv(0, n_tokens, last_only);
+    if (!wmma_used) {
       rocm::AttentionKv(s_.q, s.k_cache_kv, s.v_cache_kv, mask, mask_words_,
                         s_.ctx, split ? s_.attn_partials : nullptr, use_splits,
                         n_tokens, pos, c.num_heads, c.num_kv_heads, c.head_dim,
@@ -2986,6 +3060,26 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   }
   const std::uint32_t q_dim = c.AttentionQDim();
   const std::size_t ctx_count = static_cast<std::size_t>(n_tokens) * q_dim;
+
+  if (const char* dump = std::getenv("GUFO_ATTN_OUT")) {
+    if (n_tokens > 0) {
+      const std::size_t bytes = ctx_count * sizeof(float);
+      void* host = std::malloc(2 * bytes);
+      if (hipStreamSynchronize(stream_) == hipSuccess && host != nullptr &&
+          hipMemcpy(host, s_.q, bytes, hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(static_cast<char*>(host) + bytes, s_.ctx, bytes,
+                    hipMemcpyDeviceToHost) == hipSuccess) {
+        const std::uint32_t aheader[6] = {start_pos, n_tokens, q_dim, 4u, 4u, 1u};
+        if (std::FILE* f = std::fopen(dump, "ab")) {
+          std::fwrite(aheader, sizeof(aheader), 1, f);
+          std::fwrite(host, 1, 2 * bytes, f);
+          std::fclose(f);
+        }
+      }
+      if (host != nullptr)
+        std::free(host);
+    }
+  }
   // A decode batch's output projection reads the gate's Q8_1 rows.
   if (project_output && split && l.attn_out.type == GgmlType::kQ8_0 &&
       l.attn_out.cols == q_dim && UnpaddedQ8(q_dim) &&
@@ -2993,7 +3087,29 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     return Dense(l.attn_out, Q8Input{s_.ctx, s_.ctx_q8_1, n_tokens, q_dim}, out,
                  error_msg);
   }
-  SigmoidMul(s_.ctx, s_.attn_gate, ctx_count, stream_);
+  // WmmaCausalAttention already applies SigmoidF(gate) in-kernel
+  // (post-gate s_.ctx); the fused AttentionKv path does not, so gate once here.
+  if (!wmma_used) {
+    SigmoidMul(s_.ctx, s_.attn_gate, ctx_count, stream_);
+  }
+  if (const char* gdump = std::getenv("GUFO_ATTN_GATED")) {
+    if (n_tokens > 0) {
+      const std::size_t gbytes = ctx_count * sizeof(float);
+      (void)hipStreamSynchronize(stream_);
+      void* ghost = std::malloc(gbytes);
+      if (ghost != nullptr &&
+          hipMemcpy(ghost, s_.ctx, gbytes, hipMemcpyDeviceToHost) == hipSuccess) {
+        const std::uint32_t gheader[6] = {start_pos, n_tokens, q_dim, 4u, 4u, 1u};
+        if (std::FILE* gf = std::fopen(gdump, "ab")) {
+          std::fwrite(gheader, sizeof(gheader), 1, gf);
+          std::fwrite(ghost, 1, gbytes, gf);
+          std::fclose(gf);
+        }
+      }
+      if (ghost != nullptr)
+        std::free(ghost);
+    }
+  }
   return !project_output || Dense(l.attn_out, s_.ctx, out, n_tokens, error_msg);
 }
 

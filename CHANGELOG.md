@@ -3,6 +3,24 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.20.8（2026-10-23）
+- 修正 blocked-WMMA 路徑的 **double-gate**：`WmmaCausalAttentionKernel` 已在 kernel
+  內施加 `SigmoidF(gate)`（kernel 5583 行註明 epilogue apply sigmoid output gate），
+  但 blocked-WMMA 跑完又掉到 `executor.cpp:3088` 的 `SigmoidMul` 再 gate 一次，
+  輸出剩 ~1/4 大小、corr 0.88，64k 工具呼叫 22/30（27% 失敗）。
+  修法：WMMA 走過（`wmma_used`）就跳過該 `SigmoidMul`（fused `AttentionKv`
+  簽名無 gate 參數，只靠它 gate 一次）。f16 early-return 在 `SigmoidMul` 前返回
+  （kernel 內單次，正確），decode（`rocm::Attention` 無 gate）不受影響。
+- 修正 K4V8（`GUFO_KV_Q4` 不帶 V4，K18/V34）的 GPU page fault（signal 6）：
+  `AttentionQ8Gemm` 融合投影路徑寫死 34-byte Q8_0 K 塊，K4（18-byte K 列）誤入
+  `fused_projection` → 每 token 溢寫 256 B → 30k tok 左右越界 abort。
+  修法：`fused_projection` 開關加 `!KvKeyIs4Bit(...)`（鏡像 V4 排除），K4V8 改走
+  `Dense` + `PrepareAttentionKv`（獨立 K/V block sizes，正確處理混排）。
+- 驗證（64k 工具梯子 N=10，`GUFO_KV_WMMA=1 GUFO_KV_I8=1`，修後 binary）：
+  K8V8 / K8V4 / K4V4 / K4V8 皆 **30/30**；生產實例（`+GUFO_KV_V4=1`）9/9 通過。
+  prefill 保留 WMMA 速度（64k 全 prefill ~1350 tok/s；fused 路徑約 990 tok/s）。
+
+
 ## v0.20.7（2026-10-22）
 - 文件：更新高併發建議。舊的 `--sessions 16 -c 32768` 已非上限；q8 KV＋4-bit
   value 列下實測 `8 × 131072` 載入 101.0 GB（餘 21 GB）、`16 × 65536`
