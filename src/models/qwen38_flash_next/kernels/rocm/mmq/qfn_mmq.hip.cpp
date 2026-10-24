@@ -359,7 +359,8 @@ static int moe_vector_projection(int weight_type, const void* W,
   constexpr const char* tag = "qfn_mmq_moe_vec";
   const auto type = static_cast<ggml_type>(weight_type);
   if (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K &&
-      type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q8_0) {
+      type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q8_0 &&
+      type != GGML_TYPE_Q4_0_ROCMFP4_FAST) {
     fprintf(stderr, "%s: unsupported weight type %d\n", tag, weight_type);
     return -1;
   }
@@ -410,8 +411,9 @@ static int moe_vector_projection(int weight_type, const void* W,
   // slots that share an expert read its weights in the same block.
   const bool by_expert =
       !gated && !W_b && !X_q8 &&
-      (type == GGML_TYPE_Q5_1 || type == GGML_TYPE_Q8_0) && K == 640 &&
-      n_expert_used == 1 && n_tokens > 1;
+      (type == GGML_TYPE_Q5_1 || type == GGML_TYPE_Q8_0 ||
+       type == GGML_TYPE_Q4_0_ROCMFP4_FAST) &&
+      K == 640 && n_expert_used == 1 && n_tokens > 1;
   const size_t group_bytes =
       by_expert ? 2 * size_t(n_tokens) * sizeof(int32_t)
       : gated && n_tokens > 1
@@ -545,6 +547,16 @@ extern "C" int qfn_mmq_q4_K_moe_raw(
     return qfn_mmq_moe_impl<GGML_TYPE_Q4_K>("qfn_mmq_q4_K_moe_raw", W, X, ids, out, M, K,
                                             n_tokens, n_experts, n_expert_used, stream,
                                             nullptr, nullptr);
+}
+
+extern "C" int qfn_mmq_rocmfp4_fast_moe_raw(
+    const void * W, const float * X, const int32_t * ids, float * out, int M,
+    int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream) {
+  // Vector route only: the MMQ tile kernels have no ROCmFP4 dequant yet.
+  return moe_vector_projection(GGML_TYPE_Q4_0_ROCMFP4_FAST, W, X, ids, out, M,
+                               K, n_tokens, n_experts, n_expert_used, stream,
+                               nullptr, nullptr, false);
 }
 
 extern "C" int qfn_mmq_q5_1_moe_raw(

@@ -233,6 +233,7 @@ static constexpr __device__ vec_dot_q_hip_t get_vec_dot_q_hip(ggml_type type) {
         case GGML_TYPE_Q8_0:    return vec_dot_q8_0_q8_1;
         case GGML_TYPE_Q4_K:    return vec_dot_q4_K_q8_1;
         case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1;
+        case GGML_TYPE_Q4_0_ROCMFP4_FAST: return vec_dot_rocmfp4_fast_q8_1;
         default:                return nullptr;
     }
 }
@@ -244,6 +245,7 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
         case GGML_TYPE_Q8_0:    return VDR_Q8_0_Q8_1_MMVQ;
         case GGML_TYPE_Q4_K:    return VDR_Q4_K_Q8_1_MMVQ;
         case GGML_TYPE_Q5_K:    return VDR_Q5_K_Q8_1_MMVQ;
+        case GGML_TYPE_Q4_0_ROCMFP4_FAST: return VDR_ROCMFP4_Q8_1_MMVQ;
         default:                return 1;
     }
 }
@@ -894,7 +896,8 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
     // dst_slots (expert-ordered slot rows) is only used by the down view.
     GGML_ASSERT(!dst_slots || (k == 640 && experts_used == 1 && tokens > 1 &&
                                (type == GGML_TYPE_Q5_1 ||
-                                type == GGML_TYPE_Q8_0)));
+                                type == GGML_TYPE_Q8_0 ||
+                                type == GGML_TYPE_Q4_0_ROCMFP4_FAST)));
     switch (type) {
         case GGML_TYPE_Q5_1:
           // Down projection slots have independent inputs. Wider row tiles
@@ -926,6 +929,26 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
             launch_moe<GGML_TYPE_Q8_0>(weights, input, ids, output, k, rows, tokens,
                                           experts_used, input_stride, stream);
             break;
+        case GGML_TYPE_Q4_0_ROCMFP4_FAST:
+          // Down experts only (the gated route stays Q4_K/Q5_K/Q8_0). The
+          // slot rows have independent inputs: wider row tiles reuse each
+          // short input without changing its dot-product sum.
+          if (k == 640 && experts_used == 1 && tokens > 1) {
+            if (tokens > 20) {
+              launch_moe<GGML_TYPE_Q4_0_ROCMFP4_FAST, 8>(
+                  weights, input, ids, output, k, rows, tokens, experts_used,
+                  input_stride, stream, dst_slots);
+            } else {
+              launch_moe<GGML_TYPE_Q4_0_ROCMFP4_FAST, 4>(
+                  weights, input, ids, output, k, rows, tokens, experts_used,
+                  input_stride, stream, dst_slots);
+            }
+            break;
+          }
+          launch_moe<GGML_TYPE_Q4_0_ROCMFP4_FAST>(
+              weights, input, ids, output, k, rows, tokens, experts_used,
+              input_stride, stream);
+          break;
         case GGML_TYPE_Q4_K:
             launch_moe<GGML_TYPE_Q4_K>(weights, input, ids, output, k, rows, tokens,
                                           experts_used, input_stride, stream);
