@@ -769,6 +769,13 @@ struct ggml_hip_type_traits<GGML_TYPE_Q8_0> {
 };
 
 template<>
+struct ggml_hip_type_traits<GGML_TYPE_Q4_0_ROCMFP4_FAST> {
+    static constexpr int qk = QK_ROCMFP4;
+    static constexpr int qr = QR_ROCMFP4;
+    static constexpr int qi = QI_ROCMFP4;
+};
+
+template<>
 struct ggml_hip_type_traits<GGML_TYPE_MXFP4> {
     static constexpr int qk = QK_MXFP4;
     static constexpr int qr = QR_MXFP4;

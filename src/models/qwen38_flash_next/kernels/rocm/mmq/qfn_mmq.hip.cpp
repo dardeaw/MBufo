@@ -553,10 +553,9 @@ extern "C" int qfn_mmq_rocmfp4_fast_moe_raw(
     const void * W, const float * X, const int32_t * ids, float * out, int M,
     int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream) {
-  // Vector route only: the MMQ tile kernels have no ROCmFP4 dequant yet.
-  return moe_vector_projection(GGML_TYPE_Q4_0_ROCMFP4_FAST, W, X, ids, out, M,
-                               K, n_tokens, n_experts, n_expert_used, stream,
-                               nullptr, nullptr, false);
+  return qfn_mmq_moe_impl<GGML_TYPE_Q4_0_ROCMFP4_FAST>(
+      "qfn_mmq_rocmfp4_fast_moe_raw", W, X, ids, out, M, K, n_tokens,
+      n_experts, n_expert_used, stream, nullptr, nullptr);
 }
 
 extern "C" int qfn_mmq_q5_1_moe_raw(
@@ -775,5 +774,7 @@ template void mul_mat_q_case<GGML_TYPE_Q4_K>(
 template void mul_mat_q_case<GGML_TYPE_Q5_1>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_Q5_K>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_Q4_0_ROCMFP4_FAST>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 } // namespace qfn_mmq

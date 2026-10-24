@@ -1,5 +1,6 @@
 // PLE n-gram hashing and disk row reads, checked without the model.
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -535,6 +536,54 @@ void TestFp3Rows() {
   std::filesystem::remove(path);
 }
 
+// Real v2q8 PLE table: decode sampled rows (including the last row of a
+// 22.4 GB table) against a plain-read + CPU-reference oracle.
+void TestFp3RealFile() {
+  const char* path =
+      "/mnt/nvme-data/gufo-models/qwen3.8-rocmfp4/v2q8/"
+      "Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8.gguf";
+  if (!std::filesystem::exists(path)) {
+    std::printf("ROCmFP3 real file skipped (missing)\n");
+    return;
+  }
+  constexpr std::uint64_t offset = 693381152;
+  constexpr std::uint64_t rows = 320001536;
+  constexpr std::uint32_t dim = 160;
+  std::string error;
+  auto table = OpenTable(path, offset, rows, dim,
+                         gufo::core::GgmlType::kQ3_0_ROCMFPX, &error);
+  Check(table != nullptr, error.c_str());
+  if (!table)
+    return;
+  const std::array<std::uint32_t, 5> ids{0, 1, 12345, 160000000, 320001535};
+  std::vector<float> out(ids.size() * dim, 0.0F);
+  q::NgramCounters counters;
+  const std::array owners{q::NgramGatherOwner{
+      static_cast<std::uint32_t>(ids.size()), &counters}};
+  Check(table->StartRead(ids, out, owners) && table->WaitRead(),
+        "ROCmFP3 real gather");
+  std::FILE* f = std::fopen(path, "rb");
+  Check(f != nullptr, "real file open");
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    std::uint8_t bytes[70];
+    const std::uint64_t at = offset + static_cast<std::uint64_t>(ids[i]) * 70;
+    Check(std::fseek(f, static_cast<long>(at), SEEK_SET) == 0, "real seek");
+    Check(std::fread(bytes, 1, sizeof(bytes), f) == sizeof(bytes), "real read");
+    std::vector<float> ref(dim, 0.0F);
+    gufo::quant::DequantizeQ3_0_ROCMFPX(bytes, ref.data(), dim);
+    for (std::uint32_t col = 0; col < dim; ++col) {
+      if (out[i * dim + col] != ref[col]) {
+        std::printf("row %u col %u got %.9g want %.9g\n", ids[i], col,
+                    out[i * dim + col], ref[col]);
+        Check(false, "ROCmFP3 real row exact");
+        break;
+      }
+    }
+  }
+  std::fclose(f);
+  std::printf("ROCmFP3 real file rows exact\n");
+}
+
 int main() {
   TestReplacedPath();
   TestHash();
@@ -543,6 +592,7 @@ int main() {
   TestDistantRows();
   TestCounters();
   TestFp3Rows();
+  TestFp3RealFile();
   if (failures != 0) {
     std::fprintf(stderr, "%d failures\n", failures);
     return 1;

@@ -45,6 +45,7 @@ enum class WeightType : std::uint32_t {
   kQ4_K = 12,
   kQ5_K = 13,
   kBF16 = 30,
+  kQ4_0_ROCMFP4_FAST = 101,
 };
 
 /// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0 rows).

@@ -3190,7 +3190,8 @@ bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
           l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
          l.ffn_up_exps.type == l.ffn_gate_exps.type &&
          (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
-          l.ffn_down_exps.type == GgmlType::kQ8_0) &&
+          l.ffn_down_exps.type == GgmlType::kQ8_0 ||
+          l.ffn_down_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST) &&
          c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
 }
 
@@ -3251,9 +3252,12 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
       AssignError(error_msg, "routed F16 gate/up GEMM failed");
       return false;
     }
-    const WeightType down_type = l.ffn_down_exps.type == GgmlType::kQ8_0
-                                     ? WeightType::kQ8_0
-                                     : WeightType::kQ5_1;
+    const WeightType down_type =
+        l.ffn_down_exps.type == GgmlType::kQ8_0
+            ? WeightType::kQ8_0
+            : l.ffn_down_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST
+                  ? WeightType::kQ4_0_ROCMFP4_FAST
+                  : WeightType::kQ5_1;
     // Prefill takes the 64-token down tiles: they decode each expert's
     // weights over more rows, also where narrower tiles would be fewer.
     const bool wide_down = routed_64_tiles_ != 0;

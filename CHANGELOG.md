@@ -3,6 +3,23 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.23.1（2026-10-25）
+- 接上 **ROCmFP4-FAST 的 HIP kernel**（補 v0.23.0 標註「尚未接」的 prefill GEMM）：
+  - **prefill 大 batch**：`RoutedF16GEMMKernel` 新增 FAST 解碼分支——FAST block
+    （16B codebook codes＋1B UE4M3 scale）在 `fetch_stage` 以 perm LUT 展開成
+    Q8 形狀的 int8 codebook bytes，之後整套 Q8_0 反量化（1152 magic）＋fp16 WMMA
+    核心直接重用；`WmmaExperts()` 放行 FAST down experts，整個 MoE（gate/up Q4_K
+    ＋down FAST）改走 fp16 矩陣核心，不再掉進通用 `mul_mat_q`。
+  - **中 batch**：down experts FAST 走 int8 MMQ（`load_tiles_rocmfp4_fast`＋
+    `vec_dot_rocmfp4_fast_q8_1_mma`，codebook LUT＋UE4M3 scale、Q8_1 激活）。
+  - gfx1151 實測 int8 與 fp16 WMMA 峰值同吞吐（57.3 TFLOP/s、1.00x），故 prefill
+    走 fp16、重用 prod 那條 `RoutedF16GEMMKernel`。
+- 效能（對 UD-Q4_K_XL 生產基線）：prefill 1891／5041 tok **1563.7／1367.6 tok/s**
+  （prod 1555.9／1323.6，+0.5%／+3.3%）；decode 48.5 tok/s 不退步；64k 工具梯子
+  Q4／Q8 皆 **30/30**；12 題 greedy 對 MMQ 路忠實（同 fp16 捨入級差異）。
+- `projection_ops_test` oracle 修正：FAST scale 用 `d=amax/127`（對齊 kernel）；
+  新增 FAST mini／real-shape／FP64 oracle 斷言。
+
 ## v0.23.0（2026-10-24）
 - 移植 **ROCmFP4 / ROCmFPx 量化家族**（規格與參考實作：agentionai/llama.cpp，MIT）：
   - `GgmlType` 新增 `kQ4_0_ROCMFP4=100`（18B/32 雙 UE4M3 scale）、

@@ -444,6 +444,342 @@ void CheckW8A8Tail(std::size_t m, std::size_t k, std::uint32_t seed) {
   (void)hipFree(d_short);
 }
 
+namespace {
+
+constexpr int kRocmFp4Code[16] = {0,  1,  2,  3,  4,  6,  8,  10,
+                                  0, -1, -2, -3, -4, -6, -8, -10};
+
+float Ue4m3Host(std::uint8_t e) {
+  if (e > 0x7e)
+    return 0.0F;
+  const int exp = e >> 3;
+  const int mant = e & 7;
+  if (exp == 0)
+    return static_cast<float>(mant) * 0x1p-10f;
+  return static_cast<float>(8 + mant) * std::ldexp(1.0F, exp - 11);
+}
+
+}  // namespace
+
+// Deterministic isolation: every code = +10 (index 7), scale 1.0, input 1.
+void CheckRocmFp4FastMini() {
+  constexpr int rows = 8, cols = 32, experts = 1, tokens = 1;
+  const std::uint8_t kPat[8] = {0x07, 0x70, 0x0F, 0xF0, 0x08, 0x80, 0x18, 0x81};
+  const float kWant[8] = {160, 160, -160, -160, 0, 0, 16, 16};
+  std::vector<std::uint8_t> fast(static_cast<std::size_t>(rows) * 17);
+  for (std::size_t b = 0; b < static_cast<std::size_t>(rows); ++b) {
+    auto* blk = fast.data() + b * 17;
+    for (int j = 0; j < 16; ++j)
+      blk[j] = kPat[b];
+    blk[16] = 0x40;  // UE4M3 scale 1.0
+  }
+  std::vector<float> input(cols, 1.0F);
+  std::vector<std::int32_t> ids(tokens * experts, 0);
+  void* dw = nullptr;
+  float *dx = nullptr, *dy = nullptr;
+  std::int32_t* di = nullptr;
+  CheckHip(hipMalloc(&dw, fast.size()), "mini w");
+  CheckHip(hipMalloc(&dx, input.size() * 4), "mini x");
+  CheckHip(hipMalloc(&dy, rows * tokens * experts * 4), "mini y");
+  CheckHip(hipMalloc(&di, ids.size() * 4), "mini ids");
+  CheckHip(hipMemcpy(dw, fast.data(), fast.size(), hipMemcpyHostToDevice), "mini Wu");
+  CheckHip(hipMemcpy(dx, input.data(), input.size() * 4, hipMemcpyHostToDevice), "mini Xu");
+  CheckHip(hipMemcpy(di, ids.data(), ids.size() * 4, hipMemcpyHostToDevice), "mini iu");
+  if (qfn_mmq_rocmfp4_fast_moe_raw(dw, dx, di, dy, rows, cols, tokens, experts,
+                                   experts, nullptr) != 0)
+    throw std::runtime_error("mini FAST failed");
+  std::vector<float> out(rows);
+  CheckHip(hipMemcpy(out.data(), dy, out.size() * 4, hipMemcpyDeviceToHost),
+           "mini down");
+  for (int r = 0; r < rows; ++r)
+    std::printf("FAST mini row%d pat=0x%02x got=%.4f want=%.1f\n", r, kPat[r],
+                out[r], kWant[r]);
+  (void)hipFree(dw);
+  (void)hipFree(dx);
+  (void)hipFree(dy);
+  (void)hipFree(di);
+}
+
+// Real v2 geometry: M=640, K=2560, E=128, U=8. Samples a slot subset against
+// the FP64 oracle to rule out shape-dependent decode bugs.
+void CheckRocmFp4FastRealShape(int experts = 128, int experts_used = 8) {
+  constexpr int rows = 640, cols = 2560;
+  const int blocks_per_row = cols / 32;
+  const int total_blocks = rows * experts * blocks_per_row;
+  std::vector<std::uint8_t> fast(static_cast<std::size_t>(total_blocks) * 17);
+  std::vector<float> scale_val(total_blocks);
+  static const int kCode16[16] = {0,  1,  2,  3,  4,  6,  8,  10,
+                                  0, -1, -2, -3, -4, -6, -8, -10};
+  std::uint32_t seed = 5150;
+  for (int b = 0; b < total_blocks; ++b) {
+    float x[32];
+    float max_abs = 0.0F;
+    for (int j = 0; j < 32; ++j) {
+      x[j] = (static_cast<int>(NextRandom(&seed) % 2001) - 1000) * 0.001F;
+      max_abs = std::max(max_abs, std::abs(x[j]));
+    }
+    const float target = max_abs / 10.0F;
+    std::uint8_t best = 0;
+    float best_diff = -1.0F;
+    for (int e = 0; e <= 0x7e; ++e) {
+      const float diff = std::abs(Ue4m3Host(static_cast<std::uint8_t>(e)) - target);
+      if (best_diff < 0.0F || diff < best_diff) {
+        best_diff = diff;
+        best = static_cast<std::uint8_t>(e);
+      }
+    }
+    const float sc = Ue4m3Host(best);
+    auto* block = fast.data() + static_cast<std::size_t>(b) * 17;
+    for (int j = 0; j < 16; ++j)
+      block[j] = 0;
+    block[16] = best;
+    for (int j = 0; j < 32; ++j) {
+      int best_code = 0;
+      float best_err = -1.0F;
+      if (sc > 0.0F) {
+        for (int c = 0; c < 16; ++c) {
+          const float err = std::abs(static_cast<float>(kCode16[c]) * sc - x[j]);
+          if (best_err < 0.0F || err < best_err) {
+            best_err = err;
+            best_code = c;
+          }
+        }
+      }
+      if (j < 16)
+        block[j] |= static_cast<std::uint8_t>(best_code);
+      else
+        block[j - 16] |= static_cast<std::uint8_t>(best_code << 4);
+    }
+    scale_val[b] = sc;
+  }
+
+  constexpr int tokens = 65;
+  std::vector<float> input(static_cast<std::size_t>(tokens) * cols);
+  for (int b = 0; b < blocks_per_row; ++b) {
+    const float scale = 0.0012345F * (1 + b % 7);
+    for (int j = 0; j < 32; ++j)
+      input[b * 32 + j] =
+          (j == 0 ? 127 : static_cast<int>(NextRandom(&seed) % 255) - 127) * scale;
+  }
+  for (int t = 1; t < tokens; ++t)
+    std::copy_n(input.data(), cols,
+                input.data() + static_cast<std::size_t>(t) * cols);
+  std::vector<std::int32_t> ids(static_cast<std::size_t>(tokens) * experts_used);
+  for (std::size_t i = 0; i < ids.size(); ++i)
+    ids[i] = static_cast<std::int32_t>((i * 37 + i / experts_used) % experts);
+
+  void* dw = nullptr;
+  float *dx = nullptr, *dy = nullptr;
+  std::int32_t* di = nullptr;
+  CheckHip(hipMalloc(&dw, fast.size()), "real FAST w");
+  CheckHip(hipMalloc(&dx, input.size() * 4), "real FAST x");
+  CheckHip(hipMalloc(&dy, ids.size() * rows * 4), "real FAST y");
+  CheckHip(hipMalloc(&di, ids.size() * 4), "real FAST ids");
+  CheckHip(hipMemcpy(dw, fast.data(), fast.size(), hipMemcpyHostToDevice), "real wu");
+  CheckHip(hipMemcpy(dx, input.data(), input.size() * 4, hipMemcpyHostToDevice), "real xu");
+  CheckHip(hipMemcpy(di, ids.data(), ids.size() * 4, hipMemcpyHostToDevice), "real iu");
+  if (qfn_mmq_rocmfp4_fast_moe_raw(dw, dx, di, dy, rows, cols, tokens, experts,
+                                   experts_used, nullptr) != 0)
+    throw std::runtime_error("real-shape FAST moe failed");
+  std::vector<float> output(ids.size() * rows);
+  CheckHip(hipMemcpy(output.data(), dy,
+                     output.size() * 4, hipMemcpyDeviceToHost),
+           "real down");
+  for (int s = 0; s < 24; ++s) {
+    const int slot = s * 23 % static_cast<int>(ids.size());
+    const int expert = ids[slot];
+    const int t = slot / experts_used;
+    const int e = slot % experts_used;
+    (void)e;
+    for (int row = 0; row < rows; row += 16) {
+      double expected = 0.0;
+      for (int b = 0; b < blocks_per_row; ++b) {
+        float maximum = 0.0F;
+        for (int j = 0; j < 32; ++j)
+          maximum = std::max(maximum, std::abs(input[static_cast<std::size_t>(t) * cols + b * 32 + j]));
+        const float d_f = maximum / 127.0F;
+        const float d_in = d_f;
+        const int wblock = expert * rows * blocks_per_row + row * blocks_per_row + b;
+        const auto* blk = fast.data() + static_cast<std::size_t>(wblock) * 17;
+        long long dot = 0;
+        for (int j = 0; j < 32; ++j) {
+          const int nib = (j < 16 ? blk[j] : blk[j - 16] >> 4) & 0x0F;
+          const int q = maximum == 0.0F
+                            ? 0
+                            : static_cast<int>(std::round(
+                                  input[static_cast<std::size_t>(t) * cols + b * 32 + j] / d_f));
+          dot += static_cast<long long>(kCode16[nib]) * q;
+        }
+        expected += static_cast<double>(scale_val[wblock]) * d_in *
+                    static_cast<double>(dot);
+      }
+      const float actual = output[static_cast<std::size_t>(slot) * rows + row];
+      if (!std::isfinite(actual) ||
+          std::abs(static_cast<double>(actual) - expected) > 1e-3)
+        throw std::runtime_error(
+            "real-shape FAST differs at slot " + std::to_string(slot) +
+            " row " + std::to_string(row) + ": actual=" + std::to_string(actual) +
+            " expected=" + std::to_string(expected));
+    }
+  }
+  (void)hipFree(dw);
+  (void)hipFree(dx);
+  (void)hipFree(dy);
+  (void)hipFree(di);
+  std::cout << "ROCmFP4-FAST real shape 640x2560x128: oracle exact\n";
+}
+
+// ROCmFP4-FAST down experts: GPU GEMV against an FP64 oracle that replays
+// the Q8_1 activation quantization and the kernel's integer accumulation.
+void CheckRocmFp4FastMoe() {
+  constexpr int rows = 64, cols = 512, experts = 2;
+  const int blocks_per_row = cols / 32;
+  const int total_blocks = rows * experts * blocks_per_row;
+  std::vector<std::uint8_t> fast(static_cast<std::size_t>(total_blocks) * 17);
+  std::vector<float> code_val(static_cast<std::size_t>(total_blocks) * 32);
+  std::vector<float> scale_val(total_blocks);
+  std::uint32_t seed = 90210;
+  for (int b = 0; b < total_blocks; ++b) {
+    float x[32];
+    float max_abs = 0.0F;
+    for (int j = 0; j < 32; ++j) {
+      x[j] = (static_cast<int>(NextRandom(&seed) % 2001) - 1000) * 0.001F;
+      max_abs = std::max(max_abs, std::abs(x[j]));
+    }
+    const float target = max_abs / 10.0F;
+    std::uint8_t best = 0;
+    float best_diff = -1.0F;
+    for (int e = 0; e <= 0x7e; ++e) {
+      const float diff = std::abs(Ue4m3Host(static_cast<std::uint8_t>(e)) - target);
+      if (best_diff < 0.0F || diff < best_diff) {
+        best_diff = diff;
+        best = static_cast<std::uint8_t>(e);
+      }
+    }
+    const float s = Ue4m3Host(best);
+    auto* block = fast.data() + static_cast<std::size_t>(b) * 17;
+    for (int j = 0; j < 16; ++j)
+      block[j] = 0;
+    block[16] = best;
+    for (int j = 0; j < 32; ++j) {
+      int best_code = 0;
+      float best_err = -1.0F;
+      if (s > 0.0F) {
+        for (int c = 0; c < 16; ++c) {
+          const float err = std::abs(static_cast<float>(kRocmFp4Code[c]) * s - x[j]);
+          if (best_err < 0.0F || err < best_err) {
+            best_err = err;
+            best_code = c;
+          }
+        }
+      }
+      if (j < 16)
+        block[j] |= static_cast<std::uint8_t>(best_code);
+      else
+        block[j - 16] |= static_cast<std::uint8_t>(best_code << 4);
+      code_val[static_cast<std::size_t>(b) * 32 + j] =
+          static_cast<float>(kRocmFp4Code[best_code]);
+    }
+    scale_val[b] = s;
+  }
+
+  std::vector<float> input(static_cast<std::size_t>(65) * cols);
+  for (int b = 0; b < blocks_per_row; ++b) {
+    const float scale = 0.0012345F * (1 + b % 7);
+    for (int j = 0; j < 32; ++j)
+      input[b * 32 + j] =
+          (j == 0 ? 127 : static_cast<int>(NextRandom(&seed) % 255) - 127) * scale;
+  }
+  for (int t = 1; t < 65; ++t)
+    std::copy_n(input.data(), cols,
+                input.data() + static_cast<std::size_t>(t) * cols);
+
+  void* dw = nullptr;
+  float* dx = nullptr;
+  float* dy = nullptr;
+  std::int32_t* di = nullptr;
+  CheckHip(hipMalloc(&dw, fast.size()), "FAST weights");
+  CheckHip(hipMalloc(&dx, input.size() * sizeof(float)), "FAST input");
+  CheckHip(hipMalloc(&di, 65 * experts * sizeof(std::int32_t)), "FAST ids");
+  CheckHip(hipMalloc(&dy, 65 * experts * rows * sizeof(float)), "FAST out");
+  CheckHip(hipMemcpy(dw, fast.data(), fast.size(), hipMemcpyHostToDevice),
+           "FAST weights upload");
+  CheckHip(hipMemcpy(dx, input.data(), input.size() * sizeof(float),
+                     hipMemcpyHostToDevice),
+           "FAST input upload");
+
+  std::vector<std::int32_t> ids(65 * experts);
+  for (std::size_t i = 0; i < ids.size(); ++i)
+    ids[i] = static_cast<std::int32_t>((i / experts + i % experts) % experts);
+  CheckHip(hipMemcpy(di, ids.data(), ids.size() * sizeof(std::int32_t),
+                     hipMemcpyHostToDevice),
+           "FAST ids upload");
+
+  std::vector<float> big, small;
+  for (const int tokens : {65, 3}) {
+    std::vector<float> output(static_cast<std::size_t>(tokens) * experts * rows);
+    if (qfn_mmq_rocmfp4_fast_moe_raw(dw, dx, di, dy, rows, cols, tokens, experts,
+                                     experts, nullptr) != 0)
+      throw std::runtime_error("FAST moe projection failed");
+    CheckHip(hipMemcpy(output.data(), dy, output.size() * sizeof(float),
+                       hipMemcpyDeviceToHost),
+             "FAST download");
+    for (int t = 0; t < tokens; ++t) {
+      for (int e = 0; e < experts; ++e) {
+        const int slot = t * experts + e;
+        const int expert = ids[slot];
+        for (int row = 0; row < rows; ++row) {
+          double expected = 0.0;
+          for (int b = 0; b < blocks_per_row; ++b) {
+            float maximum = 0.0F;
+            for (int j = 0; j < 32; ++j)
+              maximum = std::max(maximum, std::abs(input[b * 32 + j]));
+            const float d_f = maximum / 127.0F;
+            const float d_in = d_f;
+            const int wblock = expert * rows * blocks_per_row + row * blocks_per_row + b;
+            long long dot = 0;
+            for (int j = 0; j < 32; ++j) {
+              const int q = maximum == 0.0F
+                                ? 0
+                                : static_cast<int>(
+                                      std::round(input[b * 32 + j] / d_f));
+              dot += static_cast<long long>(
+                         code_val[static_cast<std::size_t>(wblock) * 32 + j]) * q;
+            }
+            expected += static_cast<double>(scale_val[wblock]) * d_in *
+                        static_cast<double>(dot);
+          }
+          const float actual =
+              output[static_cast<std::size_t>(slot) * rows + row];
+          if (!std::isfinite(actual) ||
+              std::abs(static_cast<double>(actual) - expected) > 1e-4)
+            throw std::runtime_error(
+                "FAST moe differs from FP64 oracle at slot " +
+                std::to_string(slot) + " row " + std::to_string(row) +
+                ": actual=" + std::to_string(actual) +
+                " expected=" + std::to_string(expected));
+        }
+      }
+    }
+    if (tokens == 65)
+      big = output;
+    else
+      small = output;
+  }
+  // Identical rows must not depend on the batched launch width.
+  for (int t = 0; t < 3; ++t)
+    for (int e = 0; e < experts; ++e)
+      if (std::memcmp(&big[static_cast<std::size_t>(t * experts + e) * rows],
+                      &small[static_cast<std::size_t>(t * experts + e) * rows],
+                      rows * sizeof(float)) != 0)
+        throw std::runtime_error("FAST moe batch width changes results");
+  (void)hipFree(dw);
+  (void)hipFree(dx);
+  (void)hipFree(dy);
+  (void)hipFree(di);
+  std::cout << "ROCmFP4-FAST moe: FP64 oracle exact\n";
+}
+
 void CheckRoutedQ8Placement() {
   constexpr int rows = 64, cols = 512, tokens = 65, experts = 2;
   const auto weights = MakeWeights(rows * experts, cols, 31415, false);
@@ -1012,6 +1348,10 @@ int main() {
     if (qfn_mmq_init(0) != 0)
       throw std::runtime_error("prepare quantized decode projections");
     CheckRoutedQ8Placement();
+    CheckRocmFp4FastMini();
+    CheckRocmFp4FastMoe();
+    CheckRocmFp4FastRealShape();
+    CheckRocmFp4FastRealShape(512, 10);
     CheckDenseAcrossStreams();
     CheckSmallProjection(q::WeightType::kF32, 513, 2560);
     CheckSmallProjection(q::WeightType::kF32, 96, 2560);

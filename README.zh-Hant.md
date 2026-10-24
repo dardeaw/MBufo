@@ -83,6 +83,12 @@ matched-token decode、對三個上下文取平均：
 
 ### 性能調優
 
+- **ROCmFP4-FAST 專家走 fp16 WMMA 核心。** 4.25 bpw 的 `Q4_0_ROCMFP4_FAST` down
+  專家現在與 Q4_K/Q8_0 專家共用同一條 fp16 WMMA routed-expert GEMM（perm codebook
+  LUT 餵進既有 Q8_0 反量化），FAST 模型的 MoE prefill 因此跑在矩陣核心上、不再掉
+  進通用 `mul_mat_q`。gfx1151 實測 FAST 模型 prefill 打平或勝過 UD-Q4_K_XL 基線
+  （1.9K／5K token 為 1564／1368 對 1556／1324 tok/s），decode 速度與 64k 工具
+  梯子正確性不變。
 - **int8 WMMA 直讀 prefill。** 單 session 的 causal prefill
   （`WmmaCausalAttention`）現在直接讀 blocked int8 KV 快取，跳過 F16 staging
   反量化。它覆蓋快取能持有的所有 KV 區塊佈局（K34/K18 x V34/V18，dense 與

@@ -6938,6 +6938,8 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
   return kType == WeightType::kQ4_K   ? (k / 256) * sizeof(Q4KBlock)
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
+         : kType == WeightType::kQ4_0_ROCMFP4_FAST
+             ? (k / 32) * 17
                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
@@ -6969,6 +6971,44 @@ __device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
   hi = __hfma2(__hadd2(__builtin_bit_cast(__half2, p1), magic), scale2, bias2);
 }
 
+// ROCmFP4-FAST: 16-entry E2M1-derived codebook {0,1,2,3,4,6,8,10,0,-1,...}
+// with one unsigned E4M3 scale per 32-value block. The routed F16 path expands
+// each 4-bit code to its codebook byte and then reuses the Q8_0 dequant (the
+// 1152 magic), so FAST rides the same fp16 WMMA core as the production experts.
+__constant__ int8_t kFastCodebook[16] = {0, 1, 2, 3, 4, 6, 8, 10,
+                                         0, -1, -2, -3, -4, -6, -8, -10};
+
+__device__ __forceinline__ float FastScaleUe4m3(std::uint8_t e) {
+  if (e > 0x7e)
+    return 0.0f;
+  const std::uint32_t exp = e >> 3;
+  const std::uint32_t mant = e & 7u;
+  if (exp == 0)
+    return static_cast<float>(mant) * 0x1p-10f;
+  return __uint_as_float(((exp + 119u) << 23) | (mant << 20));
+}
+
+// Two code bytes -> their codebook bytes via the perm LUT, matching
+// get_int_from_table_16 in the mmq path.
+__device__ __forceinline__ int2 FastTable16(std::uint32_t q4) {
+  const std::uint32_t* values =
+      reinterpret_cast<const std::uint32_t*>(kFastCodebook);
+  const std::uint32_t q_even = q4;
+  const std::uint32_t q_odd = (q4 >> 4);
+  const std::uint32_t ve_low =
+      __builtin_amdgcn_perm(values[1], values[0], q_even & 0x07070707U);
+  const std::uint32_t vo_low =
+      __builtin_amdgcn_perm(values[1], values[0], q_odd & 0x07070707U);
+  const std::uint32_t ve_high =
+      __builtin_amdgcn_perm(values[3], values[2], q_even & 0x07070707U);
+  const std::uint32_t vo_high =
+      __builtin_amdgcn_perm(values[3], values[2], q_odd & 0x07070707U);
+  const std::uint32_t mask_even = 0x03020100U | ((q_even & 0x08080808U) >> 1);
+  const std::uint32_t mask_odd = 0x03020100U | ((q_odd & 0x08080808U) >> 1);
+  return make_int2(__builtin_amdgcn_perm(ve_high, ve_low, mask_even),
+                   __builtin_amdgcn_perm(vo_high, vo_low, mask_odd));
+}
+
 template<WeightType kType, int BM, int BN, int BK, bool kPair = false>
 __launch_bounds__(256) __global__
     void RoutedF16GEMMKernel(const void* __restrict__ w,
@@ -6990,10 +7030,12 @@ __launch_bounds__(256) __global__
   constexpr bool kQ5 = kType == WeightType::kQ5_1;
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
   constexpr bool kQ8 = kType == WeightType::kQ8_0;
+  constexpr bool kFast = kType == WeightType::kQ4_0_ROCMFP4_FAST;
+  constexpr bool kQ8Like = kQ8 || kFast;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
-  constexpr int kChunks = kQ8 ? 2 * BK : BK;
+  constexpr int kChunks = kQ8Like ? 2 * BK : BK;
 
   // Separate projections stage codes and affine parameters in LDS, with
   // nearby rows permuted across the bank groups. Paired waves keep them in
@@ -7152,6 +7194,23 @@ __launch_bounds__(256) __global__
         f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
         __builtin_memcpy(&f_codes[u], blk + 2, 16);
         __builtin_memcpy(&f_codes_hi[u], blk + 18, 16);
+      } else if constexpr (kFast) {
+        // block_rocmfp4_fast is 17 bytes: 16 packed 4-bit codes then one
+        // UE4M3 scale. Expand the codes to codebook bytes (low nibbles are
+        // elements 0-15, high nibbles 16-31) and present them as Q8_0-shaped
+        // signed bytes so the shared dequant path takes over.
+        const auto* blk = f_ptr[u] + ((kb0 + f_c) * 17);
+        const float sc = FastScaleUe4m3(blk[16]);
+        f_dm[u] =
+            __builtin_bit_cast(std::uint32_t, __floats2half2_rn(sc, 0.0f));
+        uint4 q;
+        __builtin_memcpy(&q, blk, 16);
+        const int2 r0 = FastTable16(q.x);
+        const int2 r1 = FastTable16(q.y);
+        const int2 r2 = FastTable16(q.z);
+        const int2 r3 = FastTable16(q.w);
+        f_codes[u] = make_uint4(r0.x, r1.x, r2.x, r3.x);
+        f_codes_hi[u] = make_uint4(r0.y, r1.y, r2.y, r3.y);
       } else {
         constexpr int kBlockChunks = kQ5K ? 11 : 9;
         constexpr int kCodeChunk = kQ5K ? 3 : 1;
@@ -7223,7 +7282,7 @@ __launch_bounds__(256) __global__
         own_codes[u] = f_codes[u];
         if constexpr (kQ5K)
           own_high[u] = f_high[u];
-      } else if constexpr (kQ8) {
+      } else if constexpr (kQ8Like) {
         s_codes[swizzle(row, 2 * f_c)] = f_codes[u];
         s_codes[swizzle(row, (2 * f_c) + 1)] = f_codes_hi[u];
         scale_bias = f_live[u] ? f_dm[u] : 0U;  // half2 (d, 0)
@@ -7233,7 +7292,7 @@ __launch_bounds__(256) __global__
       if constexpr (kQ5K && !kPair) {
         s_high[(f_c * BM) + row] = f_high[u];
       }
-      if constexpr (kQ8) {
+      if constexpr (kQ8Like) {
       } else {
         const int sb32 = f_sb32[u];
         // The first four scale/min bytes live in y/z. Their remaining
@@ -7283,11 +7342,11 @@ __launch_bounds__(256) __global__
     }
   }
 
-  const __half2 magic =
-      __floats2half2_rn(kQ8 ? -1152.0F : -1024.0F, kQ8 ? -1152.0F : -1024.0F);
+  const __half2 magic = __floats2half2_rn(kQ8Like ? -1152.0F : -1024.0F,
+                                          kQ8Like ? -1152.0F : -1024.0F);
   const auto compute_stage = [&]() {
     uint4 raw[kWaveRowTiles][BK];
-    if constexpr (!kQ8 && !kQ5 && !kPair) {
+    if constexpr (!kQ8Like && !kQ5 && !kPair) {
 #pragma unroll
       for (int u = 0; u < kWaveRowTiles; ++u) {
         const int row = (wave_id * 16) + (u * 128) + sub_lane;
@@ -7367,7 +7426,7 @@ __launch_bounds__(256) __global__
           const __half2 scale2 = __low2half2(sb);
           const __half2 bias2 = __high2half2(sb);
           std::uint32_t nib[8];
-          if constexpr (kQ8) {
+          if constexpr (kQ8Like) {
             // Q8_0: the block's 32 signed bytes are chunks 2 kb and 2 kb + 1;
             // flipping the sign bit carries q + 128, which the 1152 magic
             // takes back out.
@@ -7419,7 +7478,7 @@ __launch_bounds__(256) __global__
       }
 #pragma unroll
       for (int j = 0; j < kTokTiles; ++j) {
-        if constexpr (kPair || ((kQ5 || kQ8) && BN >= 48)) {
+        if constexpr (kPair || ((kQ5 || kQ8Like) && BN >= 48)) {
           // Keep one token tile's LDS fragments live at a time. Hoisting
           // all eight tiles spills registers and defeats the wider tile's
           // reuse of each weight decode. This is a compiler barrier only.
@@ -7427,7 +7486,7 @@ __launch_bounds__(256) __global__
         }
         // A short expert bucket has no output in the remaining token
         // tiles, so omit their WMMA work.
-        if constexpr ((kPair || ((kQ5 || kQ8) && BN >= 48)) && kTokTiles > 1) {
+        if constexpr ((kPair || ((kQ5 || kQ8Like) && BN >= 48)) && kTokTiles > 1) {
           if (j >= live_tok_tiles)
             continue;
         }
@@ -8179,6 +8238,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);
+      return true;
+    case WeightType::kQ4_0_ROCMFP4_FAST:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kQ4_0_ROCMFP4_FAST, kBM, BN, kBK>),
+          grid, dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
       return true;
     case WeightType::kQ5_K:
       if constexpr (BN > 48) {

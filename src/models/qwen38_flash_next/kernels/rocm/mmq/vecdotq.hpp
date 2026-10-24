@@ -766,6 +766,76 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
     return vec_dot_q8_0_q8_1_impl<float, VDR_Q8_0_Q8_1_MMVQ>(v, u, bq8_0->d, __low2half(bq8_1->ds));
 }
 
+#define VDR_ROCMFP4_Q8_1_MMVQ 2
+
+// Four low nibbles -> four int8 codebook values {0,1,2,3,4,6,8,10,
+// 0,-1,-2,-3,-4,-6,-8,-10} (E2M1 grid, top step 12 -> 10, AMD tuning).
+// AMD PRMT via __builtin_amdgcn_perm (selector bit 3 picks the source,
+// bits 2:0 the byte); mirrors rocmfp4_get_low_int_from_codebook_16 from
+// the ROCmFPx port. HIP __byte_perm does not keep CUDA selector semantics
+// on gfx1151, so the builtin is required here.
+static __device__ __forceinline__ int rocmfp4_codes(uint32_t nibbles) {
+    const uint32_t v_low  = __builtin_amdgcn_perm(0x0A080604u, 0x03020100u, nibbles & 0x07070707u);
+    const uint32_t v_high = __builtin_amdgcn_perm(0xF6F8FAFCu, 0xFDFEFF00u, nibbles & 0x07070707u);
+    const uint32_t mask   = 0x03020100u | ((nibbles & 0x08080808u) >> 1);
+    return __builtin_amdgcn_perm(v_high, v_low, mask);
+}
+
+// Unsigned E4M3 scale byte: exp==0 -> mant * 2^-10, else (8+mant) *
+// 2^(exp-11); bytes above 0x7e are invalid and decode to 0 (reference
+// table guard).
+static __device__ __forceinline__ float rocmfp4_scale_ue4m3(uint8_t e) {
+    if (e > 0x7e)
+        return 0.0f;
+    const uint32_t exp = e >> 3;
+    const uint32_t mant = e & 7u;
+    if (exp == 0)
+        return (float)mant * 0x1p-10f;
+    return __uint_as_float(((exp + 119u) << 23) | (mant << 20));
+}
+
+static __device__ __forceinline__ float vec_dot_rocmfp4_fast_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_rocmfp4_fast * bq4 = (const block_rocmfp4_fast *) vbq + kbx;
+
+    int sumi = 0;
+#pragma unroll
+    for (int i = 0; i < VDR_ROCMFP4_Q8_1_MMVQ; ++i) {
+        const int q = iqs + i;
+        // Quant q covers elements 4q..4q+3: word q%4, low nibbles for the
+        // first half of the block, high nibbles for the second.
+        const uint32_t word = get_int_b4(bq4->qs, q & 3);
+        const uint32_t nib =
+            q < 4 ? (word & 0x0F0F0F0Fu) : ((word >> 4) & 0x0F0F0F0Fu);
+        sumi = ggml_hip_dp4a(rocmfp4_codes(nib), get_int_b4(bq8_1->qs, q), sumi);
+    }
+    return rocmfp4_scale_ue4m3(bq4->e) * __low2float(bq8_1->ds) * (float)sumi;
+}
+
+#define VDR_ROCMFP4_Q8_1_MMQ 4
+
+static __device__ __forceinline__ float vec_dot_rocmfp4_fast_q8_1_mmq(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_rocmfp4_fast * bq4 = (const block_rocmfp4_fast *) vbq + kbx;
+
+    const int * q8 = (const int *) bq8_1->qs + iqs;
+
+    int sumi = 0;
+#pragma unroll
+    for (int l = 0; l < VDR_ROCMFP4_Q8_1_MMQ; ++l) {
+        const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
+        const int2 v = get_int_from_table_16(aux_q4, kvalues_rocmfp4_fast);
+
+        sumi = ggml_hip_dp4a(v.x, q8[l + 0], sumi);
+        sumi = ggml_hip_dp4a(v.y, q8[l + 4], sumi);
+    }
+
+    const float d = rocmfp4_scale_ue4m3(bq4->e) * __low2float(bq8_1->ds);
+    return d * sumi;
+}
+
 static __device__ __forceinline__ float vec_dot_q2_K_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 

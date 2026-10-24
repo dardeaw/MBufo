@@ -93,6 +93,13 @@ not stack gracefully.
 
 ### Performance tuning
 
+- **ROCmFP4-FAST experts on the fp16 WMMA core.** The 4.25 bpw
+  `Q4_0_ROCMFP4_FAST` down experts now decode through the same fp16 WMMA
+  routed-expert GEMM as the Q4_K/Q8_0 experts (a perm codebook LUT feeds the
+  existing Q8_0 dequant), so a FAST model's MoE prefill rides the matrix cores
+  instead of the generic `mul_mat_q` path. On gfx1151 a FAST model's prefill
+  matches or beats the UD-Q4_K_XL baseline (1564 / 1368 vs 1556 / 1324 tok/s at
+  1.9K / 5K tokens) with decode speed and 64K tool-call accuracy unchanged.
 - **int8 WMMA direct prefill.** The single-session causal prefill
   (`WmmaCausalAttention`) now reads the blocked int8 KV cache directly, skipping
   the F16 staging dequant. It covers every KV block layout the cache can hold

@@ -182,6 +182,19 @@ typedef struct {
 } block_q8_0;
 static_assert(sizeof(block_q8_0) == sizeof(ggml_half) + QK8_0, "wrong q8_0 block size/padding");
 
+// ROCmFP4 (agentionai/llama.cpp, MIT): AMD E2M1-derived 4-bit codebook
+// {0,1,2,3,4,6,8,10,0,-1,-2,-3,-4,-6,-8,-10} with one unsigned E4M3 scale
+// per 32-element block. Low nibbles give elements 0..15, high nibbles 16..31.
+#define QK_ROCMFP4 32
+#define QR_ROCMFP4 1
+#define QI_ROCMFP4 (QK_ROCMFP4 / (4 * QR_ROCMFP4))
+typedef struct {
+    uint8_t qs[QK_ROCMFP4/2]; // packed 4-bit codes
+    uint8_t e;                // UE4M3 scale
+} block_rocmfp4_fast;
+static_assert(sizeof(block_rocmfp4_fast) == QK_ROCMFP4/2 + sizeof(uint8_t),
+              "wrong rocmfp4 fast block size/padding");
+
 #define QK8_1 32
 typedef struct {
     GGML_EXTENSION union {
@@ -1021,6 +1034,11 @@ GGML_TABLE_END()
 // ref: https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 GGML_TABLE_BEGIN(int8_t, kvalues_mxfp4, 16)
     0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12,
+GGML_TABLE_END()
+
+// ROCmFP4 FAST codebook (E2M1 grid, top step 12 -> 10, AMD tuning)
+GGML_TABLE_BEGIN(int8_t, kvalues_rocmfp4_fast, 16)
+    0, 1, 2, 3, 4, 6, 8, 10, 0, -1, -2, -3, -4, -6, -8, -10,
 GGML_TABLE_END()
 
 #define NGRID_IQ1S 2048
