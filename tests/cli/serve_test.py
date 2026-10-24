@@ -73,6 +73,16 @@ def main():
     # The flag is a plain switch: it must not swallow the next argument.
     check(["serve", "llm", "--enable-yarn", "--model", "missing.gguf"], 1,
           "Error loading model 'missing.gguf'")
+    # One process can answer under several names; the first is primary.
+    name_help = next(line for line in help_text.splitlines()
+                     if "--served-model-name" in line)
+    assert "repeatable" in name_help, name_help
+    check(["serve", "llm", "--served-model-name", "a", "--served-model-name",
+           "b", "--model", "missing.gguf"], 1,
+          "Error loading model 'missing.gguf'")
+    check(["serve", "llm", "--served-model-name", "a", "--served-model-name",
+           "a", "--model", "missing.gguf"], 2,
+          "duplicate --served-model-name")
 
     # Verbosity must change the output, not merely parse. The config line is
     # emitted at the debug tier before the model file is opened, so these all

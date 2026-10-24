@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -2975,6 +2976,7 @@ struct InferenceBackend::Impl {
   struct State {
     std::shared_ptr<TextGenerationScheduler> scheduler;
     std::string model_id;
+    std::vector<std::string> extra_model_ids;
     SamplingDefaults sampling_defaults;
     std::uint32_t max_context{0};
     bool supports_images{false};
@@ -3650,6 +3652,20 @@ std::string InferenceBackend::model_id() const {
 #endif
 }
 
+std::vector<std::string> InferenceBackend::model_ids() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr)
+    return {"unknown"};
+  std::vector<std::string> ids{state->model_id};
+  ids.insert(ids.end(), state->extra_model_ids.begin(),
+             state->extra_model_ids.end());
+  return ids;
+#else
+  return {"unknown"};
+#endif
+}
+
 bool InferenceBackend::ready() const {
 #if defined(ENGINE_ENABLE_HIP)
   return impl_->Snapshot() != nullptr;
@@ -3762,9 +3778,9 @@ void InferenceBackend::set_served_artifact(const std::string& model_path,
 #endif
 }
 
-void InferenceBackend::set_model_id(const std::string& model_id) {
+void InferenceBackend::set_model_ids(std::vector<std::string> model_ids) {
 #if defined(ENGINE_ENABLE_HIP)
-  if (model_id.empty()) {
+  if (model_ids.empty()) {
     return;
   }
   const std::lock_guard<std::mutex> lock(impl_->state_mutex);
@@ -3772,10 +3788,13 @@ void InferenceBackend::set_model_id(const std::string& model_id) {
     return;
   }
   auto updated = std::make_shared<Impl::State>(*impl_->state);
-  updated->model_id = model_id;
+  updated->model_id = std::move(model_ids.front());
+  updated->extra_model_ids.assign(
+      std::make_move_iterator(model_ids.begin() + 1),
+      std::make_move_iterator(model_ids.end()));
   impl_->state = std::move(updated);
 #else
-  (void)model_id;
+  (void)model_ids;
 #endif
 }
 

@@ -93,6 +93,8 @@ public:
     output_ = std::move(text);
   }
   std::string model_id() const override { return "test"; }
+  std::vector<std::string> model_ids() const override { return names; }
+  std::vector<std::string> names{"test"};
   bool ready() const override { return true; }
   bool device_lost() const override { return lost.load(); }
   bool supports_images() const override { return image_support.load(); }
@@ -2112,6 +2114,80 @@ void TestModelInputModalities() {
   }
 }
 
+void TestServedModelNames() {
+  RunningServer server;
+  using gufo::json::parse;
+  const auto body_of = [](const std::string& response) {
+    return parse(response.substr(response.find("\r\n\r\n") + 4));
+  };
+  const auto listed = [&] {
+    std::vector<std::string> ids;
+    const auto models = server.Send("GET /v1/models HTTP/1.1\r\n\r\n");
+    ExpectStatus(models, 200);
+    const auto listing = body_of(models);
+    for (const auto& model : listing.find("data")->items()) {
+      assert(model.member_size("context_length") == 65536);
+      ids.push_back(model.member_str("id"));
+    }
+    return ids;
+  };
+  struct Endpoint {
+    const char *path, *fields;
+    bool echoes = true;
+  };
+  const Endpoint endpoints[] = {
+      {"/v1/chat/completions",
+       R"("messages":[{"role":"user","content":"hi"}])"},
+      {"/v1/completions", R"("prompt":"hi")"},
+      {"/v1/responses", R"("input":"hi")"},
+      {"/v1/messages", R"("messages":[{"role":"user","content":"hi"}])"},
+      {"/v1/messages/count_tokens",
+       R"("messages":[{"role":"user","content":"hi"}])", false},
+      {"/completion", R"("prompt":"hi")", false},
+  };
+  server.backend->chat_token_count = 1;
+  const auto post = [&](const Endpoint& endpoint, const std::string& model) {
+    return server.Post(endpoint.path, R"({"model":")" + model + R"(",)" +
+                                          endpoint.fields + "}");
+  };
+  // One name serves as before: it alone is listed and accepted.
+  assert(listed() == std::vector<std::string>{"test"});
+  for (const auto& endpoint : endpoints) {
+    const auto response = post(endpoint, "test");
+    ExpectStatus(response, 200);
+    assert(!endpoint.echoes || body_of(response).member_str("model") == "test");
+    const auto unknown = post(endpoint, "additional");
+    ExpectStatus(unknown, 404);
+    assert(unknown.find("model_not_found") != std::string::npos);
+  }
+
+  server.backend->names = {"test", "additional", "books"};
+  assert(listed() == server.backend->names);
+  for (const auto& endpoint : endpoints) {
+    for (const auto& model : server.backend->names) {
+      const auto response = post(endpoint, model);
+      ExpectStatus(response, 200);
+      assert(!endpoint.echoes ||
+             body_of(response).member_str("model") == model);
+    }
+    const auto unknown = post(endpoint, "other");
+    ExpectStatus(unknown, 404);
+    assert(unknown.find("model_not_found") != std::string::npos);
+  }
+  // Streamed events carry the additional name the request selected.
+  const auto streamed = server.Post(
+      "/v1/responses", R"({"model":"books","input":"hi","stream":true})");
+  ExpectStatus(streamed, 200);
+  assert(streamed.find("text/event-stream") != std::string::npos &&
+         streamed.find(R"("model":"books")") != std::string::npos &&
+         streamed.find(R"("model":"test")") == std::string::npos);
+  // Without a model field the primary name answers.
+  assert(body_of(server.Post("/v1/responses", R"({"input":"hi"})"))
+             .member_str("model") == "test");
+  server.backend->names = {"test"};
+  server.backend->chat_token_count.reset();
+}
+
 void TestRawCompletionStreaming() {
   RunningServer server;
   using gufo::json::parse;
@@ -3109,6 +3185,7 @@ int main() {
   TestTextOnlyBackendRefusesImagesBeforeReading();
   TestResponsesToolImages();
   TestModelInputModalities();
+  TestServedModelNames();
   TestRawCompletionStreaming();
   TestGenerationFailureLogsCause();
   TestDeviceLoss();

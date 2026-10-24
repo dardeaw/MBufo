@@ -665,6 +665,15 @@ struct CompatibilityAllowances {
   bool tools{false};
 };
 
+// The served name a validated request selected; responses echo it. A request
+// without one is answered under the primary name.
+std::string RequestedModel(const json::Value& body,
+                           const TextGenerationBackend& backend) {
+  const auto* model = body.find("model");
+  return model != nullptr && model->is_string() ? model->str()
+                                                : backend.model_id();
+}
+
 // Validate the text subset before dispatch so a client never gets an answer
 // to a different request. Responses also supports streamed output.
 std::optional<HttpResponse> ReadCompatibilityOptions(
@@ -677,7 +686,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
   if (const auto* model = body.find("model"); model != nullptr) {
     if (!model->is_string())
       return InvalidCompatibilityRequest("'model' must be a string");
-    if (model->str() != backend.model_id())
+    if (!backend.serves_model(model->str()))
       return Err(404, "Not Found", "requested model is not loaded",
                  "invalid_request_error", "model_not_found");
   }
@@ -775,9 +784,10 @@ HttpResponse ListModels(TextGenerationBackend* backend,
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   json::Value data = json::Value::array();
-  if (backend != nullptr) {
+  for (const auto& id :
+       backend != nullptr ? backend->model_ids() : std::vector<std::string>{}) {
     json::Value model = json::Value::object();
-    model["id"] = backend->model_id();
+    model["id"] = id;
     model["object"] = "model";
     model["created"] = Now();
     model["owned_by"] = "gufo";
@@ -922,7 +932,7 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
       req.client_id, stop_sequences, return_progress, cache_prompt);
   const std::string id = "cmpl-" + RandomId();
   const long long created = Now();
-  const std::string model = b.model_id();
+  const std::string model = RequestedModel(body, b);
   if (stream) {
     auto stream_log = std::make_shared<HttpResponse::StreamLog>();
     return {
@@ -1127,7 +1137,8 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
   chat.client_id = req.client_id;
   return CreateOpenAiResponse(
       req, b, chat, max_tokens, sampling_config,
-      body.find("stream") != nullptr && body.find("stream")->as_bool());
+      body.find("stream") != nullptr && body.find("stream")->as_bool(),
+      RequestedModel(body, b));
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1272,7 +1283,8 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   chat.client_id = req.client_id;
   return CreateAnthropicMessage(
       req, b, chat, max_tokens, sampling_config,
-      body.find("stream") != nullptr && body.find("stream")->as_bool());
+      body.find("stream") != nullptr && body.find("stream")->as_bool(),
+      RequestedModel(body, b));
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");

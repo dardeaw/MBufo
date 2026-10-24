@@ -94,6 +94,9 @@ private:
 class FakeBackend final : public gufo::server::TextGenerationBackend {
 public:
   [[nodiscard]] std::string model_id() const override { return "test-model"; }
+  [[nodiscard]] std::vector<std::string> model_ids() const override {
+    return names;
+  }
   [[nodiscard]] bool ready() const override { return true; }
   [[nodiscard]] SamplingDefaults sampling_defaults() const override {
     return defaults;
@@ -214,6 +217,7 @@ public:
     condition.notify_all();
   }
 
+  std::vector<std::string> names{"test-model"};
   std::vector<std::string> pieces;
   std::vector<PromptProgress> progress;
   std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format;
@@ -2318,6 +2322,39 @@ void TestWrongModelIsRejected() {
          "Unknown model returns a stable error code");
   Expect(backend.chat_calls.load() == 0,
          "Rejected request never reaches the backend");
+}
+
+void TestServedModelNamesAreEchoed() {
+  FakeBackend backend;
+  backend.names = {"test-model", "additional"};
+  backend.pieces = {"ok"};
+  for (const std::string model : {"test-model", "additional"}) {
+    for (const bool stream : {false, true}) {
+      auto response = gufo::server::HandleOpenAiChat(
+          Request(
+              R"({"model":")" + model +
+              R"(","messages":[{"role":"user","content":"hello"}],"stream":)" +
+              (stream ? "true}" : "false}")),
+          backend);
+      Expect(response.status == 200, "Every served model name is accepted");
+      std::string body = response.body;
+      if (stream)
+        response.streaming_body([&](std::string_view chunk) {
+          body.append(chunk);
+          return true;
+        });
+      Expect(body.find(R"("model":")" + model + R"(")") != std::string::npos,
+             "The response names the model the request selected");
+    }
+  }
+  backend.names = {"test-model"};
+  const auto response = gufo::server::HandleOpenAiChat(
+      Request(
+          R"({"model":"additional","messages":[{"role":"user","content":"hi"}]})"),
+      backend);
+  Expect(response.status == 404 &&
+             response.body.find("model_not_found") != std::string::npos,
+         "A single served name accepts nothing else");
 }
 
 void TestClientIdentityReachesBackend() {
@@ -6445,6 +6482,7 @@ int main() {
   TestDeepSeekSchemaCheckedArguments();
   TestStreamingStopsAtRejectedParameter();
   TestWrongModelIsRejected();
+  TestServedModelNamesAreEchoed();
   TestClientIdentityReachesBackend();
   TestStreamingOverloadIsRejectedBeforeHeaders();
   TestImagePartsRetainOrderAndIdentity();

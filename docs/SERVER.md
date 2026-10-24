@@ -986,7 +986,9 @@ for text-only serving or `["text", "image"]` when a vision encoder is loaded.
 Image support reflects the loaded projector, not the model name; launching a
 vision-capable model without its projector advertises text only. Audio/video
 entries describe their capability. Send the returned model ID in requests.
-Text requests naming another model return 404.
+Repeat `--served-model-name` to list the text model under several IDs; the
+first is primary, and responses report the ID the request named. Text
+requests naming another model return 404.
 
 ## Errors
 
