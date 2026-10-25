@@ -10,6 +10,7 @@
 
 #include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/models/qwen/hip/quant_ops.hpp"
 
 namespace gufo::hip {
 
@@ -445,6 +446,32 @@ __global__ void DequantizeQ6KToBf16Kernel(const void* __restrict__ w,
   }
 }
 
+__global__ void DequantizeRocmFp4ToBf16Kernel(const void* __restrict__ w,
+                                              hip_bfloat16* __restrict__ out,
+                                              std::size_t n_elems, int dual) {
+  const std::size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n_elems) {
+    return;
+  }
+  const std::size_t b = idx / 32;
+  const std::size_t e = idx % 32;
+  const bool lo = (e < 16);
+  float d = 0.0F;
+  std::uint8_t nib = 0;
+  if (dual) {
+    const auto* blk = static_cast<const block_q4_0_rocmfp4*>(w) + b;
+    nib = lo ? static_cast<std::uint8_t>(blk->qs[e] & 0x0FU)
+             : static_cast<std::uint8_t>(blk->qs[e - 16] >> 4);
+    d = Ue4m3ScaleToFloatDev(lo ? blk->e[0] : blk->e[1]);
+  } else {
+    const auto* blk = static_cast<const block_q4_0_rocmfp4_fast*>(w) + b;
+    nib = lo ? static_cast<std::uint8_t>(blk->qs[e] & 0x0FU)
+             : static_cast<std::uint8_t>(blk->qs[e - 16] >> 4);
+    d = Ue4m3ScaleToFloatDev(blk->e);
+  }
+  out[idx] = hip_bfloat16(RocmFp4ValueDev(nib) * d);
+}
+
 // opt-c162-q8k-prefill-dequant (extended): type-dispatched entry point that
 // converts a quantized weight region (Q8_0/Q5_K/Q6_K/Q8_K) into a BF16 scratch
 // for the prefill hipblas GEMM path.
@@ -466,6 +493,18 @@ void LaunchDequantizeToBf16(core::GgmlType type, const void* w,
     const std::size_t grid = (n_blocks + blocks_per_tb - 1U) / blocks_per_tb;
     DequantizeQ8_0ToBf16Kernel<<<static_cast<unsigned int>(grid), block_threads,
                                  0, stream>>>(w, out, n_blocks);
+    return;
+  }
+  if (type == core::GgmlType::kQ4_0_ROCMFP4 ||
+      type == core::GgmlType::kQ4_0_ROCMFP4_FAST) {
+    if (n_elems % 32 != 0) {
+      return;
+    }
+    const int dual = (type == core::GgmlType::kQ4_0_ROCMFP4) ? 1 : 0;
+    const std::size_t grid = (n_elems + block_threads - 1U) / block_threads;
+    DequantizeRocmFp4ToBf16Kernel<<<static_cast<unsigned int>(grid),
+                                    block_threads, 0, stream>>>(
+        w, out, n_elems, dual);
     return;
   }
   if (type == core::GgmlType::kQ5_K || type == core::GgmlType::kQ6_K ||

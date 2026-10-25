@@ -27,6 +27,32 @@ struct Q8_0Block {
 };
 static_assert(sizeof(Q8_0Block) == 34, "block_q8_0 must be 34 bytes");
 
+// ROCmFP4 (E2M1-derived codebook + UE4M3 scales), bit-exact with ggml_dequant.cpp.
+constexpr std::int8_t kRocmFp4Codebook[16] = {0, 1, 2, 3, 4, 6, 8, 10,
+                                              0, -1, -2, -3, -4, -6, -8, -10};
+__device__ inline float Ue4m3ScaleToFloatDev(std::uint8_t e) {
+  if (e > 0x7EU)
+    return 0.0F;
+  const int exp = e >> 3;
+  const int mant = e & 0x07;
+  if (exp == 0)
+    return static_cast<float>(mant) * 0x1p-10f;
+  return static_cast<float>(8 + mant) * ldexpf(1.0F, exp - 11);
+}
+__device__ inline float RocmFp4ValueDev(std::uint8_t code) {
+  return static_cast<float>(kRocmFp4Codebook[code & 0x0FU]);
+}
+struct block_q4_0_rocmfp4_fast {
+  std::uint8_t qs[16];
+  std::uint8_t e;
+};
+struct block_q4_0_rocmfp4 {
+  std::uint8_t qs[16];
+  std::uint8_t e[2];
+};
+static_assert(sizeof(block_q4_0_rocmfp4_fast) == 17, "rocmfp4_fast 17B");
+static_assert(sizeof(block_q4_0_rocmfp4) == 18, "rocmfp4 18B");
+
 // opt-r4-q5k-q6k: block_q5_K layout ({half d; half dmin; uint8 scales[12];
 // uint8 qh[32]; uint8 qs[128]; }, 176 bytes, QK_K=256). Dequant-to-fp path:
 // Q5KValue read a fp16 d/dmin and the packed 4-bit qs + qh sign bits, then
@@ -167,6 +193,10 @@ __device__ inline std::size_t QuantBlockBytes(core::GgmlType t) {
       return sizeof(IQ4XSBlock);
     case core::GgmlType::kIQ3_S:
       return sizeof(IQ3SBlock);
+    case core::GgmlType::kQ4_0_ROCMFP4:
+      return sizeof(block_q4_0_rocmfp4);
+    case core::GgmlType::kQ4_0_ROCMFP4_FAST:
+      return sizeof(block_q4_0_rocmfp4_fast);
     default:
       return 0;
   }
@@ -192,6 +222,9 @@ __device__ inline std::size_t QuantBlockQK(core::GgmlType t) {
       return kIQ4XSBlockSize;
     case core::GgmlType::kIQ3_S:
       return kIQ3SBlockSize;
+    case core::GgmlType::kQ4_0_ROCMFP4:
+    case core::GgmlType::kQ4_0_ROCMFP4_FAST:
+      return 32;
     default:
       return 0;
   }
@@ -510,6 +543,38 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       out.scale = __half2float(blk.d);
       return;
     }
+    case core::GgmlType::kQ4_0_ROCMFP4_FAST: {
+      const auto& blk =
+          static_cast<const block_q4_0_rocmfp4_fast*>(row)[sub16 / 2];
+      const std::uint8_t* qs = blk.qs;
+      if ((sub16 % 2) == 0) {
+#pragma unroll
+        for (int j = 0; j < 16; ++j) out.q[j] = kRocmFp4Codebook[qs[j] & 0x0FU];
+        out.scale = Ue4m3ScaleToFloatDev(blk.e);
+      } else {
+#pragma unroll
+        for (int j = 0; j < 16; ++j) out.q[j] = kRocmFp4Codebook[qs[j] >> 4];
+        out.scale = Ue4m3ScaleToFloatDev(blk.e);
+      }
+      out.offset = 0.0F;
+      return;
+    }
+    case core::GgmlType::kQ4_0_ROCMFP4: {
+      const auto& blk =
+          static_cast<const block_q4_0_rocmfp4*>(row)[sub16 / 2];
+      const std::uint8_t* qs = blk.qs;
+      const std::uint8_t e = (sub16 % 2) == 0 ? blk.e[0] : blk.e[1];
+      if ((sub16 % 2) == 0) {
+#pragma unroll
+        for (int j = 0; j < 16; ++j) out.q[j] = kRocmFp4Codebook[qs[j] & 0x0FU];
+      } else {
+#pragma unroll
+        for (int j = 0; j < 16; ++j) out.q[j] = kRocmFp4Codebook[qs[j] >> 4];
+      }
+      out.scale = Ue4m3ScaleToFloatDev(e);
+      out.offset = 0.0F;
+      return;
+    }
     case core::GgmlType::kQ4_K: {
       const auto& blk = static_cast<const Q4KBlock*>(row)[sub16 / 16];
       const std::size_t sb32 = (sub16 / 2) % 8;
@@ -696,7 +761,9 @@ __device__ inline bool IsSub16DecodedQuant(core::GgmlType t) noexcept {
   return t == core::GgmlType::kQ4_K || t == core::GgmlType::kQ5_K ||
          t == core::GgmlType::kQ6_K || t == core::GgmlType::kQ3_K ||
          t == core::GgmlType::kIQ4_NL || t == core::GgmlType::kIQ4_XS ||
-         t == core::GgmlType::kIQ3_S;
+         t == core::GgmlType::kIQ3_S ||
+         t == core::GgmlType::kQ4_0_ROCMFP4 ||
+         t == core::GgmlType::kQ4_0_ROCMFP4_FAST;
 }
 
 // opt-r7-decode-parallel: warp-parallel quant row-dot, templated on the input
