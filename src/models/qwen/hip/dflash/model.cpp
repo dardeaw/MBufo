@@ -13,6 +13,7 @@
 #include "src/core/mapped_prefetch.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
+#include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 
@@ -360,6 +361,24 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     // weights
     weights.token_embedding = target_model->GetWeights().token_embd;
     weights.output = target_model->GetWeights().output;
+    // The draft LM head is tied to the target output weight. For a ROCmFP4
+    // target that weight is packed FP4 (type 101/102), which the draft
+    // RunBlockGemm does not decode and would read as F32, producing NaN
+    // logits. Dequantize it to BF16 so the existing BF16 -> Q8_0 draft-head
+    // path applies.
+    if (weights.output.type == core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+        weights.output.type == core::GgmlType::kQ4_0_ROCMFP4) {
+      const std::size_t n = weights.output.num_elements;
+      auto* bf16 = static_cast<hip_bfloat16*>(
+          detail::AllocateDevice(n * sizeof(hip_bfloat16)));
+      allocations.push_back(bf16);
+      LaunchDequantizeToBf16(weights.output.type, weights.output.data, bf16,
+                             n, nullptr);
+      HIP_CHECK(hipDeviceSynchronize());
+      weights.output = {.data = static_cast<void*>(bf16),
+                        .type = core::GgmlType::kBF16,
+                        .num_elements = n};
+    }
     if (weights.output.type == core::GgmlType::kBF16 &&
         weights.output.num_elements %
                 quant::QuantizedBlockElements(core::GgmlType::kQ8_0) ==
