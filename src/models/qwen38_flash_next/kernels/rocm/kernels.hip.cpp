@@ -6940,7 +6940,7 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
          : kType == WeightType::kQ4_0_ROCMFP4_FAST
              ? (k / 32) * 17
-                                      : (k / 32) * sizeof(Q8_0Block);
+             : (k / 32) * sizeof(Q8_0Block);
 }
 
 /// Bit `s` of each of the four bytes of `w`, packed into bits 0-3.
@@ -6975,7 +6975,7 @@ __device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
 // with one unsigned E4M3 scale per 32-value block. The routed F16 path expands
 // each 4-bit code to its codebook byte and then reuses the Q8_0 dequant (the
 // 1152 magic), so FAST rides the same fp16 WMMA core as the production experts.
-__constant__ int8_t kFastCodebook[16] = {0, 1, 2, 3, 4, 6, 8, 10,
+__constant__ int8_t kFastCodebook[16] = {0, 1,  2,  3,  4,  6,  8,  10,
                                          0, -1, -2, -3, -4, -6, -8, -10};
 
 __device__ __forceinline__ float FastScaleUe4m3(std::uint8_t e) {
@@ -7486,7 +7486,8 @@ __launch_bounds__(256) __global__
         }
         // A short expert bucket has no output in the remaining token
         // tiles, so omit their WMMA work.
-        if constexpr ((kPair || ((kQ5 || kQ8Like) && BN >= 48)) && kTokTiles > 1) {
+        if constexpr ((kPair || ((kQ5 || kQ8Like) && BN >= 48)) &&
+                      kTokTiles > 1) {
           if (j >= live_tok_tiles)
             continue;
         }
@@ -9086,12 +9087,12 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
   // stage to 24 KB, so three blocks share a WGP instead of two (7.8 to
   // 7.3 ms); the K order is unchanged.
   if (yarn.enabled != 0) {
-    hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false,
-                                           true, false, false, false, false,
-                                           true>),
-                       dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0,
-                       stream, weights, input, nullptr, n_tokens, 13312, 2560,
-                       nullptr, nullptr, nullptr, nullptr, nullptr, output);
+    hipLaunchKernelGGL(
+        (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true, false,
+                            false, false, false, true>),
+        dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
+        input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr,
+        nullptr, nullptr, output);
     return true;
   }
   hipLaunchKernelGGL(
@@ -9115,10 +9116,9 @@ bool AttentionQ8Gemm(const void* weights, const __half* input,
       gate == nullptr || keys == nullptr || values == nullptr ||
       position == nullptr)
     return false;
-  const AttentionProjectionOutput output{q_gamma, k_gamma, query,    gate,
-                                         nullptr, nullptr, position, theta,
-                                         eps,     rope,    YarnRope{}, keys,
-                                         values};
+  const AttentionProjectionOutput output{
+      q_gamma, k_gamma, query, gate,       nullptr, nullptr, position,
+      theta,   eps,     rope,  YarnRope{}, keys,    values};
   hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false,
                                          true, false, false, false, true>),
                      dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0,

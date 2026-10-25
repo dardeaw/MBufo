@@ -446,7 +446,7 @@ void CheckW8A8Tail(std::size_t m, std::size_t k, std::uint32_t seed) {
 
 namespace {
 
-constexpr int kRocmFp4Code[16] = {0,  1,  2,  3,  4,  6,  8,  10,
+constexpr int kRocmFp4Code[16] = {0, 1,  2,  3,  4,  6,  8,  10,
                                   0, -1, -2, -3, -4, -6, -8, -10};
 
 float Ue4m3Host(std::uint8_t e) {
@@ -482,9 +482,12 @@ void CheckRocmFp4FastMini() {
   CheckHip(hipMalloc(&dx, input.size() * 4), "mini x");
   CheckHip(hipMalloc(&dy, rows * tokens * experts * 4), "mini y");
   CheckHip(hipMalloc(&di, ids.size() * 4), "mini ids");
-  CheckHip(hipMemcpy(dw, fast.data(), fast.size(), hipMemcpyHostToDevice), "mini Wu");
-  CheckHip(hipMemcpy(dx, input.data(), input.size() * 4, hipMemcpyHostToDevice), "mini Xu");
-  CheckHip(hipMemcpy(di, ids.data(), ids.size() * 4, hipMemcpyHostToDevice), "mini iu");
+  CheckHip(hipMemcpy(dw, fast.data(), fast.size(), hipMemcpyHostToDevice),
+           "mini Wu");
+  CheckHip(hipMemcpy(dx, input.data(), input.size() * 4, hipMemcpyHostToDevice),
+           "mini Xu");
+  CheckHip(hipMemcpy(di, ids.data(), ids.size() * 4, hipMemcpyHostToDevice),
+           "mini iu");
   if (qfn_mmq_rocmfp4_fast_moe_raw(dw, dx, di, dy, rows, cols, tokens, experts,
                                    experts, nullptr) != 0)
     throw std::runtime_error("mini FAST failed");
@@ -508,7 +511,7 @@ void CheckRocmFp4FastRealShape(int experts = 128, int experts_used = 8) {
   const int total_blocks = rows * experts * blocks_per_row;
   std::vector<std::uint8_t> fast(static_cast<std::size_t>(total_blocks) * 17);
   std::vector<float> scale_val(total_blocks);
-  static const int kCode16[16] = {0,  1,  2,  3,  4,  6,  8,  10,
+  static const int kCode16[16] = {0, 1,  2,  3,  4,  6,  8,  10,
                                   0, -1, -2, -3, -4, -6, -8, -10};
   std::uint32_t seed = 5150;
   for (int b = 0; b < total_blocks; ++b) {
@@ -522,7 +525,8 @@ void CheckRocmFp4FastRealShape(int experts = 128, int experts_used = 8) {
     std::uint8_t best = 0;
     float best_diff = -1.0F;
     for (int e = 0; e <= 0x7e; ++e) {
-      const float diff = std::abs(Ue4m3Host(static_cast<std::uint8_t>(e)) - target);
+      const float diff =
+          std::abs(Ue4m3Host(static_cast<std::uint8_t>(e)) - target);
       if (best_diff < 0.0F || diff < best_diff) {
         best_diff = diff;
         best = static_cast<std::uint8_t>(e);
@@ -538,7 +542,8 @@ void CheckRocmFp4FastRealShape(int experts = 128, int experts_used = 8) {
       float best_err = -1.0F;
       if (sc > 0.0F) {
         for (int c = 0; c < 16; ++c) {
-          const float err = std::abs(static_cast<float>(kCode16[c]) * sc - x[j]);
+          const float err =
+              std::abs(static_cast<float>(kCode16[c]) * sc - x[j]);
           if (best_err < 0.0F || err < best_err) {
             best_err = err;
             best_code = c;
@@ -559,12 +564,14 @@ void CheckRocmFp4FastRealShape(int experts = 128, int experts_used = 8) {
     const float scale = 0.0012345F * (1 + b % 7);
     for (int j = 0; j < 32; ++j)
       input[b * 32 + j] =
-          (j == 0 ? 127 : static_cast<int>(NextRandom(&seed) % 255) - 127) * scale;
+          (j == 0 ? 127 : static_cast<int>(NextRandom(&seed) % 255) - 127) *
+          scale;
   }
   for (int t = 1; t < tokens; ++t)
     std::copy_n(input.data(), cols,
                 input.data() + static_cast<std::size_t>(t) * cols);
-  std::vector<std::int32_t> ids(static_cast<std::size_t>(tokens) * experts_used);
+  std::vector<std::int32_t> ids(static_cast<std::size_t>(tokens) *
+                                experts_used);
   for (std::size_t i = 0; i < ids.size(); ++i)
     ids[i] = static_cast<std::int32_t>((i * 37 + i / experts_used) % experts);
 
@@ -575,16 +582,19 @@ void CheckRocmFp4FastRealShape(int experts = 128, int experts_used = 8) {
   CheckHip(hipMalloc(&dx, input.size() * 4), "real FAST x");
   CheckHip(hipMalloc(&dy, ids.size() * rows * 4), "real FAST y");
   CheckHip(hipMalloc(&di, ids.size() * 4), "real FAST ids");
-  CheckHip(hipMemcpy(dw, fast.data(), fast.size(), hipMemcpyHostToDevice), "real wu");
-  CheckHip(hipMemcpy(dx, input.data(), input.size() * 4, hipMemcpyHostToDevice), "real xu");
-  CheckHip(hipMemcpy(di, ids.data(), ids.size() * 4, hipMemcpyHostToDevice), "real iu");
+  CheckHip(hipMemcpy(dw, fast.data(), fast.size(), hipMemcpyHostToDevice),
+           "real wu");
+  CheckHip(hipMemcpy(dx, input.data(), input.size() * 4, hipMemcpyHostToDevice),
+           "real xu");
+  CheckHip(hipMemcpy(di, ids.data(), ids.size() * 4, hipMemcpyHostToDevice),
+           "real iu");
   if (qfn_mmq_rocmfp4_fast_moe_raw(dw, dx, di, dy, rows, cols, tokens, experts,
                                    experts_used, nullptr) != 0)
     throw std::runtime_error("real-shape FAST moe failed");
   std::vector<float> output(ids.size() * rows);
-  CheckHip(hipMemcpy(output.data(), dy,
-                     output.size() * 4, hipMemcpyDeviceToHost),
-           "real down");
+  CheckHip(
+      hipMemcpy(output.data(), dy, output.size() * 4, hipMemcpyDeviceToHost),
+      "real down");
   for (int s = 0; s < 24; ++s) {
     const int slot = s * 23 % static_cast<int>(ids.size());
     const int expert = ids[slot];
@@ -596,18 +606,23 @@ void CheckRocmFp4FastRealShape(int experts = 128, int experts_used = 8) {
       for (int b = 0; b < blocks_per_row; ++b) {
         float maximum = 0.0F;
         for (int j = 0; j < 32; ++j)
-          maximum = std::max(maximum, std::abs(input[static_cast<std::size_t>(t) * cols + b * 32 + j]));
+          maximum = std::max(
+              maximum,
+              std::abs(input[static_cast<std::size_t>(t) * cols + b * 32 + j]));
         const float d_f = maximum / 127.0F;
         const float d_in = d_f;
-        const int wblock = expert * rows * blocks_per_row + row * blocks_per_row + b;
+        const int wblock =
+            expert * rows * blocks_per_row + row * blocks_per_row + b;
         const auto* blk = fast.data() + static_cast<std::size_t>(wblock) * 17;
         long long dot = 0;
         for (int j = 0; j < 32; ++j) {
           const int nib = (j < 16 ? blk[j] : blk[j - 16] >> 4) & 0x0F;
-          const int q = maximum == 0.0F
-                            ? 0
-                            : static_cast<int>(std::round(
-                                  input[static_cast<std::size_t>(t) * cols + b * 32 + j] / d_f));
+          const int q =
+              maximum == 0.0F
+                  ? 0
+                  : static_cast<int>(std::round(
+                        input[static_cast<std::size_t>(t) * cols + b * 32 + j] /
+                        d_f));
           dot += static_cast<long long>(kCode16[nib]) * q;
         }
         expected += static_cast<double>(scale_val[wblock]) * d_in *
@@ -616,10 +631,11 @@ void CheckRocmFp4FastRealShape(int experts = 128, int experts_used = 8) {
       const float actual = output[static_cast<std::size_t>(slot) * rows + row];
       if (!std::isfinite(actual) ||
           std::abs(static_cast<double>(actual) - expected) > 1e-3)
-        throw std::runtime_error(
-            "real-shape FAST differs at slot " + std::to_string(slot) +
-            " row " + std::to_string(row) + ": actual=" + std::to_string(actual) +
-            " expected=" + std::to_string(expected));
+        throw std::runtime_error("real-shape FAST differs at slot " +
+                                 std::to_string(slot) + " row " +
+                                 std::to_string(row) +
+                                 ": actual=" + std::to_string(actual) +
+                                 " expected=" + std::to_string(expected));
     }
   }
   (void)hipFree(dw);
@@ -650,7 +666,8 @@ void CheckRocmFp4FastMoe() {
     std::uint8_t best = 0;
     float best_diff = -1.0F;
     for (int e = 0; e <= 0x7e; ++e) {
-      const float diff = std::abs(Ue4m3Host(static_cast<std::uint8_t>(e)) - target);
+      const float diff =
+          std::abs(Ue4m3Host(static_cast<std::uint8_t>(e)) - target);
       if (best_diff < 0.0F || diff < best_diff) {
         best_diff = diff;
         best = static_cast<std::uint8_t>(e);
@@ -666,7 +683,8 @@ void CheckRocmFp4FastMoe() {
       float best_err = -1.0F;
       if (s > 0.0F) {
         for (int c = 0; c < 16; ++c) {
-          const float err = std::abs(static_cast<float>(kRocmFp4Code[c]) * s - x[j]);
+          const float err =
+              std::abs(static_cast<float>(kRocmFp4Code[c]) * s - x[j]);
           if (best_err < 0.0F || err < best_err) {
             best_err = err;
             best_code = c;
@@ -688,7 +706,8 @@ void CheckRocmFp4FastMoe() {
     const float scale = 0.0012345F * (1 + b % 7);
     for (int j = 0; j < 32; ++j)
       input[b * 32 + j] =
-          (j == 0 ? 127 : static_cast<int>(NextRandom(&seed) % 255) - 127) * scale;
+          (j == 0 ? 127 : static_cast<int>(NextRandom(&seed) % 255) - 127) *
+          scale;
   }
   for (int t = 1; t < 65; ++t)
     std::copy_n(input.data(), cols,
@@ -717,9 +736,10 @@ void CheckRocmFp4FastMoe() {
 
   std::vector<float> big, small;
   for (const int tokens : {65, 3}) {
-    std::vector<float> output(static_cast<std::size_t>(tokens) * experts * rows);
-    if (qfn_mmq_rocmfp4_fast_moe_raw(dw, dx, di, dy, rows, cols, tokens, experts,
-                                     experts, nullptr) != 0)
+    std::vector<float> output(static_cast<std::size_t>(tokens) * experts *
+                              rows);
+    if (qfn_mmq_rocmfp4_fast_moe_raw(dw, dx, di, dy, rows, cols, tokens,
+                                     experts, experts, nullptr) != 0)
       throw std::runtime_error("FAST moe projection failed");
     CheckHip(hipMemcpy(output.data(), dy, output.size() * sizeof(float),
                        hipMemcpyDeviceToHost),
@@ -736,15 +756,17 @@ void CheckRocmFp4FastMoe() {
               maximum = std::max(maximum, std::abs(input[b * 32 + j]));
             const float d_f = maximum / 127.0F;
             const float d_in = d_f;
-            const int wblock = expert * rows * blocks_per_row + row * blocks_per_row + b;
+            const int wblock =
+                expert * rows * blocks_per_row + row * blocks_per_row + b;
             long long dot = 0;
             for (int j = 0; j < 32; ++j) {
-              const int q = maximum == 0.0F
-                                ? 0
-                                : static_cast<int>(
-                                      std::round(input[b * 32 + j] / d_f));
+              const int q =
+                  maximum == 0.0F
+                      ? 0
+                      : static_cast<int>(std::round(input[b * 32 + j] / d_f));
               dot += static_cast<long long>(
-                         code_val[static_cast<std::size_t>(wblock) * 32 + j]) * q;
+                         code_val[static_cast<std::size_t>(wblock) * 32 + j]) *
+                     q;
             }
             expected += static_cast<double>(scale_val[wblock]) * d_in *
                         static_cast<double>(dot);

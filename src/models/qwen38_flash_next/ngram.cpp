@@ -84,10 +84,9 @@ std::unique_ptr<NgramTable> NgramTable::Open(
       type == core::GgmlType::kIQ4_NL || type == core::GgmlType::kQ3_0_ROCMFPX
           ? 32
           : 1;
-  const std::size_t block_bytes =
-      type == core::GgmlType::kIQ4_NL      ? 18
-      : type == core::GgmlType::kQ3_0_ROCMFPX ? 14
-                                              : 2;
+  const std::size_t block_bytes = type == core::GgmlType::kIQ4_NL         ? 18
+                                  : type == core::GgmlType::kQ3_0_ROCMFPX ? 14
+                                                                          : 2;
   if ((type != core::GgmlType::kIQ4_NL && type != core::GgmlType::kBF16 &&
        type != core::GgmlType::kQ3_0_ROCMFPX) ||
       row_dim == 0 || row_dim % block != 0) {

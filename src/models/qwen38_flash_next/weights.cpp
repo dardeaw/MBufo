@@ -128,14 +128,13 @@ struct Binder {
         Get(prefix + "_down.weight", hc_dim, c.hc_low_rank, 1,
             {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32,
              GgmlType::kQ6_K, GgmlType::kQ4_0_ROCMFP4_FAST});
-    m.up =
-        Get(prefix + "_up.weight", c.hc_low_rank, hc_dim, 1,
-            {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32,
-             GgmlType::kQ4_0_ROCMFP4_FAST});
+    m.up = Get(prefix + "_up.weight", c.hc_low_rank, hc_dim, 1,
+               {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
+                GgmlType::kF32, GgmlType::kQ4_0_ROCMFP4_FAST});
     if (with_inject) {
-      m.inject = Get(prefix + "_inject.weight", hc_dim, c.hc_count, 1,
-                     {GgmlType::kF32, GgmlType::kQ8_0, GgmlType::kBF16,
-                      GgmlType::kQ6_K});
+      m.inject = Get(
+          prefix + "_inject.weight", hc_dim, c.hc_count, 1,
+          {GgmlType::kF32, GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kQ6_K});
     }
     return m;
   }
@@ -149,9 +148,9 @@ struct Binder {
     const std::uint64_t hc_dim = c.HcDim();
     const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
                         GgmlType::kF32, GgmlType::kQ6_K};
-    const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
-                          GgmlType::kQ5_1, GgmlType::kQ8_0,
-                          GgmlType::kQ4_0_ROCMFP4_FAST};
+    const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K,
+                          GgmlType::kQ6_K, GgmlType::kQ5_1,
+                          GgmlType::kQ8_0, GgmlType::kQ4_0_ROCMFP4_FAST};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -163,12 +162,12 @@ struct Binder {
           Get(p + "attn_gate.weight", hidden, c.SsmValueDim(), 1, dense);
       l.ssm_conv1d = Get(p + "ssm_conv1d.weight", c.ssm_conv_kernel,
                          c.SsmConvChannels(), 1, {GgmlType::kF32});
-      l.ssm_alpha = Get(p + "ssm_alpha.weight", hidden, c.ssm_num_v_heads, 1,
-                        {GgmlType::kF32, GgmlType::kBF16, GgmlType::kQ8_0,
-                         GgmlType::kQ6_K});
-      l.ssm_beta = Get(p + "ssm_beta.weight", hidden, c.ssm_num_v_heads, 1,
-                       {GgmlType::kF32, GgmlType::kBF16, GgmlType::kQ8_0,
-                        GgmlType::kQ6_K});
+      l.ssm_alpha = Get(
+          p + "ssm_alpha.weight", hidden, c.ssm_num_v_heads, 1,
+          {GgmlType::kF32, GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ6_K});
+      l.ssm_beta = Get(
+          p + "ssm_beta.weight", hidden, c.ssm_num_v_heads, 1,
+          {GgmlType::kF32, GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ6_K});
       l.ssm_dt =
           Get(p + "ssm_dt.bias", c.ssm_num_v_heads, 1, 1, {GgmlType::kF32});
       l.ssm_a = Get(p + "ssm_a", c.ssm_num_v_heads, 1, 1, {GgmlType::kF32});
@@ -260,9 +259,9 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   ModelWeights w;
   w.config = *config;
   const Config& c = w.config;
-  const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kBF16,
-                      GgmlType::kF16, GgmlType::kF32,
-                      GgmlType::kQ4_0_ROCMFP4_FAST};
+  const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K,
+                      GgmlType::kBF16, GgmlType::kF16,
+                      GgmlType::kF32,  GgmlType::kQ4_0_ROCMFP4_FAST};
 
   {
     // The vocabulary is the embedding row count; no metadata key carries it.
@@ -291,10 +290,9 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     if (rows < c.ple_rows) {
       b.Fail("per_layer_token_embd.weight is missing or too short");
     } else {
-      w.ple_table = b.Get("per_layer_token_embd.weight", c.ple_head_dim, rows,
-                          1,
-                          {GgmlType::kIQ4_NL, GgmlType::kBF16,
-                           GgmlType::kQ3_0_ROCMFPX});
+      w.ple_table =
+          b.Get("per_layer_token_embd.weight", c.ple_head_dim, rows, 1,
+                {GgmlType::kIQ4_NL, GgmlType::kBF16, GgmlType::kQ3_0_ROCMFPX});
     }
   }
   w.layers.reserve(c.num_layers);

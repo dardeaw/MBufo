@@ -380,11 +380,11 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                       session.mtp_.k_cache_kv, session.mtp_.v_cache_kv,
                       KvCodecOf(options_.kv_format),
                       MixedKvKeyRange(options_.kv_format),
-                      MixedKvValueRange(options_.kv_format),
-                      MixedKvKeyBytes(), MixedKvValueBytes(), n, 0,
-                      c.num_kv_heads, c.head_dim, c.rotary_dim,
-                      &session.control_->mtp_position, c.rope_theta, c.rms_eps,
-                      stream_, session.vision_input_.rope())
+                      MixedKvValueRange(options_.kv_format), MixedKvKeyBytes(),
+                      MixedKvValueBytes(), n, 0, c.num_kv_heads, c.head_dim,
+                      c.rotary_dim, &session.control_->mtp_position,
+                      c.rope_theta, c.rms_eps, stream_,
+                      session.vision_input_.rope())
                 : PrepareAttention(
                       base.qg + std::size_t{offsets[i]} * kv.rows, kv.rows,
                       nullptr, l.attn_k_norm.f32(), nullptr, nullptr,

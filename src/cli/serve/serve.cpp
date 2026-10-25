@@ -1410,7 +1410,8 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     if (kv_cache_quant != "f16" && kv_cache_quant != "q8") {
-      std::cerr << "Error: --kv-quant must be f16 or q8 (fp8 removed, use q8)\n";
+      std::cerr
+          << "Error: --kv-quant must be f16 or q8 (fp8 removed, use q8)\n";
       return 2;
     }
     if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&

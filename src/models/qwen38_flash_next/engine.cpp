@@ -98,7 +98,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   if (options.kv_cache_quant != "f16" && options.kv_cache_quant != "q8") {
-    AssignError(error_msg, "kv cache quant must be f16 or q8 (fp8 removed, use q8)");
+    AssignError(error_msg,
+                "kv cache quant must be f16 or q8 (fp8 removed, use q8)");
     return nullptr;
   }
   if (options.max_draft_tokens == 0) {
@@ -202,7 +203,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   // apply it yet, so an extended-context session stays on the f16 KV
   // layout.
   exec.kv_format = options.kv_cache_quant == "q8" && !options.rope_scaling
-                     ? rocm::KvFormat::kQ8
+                       ? rocm::KvFormat::kQ8
                    : options.kv_cache_quant == "fp8" ? rocm::KvFormat::kFp8
                                                      : rocm::KvFormat::kF16;
   exec.max_context = options.max_context;

@@ -13,9 +13,9 @@
 #include "src/core/mapped_prefetch.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
+#include "src/models/qwen/hip/ops/gemm.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -372,8 +372,8 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
       auto* bf16 = static_cast<hip_bfloat16*>(
           detail::AllocateDevice(n * sizeof(hip_bfloat16)));
       allocations.push_back(bf16);
-      LaunchDequantizeToBf16(weights.output.type, weights.output.data, bf16,
-                             n, nullptr);
+      LaunchDequantizeToBf16(weights.output.type, weights.output.data, bf16, n,
+                             nullptr);
       HIP_CHECK(hipDeviceSynchronize());
       weights.output = {.data = static_cast<void*>(bf16),
                         .type = core::GgmlType::kBF16,

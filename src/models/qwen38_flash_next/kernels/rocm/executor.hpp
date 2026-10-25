@@ -802,7 +802,7 @@ private:
   /// read back before the next round overwrites it. The outermost entry
   /// drains work queued by paths that returned without syncing.
   class RoundsGuard {
-   public:
+  public:
     explicit RoundsGuard(const Executor& e) : e_(e) {
       e_.rounds_mutex_.lock();
       outer_ = !e_.rounds_held_;
@@ -820,7 +820,7 @@ private:
       e_.rounds_mutex_.unlock();
     }
 
-   private:
+  private:
     const Executor& e_;
     bool outer_{false};
   };

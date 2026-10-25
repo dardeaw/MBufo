@@ -1,6 +1,5 @@
 // PLE n-gram hashing and disk row reads, checked without the model.
 #include "src/models/qwen38_flash_next/ngram.hpp"
-#include "src/core/quant/ggml_dequant.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -14,6 +13,8 @@
 #include <fstream>
 #include <stdexcept>
 #include <vector>
+
+#include "src/core/quant/ggml_dequant.hpp"
 
 namespace q = gufo::models::qwen38_flash_next;
 
@@ -468,14 +469,13 @@ void TestCounters() {
 }
 }  // namespace
 
-
 void TestFp3Rows() {
   const auto path =
       std::filesystem::temp_directory_path() / "qwen38_ngram_fp3.bin";
   constexpr std::uint32_t dim = 160;
   constexpr std::uint32_t rows = 129;
   constexpr std::uint64_t offset = 4096 + 90;
-  constexpr std::array<float, 8> values{0.0F, 1.0F, 2.0F, 4.0F,
+  constexpr std::array<float, 8> values{0.0F, 1.0F,  2.0F,  4.0F,
                                         0.0F, -1.0F, -2.0F, -4.0F};
   {
     std::ofstream file(path, std::ios::binary);
@@ -488,8 +488,8 @@ void TestFp3Rows() {
           for (std::uint32_t j = 0; j < 8; ++j) {
             c[j] = static_cast<std::uint8_t>((row + block + group * 8 + j) % 8);
           }
-          qs[group * 3 + 0] = static_cast<std::uint8_t>(
-              c[0] | (c[1] << 3) | ((c[2] & 3U) << 6));
+          qs[group * 3 + 0] = static_cast<std::uint8_t>(c[0] | (c[1] << 3) |
+                                                        ((c[2] & 3U) << 6));
           qs[group * 3 + 1] = static_cast<std::uint8_t>(
               (c[2] >> 2) | (c[3] << 1) | (c[4] << 4) | ((c[5] & 1U) << 7));
           qs[group * 3 + 2] = static_cast<std::uint8_t>(
@@ -510,16 +510,16 @@ void TestFp3Rows() {
     const std::array<std::uint32_t, 6> ids{0, 7, 128, 7, 0, 32};
     std::vector<float> out(ids.size() * dim + 16, -123.0F);
     q::NgramCounters counters;
-    const std::array owners{q::NgramGatherOwner{
-        static_cast<std::uint32_t>(ids.size()), &counters}};
-    Check(table->StartRead(ids, std::span(out).first(ids.size() * dim),
-                           owners) &&
-              table->WaitRead(),
-          "ROCmFP3 gather completes");
+    const std::array owners{
+        q::NgramGatherOwner{static_cast<std::uint32_t>(ids.size()), &counters}};
+    Check(
+        table->StartRead(ids, std::span(out).first(ids.size() * dim), owners) &&
+            table->WaitRead(),
+        "ROCmFP3 gather completes");
     for (std::size_t i = 0; i < ids.size(); ++i) {
       for (std::uint32_t col = 0; col < dim; ++col) {
-        const auto code = static_cast<std::size_t>(
-            (ids[i] + col / 32 + col % 32) % 8);
+        const auto code =
+            static_cast<std::size_t>((ids[i] + col / 32 + col % 32) % 8);
         const float scale = (col % 32) < 16 ? 1.0F : 1.125F;
         Check(out[i * dim + col] == values[code] * scale,
               "ROCmFP3 exact decoded value");
@@ -529,8 +529,8 @@ void TestFp3Rows() {
       Check(out[i] == -123.0F, "ROCmFP3 output guard");
     }
     const auto totals = counters.Load();
-    Check(totals.rows == totals.dedup_rows + totals.cache_hits +
-                             totals.disk_reads,
+    Check(totals.rows ==
+              totals.dedup_rows + totals.cache_hits + totals.disk_reads,
           "ROCmFP3 counter identity");
   }
   std::filesystem::remove(path);
@@ -558,8 +558,8 @@ void TestFp3RealFile() {
   const std::array<std::uint32_t, 5> ids{0, 1, 12345, 160000000, 320001535};
   std::vector<float> out(ids.size() * dim, 0.0F);
   q::NgramCounters counters;
-  const std::array owners{q::NgramGatherOwner{
-      static_cast<std::uint32_t>(ids.size()), &counters}};
+  const std::array owners{
+      q::NgramGatherOwner{static_cast<std::uint32_t>(ids.size()), &counters}};
   Check(table->StartRead(ids, out, owners) && table->WaitRead(),
         "ROCmFP3 real gather");
   std::FILE* f = std::fopen(path, "rb");

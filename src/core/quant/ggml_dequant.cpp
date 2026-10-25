@@ -690,7 +690,7 @@ namespace {
 
 // E2M1-derived grid with the top step clamped 12 -> 10 (AMD tuning).
 // Index 8 encodes -0 and decodes to 0 like the reference table.
-constexpr std::int8_t kRocmFp4Codebook[16] = {0,  1,  2,  3,  4,  6,  8,  10,
+constexpr std::int8_t kRocmFp4Codebook[16] = {0, 1,  2,  3,  4,  6,  8,  10,
                                               0, -1, -2, -3, -4, -6, -8, -10};
 
 constexpr std::int8_t kRocmFp3Magnitudes[4] = {0, 1, 2, 4};
@@ -787,8 +787,8 @@ float DotProductQ4_0_ROCMFP4(const void* row_data, std::span<const float> vec,
     const float d0 = Ue4m3ScaleToFloat(blocks[b].e[0]);
     const float d1 = Ue4m3ScaleToFloat(blocks[b].e[1]);
     for (std::size_t i = 0; i < 16; ++i) {
-      sum += static_cast<float>(RocmFp4Value(blocks[b].qs[i] & 0x0FU)) * d0 *
-             v[i];
+      sum +=
+          static_cast<float>(RocmFp4Value(blocks[b].qs[i] & 0x0FU)) * d0 * v[i];
       sum += static_cast<float>(RocmFp4Value(blocks[b].qs[i] >> 4)) * d1 *
              v[i + 16];
     }
@@ -805,8 +805,8 @@ float DotProductQ4_0_ROCMFP4_FAST(const void* row_data,
     const float* v = vec.data() + (b * 32);
     const float d = Ue4m3ScaleToFloat(blocks[b].e);
     for (std::size_t i = 0; i < 16; ++i) {
-      sum += static_cast<float>(RocmFp4Value(blocks[b].qs[i] & 0x0FU)) * d *
-             v[i];
+      sum +=
+          static_cast<float>(RocmFp4Value(blocks[b].qs[i] & 0x0FU)) * d * v[i];
       sum += static_cast<float>(RocmFp4Value(blocks[b].qs[i] >> 4)) * d *
              v[i + 16];
     }
@@ -829,8 +829,7 @@ float DotProductQ3_0_ROCMFPX(const void* row_data, std::span<const float> vec,
     for (std::size_t half = 0; half < 2; ++half) {
       const float scale = Ue4m3ScaleToFloat(blocks[b].e[half]);
       for (std::size_t j = 0; j < 16; ++j) {
-        sum += RocmFp3Value(codes[half * 16 + j]) * scale *
-               v[half * 16 + j];
+        sum += RocmFp3Value(codes[half * 16 + j]) * scale * v[half * 16 + j];
       }
     }
   }

@@ -27,8 +27,9 @@ struct Q8_0Block {
 };
 static_assert(sizeof(Q8_0Block) == 34, "block_q8_0 must be 34 bytes");
 
-// ROCmFP4 (E2M1-derived codebook + UE4M3 scales), bit-exact with ggml_dequant.cpp.
-constexpr std::int8_t kRocmFp4Codebook[16] = {0, 1, 2, 3, 4, 6, 8, 10,
+// ROCmFP4 (E2M1-derived codebook + UE4M3 scales), bit-exact with
+// ggml_dequant.cpp.
+constexpr std::int8_t kRocmFp4Codebook[16] = {0, 1,  2,  3,  4,  6,  8,  10,
                                               0, -1, -2, -3, -4, -6, -8, -10};
 __device__ inline float Ue4m3ScaleToFloatDev(std::uint8_t e) {
   if (e > 0x7EU)
@@ -585,8 +586,7 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       return;
     }
     case core::GgmlType::kQ4_0_ROCMFP4: {
-      const auto& blk =
-          static_cast<const block_q4_0_rocmfp4*>(row)[sub16 / 2];
+      const auto& blk = static_cast<const block_q4_0_rocmfp4*>(row)[sub16 / 2];
       const unsigned shift = ((sub16 % 2) == 0) ? 0U : 4U;
       const std::uint8_t e = (sub16 % 2) == 0 ? blk.e[0] : blk.e[1];
       std::uint32_t packed[4];
@@ -785,8 +785,7 @@ __device__ inline bool IsSub16DecodedQuant(core::GgmlType t) noexcept {
   return t == core::GgmlType::kQ4_K || t == core::GgmlType::kQ5_K ||
          t == core::GgmlType::kQ6_K || t == core::GgmlType::kQ3_K ||
          t == core::GgmlType::kIQ4_NL || t == core::GgmlType::kIQ4_XS ||
-         t == core::GgmlType::kIQ3_S ||
-         t == core::GgmlType::kQ4_0_ROCMFP4 ||
+         t == core::GgmlType::kIQ3_S || t == core::GgmlType::kQ4_0_ROCMFP4 ||
          t == core::GgmlType::kQ4_0_ROCMFP4_FAST;
 }
 

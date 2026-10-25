@@ -38,11 +38,10 @@ ContinuationLayout::ContinuationLayout(const Config& c, bool mtp,
            (four_bit ? 18 : 34);
   };
   const std::size_t kv_key_row =
-      kv_int8 ? blocked_row(kv_key_4bit)
-              : std::size_t{c.AttentionKvDim()} * 2;
-  const std::size_t kv_value_row =
-      kv_int8 ? blocked_row(kv_value_4bit)
-              : std::size_t{c.AttentionKvDim()} * 2;
+      kv_int8 ? blocked_row(kv_key_4bit) : std::size_t{c.AttentionKvDim()} * 2;
+  const std::size_t kv_value_row = kv_int8
+                                       ? blocked_row(kv_value_4bit)
+                                       : std::size_t{c.AttentionKvDim()} * 2;
   const auto add = [&](ContinuationPart part, std::size_t row,
                        std::size_t state, std::uint32_t layer = 0) {
     const auto id = static_cast<std::uint32_t>(components_.size() + 1);

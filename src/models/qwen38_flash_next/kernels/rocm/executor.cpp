@@ -1709,15 +1709,14 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
       AssignError(error_msg, "quantized input width mismatch");
       return false;
     }
-    const int rc = w.decode_type == GgmlType::kQ4_1
-                       ? qfn_mmq_q4_1_dense_vec_preq(
-                             w.decode_data, q.data, out,
-                             static_cast<int>(w.rows), static_cast<int>(q.n),
-                             static_cast<int>(w.cols), stream_)
-                       : qfn_mmq_q5_1_dense_vec_preq(
-                             w.decode_data, q.data, out,
-                             static_cast<int>(w.rows), static_cast<int>(q.n),
-                             static_cast<int>(w.cols), stream_);
+    const int rc =
+        w.decode_type == GgmlType::kQ4_1
+            ? qfn_mmq_q4_1_dense_vec_preq(
+                  w.decode_data, q.data, out, static_cast<int>(w.rows),
+                  static_cast<int>(q.n), static_cast<int>(w.cols), stream_)
+            : qfn_mmq_q5_1_dense_vec_preq(
+                  w.decode_data, q.data, out, static_cast<int>(w.rows),
+                  static_cast<int>(q.n), static_cast<int>(w.cols), stream_);
     if (rc != 0) {
       AssignError(error_msg, "decode GEMV failed");
       return false;
@@ -2686,12 +2685,11 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     const bool fused_projection =
         options_.kv_format != rocm::KvFormat::kFp8 &&
         !KvValueIs4Bit(options_.kv_format) &&
-    !KvKeyIs4Bit(options_.kv_format) && !projections_ready &&
-        q8_fused_ok && WidePrefill(n_tokens) &&
-        n_tokens <= options_.max_batch && DenseF16Route(l.attn_qkv, n_tokens) &&
-        l.attn_qkv.rows == 13312 && l.attn_qkv.cols == 2560 &&
-        c.num_heads == 24 && c.num_kv_heads == 2 && c.head_dim == 256 &&
-        c.rotary_dim == 64;
+        !KvKeyIs4Bit(options_.kv_format) && !projections_ready && q8_fused_ok &&
+        WidePrefill(n_tokens) && n_tokens <= options_.max_batch &&
+        DenseF16Route(l.attn_qkv, n_tokens) && l.attn_qkv.rows == 13312 &&
+        l.attn_qkv.cols == 2560 && c.num_heads == 24 && c.num_kv_heads == 2 &&
+        c.head_dim == 256 && c.rotary_dim == 64;
     if (fused_projection) {
       PrepareHalfInput(x, n_tokens, l.attn_qkv.cols);
       if (options_.kv_format == rocm::KvFormat::kQ8) {
@@ -2780,12 +2778,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     if (n_tokens > 0 && pos != nullptr) {
       std::uint32_t base_pos = 0;
       if (hipStreamSynchronize(stream_) == hipSuccess &&
-          hipMemcpy(&base_pos, pos, sizeof(base_pos),
-                    hipMemcpyDeviceToHost) == hipSuccess) {
+          hipMemcpy(&base_pos, pos, sizeof(base_pos), hipMemcpyDeviceToHost) ==
+              hipSuccess) {
         const std::size_t elems = std::size_t{kv_row};
         std::size_t k_row = 0, v_row = 0;
         if (KvBlocked(options_.kv_format)) {
-          k_row = KvBlockedRowBytes(kv_row, KvKeyBlockBytes(options_.kv_format));
+          k_row =
+              KvBlockedRowBytes(kv_row, KvKeyBlockBytes(options_.kv_format));
           v_row =
               KvBlockedRowBytes(kv_row, KvValueBlockBytes(options_.kv_format));
         } else {
@@ -2795,12 +2794,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         const std::size_t kb = k_row * n_tokens, vb = v_row * n_tokens;
         void* host = std::malloc(kb + vb);
         if (host != nullptr &&
-            hipMemcpy(host, KvBlocked(options_.kv_format)
-                                ? static_cast<const void*>(
-                                      s.k_cache_kv + std::size_t{base_pos} * k_row)
-                                : static_cast<const void*>(
-                                      s.k_cache + std::size_t{base_pos} * kv_row),
-                       kb, hipMemcpyDeviceToHost) == hipSuccess &&
+            hipMemcpy(host,
+                      KvBlocked(options_.kv_format)
+                          ? static_cast<const void*>(
+                                s.k_cache_kv + std::size_t{base_pos} * k_row)
+                          : static_cast<const void*>(
+                                s.k_cache + std::size_t{base_pos} * kv_row),
+                      kb, hipMemcpyDeviceToHost) == hipSuccess &&
             hipMemcpy(static_cast<char*>(host) + kb,
                       KvBlocked(options_.kv_format)
                           ? static_cast<const void*>(
@@ -2809,10 +2809,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                                 s.v_cache + std::size_t{base_pos} * kv_row),
                       vb, hipMemcpyDeviceToHost) == hipSuccess) {
           const std::uint32_t header[7] = {
-              base_pos, n_tokens, kv_row,
+              base_pos,
+              n_tokens,
+              kv_row,
               static_cast<std::uint32_t>(k_row),
               static_cast<std::uint32_t>(v_row),
-              static_cast<std::uint32_t>(KvBlocked(options_.kv_format) ? 1u : 0u),
+              static_cast<std::uint32_t>(KvBlocked(options_.kv_format) ? 1u
+                                                                       : 0u),
               static_cast<std::uint32_t>(static_cast<int>(options_.kv_format))};
           if (std::FILE* f = std::fopen(ref, "ab")) {
             std::fwrite(header, sizeof(header), 1, f);
@@ -3038,8 +3041,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                 1, std::min(kAttnSplits,
                             (start_pos + n_tokens + kAttnTile - 1) / kAttnTile))
           : kAttnSplits;
-    bool wmma_used = false;
-if (KvBlocked(options_.kv_format)) {
+  bool wmma_used = false;
+  if (KvBlocked(options_.kv_format)) {
     // Wide batches used to ride the tensor cores via transient F16 staging.
     // The staging route is gated behind GUFO_KV_WMMA until its prefill numerics
     // match the fused blocked kernel: the offline audit measured KL 0.63 at
@@ -3074,7 +3077,8 @@ if (KvBlocked(options_.kv_format)) {
           hipMemcpy(host, s_.q, bytes, hipMemcpyDeviceToHost) == hipSuccess &&
           hipMemcpy(static_cast<char*>(host) + bytes, s_.ctx, bytes,
                     hipMemcpyDeviceToHost) == hipSuccess) {
-        const std::uint32_t aheader[6] = {start_pos, n_tokens, q_dim, 4u, 4u, 1u};
+        const std::uint32_t aheader[6] = {start_pos, n_tokens, q_dim,
+                                          4u,        4u,       1u};
         if (std::FILE* f = std::fopen(dump, "ab")) {
           std::fwrite(aheader, sizeof(aheader), 1, f);
           std::fwrite(host, 1, 2 * bytes, f);
@@ -3102,9 +3106,10 @@ if (KvBlocked(options_.kv_format)) {
       const std::size_t gbytes = ctx_count * sizeof(float);
       (void)hipStreamSynchronize(stream_);
       void* ghost = std::malloc(gbytes);
-      if (ghost != nullptr &&
-          hipMemcpy(ghost, s_.ctx, gbytes, hipMemcpyDeviceToHost) == hipSuccess) {
-        const std::uint32_t gheader[6] = {start_pos, n_tokens, q_dim, 4u, 4u, 1u};
+      if (ghost != nullptr && hipMemcpy(ghost, s_.ctx, gbytes,
+                                        hipMemcpyDeviceToHost) == hipSuccess) {
+        const std::uint32_t gheader[6] = {start_pos, n_tokens, q_dim,
+                                          4u,        4u,       1u};
         if (std::FILE* gf = std::fopen(gdump, "ab")) {
           std::fwrite(gheader, sizeof(gheader), 1, gf);
           std::fwrite(ghost, 1, gbytes, gf);
@@ -3253,11 +3258,10 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
       return false;
     }
     const WeightType down_type =
-        l.ffn_down_exps.type == GgmlType::kQ8_0
-            ? WeightType::kQ8_0
-            : l.ffn_down_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST
-                  ? WeightType::kQ4_0_ROCMFP4_FAST
-                  : WeightType::kQ5_1;
+        l.ffn_down_exps.type == GgmlType::kQ8_0 ? WeightType::kQ8_0
+        : l.ffn_down_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST
+            ? WeightType::kQ4_0_ROCMFP4_FAST
+            : WeightType::kQ5_1;
     // Prefill takes the 64-token down tiles: they decode each expert's
     // weights over more rows, also where narrower tiles would be fewer.
     const bool wide_down = routed_64_tiles_ != 0;
@@ -4994,8 +4998,7 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
                                  nullptr, nullptr, attn.k_cache, attn.v_cache,
                                  n, 0, c.num_kv_heads, c.head_dim, c.rotary_dim,
                                  &session.control_->mtp_position, c.rope_theta,
-                                 c.rms_eps, stream_, attn.rope, false,
-                                 yarn_)) {
+                                 c.rms_eps, stream_, attn.rope, false, yarn_)) {
       AssignError(error_msg, "MTP cache projection failed");
       return false;
     }
