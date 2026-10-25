@@ -42,6 +42,30 @@ __device__ inline float Ue4m3ScaleToFloatDev(std::uint8_t e) {
 __device__ inline float RocmFp4ValueDev(std::uint8_t code) {
   return static_cast<float>(kRocmFp4Codebook[code & 0x0FU]);
 }
+
+// Arithmetic E2M1 codebook (0,1,2,3,4,6,8,10 sign-magnitude). Avoids the
+// per-element table gather that becomes dependent local loads under a
+// divergent index on the LM-head decode GEMV (same trap IQ4 perm avoids).
+__device__ inline std::int8_t RocmFp4CodeDev(std::uint8_t nib) {
+  const int mag = nib & 7;
+  const int v = (mag <= 4) ? mag : (2 * mag - 4);
+  return static_cast<std::int8_t>((nib & 8) ? -v : v);
+}
+
+// V_PERM_B32 codebook (mirrors Iq4NlLookup4): four 4-bit indices per
+// word, no per-element table gather. Tables pack the signed E2M1 values
+// {0,1,2,3,4,6,8,10,0,-1,-2,-3,-4,-6,-8,-10} as bytes.
+__device__ inline std::uint32_t RocmFp4Lookup4(std::uint32_t nibbles) noexcept {
+  constexpr std::uint32_t kT0 = 0x03020100U;  // entries 0..3
+  constexpr std::uint32_t kT1 = 0x0A080604U;  // entries 4..7
+  constexpr std::uint32_t kT2 = 0xFDFEFF00U;  // entries 8..11
+  constexpr std::uint32_t kT3 = 0xF6F8FAFCU;  // entries 12..15
+  const std::uint32_t low_index = nibbles & 0x07070707U;
+  const std::uint32_t lower = __builtin_amdgcn_perm(kT1, kT0, low_index);
+  const std::uint32_t upper = __builtin_amdgcn_perm(kT3, kT2, low_index);
+  const std::uint32_t select = ((nibbles & 0x08080808U) >> 3U) * 0xFFU;
+  return (lower & ~select) | (upper & select);
+}
 struct block_q4_0_rocmfp4_fast {
   std::uint8_t qs[16];
   std::uint8_t e;
@@ -546,30 +570,27 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
     case core::GgmlType::kQ4_0_ROCMFP4_FAST: {
       const auto& blk =
           static_cast<const block_q4_0_rocmfp4_fast*>(row)[sub16 / 2];
-      const std::uint8_t* qs = blk.qs;
-      if ((sub16 % 2) == 0) {
+      const unsigned shift = ((sub16 % 2) == 0) ? 0U : 4U;
+      std::uint32_t packed[4];
+      LoadQuantWords16(blk.qs, packed);
 #pragma unroll
-        for (int j = 0; j < 16; ++j) out.q[j] = kRocmFp4Codebook[qs[j] & 0x0FU];
-        out.scale = Ue4m3ScaleToFloatDev(blk.e);
-      } else {
-#pragma unroll
-        for (int j = 0; j < 16; ++j) out.q[j] = kRocmFp4Codebook[qs[j] >> 4];
-        out.scale = Ue4m3ScaleToFloatDev(blk.e);
+      for (int i = 0; i < 4; ++i) {
+        out.w[i] = RocmFp4Lookup4((packed[i] >> shift) & 0x0F0F0F0FU);
       }
+      out.scale = Ue4m3ScaleToFloatDev(blk.e);
       out.offset = 0.0F;
       return;
     }
     case core::GgmlType::kQ4_0_ROCMFP4: {
       const auto& blk =
           static_cast<const block_q4_0_rocmfp4*>(row)[sub16 / 2];
-      const std::uint8_t* qs = blk.qs;
+      const unsigned shift = ((sub16 % 2) == 0) ? 0U : 4U;
       const std::uint8_t e = (sub16 % 2) == 0 ? blk.e[0] : blk.e[1];
-      if ((sub16 % 2) == 0) {
+      std::uint32_t packed[4];
+      LoadQuantWords16(blk.qs, packed);
 #pragma unroll
-        for (int j = 0; j < 16; ++j) out.q[j] = kRocmFp4Codebook[qs[j] & 0x0FU];
-      } else {
-#pragma unroll
-        for (int j = 0; j < 16; ++j) out.q[j] = kRocmFp4Codebook[qs[j] >> 4];
+      for (int i = 0; i < 4; ++i) {
+        out.w[i] = RocmFp4Lookup4((packed[i] >> shift) & 0x0F0F0F0FU);
       }
       out.scale = Ue4m3ScaleToFloatDev(e);
       out.offset = 0.0F;
