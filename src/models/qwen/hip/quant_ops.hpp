@@ -37,7 +37,10 @@ __device__ inline float Ue4m3ScaleToFloatDev(std::uint8_t e) {
   const int mant = e & 0x07;
   if (exp == 0)
     return static_cast<float>(mant) * 0x1p-10f;
-  return static_cast<float>(8 + mant) * ldexpf(1.0F, exp - 11);
+  // (8+mant) * 2^(exp-11) == (1.mant) * 2^(exp-8): build the IEEE bits
+  // directly instead of calling ldexpf (a slow libdevice polynomial).
+  return __int_as_float(static_cast<std::int32_t>((exp + 119) << 23) |
+                        static_cast<std::int32_t>(mant << 20));
 }
 __device__ inline float RocmFp4ValueDev(std::uint8_t code) {
   return static_cast<float>(kRocmFp4Codebook[code & 0x0FU]);
