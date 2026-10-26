@@ -3419,7 +3419,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
           speculative_config.min_draft_tokens;
       speculative_options.initial_draft_tokens =
           speculative_config.max_draft_tokens;
-      speculative_options.use_batched_verification = true;
+      speculative_options.use_batched_verification = std::getenv("GUFO_NO_BATCHED_VERIFY") == nullptr;
       speculative_options.retain_frontier_logits = true;
       speculative_options.enable_adaptive_draft_length = false;
     }

@@ -3,6 +3,19 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.25.0（2026-10-27）
+- **新增 `GUFO_NO_BATCHED_VERIFY` 環境變數**：設定後投機解碼改走逐 session 串行驗證
+  （`use_batched_verification=false`）；不設＝維持批次驗證，預設行為不變。
+- **背景（高併發 MTP 接受率崩潰）**：gfx1151 高併發測速發現 MBufo 開 MTP 時，
+  batch_width>1 的 draft 接受率從單流 85% 崩到 46–55%，使併發 decode 吞吐與穩定性
+  輸給上游同權重版（上游維持 68–95%）。以**相同 Q4_K_XL 權重**只換 binary 對照，
+  確認非 ROCmFP4 量化問題，而是 fork 的 batched speculative verification 路徑回歸。
+- **緩解效果**（同權重、同 binary、同請求，僅切開關，temp 0 greedy）：
+  batch_width 2／3／4 接受率 **48.8／38.9／41.7%（ON）→ 60.0／53.8／53.4%（OFF）**，
+  每級回升約 10–15pt；設 `GUFO_NO_BATCHED_VERIFY=1` 即得此 fallback。
+- **待追**：關掉批次驗證後接受率仍低於上游，且 Flash-Next MTP 走模型專屬投機引擎
+  （非通用 `speculative_verifier` 路徑），確切 kernel 行尚未揪出，留待後續。
+
 ## v0.24.1（2026-10-26）
 - **修復 27B ROCmFP4 開 DFlash2 推測解碼 decode 崩速**：投機 verify（batch≤8）的權重
   matmul 原走 `LaunchBatchedQuantGEMMFp32`，但 ROCmFP4 未被納入 batch≤8 的小批量
