@@ -3,6 +3,22 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.25.1（2026-10-27）
+- **修復 MTP 推測解碼高併發 draft 接受率崩潰（根因）**：gfx1151 併發測速發現開 MTP 時
+  batch_width>1 的 draft 接受率從單流 ~85% 崩到 39–49%，使併發 decode 吞吐與穩定性輸給
+  上游同權重版。以相同 Q4_K_XL 權重只換 binary 對照，確認非 ROCmFP4、非 client 量測問題。
+- **根因**：`qwen38_flash_next` 的 mixed-batch attention（`WmmaMixedAttention`）把投機
+  verify chain 一併塞進 packed WMMA 核；該核讀 mixed decode/prefill 行家族，其 logits 與
+  MTP draft 所依的单-session 路径不同家族（`docs/MIXED_BATCH.md` 所稱 "chunk family noise"），
+  導致 target argmax 與 draft 不一致而大面積誤拒。
+- **修法**：`ForwardBatch` 的 mixed-batch gate 排除投機項（`std::any_of(... it.speculative)`）——
+  含投機 verify 的批次改走 legacy 逐 session attention cores（已驗證正確路徑）；非投機
+  （prefill／純 decode）仍享 mixed-batch 加速。不影響 prefill／MoE／非投機併發。
+- **gfx1151 實測**（27B-Flash-Next Q4_K_XL＋MTP，預設 env，temp 0 greedy，同權重對照）：
+  batch_width 2／3／4 接受率 **48.8／38.9／41.7% → 88.7／91.6／89.5%**，且不再隨 batch 衰減
+  （上游 95→82→68 遞減，本版平穩 ~90%）；per-stream decode **27／22／19 → 49／37／33 tok/s**，
+  聚合吞吐 **97／111／133** 全線反超上游（70／105／112）。
+
 ## v0.25.0（2026-10-27）
 - **新增 `GUFO_NO_BATCHED_VERIFY` 環境變數**：設定後投機解碼改走逐 session 串行驗證
   （`use_batched_verification=false`）；不設＝維持批次驗證，預設行為不變。

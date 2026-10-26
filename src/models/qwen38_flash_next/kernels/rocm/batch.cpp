@@ -1157,10 +1157,18 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         }
       }
       std::uint32_t gdn_active = 0;
-      // Mixed-batch attention: all items must be dense rows; speculative
-      // verify chains are plain rows for attention purposes (rollback and
-      // selection live outside the core). Sparse batches keep legacy cores.
-      bool use_mixed = !l.linear && UseMixedBatch() && items.size() >= 2;
+      // Mixed-batch attention: all items must be dense rows. Speculative
+      // verify chains are excluded: the packed WmmaMixedAttention reads the
+      // mixed decode/prefill row family and its logits differ from the
+      // single-session path the MTP draft was built against (docs/MIXED_BATCH.md
+      // "chunk family noise"), collapsing draft acceptance under concurrency
+      // (92% -> 46% at batch_width 2-4). Those sessions keep the legacy
+      // per-item cores. Sparse batches keep legacy cores too.
+      bool use_mixed = !l.linear && UseMixedBatch() && items.size() >= 2 &&
+                       !std::any_of(items.begin(), items.end(),
+                                    [](const BatchItem& it) {
+                                      return it.speculative;
+                                    });
       if (use_mixed) {
         for (std::size_t i = 0; i < items.size(); ++i) {
           const auto& item = items[i];
