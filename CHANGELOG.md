@@ -3,6 +3,18 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.24.0（2026-10-26）
+- **修復 27B ROCmFP4 `half_prefill` 正確性**：prefill 走 **FP16 WMMA**，同 prompt
+  跨不同 token 數輸出穩定。驗證：exact-repeat 29–2962 token 全過、WMMA 與 fallback
+  逐字元 bit-identical（batch 13–200）、tool_ladder 72 案例到 128K **0 失敗**。
+- **ROCmFP4 prefill 門檻下調**：`UseQwen27bFp16Prefill` 對 FP4 從 batch≥1024 降到
+  **≥8**（Q4_K 維持 1024；`GUFO_HALF_PREFILL_MIN_BATCH` 可覆寫）。讓 in-kernel-decode
+  的 FP16 WMMA 覆蓋幾乎全部 prefill，避開 sub-threshold 的 `dequant→BF16` 全權重
+  重解碼路徑——短 prompt 固定成本 **2.5s→1.55s**；256–1023 token prefill **+63–79%**。
+- **magic dequant**（`PackHalves`）：FP4 nibble→half2 改走 `0x64646464` magic＋`hfma2`
+  （對齊 flash-next `kFastCodebook` 路），邊際 prefill **+3–4%**。
+- **清理 DIAG 死碼**：移除精確度診斷殘留的 dead code，diff 收斂回 4 檔。
+
 ## v0.23.1（2026-10-25）
 - 接上 **ROCmFP4-FAST 的 HIP kernel**（補 v0.23.0 標註「尚未接」的 prefill GEMM）：
   - **prefill 大 batch**：`RoutedF16GEMMKernel` 新增 FAST 解碼分支——FAST block

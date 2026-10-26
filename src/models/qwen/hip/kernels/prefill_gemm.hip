@@ -456,19 +456,14 @@ __global__ void DequantizeRocmFp4ToBf16Kernel(const void* __restrict__ w,
   const std::size_t b = idx / 32;
   const std::size_t e = idx % 32;
   const bool lo = (e < 16);
-  float d = 0.0F;
-  std::uint8_t nib = 0;
-  if (dual) {
-    const auto* blk = static_cast<const block_q4_0_rocmfp4*>(w) + b;
-    nib = lo ? static_cast<std::uint8_t>(blk->qs[e] & 0x0FU)
-             : static_cast<std::uint8_t>(blk->qs[e - 16] >> 4);
-    d = Ue4m3ScaleToFloatDev(lo ? blk->e[0] : blk->e[1]);
-  } else {
-    const auto* blk = static_cast<const block_q4_0_rocmfp4_fast*>(w) + b;
-    nib = lo ? static_cast<std::uint8_t>(blk->qs[e] & 0x0FU)
-             : static_cast<std::uint8_t>(blk->qs[e - 16] >> 4);
-    d = Ue4m3ScaleToFloatDev(blk->e);
-  }
+  const unsigned sub16 = static_cast<unsigned>(b) * 2U + (lo ? 0U : 1U);
+  std::size_t qo, so;
+  Fp4Offsets(sub16, dual, qo, so);
+  const std::uint8_t* base = static_cast<const std::uint8_t*>(w);
+  const std::uint8_t q = base[qo + (lo ? e : (e - 16))];
+  const std::uint8_t nib = lo ? static_cast<std::uint8_t>(q & 0x0FU)
+                              : static_cast<std::uint8_t>(q >> 4);
+  const float d = Ue4m3ScaleToFloatDev(base[so]);
   out[idx] = hip_bfloat16(RocmFp4ValueDev(nib) * d);
 }
 

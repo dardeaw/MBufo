@@ -21,6 +21,47 @@ __device__ __forceinline__ v8f WmmaHalf(v16bf a, v16bf b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
 }
 
+// Packed half2 code->half dequant (ported from the flash-next routed F16 path).
+// A code byte is carried as q+128 (XOR 0x80), permuted into the fp16 mantissa
+// of 1024.0 (0x6400|b = 1024+b exactly), a packed subtract of the bias, then one
+// packed FMA applies scale/bias. For ROCmFP4 (bias==0) this is bit-exact with
+// the scalar round(scale*code) path while using ~2-3x fewer ops.
+constexpr std::uint32_t kHalfMagic = 0x64646464U;  // 1024.0 high bytes
+__device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
+                                              __half2 magic, __half2 scale2,
+                                              __half2 bias2, __half2& lo,
+                                              __half2& hi) {
+  const std::uint32_t p0 = __builtin_amdgcn_perm(codes, kHalfMagic, 0x01050004U);
+  const std::uint32_t p1 = __builtin_amdgcn_perm(codes, kHalfMagic, 0x03070206U);
+  lo = __hfma2(__hadd2(__builtin_bit_cast(__half2, p0), magic), scale2, bias2);
+  hi = __hfma2(__hadd2(__builtin_bit_cast(__half2, p1), magic), scale2, bias2);
+}
+
+// Fill 16 halves from a decoded sub-block. ROCmFP4 uses the packed half2 magic
+// path; every other quant keeps the original scalar path (unchanged behaviour).
+template<gufo::core::GgmlType Type>
+__device__ __forceinline__ void PackHalves(const gufo::hip::QuantSub16& q,
+                                           v16bf& out) {
+  if constexpr (Type == gufo::core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+                Type == gufo::core::GgmlType::kQ4_0_ROCMFP4) {
+    const __half2 scale2 = __floats2half2_rn(q.scale, q.scale);
+    const __half2 magic = __floats2half2_rn(-1152.0F, -1152.0F);
+    const __half2 bias2 = __floats2half2_rn(0.0F, 0.0F);
+    const std::uint32_t words[4] = {q.w[0], q.w[1], q.w[2], q.w[3]};
+    __half2 h[8];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const std::uint32_t nib = words[i] ^ 0x80808080U;  // signed -> q+128
+      CodesToHalves(nib, magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
+    }
+    __builtin_memcpy(&out, &h[0], 32);
+  } else {
+#pragma unroll
+    for (int j = 0; j < 16; ++j)
+      out[j] = static_cast<_Float16>(__fsub_rn(
+          __fmul_rn(q.scale, static_cast<float>(q.q[j])), q.offset));
+  }
+}
 // Permute 16-byte halves and the LDS row to avoid repeated bank conflicts.
 __device__ __forceinline__ v16bf LoadSwizzled(const short* p) {
   union {
@@ -126,7 +167,9 @@ struct RawWeights {
   static_assert(Type == gufo::core::GgmlType::kQ4_K ||
                 Type == gufo::core::GgmlType::kQ5_K ||
                 Type == gufo::core::GgmlType::kQ6_K ||
-                Type == gufo::core::GgmlType::kQ8_0);
+                Type == gufo::core::GgmlType::kQ8_0 ||
+                Type == gufo::core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+                Type == gufo::core::GgmlType::kQ4_0_ROCMFP4);
   std::uint32_t low[4], high[Type == gufo::core::GgmlType::kQ5_K ||
                                      Type == gufo::core::GgmlType::kQ6_K
                                  ? 4
@@ -148,6 +191,14 @@ __device__ __forceinline__ RawWeights<Type> LoadRaw(const void* row,
     const auto& b = static_cast<const Q8_0Block*>(row)[sub / 2];
     r.d = b.d;
     __builtin_memcpy(r.low, b.qs + lane, 16);
+  } else if constexpr (Type == GgmlType::kQ4_0_ROCMFP4_FAST ||
+                       Type == GgmlType::kQ4_0_ROCMFP4) {
+    const int dual = (Type == GgmlType::kQ4_0_ROCMFP4) ? 1 : 0;
+    std::size_t qo, so;
+    gufo::hip::Fp4Offsets(sub, dual, qo, so);
+    const std::uint8_t* base = static_cast<const std::uint8_t*>(row);
+    __builtin_memcpy(r.low, base + qo, 16);
+    r.sc0 = base[so];
   } else if constexpr (Type == GgmlType::kQ4_K || Type == GgmlType::kQ5_K) {
     using Block =
         std::conditional_t<Type == GgmlType::kQ5_K, Q5KBlock, Q4KBlock>;
@@ -190,6 +241,14 @@ __device__ __forceinline__ gufo::hip::QuantSub16 DecodeRaw(
   if constexpr (Type == GgmlType::kQ8_0) {
     __builtin_memcpy(q.w, r.low, 16);
     q.scale = __half2float(r.d);
+  } else if constexpr (Type == GgmlType::kQ4_0_ROCMFP4_FAST ||
+                       Type == GgmlType::kQ4_0_ROCMFP4) {
+    const unsigned shift = (r.sub & 1U) * 4U;
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      q.w[i] = RocmFp4Lookup4((r.low[i] >> shift) & 0x0F0F0F0FU);
+    q.scale = Ue4m3ScaleToFloatDev(static_cast<std::uint8_t>(r.sc0));
+    q.offset = 0.0F;
   } else if constexpr (Type == GgmlType::kQ4_K || Type == GgmlType::kQ5_K) {
     unsigned mask = 0u - (sb >> 2), lo = r.sc0 & 63,
              up = (r.sc2 & 15) | ((r.sc0 >> 6) << 4), lm = r.sc1 & 63,
@@ -254,7 +313,9 @@ __launch_bounds__(WM * WN * 32) __global__
   constexpr int DecodeStage = (Type == gufo::core::GgmlType::kQ4_K ||
                                Type == gufo::core::GgmlType::kQ5_K ||
                                (Type == gufo::core::GgmlType::kQ6_K && !Mixed) ||
-                               Type == gufo::core::GgmlType::kQ8_0)
+                               Type == gufo::core::GgmlType::kQ8_0 ||
+                               Type == gufo::core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+                               Type == gufo::core::GgmlType::kQ4_0_ROCMFP4)
                                   ? 2
                                   : 0;
   constexpr int kThreads = WM * WN * WaveSize;
@@ -369,10 +430,7 @@ __launch_bounds__(WM * WN * 32) __global__
         gufo::hip::QuantSub16 q;
         gufo::hip::DecodeQuantSub16<true>(UpType, w_row[p], kk, q);
         union { v16bf f; uint4 u[2]; } packed;
-#pragma unroll
-        for (int j = 0; j < 16; ++j)
-          packed.f[j] = static_cast<_Float16>(__fsub_rn(
-              __fmul_rn(q.scale, static_cast<float>(q.q[j])), q.offset));
+        PackHalves<UpType>(q, packed.f);
         ra[p][0] = packed.u[0];
         ra[p][1] = packed.u[1];
       }
@@ -411,10 +469,7 @@ __launch_bounds__(WM * WN * 32) __global__
             v16bf f;
             uint4 u[2];
           } packed;
-#pragma unroll
-          for (int j = 0; j < 16; ++j)
-            packed.f[j] = static_cast<_Float16>(__fsub_rn(
-                __fmul_rn(q.scale, static_cast<float>(q.q[j])), q.offset));
+          PackHalves<Type>(q, packed.f);
           ra[p][0] = packed.u[0];
           ra[p][1] = packed.u[1];
         }
@@ -449,10 +504,7 @@ __launch_bounds__(WM * WN * 32) __global__
       if constexpr (UpRaw) {
         gufo::hip::QuantSub16 q = DecodeRaw<UpType>(raw_up[p]);
         union { v16bf f; uint4 u[2]; } packed;
-#pragma unroll
-        for (int j = 0; j < 16; ++j)
-          packed.f[j] = static_cast<_Float16>(__fsub_rn(
-              __fmul_rn(q.scale, static_cast<float>(q.q[j])), q.offset));
+        PackHalves<UpType>(q, packed.f);
         StoreSwizzled(dst, packed.u[0], packed.u[1], row);
       } else if constexpr (CacheIqHeader &&
                            UpType == gufo::core::GgmlType::kIQ4_XS) {
@@ -478,10 +530,7 @@ __launch_bounds__(WM * WN * 32) __global__
             v16bf f;
             uint4 u[2];
           } packed;
-#pragma unroll
-          for (int j = 0; j < 16; ++j)
-            packed.f[j] = static_cast<_Float16>(__fsub_rn(
-                __fmul_rn(q.scale, static_cast<float>(q.q[j])), q.offset));
+          PackHalves<Type>(q, packed.f);
           StoreSwizzled(dst, packed.u[0], packed.u[1], row);
         } else if constexpr (CacheIqHeader &&
                              Type == gufo::core::GgmlType::kIQ4_XS) {
@@ -784,6 +833,12 @@ void DirectGemm(gufo::core::GgmlType type, const void* w, const void* x,
     case GgmlType::kIQ3_S:
       launch.template operator()<GgmlType::kIQ3_S>();
       break;
+    case GgmlType::kQ4_0_ROCMFP4_FAST:
+      launch.template operator()<GgmlType::kQ4_0_ROCMFP4_FAST>();
+      break;
+    case GgmlType::kQ4_0_ROCMFP4:
+      launch.template operator()<GgmlType::kQ4_0_ROCMFP4>();
+      break;
     default:
       throw std::runtime_error("unexpected half prefill weight format");
   }
@@ -890,6 +945,5 @@ bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
       return false;
   }
 }
-
 }  // namespace gufo::hip
 #endif

@@ -552,6 +552,32 @@ __device__ inline void LoadQuantWords16(const std::uint8_t* __restrict__ src,
   __builtin_memcpy(out, src, 16);
 }
 
+// ROCmFP4 block layout: interleaved 17-byte (FAST) / 18-byte (dual) blocks.
+// Maps a 16-element sub-block index to its qs/scale byte offsets within a row.
+__device__ __forceinline__ void Fp4Offsets(unsigned sub16, int dual,
+                                           std::size_t& qs_off,
+                                           std::size_t& sc_off) {
+  const unsigned block = sub16 / 2U, half = sub16 % 2U;
+  const std::size_t bb = dual ? 18U : 17U;
+  qs_off = static_cast<std::size_t>(block) * bb;
+  sc_off = qs_off + 16U + (dual ? half : 0U);
+}
+
+__device__ __forceinline__ void DecodeFp4Sub16(const std::uint8_t* row,
+                                               unsigned sub16, int dual,
+                                               QuantSub16& out) {
+  std::size_t qo, so;
+  Fp4Offsets(sub16, dual, qo, so);
+  const unsigned shift = (sub16 % 2U) * 4U;
+  std::uint32_t packed[4];
+  LoadQuantWords16(row + qo, packed);
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+    out.w[i] = RocmFp4Lookup4((packed[i] >> shift) & 0x0F0F0F0FU);
+  out.scale = Ue4m3ScaleToFloatDev(row[so]);
+  out.offset = 0.0F;
+}
+
 /// Decodes the `sub16`-th 16-element sub-block of the row starting at `row`.
 /// `row` must point at the first block of the row for `type`.
 template<bool SharedScales = false>
@@ -572,31 +598,13 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       return;
     }
     case core::GgmlType::kQ4_0_ROCMFP4_FAST: {
-      const auto& blk =
-          static_cast<const block_q4_0_rocmfp4_fast*>(row)[sub16 / 2];
-      const unsigned shift = ((sub16 % 2) == 0) ? 0U : 4U;
-      std::uint32_t packed[4];
-      LoadQuantWords16(blk.qs, packed);
-#pragma unroll
-      for (int i = 0; i < 4; ++i) {
-        out.w[i] = RocmFp4Lookup4((packed[i] >> shift) & 0x0F0F0F0FU);
-      }
-      out.scale = Ue4m3ScaleToFloatDev(blk.e);
-      out.offset = 0.0F;
+      DecodeFp4Sub16(static_cast<const std::uint8_t*>(row), sub16, 0,
+                     out);
       return;
     }
     case core::GgmlType::kQ4_0_ROCMFP4: {
-      const auto& blk = static_cast<const block_q4_0_rocmfp4*>(row)[sub16 / 2];
-      const unsigned shift = ((sub16 % 2) == 0) ? 0U : 4U;
-      const std::uint8_t e = (sub16 % 2) == 0 ? blk.e[0] : blk.e[1];
-      std::uint32_t packed[4];
-      LoadQuantWords16(blk.qs, packed);
-#pragma unroll
-      for (int i = 0; i < 4; ++i) {
-        out.w[i] = RocmFp4Lookup4((packed[i] >> shift) & 0x0F0F0F0FU);
-      }
-      out.scale = Ue4m3ScaleToFloatDev(e);
-      out.offset = 0.0F;
+      DecodeFp4Sub16(static_cast<const std::uint8_t*>(row), sub16, 1,
+                     out);
       return;
     }
     case core::GgmlType::kQ4_K: {

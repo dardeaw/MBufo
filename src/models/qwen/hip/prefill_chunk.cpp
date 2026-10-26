@@ -18,13 +18,34 @@ bool UseQwen27bFp16Prefill(const models::QwenModelWeights& weights,
   const auto& config = weights.config;
   // Large Qwen27B low-bit prefill is qualified independently from the Q8
   // target and from the small-batch decode/verification kernels.
-  if (batch < 1024 || config.hidden_size != 5120 ||
+  // ROCmFP4's sub-threshold fallback (dequantize whole weight -> BF16 scratch
+  // -> hipBLASLt) re-dequantizes ALL weights on every forward: a ~2.4s fixed
+  // cost that dominates short prompts (measured on gfx1151: 13-token TTFT 2.5s
+  // vs 0.7s on the in-kernel-decode FP16 WMMA path, which is bit-identical to
+  // the fallback from batch 13 up). So FP4 uses WMMA for essentially all
+  // prefill; only sub-8-token prompts (rare) fall back. Other low-bit types
+  // keep 1024 because their fallback is already the fast int8 WMMA.
+  // GUFO_HALF_PREFILL_MIN_BATCH overrides for tuning.
+  static const std::size_t kEnvMin = [] {
+    const char* e = std::getenv("GUFO_HALF_PREFILL_MIN_BATCH");
+    const unsigned long v = e ? std::strtoul(e, nullptr, 10) : 0UL;
+    return v >= 2UL ? static_cast<std::size_t>(v) : 0UL;
+  }();
+  const bool fp4 = !weights.layers.empty() &&
+                   (weights.layers[0].ffn_gate.type ==
+                        core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+                    weights.layers[0].ffn_gate.type ==
+                        core::GgmlType::kQ4_0_ROCMFP4);
+  const std::size_t kMinBatch = kEnvMin ? kEnvMin : (fp4 ? 8UL : 1024UL);
+  if (batch < kMinBatch || config.hidden_size != 5120 ||
       config.intermediate_size != 17408 || config.num_layers != 64 ||
       config.AttentionSize() != 6144 || config.ssm_inner_size != 6144)
     return false;
   const auto supported = [](const models::QwenTensorRef& tensor) {
     return tensor.type == core::GgmlType::kQ8_0 ||
-           detail::IsNativeWmmaQuant(tensor.type);
+           detail::IsNativeWmmaQuant(tensor.type) ||
+           tensor.type == core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+           tensor.type == core::GgmlType::kQ4_0_ROCMFP4;
   };
   bool low_bit_ffn = false;
   for (const auto& layer : weights.layers) {
@@ -33,7 +54,9 @@ bool UseQwen27bFp16Prefill(const models::QwenModelWeights& weights,
       return false;
     low_bit_ffn |= detail::IsNativeWmmaQuant(layer.ffn_gate.type) ||
                    detail::IsNativeWmmaQuant(layer.ffn_up.type) ||
-                   detail::IsNativeWmmaQuant(layer.ffn_down.type);
+                   detail::IsNativeWmmaQuant(layer.ffn_down.type) ||
+                   layer.ffn_gate.type == core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+                   layer.ffn_gate.type == core::GgmlType::kQ4_0_ROCMFP4;
     if (layer.is_full_attention) {
       if (!supported(layer.attn_q) || !supported(layer.attn_k) ||
           !supported(layer.attn_v) || !supported(layer.attn_output))
