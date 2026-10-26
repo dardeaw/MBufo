@@ -256,30 +256,54 @@ Q8 KV cache, int8 WMMA, persistence and history-drafting changes.
 
 ## Benchmark（MBufo v0.24.1，gfx1151 Strix Halo）
 
-Cold KV (unique prompt per request, `cached_tokens≈0`), temp 0, think off,
-**F16 KV**, `-j 1`. Four configs: 27B (UD-Q4_K_XL vs ROCmFP4) + Flash-Next
-(ROCmFP4 vs UD-Q4_K_XL).
+Cold KV (unique prompt per request, `cached_tokens≈0`), think off, **F16 KV**,
+`-j 1`, ctx 262144. Four configs: 27B (UD-Q4_K_XL vs ROCmFP4-FAST) + Flash-Next
+(ROCmFP4-FAST vs UD-Q4_K_XL). Speculative: 27B = DFlash2, Flash-Next = MTP.
 
 ### Prefill (tok/s, higher is better)
 
-| tokens | 27B Q4_K_XL | 27B ROCmFP4 | FN ROCmFP4 | FN Q4_K_XL |
+| tokens | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
 |---:|---:|---:|---:|---:|
-| 2K | 544 | 483 | **1739** | 1301 |
-| 8K | 568 | 523 | **1701** | 1549 |
-| 32K | 526 | 520 | 1598 | **1618** |
-| 128K | 385 | 383 | **1504** | 1507 |
+| 2K | 544 | 432 | **1739** | 1301 |
+| 8K | 568 | 534 | **1701** | 1549 |
+| 32K | 526 | 517 | 1598 | **1618** |
+| 128K | 385 | 382 | **1504** | 1507 |
 | 250K | — | — | **1438** | 1415 |
 
-### Decode (tok/s, speculative on; 27B=DFlash2, Flash-Next=MTP)
+> 27B ROCmFP4-**FAST** prefill ≈ the non-FAST STRIX build — single-scale only
+> changes the codebook, not the fp16-WMMA prefill engine (432/534/517/382 vs
+> 483/523/520/383). FAST's real speed comes from the int8-MMQ consumer path,
+> which is wired for Flash-Next's MoE experts, not the dense 27B.
 
-| scenario | 27B Q4_K_XL | 27B ROCmFP4 | FN ROCmFP4 | FN Q4_K_XL |
+### Decode (tok/s, speculative on)
+
+Standard: 5 cold-KV scenarios (temp labelled) + an 8-task ReAct agent suite.
+
+| scenario | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
 |---|---:|---:|---:|---:|
-| short | 20.9 | 22.9 | 39.6 | **41.7** |
-| prose | 22.9 | 19.5 | **39.9** | 38.4 |
-| code | 57.0 | 56.2 | 68.1 | **69.6** |
-| json | 51.5 | 52.3 | 64.0 | **64.6** |
+| prose (temp 0.4) | 21.8 | 21.4 | **45.0** | 43.6 |
+| fibonacci (temp 0.4) | 68.7 | 60.6 | **87.0** | 75.5 |
+| json (temp 0) | 55.7 | 48.1 | **55.8** | 51.6 |
+| greedy code /128 (temp 0) | 62.4 | 57.4 | 69.9 | **71.8** |
+| repeat text /256 (temp 0) | 71.1 | 62.0 | **74.9** | 74.5 |
+
+### Agentic (agent_bench_v2, t1–t8, sandboxed tools)
+
+| | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+|---|---:|---:|---:|---:|
+| passed | 8/8 | 8/8 | 8/8 | 7/8 |
+| nuclear (must be 0) | 0 | 0 | 0 | 0 |
+| gen tps range | 9.4–32.4 | 10.7–21.0 | 21.4–57.4 | 31.8–53.5 |
+
+### Recommended build per model
+
+- **Qwen 3.8 27B → UD-Q4_K_XL.** FP4-FAST wins the FP4 family (all 5 decode
+  scenarios + 8/8 agentic vs STRIX's 7/8), but single-scale FP4 still loses
+  decode and draft-acceptance to Q4_K_XL, so Q4_K_XL is the best 27B build.
+- **Qwen 3.8 Flash-Next → ROCmFP4.** Fastest decode (prose 45.0, fibonacci 87.0),
+  8/8 agentic, and ~94 GB vs Q4_K_XL's ~111 GB — ROCmFP4 is the best Flash-Next
+  build.
 
 > 27B ROCmFP4 decode is the **post-v0.24.1-fix** figure: before the fix, DFlash2
-> verify fell to a per-row GEMV loop (5.8/5.6/13.2/11.9); after, it matches
-> Q4_K_XL (+248-340%). 27B ROCmFP4 spec-off decode (13.2-13.8) already edged
-> out Q4_K_XL (11.6-12.2).
+> verify fell to a per-row GEMV loop and collapsed; after, FAST matches non-FAST
+> and edges it.

@@ -229,31 +229,51 @@ persistence 與 history drafting 等改動之上。
 
 ## 效能基準（MBufo v0.24.1，gfx1151 Strix Halo）
 
-冷 KV（每請求唯一 prompt，`cached_tokens≈0`）、temp 0、think off、**F16 KV**、
-`-j 1`。四組：27B（UD-Q4_K_XL vs ROCmFP4）＋ Flash-Next（ROCmFP4 vs UD-Q4_K_XL）。
-方法詳見 `docs`／測速方法紀錄。
+冷 KV（每請求唯一 prompt，`cached_tokens≈0`）、think off、**F16 KV**、`-j 1`、
+ctx 262144。四組設定：27B（UD-Q4_K_XL 對 ROCmFP4-FAST）＋ Flash-Next（ROCmFP4-FAST
+對 UD-Q4_K_XL）。投機：27B＝DFlash2，Flash-Next＝MTP。
 
 ### Prefill（tok/s，越高越好）
 
-| tokens | 27B Q4_K_XL | 27B ROCmFP4 | FN ROCmFP4 | FN Q4_K_XL |
+| tokens | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
 |---:|---:|---:|---:|---:|
-| 2K | 544 | 483 | **1739** | 1301 |
-| 8K | 568 | 523 | **1701** | 1549 |
-| 32K | 526 | 520 | 1598 | **1618** |
-| 128K | 385 | 383 | **1504** | 1507 |
+| 2K | 544 | 432 | **1739** | 1301 |
+| 8K | 568 | 534 | **1701** | 1549 |
+| 32K | 526 | 517 | 1598 | **1618** |
+| 128K | 385 | 382 | **1504** | 1507 |
 | 250K | — | — | **1438** | 1415 |
 
-Flash-Next（MoE＋GDN）prefill 約為 27B dense 的 3 倍，並穩定到 250K tokens。
+> 27B ROCmFP4-**FAST** 的 prefill ≈ 非 FAST 的 STRIX 版——single-scale 只換 codebook，
+> 不換 fp16-WMMA prefill 引擎（432/534/517/382 對 483/523/520/383）。FAST 真正的速度
+> 來自 int8-MMQ 消費路徑，而那條路徑只餵給 Flash-Next 的 MoE experts，dense 27B 沒接。
 
-### Decode（tok/s，投機開；27B=DFlash2，Flash-Next=MTP）
+### Decode（tok/s，投機開）
 
-| 情境 | 27B Q4_K_XL | 27B ROCmFP4 | FN ROCmFP4 | FN Q4_K_XL |
+標準：5 個冷 KV 情境（標明 temp）＋ 8 任務 ReAct 代理套件。
+
+| 情境 | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
 |---|---:|---:|---:|---:|
-| short | 20.9 | 22.9 | 39.6 | **41.7** |
-| prose | 22.9 | 19.5 | **39.9** | 38.4 |
-| code | 57.0 | 56.2 | 68.1 | **69.6** |
-| json | 51.5 | 52.3 | 64.0 | **64.6** |
+| 散文 (temp 0.4) | 21.8 | 21.4 | **45.0** | 43.6 |
+| 費波那契 (temp 0.4) | 68.7 | 60.6 | **87.0** | 75.5 |
+| JSON 約束 (temp 0) | 55.7 | 48.1 | **55.8** | 51.6 |
+| 貪心程式碼 /128 (temp 0) | 62.4 | 57.4 | 69.9 | **71.8** |
+| 重複文本 /256 (temp 0) | 71.1 | 62.0 | **74.9** | 74.5 |
+
+### 代理任務（agent_bench_v2，t1–t8，沙箱工具）
+
+| | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+|---|---:|---:|---:|---:|
+| 通過 | 8/8 | 8/8 | 8/8 | 7/8 |
+| 核爆（須為 0） | 0 | 0 | 0 | 0 |
+| 生成 tps 區間 | 9.4–32.4 | 10.7–21.0 | 21.4–57.4 | 31.8–53.5 |
+
+### 各模型建議（目前最佳）
+
+- **Qwen 3.8 27B → 用 UD-Q4_K_XL。** FP4-FAST 在 FP4 家族內全勝（5 個 decode 情境
+  ＋代理 8/8，勝 STRIX 的 7/8），但 single-scale FP4 的 decode 與草稿接受率仍輸
+  Q4_K_XL，故 27B 以 Q4_K_XL 為最佳。
+- **Qwen 3.8 Flash-Next → 用 ROCmFP4。** decode 最快（散文 45.0、費波那契 87.0）、
+  代理 8/8，且 ~94 GB 比 Q4_K_XL 的 ~111 GB 更省，故 Flash-Next 以 ROCmFP4 為最佳。
 
 > 27B ROCmFP4 decode 為 **v0.24.1 修復後**數值：修復前開 DFlash2 因 verify 走逐行
-> GEMV 迴圈僅 5.8／5.6／13.2／11.9，修復後回到與 Q4_K_XL 相當（+248–340%）。
-> 27B ROCmFP4 spec-off decode（13.2–13.8）本就略贏 Q4_K_XL（11.6–12.2）。
+> GEMV 迴圈而崩速，修復後 FAST 追平並略勝非 FAST。
