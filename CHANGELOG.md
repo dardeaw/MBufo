@@ -3,6 +3,23 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.24.1（2026-10-26）
+- **修復 27B ROCmFP4 開 DFlash2 推測解碼 decode 崩速**：投機 verify（batch≤8）的權重
+  matmul 原走 `LaunchBatchedQuantGEMMFp32`，但 ROCmFP4 未被納入 batch≤8 的小批量
+  GEMM 路由（`SupportsExactSharedProjection`／`IsNativeWmmaQuant` 皆未列 FP4），
+  於 `batched_decode.cpp` 落到逐行 `LaunchGEMV` 迴圈——每 token 重讀整份權重，
+  造成 FP4 decode 反而比 spec-off 更慢（short 5.8 vs spec-off 13.2）。
+- **修法**：把 `kQ4_0_ROCMFP4(_FAST)` 納入 verify 的 batch≤8 路由——
+  `SupportsExactSharedProjection` 放行 FP4、`LaunchBatchedQuantGEMMFp32` batch≤8
+  分支放行 FP4、`LaunchKQuantSmallBatchByType` 新增 FP4 case，重用既有
+  `SmallBatchKQuantExactFp32GEMMKernel`（其 `DecodeQuantSub16` 已支援 FP4，
+  `offset=0`，與已驗證的 IQ4_XS no-offset 路徑同）。不改 `IsNativeWmmaQuant`
+  本身，prefill／MoE 路由不受影響。
+- **gfx1151 實測**（27B FP4＋DFlash2，冷 KV，temp 0）：decode short／prose／code／
+  json **5.8／5.6／13.2／11.9 → 22.9／19.5／56.2／52.3 tok/s（+248–340%）**；
+  acceptance 完全不變（33.3／26.5／88.3／78.6%）→ 輸出正確。修復後 FP4 dflash2
+  decode 與 UD-Q4_K_XL（20.9／22.9／57.0／51.5）相當，逆轉原先 FP4 開投機反而變慢。
+
 ## v0.24.0（2026-10-26）
 - **修復 27B ROCmFP4 `half_prefill` 正確性**：prefill 走 **FP16 WMMA**，同 prompt
   跨不同 token 數輸出穩定。驗證：exact-repeat 29–2962 token 全過、WMMA 與 fallback

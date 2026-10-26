@@ -22,7 +22,9 @@ constexpr std::size_t kMaxDecodeBatch = 8;
     core::GgmlType type) noexcept {
   // These formats preserve scalar FP32 arithmetic while sharing weight loads.
   return type == core::GgmlType::kQ8_0 || type == core::GgmlType::kQ8_K ||
-         detail::IsNativeWmmaQuant(type);
+         detail::IsNativeWmmaQuant(type) ||
+         type == core::GgmlType::kQ4_0_ROCMFP4 ||
+         type == core::GgmlType::kQ4_0_ROCMFP4_FAST;
 }
 
 void LaunchProjection(const models::QwenTensorRef& weight, const float* input,

@@ -1424,6 +1424,15 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
       LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ3_S>(
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
+    case core::GgmlType::kQ4_0_ROCMFP4:
+      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ4_0_ROCMFP4>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
+      return;
+    case core::GgmlType::kQ4_0_ROCMFP4_FAST:
+      LaunchKQuantSmallBatchTyped<RowsPerWave,
+                                  core::GgmlType::kQ4_0_ROCMFP4_FAST>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
+      return;
     default:
       return;
   }
@@ -1836,7 +1845,10 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
   const std::size_t num_blocks_x = (m + kWarpsPerBlock - 1) / kWarpsPerBlock;
   // opt-q4kxl: K-quant/IQ formats share one weight stream across the whole
   // draft block instead of re-reading it per token.
-  if (::gufo::hip::detail::IsNativeWmmaQuant(type) && batch <= 8) {
+  if ((::gufo::hip::detail::IsNativeWmmaQuant(type) ||
+       type == core::GgmlType::kQ4_0_ROCMFP4 ||
+       type == core::GgmlType::kQ4_0_ROCMFP4_FAST) &&
+      batch <= 8) {
     // Exact width instantiations: a padded Batch would stage and multiply
     // activations that no output consumes.
     constexpr std::size_t kKWarpsPerBlock = kKQuantSmallBatchWarps;
