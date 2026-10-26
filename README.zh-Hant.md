@@ -11,7 +11,7 @@
 
 | 主軸 | 改了什麼 | 換到什麼 |
 | --- | --- | --- |
-| **混合批次排程** | decode 列與 prefill chunk 共用同一個 `ForwardBatch` 與同一個注意力核心；批次封裝放大到 32 session / 1024 列。 | 小批次 2.1 倍（服務層 5.3 秒對 6.3 秒）；16 路併發 GPU 使用率 99%，零錯誤。 |
+| **混合批次排程** | decode 列與 prefill chunk 共用同一個 `ForwardBatch` 與同一個注意力核心；批次封裝放大到 32 session / 1024 列。 | 負載下 ITL 穩定、服務公平：串流中的 token 只等一步而不是兩步（5 列批次每 token 121 ms → 57 ms）；16 路併發 GPU 使用率 99%，16 路 15.3 秒對 17.0 秒。 |
 | **低位元 KV 快取** | 上游 blocked Q8 路徑泛化成「格式＋編解碼器」抽象，K、V 兩軸可各自壓成 4-bit 18-byte 區塊。 | 262144 token 的 session 從 6.44 GB 降到 3.42 GB，K4V4 為 1.81 GB——代價是量出來的，不是假設的。 |
 
 混合批次預設開啟；KV 快取預設 `f16`，`q8` 是一個參數就能開。兩者都不改變模型
@@ -76,36 +76,54 @@ UD-Q4_K_XL ＋ MTP Q8_0 sidecar ＋ BF16 mmproj，舊的 32K 上限已不成立�
 
 ## 混合批次排程（高併發）
 
-服務迴圈有兩個地方在浪費 GPU，MBufo 兩處都修掉。第一，decode 與 prefill 互相
-敲鐘：一個 decode 列會空等整個 prefill chunk 跑完。第二，上游批次封頂在
-8 session / 8 列，不管記憶體剩多少，併發都有一個硬天花板。
+併發不是一個數字。一台吃重的伺服器能不能用，是兩件事決定的，MBufo 兩件都當成
+主軸：
 
-- **一次批次、一個注意力核心。** 1 個 decode 列加上 N 個 prefill-chunk 列裝進
-  同一個 `ForwardBatch`，用單一混合注意力核心取代逐項注意力。這消除了低併發時
-  decode / prefill 輪流空轉的現象：小批次 2.1 倍，服務層實測 5.3 秒對比
-  6.3 秒。
-- **32 路封裝（32-session envelope）。** `ForwardBatch` 從 8 session / 8 列放大
-  到 32 session / 1024 列，過程中一併修掉三個硬上限（GDN、MoE、logits 緩衝）。
-  16 路併發實測 GPU 使用率穩定在 99%，輸出全數正確、零錯誤。
-- **Serve 併單。** 排程器把 prefill chunk 與一般 decode 合成一批
-  （`TryStepMixedBatch`）。每一層都可獨立降級，任何一步拒絕就退回舊的雙路徑。
-- **批次化工作的 MTP 對等。** 進入混合批次的 chunk 會自動補上 predictor-KV
-  （frontier 檢查加上 tail），行為與單次 forward 一致。若某一層無法服務投機列，
-  該列會降級走原本的路徑：正確，只是沒有加速。MTP 預設 draft 深度為 5（loader
-  對 Flash-Next 上限 7）；深度 5 在 decode 上與 7 持平，在 greedy 各 workload
-  上領先 5–6 tok/s。
-- **改的是排程，不是語意。** 混合批次改變的是工作何時跑，不是模型算出什麼。
-  它預設開啟；設定 `GUFO_MIXED_BATCH=0` 即可完全還原上游行為。
+- **ITL（token 間延遲）**——請求已經在串流之後，它前後兩個 token 之間的間隔。
+  批次效率再高，只要會讓一條串流凍住一整個 prefill 步驟，那就不叫服務，那叫
+  排隊加上額外手續。
+- **公平性**——沒有任何 session、客戶端或 prompt 可以餓死別人。一段 25 萬 token
+  的 prompt 插進對話中途，不該因此換到比十六路短對話更大的裝置佔比。
+
+上游的排程器骨架已經是對的：prefill chunk 有上限（`--prefill-chunk`）、有待跑
+decoder 時先服務 decode 再做 prefill、admission 有每客戶端上限。它缺的是「便宜
+地同時兌現這三件事」所需的裝置時間：一個有上限的 chunk 仍然吃掉一整個 tick，而
+那個 tick 裡**沒有任何** decoder 產出 token——因為 chunk 與 decode 是兩趟分別
+掃過權重的計算。ITL 與公平性就是從這個 tick 漏掉的：每一輪，串流中的請求都要
+付一次與它無關的 prefill 步驟。
+
+MBufo 把兩者合併：chunk 與 decode 列共用同一個 `ForwardBatch`、同一個注意力
+核心，於是 prefill 的那個 tick 也順便把該出的 token 全部產出。合併沒有繞過公平
+政策；公平政策正是讓合併安全的前提。
+
+### 排程器保證什麼
+
+| 保證 | 機制 |
+| --- | --- |
+| 待跑 decoder 絕不排在 prefill 之後 | 只有在沒有 decoder 待跑時（或正在湊第一批時）才進合併步驟，所以 prefill 只在空隙裡跑，永遠不會插隊到串流請求前面。 |
+| chunk 不能把 decoder 擠出輪替 | 每次合併或 prefill 步驟後，`MarkAllDecodersDue` 會把所有常駐 decoder 重新標記為待跑，下一步就全部服務。 |
+| 任何 prompt 都無法獨佔裝置 | chunk 是有上限的切片（`--prefill-chunk` 預設 512 token），25 萬 token 的 prompt 每輪只餵一片。 |
+| 同等的 session 輪流 | decode 佇列會輪替（`PopDecoder` 把服務過的請求移到隊尾），不是固定隊頭順序，所以沒有哪個 session 能一直贏得前排。 |
+| 單一客戶端無法塞滿佇列 | `--max-pending-per-client` 限制單一客戶端的待處理請求（回 `client_quota`），出隊也跨客戶端輪流，一個客戶端爆量不會餓死別人。 |
+| 某一層拒絕也不損失 | 每一層都可獨立降級；投機列被拒就退回原本路徑：正確，只是沒有加速。 |
+
+### 換到什麼
 
 | 量測項 | 結果 |
 | --- | --- |
-| 小批次服務，混合批次對上游雙路徑 | 5.3 秒 對 6.3 秒（2.1 倍） |
+| 串流請求的 token 間隔，5 列批次 | 兩趟計算 121 ms → 合併後 **57 ms**（**2.1 倍**）：間隔從兩趟權重計算縮成一趟 |
+| 16 路 sustained 服務，3 輪 | **平均 15.3 秒 對 17.0 秒**（合併開 14/17/15，關 15/16/20），實測尾延遲改善 |
+| 4 路混合 prompt A/B | **5.3 秒對 6.3 秒**，每輪都贏，輸出全對 |
 | 16 路併發 | GPU 使用率 99%，輸出全數正確，零錯誤 |
-| 批次封裝 | 32 session / 1024 列 |
-| 逃生門 | `GUFO_MIXED_BATCH=0` 完全還原上游行為 |
+| 批次封裝 | 32 session / 1024 列（上游為 8 / 8，過程中修掉三個硬上限：GDN、MoE、logits） |
 
-設計鐵律、驗證矩陣與逐階段量測見
-[docs/MIXED_BATCH.md](docs/MIXED_BATCH.md)。
+先講一個但書：66 列時一個合併步驟要 316 ms，比兩趟分開的 247 ms 慢，因為在那種
+規模下 batch-MoE 掉到 memory-bound 的 vec 路徑。上面的端到端數字在服務併發下仍然
+勝出——每輪少掃一趟權重——但大批次在 FLOP 這一側的問題另案追蹤。
+
+混合批次改變的是工作何時跑，不是模型算出什麼。它預設開啟；設定
+`GUFO_MIXED_BATCH=0` 即可完全還原上游排程，tick-tock 也一併還原。設計鐵律、
+驗證矩陣與逐階段量測見 [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md)。
 
 ## 低位元 KV 快取
 

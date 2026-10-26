@@ -14,7 +14,7 @@ upstream's; thanks to gufo-org and all contributors.
 
 | Pillar | What changes | What you get |
 | --- | --- | --- |
-| **Mixed-batch scheduling** | Decode rows and prefill chunks share one `ForwardBatch` and one attention kernel; the batch envelope grows to 32 sessions / 1024 rows. | 2.1x on small batches (5.3 s vs 6.3 s at the serving layer); 16 concurrent requests at 99% GPU with zero errors. |
+| **Mixed-batch scheduling** | Decode rows and prefill chunks share one `ForwardBatch` and one attention kernel; the batch envelope grows to 32 sessions / 1024 rows. | Steady ITL and fair service under load: a streaming token waits one step instead of two (121 ms → 57 ms per token on a 5-row batch), 16 concurrent requests at 99% GPU, 15.3 s vs 17.0 s at 16-way. |
 | **Low-bit KV cache** | The blocked Q8 path becomes a format + codec abstraction, with 4-bit 18-byte blocks on the K and V axes independently. | 3.42 GB instead of 6.44 GB for a 262144-token session, 1.81 GB at K4V4 — quality cost measured, not assumed. |
 
 Mixed batching is on by default. The KV cache defaults to `f16`; `q8` is a
@@ -82,42 +82,60 @@ longer applies.
 
 ## Mixed-batch scheduling (high concurrency)
 
-A serving loop wastes the GPU in two places, and MBufo fixes both. First, decode
-tick-tocks against prefill: a decode row sits idle while a whole prefill chunk
-runs. Second, upstream's batch caps at 8 sessions / 8 rows, so concurrency has a
-hard ceiling no matter how much memory is free.
+Concurrency is not one number. Two properties decide whether a loaded server is
+actually usable, and MBufo is built around both:
 
-- **One batch, one attention kernel.** One decode row plus N prefill-chunk rows
-  share a single `ForwardBatch` and one mixed attention kernel, replacing
-  per-item attention. This removes the decode/prefill idle alternation at low
-  concurrency: 2.1x on small batches, 5.3 s vs 6.3 s measured at the serving
-  layer.
-- **32-session envelope.** `ForwardBatch` grows from 8 sessions / 8 rows to 32
-  sessions / 1024 rows, fixing three hard caps along the way (GDN, MoE, logits
-  buffer). 16 concurrent requests hold 99% GPU utilization with all outputs
-  correct and zero errors.
-- **Serve batching.** The scheduler merges prefill chunks with ordinary decode
-  into one batch (`TryStepMixedBatch`). Every layer can degrade independently;
-  any step that refuses falls back to the old dual path.
-- **MTP parity for batched work.** Chunks entering the mixed batch get their
-  predictor-KV (frontier check plus tail) so they behave like a single forward.
-  A layer that cannot serve a speculative row degrades that row to the original
-  path: correct, just not accelerated. The default MTP draft depth is 5 (the
-  loader caps Flash-Next at 7); depth 5 matches 7 on decode and leads it by
-  5–6 tok/s on greedy workloads.
-- **Scheduling, not semantics.** Mixed batching changes when work runs, never
-  what the model computes. It is on by default; set `GUFO_MIXED_BATCH=0` to
-  restore upstream behavior exactly.
+- **ITL (inter-token latency)** — once a request is streaming, the gap between
+  its tokens. A server that batches efficiently but freezes a stream for a whole
+  prefill step is not serving, it is queueing with extra steps.
+- **Fairness** — no session, client or prompt may starve another. A 250K-token
+  prompt arriving mid-conversation must not buy itself a bigger share of the
+  device than sixteen short chats.
+
+Upstream's scheduler already has the right shape: a prefill chunk is bounded
+(`--prefill-chunk`), a due decoder is served before more prefill, and admission
+is capped per client. What it lacks is the device time to honour all three
+cheaply. A bounded chunk still costs a full tick in which **no** decoder
+produces a token, because the chunk and the decodes are two separate passes over
+the weights. That tick is exactly where ITL and fairness leak: every cycle a
+streaming request pays a prefill step it does not benefit from.
+
+MBufo merges them — the chunk rides the same `ForwardBatch` and the same
+attention kernel as the decode rows — so a prefill tick also emits every token
+that is due. The fairness policy is not bypassed by the merge; it is what makes
+the merge safe.
+
+### What the scheduler guarantees
+
+| Guarantee | Mechanism |
+| --- | --- |
+| A due decoder is never queued behind prefill | The merged step is entered only when no decoder is due (or while assembling a first batch), so prefill runs in the gaps and never ahead of a streaming request. |
+| A chunk cannot push a decoder out of the rotation | `MarkAllDecodersDue` re-arms every resident decoder after each merged or prefill step; the following step serves all of them. |
+| No prompt can monopolize the device | The chunk is a bounded slice (`--prefill-chunk`, 512 tokens by default), so a 250K-token prompt is fed one slice per cycle. |
+| Equal sessions take turns | The decode queue rotates (`PopDecoder` moves a served request to the back) instead of fixing a head-of-line order, so no session keeps winning the front slot. |
+| One client cannot fill the queue | `--max-pending-per-client` caps a client's pending requests (`client_quota` refusal), and dequeue round-robins across clients, so a burst from one client cannot starve another. |
+| A layer that refuses loses nothing | Every layer degrades independently; a refused speculative row falls back to the original path — correct, just not accelerated. |
+
+### What it buys
 
 | Measurement | Result |
 | --- | --- |
-| Small-batch serving, mixed batch vs upstream dual path | 5.3 s vs 6.3 s (2.1x) |
+| Token gap for a streaming request, 5-row batch | 121 ms as two passes → **57 ms** merged (**2.1x**): the gap is now one weight pass, not two |
+| 16-way sustained serving, 3 rounds | **15.3 s mean vs 17.0 s** with the merge off (rounds 14/17/15 vs 15/16/20), tail latency observed to improve |
+| 4-way mixed-prompt A/B | **5.3 s vs 6.3 s**, the merge won every round, outputs exact |
 | 16 concurrent requests | 99% GPU utilization, all outputs correct, zero errors |
-| Batch envelope | 32 sessions / 1024 rows |
-| Escape hatch | `GUFO_MIXED_BATCH=0` restores upstream behavior exactly |
+| Batch envelope | 32 sessions / 1024 rows (upstream: 8 / 8 — three hard caps fixed: GDN, MoE, logits) |
 
-Design invariants, the validation matrix and per-step measurements live in
-[docs/MIXED_BATCH.md](docs/MIXED_BATCH.md).
+One caveat, stated up front: at 66 rows a merged step costs 316 ms against
+247 ms for the two separate passes, because batch-MoE falls to the memory-bound
+vec path there. The end-to-end numbers above still win at serving concurrency —
+one weight pass per cycle instead of two — but the large-batch FLOP side is
+tracked separately.
+
+Mixed batching changes when work runs, never what the model computes. It is on
+by default; `GUFO_MIXED_BATCH=0` restores upstream scheduling exactly, tick-tock
+included. Design invariants, the validation matrix and per-step measurements
+live in [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md).
 
 ## Low-bit KV cache
 
