@@ -1,30 +1,130 @@
 # MBufo
 
-A [gufo](https://github.com/gufo-org/gufo) fork for AMD Strix Halo, focused on
-**low-precision KV caching** and **performance tuning**.
+A [gufo](https://github.com/gufo-org/gufo) fork for AMD Strix Halo, built around
+two things: **high-concurrency mixed-batch scheduling** and a **low-bit KV
+cache**.
 
 > [繁體中文版本](README.zh-Hant.md)
 
-MBufo keeps the upstream engine intact and changes two things: how much
-precision the KV cache uses, and how hard the chip works under concurrent load.
-Upstream gufo owns single-stream peak performance; MBufo adds low-precision KV
-formats — with a measured, not assumed, quality cost — and the tuning that keeps
-the GPU saturated across many concurrent requests without changing model
-semantics. The base engine, kernels and the bulk of the code come from the
-upstream open source project; thanks to gufo-org and all contributors.
+Upstream gufo owns single-stream peak performance. MBufo asks the serving
+question instead: what does one Strix Halo node do with sixteen requests at
+once, and how much context can each of them hold? Those are the only two
+subsystems this fork changes. The engine, kernels and the bulk of the code are
+upstream's; thanks to gufo-org and all contributors.
+
+| Pillar | What changes | What you get |
+| --- | --- | --- |
+| **Mixed-batch scheduling** | Decode rows and prefill chunks share one `ForwardBatch` and one attention kernel; the batch envelope grows to 32 sessions / 1024 rows. | 2.1x on small batches (5.3 s vs 6.3 s at the serving layer); 16 concurrent requests at 99% GPU with zero errors. |
+| **Low-bit KV cache** | The blocked Q8 path becomes a format + codec abstraction, with 4-bit 18-byte blocks on the K and V axes independently. | 3.42 GB instead of 6.44 GB for a 262144-token session, 1.81 GB at K4V4 — quality cost measured, not assumed. |
+
+Mixed batching is on by default. The KV cache defaults to `f16`; `q8` is a
+one-flag opt-in. Neither changes model semantics.
 
 Target hardware: Ryzen AI MAX+ 395 / Radeon 8060S (`gfx1151`), up to 128 GiB
 unified memory. Model focus: Qwen3.8 Flash-Next and Qwen3.8 27B.
 
-## What MBufo adds
+**Contents:** [Quickstart](#quickstart) ·
+[Mixed-batch scheduling](#mixed-batch-scheduling-high-concurrency) ·
+[Low-bit KV cache](#low-bit-kv-cache) ·
+[Kernel-level speedups](#kernel-level-speedups) ·
+[Serving presets](#recommended-serving-settings) ·
+[Benchmark](#benchmark-mbufo-v0241-gfx1151-strix-halo) ·
+[Upstream tracking](#upstream-tracking) ·
+[Build](#build-from-source) · [Docs](#documentation-index) ·
+[Limits](#compatibility-and-limits)
 
-### Low-precision KV cache
+## Quickstart
+
+Start Qwen3.8 Flash-Next with the recommended cache settings:
+
+```sh
+./build/release/gufo serve llm \
+  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
+  --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
+  --speculative mtp --think off \
+  --served-model-name gufo-qwen3.8-flash-next \
+  --sessions 2 -c 262144 --kv-quant q8
+```
+
+Ask it something through the OpenAI-compatible API:
+
+```sh
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gufo-qwen3.8-flash-next",
+    "messages": [{"role": "user", "content": "Say something"}]
+  }'
+```
+
+For Open WebUI, VS Code, OpenAI SDK and Responses-API clients, point the base
+URL at `http://localhost:8080/v1`. Chat Completions and Responses support text,
+images, function tools, structured output and streaming; see the
+[API contract](docs/SERVER.md).
+
+### Recommended serving settings
+
+| Goal | Setting |
+| --- | --- |
+| 16 streams, high concurrency | `--sessions 16 -c 65536 --kv-quant q8` (about 103 GB; 20 GB left) |
+| 8 streams, long context | `--sessions 8 -c 131072 --kv-quant q8` (about 101 GB; 21 GB left) |
+| Single stream, max context | `--sessions 1 -c 262144 --kv-quant q8` |
+| Restore upstream scheduling | env `GUFO_MIXED_BATCH=0` |
+
+Sessions times context is what the loader bounds, not context alone. On a
+128 GB Strix Halo with the blocked Q8 cache and 4-bit value rows, eight streams
+can even hold 192K each (`-c 196608`, 107 GB) if you want the reach and can live
+with 16 GB of headroom, while `-c 98304` at sixteen streams is refused with
+`text runner request-state claim exceeds state capacity`. Measurements use
+UD-Q4_K_XL plus the MTP Q8_0 sidecar and BF16 mmproj, so the old 32K cap no
+longer applies.
+
+## Mixed-batch scheduling (high concurrency)
+
+A serving loop wastes the GPU in two places, and MBufo fixes both. First, decode
+tick-tocks against prefill: a decode row sits idle while a whole prefill chunk
+runs. Second, upstream's batch caps at 8 sessions / 8 rows, so concurrency has a
+hard ceiling no matter how much memory is free.
+
+- **One batch, one attention kernel.** One decode row plus N prefill-chunk rows
+  share a single `ForwardBatch` and one mixed attention kernel, replacing
+  per-item attention. This removes the decode/prefill idle alternation at low
+  concurrency: 2.1x on small batches, 5.3 s vs 6.3 s measured at the serving
+  layer.
+- **32-session envelope.** `ForwardBatch` grows from 8 sessions / 8 rows to 32
+  sessions / 1024 rows, fixing three hard caps along the way (GDN, MoE, logits
+  buffer). 16 concurrent requests hold 99% GPU utilization with all outputs
+  correct and zero errors.
+- **Serve batching.** The scheduler merges prefill chunks with ordinary decode
+  into one batch (`TryStepMixedBatch`). Every layer can degrade independently;
+  any step that refuses falls back to the old dual path.
+- **MTP parity for batched work.** Chunks entering the mixed batch get their
+  predictor-KV (frontier check plus tail) so they behave like a single forward.
+  A layer that cannot serve a speculative row degrades that row to the original
+  path: correct, just not accelerated. The default MTP draft depth is 5 (the
+  loader caps Flash-Next at 7); depth 5 matches 7 on decode and leads it by
+  5–6 tok/s on greedy workloads.
+- **Scheduling, not semantics.** Mixed batching changes when work runs, never
+  what the model computes. It is on by default; set `GUFO_MIXED_BATCH=0` to
+  restore upstream behavior exactly.
+
+| Measurement | Result |
+| --- | --- |
+| Small-batch serving, mixed batch vs upstream dual path | 5.3 s vs 6.3 s (2.1x) |
+| 16 concurrent requests | 99% GPU utilization, all outputs correct, zero errors |
+| Batch envelope | 32 sessions / 1024 rows |
+| Escape hatch | `GUFO_MIXED_BATCH=0` restores upstream behavior exactly |
+
+Design invariants, the validation matrix and per-step measurements live in
+[docs/MIXED_BATCH.md](docs/MIXED_BATCH.md).
+
+## Low-bit KV cache
 
 The upstream blocked Q8 KV path is generalized into a format + codec
-abstraction, and both the key and value axes can
-be compressed further to 4-bit 18-byte packed blocks (18 bytes per 32
-elements). The two axes are selected independently, so K8V8, K4V8, K8V4 and
-K4V4 are all reachable.
+abstraction, and both the key and value axes can be compressed further to 4-bit
+18-byte packed blocks (18 bytes per 32 elements). The two axes are selected
+independently, so K8V8, K4V8, K8V4 and K4V4 are all reachable.
 
 | Mode | Status | Notes |
 | --- | --- | --- |
@@ -34,13 +134,14 @@ K4V4 are all reachable.
 | `q8` + `GUFO_KV_Q4=1` | manual, K4V8 | 4-bit key packed to 18 bytes, value stays 8-bit. |
 | `q8` + both | manual, K4V4 | key and value both 4-bit. |
 
-**Use `q8`.** The blocked mode is bit-exact at the codec level; `f16` remains the default and baseline. The
-4-bit paths are environment-variable hooks for machines where KV memory is the
-bottleneck, not `--kv-quant` format options, and they change no default — with
-them unset the engine is bit-identical to a build without these paths (verified
-by logit-dump hash comparison). Full details in [docs/KV-V4.md](docs/KV-V4.md).
+**Use `q8`.** The blocked mode is bit-exact at the codec level; `f16` remains
+the default and baseline. The 4-bit paths are environment-variable hooks for
+machines where KV memory is the bottleneck, not `--kv-quant` format options, and
+they change no default — with them unset the engine is bit-identical to a build
+without these paths (verified by logit-dump hash comparison). Full details in
+[docs/KV-V4.md](docs/KV-V4.md).
 
-#### Correctness first
+### Footprint
 
 Bytes per KV position, and the total for one session at `-c 262144` across
 Qwen3.8 Flash-Next's 12 attention layers:
@@ -51,6 +152,8 @@ Qwen3.8 Flash-Next's 12 attention layers:
 | `q8` | 1088 | 3.42 GB |
 | K8V4 / K4V8 | 832 | 2.62 GB |
 | K4V4 | 576 | 1.81 GB |
+
+### What it costs
 
 Correctness vs the `q8` baseline: three independent 400-token contexts, 98
 matched-token decode steps each, averaged over the three contexts:
@@ -91,7 +194,10 @@ of the pre-existing blocked-KV design, not of the 4-bit blocks, and is
 tracked separately; layering 4-bit blocks on top only widens the gap, it does
 not stack gracefully.
 
-### Performance tuning
+## Kernel-level speedups
+
+These lift single-stream and batched throughput alike; none of them change
+model semantics.
 
 - **ROCmFP4-FAST experts on the fp16 WMMA core.** The 4.25 bpw
   `Q4_0_ROCMFP4_FAST` down experts now decode through the same fp16 WMMA
@@ -110,27 +216,64 @@ not stack gracefully.
 - **Wide prefill for every pass.** The wide prefill routes (fused projections,
   paired routed expert tiles, WMMA attention) apply to every prefill pass wider
   than a vector batch, not just 1024+ tokens.
-- **Mixed-batch attention.** One decode row plus N prefill-chunk rows share a
-  single `ForwardBatch` and one mixed attention kernel, replacing per-item
-  attention. This removes the decode/prefill idle alternation at low
-  concurrency: 2.1x on small batches, 5.3 s vs 6.3 s measured at the serving
-  layer.
-- **32-session envelope.** `ForwardBatch` grows from 8 sessions / 8 rows to
-  32 sessions / 1024 rows, fixing three hard caps along the way (GDN, MoE,
-  logits buffer). 16 concurrent requests hold 99% GPU utilization with all
-  outputs correct and zero errors.
-- **MTP parity for batched work.** Chunks entering the mixed batch get their
-  predictor-KV (frontier check plus tail) so they behave like a single forward.
-  A layer that cannot serve a speculative row degrades that row to the original
-  path: correct, just not accelerated. The default MTP draft depth is 5 (the
-  loader caps Flash-Next at 7); depth 5 matches 7 on decode and leads it by
-  5–6 tok/s on greedy workloads.
-- **Serve batching.** The scheduler merges prefill chunks with ordinary decode
-  into one batch (`TryStepMixedBatch`). Every layer can degrade independently;
-  any step that refuses falls back to the old dual path.
 
-Mixed batching is on by default. Set `GUFO_MIXED_BATCH=0` to restore upstream
-behavior exactly.
+## Benchmark (MBufo v0.24.1, gfx1151 Strix Halo)
+
+Cold KV (unique prompt per request, `cached_tokens≈0`), think off, **F16 KV**,
+`-j 1`, ctx 262144. Four configs: 27B (UD-Q4_K_XL vs ROCmFP4-FAST) + Flash-Next
+(ROCmFP4-FAST vs UD-Q4_K_XL). Speculative: 27B = DFlash2, Flash-Next = MTP.
+
+These are single-stream numbers: they isolate the model and build choice. What
+changes under load is how many of them run at once, which is the
+[mixed-batch](#mixed-batch-scheduling-high-concurrency) story.
+
+### Prefill (tok/s, higher is better)
+
+| tokens | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+|---:|---:|---:|---:|---:|
+| 2K | 544 | 432 | **1739** | 1301 |
+| 8K | 568 | 534 | **1701** | 1549 |
+| 32K | 526 | 517 | 1598 | **1618** |
+| 128K | 385 | 382 | **1504** | 1507 |
+| 250K | — | — | **1438** | 1415 |
+
+> 27B ROCmFP4-**FAST** prefill ≈ the non-FAST STRIX build — single-scale only
+> changes the codebook, not the fp16-WMMA prefill engine (432/534/517/382 vs
+> 483/523/520/383). FAST's real speed comes from the int8-MMQ consumer path,
+> which is wired for Flash-Next's MoE experts, not the dense 27B.
+
+### Decode (tok/s, speculative on)
+
+Standard: 5 cold-KV scenarios (temp labelled) + an 8-task ReAct agent suite.
+
+| scenario | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+|---|---:|---:|---:|---:|
+| prose (temp 0.4) | 21.8 | 21.4 | **45.0** | 43.6 |
+| fibonacci (temp 0.4) | 68.7 | 60.6 | **87.0** | 75.5 |
+| json (temp 0) | 55.7 | 48.1 | **55.8** | 51.6 |
+| greedy code /128 (temp 0) | 62.4 | 57.4 | 69.9 | **71.8** |
+| repeat text /256 (temp 0) | 71.1 | 62.0 | **74.9** | 74.5 |
+
+### Agentic (agent_bench_v2, t1–t8, sandboxed tools)
+
+| | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+|---|---:|---:|---:|---:|
+| passed | 8/8 | 8/8 | 8/8 | 7/8 |
+| nuclear (must be 0) | 0 | 0 | 0 | 0 |
+| gen tps range | 9.4–32.4 | 10.7–21.0 | 21.4–57.4 | 31.8–53.5 |
+
+### Recommended build per model
+
+- **Qwen 3.8 27B → UD-Q4_K_XL.** FP4-FAST wins the FP4 family (all 5 decode
+  scenarios + 8/8 agentic vs STRIX's 7/8), but single-scale FP4 still loses
+  decode and draft-acceptance to Q4_K_XL, so Q4_K_XL is the best 27B build.
+- **Qwen 3.8 Flash-Next → ROCmFP4.** Fastest decode (prose 45.0, fibonacci 87.0),
+  8/8 agentic, and ~94 GB vs Q4_K_XL's ~111 GB — ROCmFP4 is the best Flash-Next
+  build.
+
+> 27B ROCmFP4 decode is the **post-v0.24.1-fix** figure: before the fix, DFlash2
+> verify fell to a per-row GEMV loop and collapsed; after, FAST matches non-FAST
+> and edges it.
 
 ## Upstream tracking
 
@@ -148,53 +291,6 @@ so they can never collide with an upstream `vX.Y.Z`.
 When upstream ships a new release, the "upstream base release" row is updated in
 the same commit that merges it, so this README always states exactly which
 upstream state this tree contains.
-
-## Quickstart
-
-Start Qwen3.8 Flash-Next with the recommended cache settings:
-
-```sh
-./build/release/gufo serve llm \
-  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
-  --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
-  --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
-  --speculative mtp --think off \
-  --served-model-name gufo-qwen3.8-flash-next \
-  --sessions 2 -c 262144 --kv-quant q8
-```
-
-Ask it something through the OpenAI-compatible API:
-
-```sh
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gufo-qwen3.8-flash-next",
-    "messages": [{"role": "user", "content": "Say something"}]
-  }'
-```
-
-For Open WebUI, VS Code, OpenAI SDK and Responses-API clients, point the base
-URL at `http://localhost:8080/v1`. Chat Completions and Responses support text,
-images, function tools, structured output and streaming; see the
-[API contract](docs/SERVER.md).
-
-### Recommended serving settings
-
-| Goal | Setting |
-| --- | --- |
-| Single stream, max context | `--sessions 1 -c 262144 --kv-quant q8` |
-| 8 streams, long context | `--sessions 8 -c 131072 --kv-quant q8` (about 101 GB; 21 GB left) |
-| 16 streams, high concurrency | `--sessions 16 -c 65536 --kv-quant q8` (about 103 GB; 20 GB left) |
-| Restore upstream scheduling | env `GUFO_MIXED_BATCH=0` |
-
-Sessions times context is what the loader bounds, not context alone. On a
-128 GB Strix Halo with the blocked Q8 cache and 4-bit value rows, eight streams
-can even hold 192K each (`-c 196608`, 107 GB) if you want the reach and can live
-with 16 GB of headroom, while `-c 98304` at sixteen streams is refused with
-`text runner request-state claim exceeds state capacity`. Measurements use
-UD-Q4_K_XL plus the MTP Q8_0 sidecar and BF16 mmproj, so the old 32K cap no
-longer applies.
 
 ## Build from source
 
@@ -252,58 +348,3 @@ and remain under their publishers' terms.
 MBufo is a fork of [gufo](https://github.com/gufo-org/gufo) (by gufo-org and
 contributors). The low-precision KV and performance work builds on upstream's
 Q8 KV cache, int8 WMMA, persistence and history-drafting changes.
-
-
-## Benchmark（MBufo v0.24.1，gfx1151 Strix Halo）
-
-Cold KV (unique prompt per request, `cached_tokens≈0`), think off, **F16 KV**,
-`-j 1`, ctx 262144. Four configs: 27B (UD-Q4_K_XL vs ROCmFP4-FAST) + Flash-Next
-(ROCmFP4-FAST vs UD-Q4_K_XL). Speculative: 27B = DFlash2, Flash-Next = MTP.
-
-### Prefill (tok/s, higher is better)
-
-| tokens | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
-|---:|---:|---:|---:|---:|
-| 2K | 544 | 432 | **1739** | 1301 |
-| 8K | 568 | 534 | **1701** | 1549 |
-| 32K | 526 | 517 | 1598 | **1618** |
-| 128K | 385 | 382 | **1504** | 1507 |
-| 250K | — | — | **1438** | 1415 |
-
-> 27B ROCmFP4-**FAST** prefill ≈ the non-FAST STRIX build — single-scale only
-> changes the codebook, not the fp16-WMMA prefill engine (432/534/517/382 vs
-> 483/523/520/383). FAST's real speed comes from the int8-MMQ consumer path,
-> which is wired for Flash-Next's MoE experts, not the dense 27B.
-
-### Decode (tok/s, speculative on)
-
-Standard: 5 cold-KV scenarios (temp labelled) + an 8-task ReAct agent suite.
-
-| scenario | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
-|---|---:|---:|---:|---:|
-| prose (temp 0.4) | 21.8 | 21.4 | **45.0** | 43.6 |
-| fibonacci (temp 0.4) | 68.7 | 60.6 | **87.0** | 75.5 |
-| json (temp 0) | 55.7 | 48.1 | **55.8** | 51.6 |
-| greedy code /128 (temp 0) | 62.4 | 57.4 | 69.9 | **71.8** |
-| repeat text /256 (temp 0) | 71.1 | 62.0 | **74.9** | 74.5 |
-
-### Agentic (agent_bench_v2, t1–t8, sandboxed tools)
-
-| | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
-|---|---:|---:|---:|---:|
-| passed | 8/8 | 8/8 | 8/8 | 7/8 |
-| nuclear (must be 0) | 0 | 0 | 0 | 0 |
-| gen tps range | 9.4–32.4 | 10.7–21.0 | 21.4–57.4 | 31.8–53.5 |
-
-### Recommended build per model
-
-- **Qwen 3.8 27B → UD-Q4_K_XL.** FP4-FAST wins the FP4 family (all 5 decode
-  scenarios + 8/8 agentic vs STRIX's 7/8), but single-scale FP4 still loses
-  decode and draft-acceptance to Q4_K_XL, so Q4_K_XL is the best 27B build.
-- **Qwen 3.8 Flash-Next → ROCmFP4.** Fastest decode (prose 45.0, fibonacci 87.0),
-  8/8 agentic, and ~94 GB vs Q4_K_XL's ~111 GB — ROCmFP4 is the best Flash-Next
-  build.
-
-> 27B ROCmFP4 decode is the **post-v0.24.1-fix** figure: before the fix, DFlash2
-> verify fell to a per-row GEMV loop and collapsed; after, FAST matches non-FAST
-> and edges it.

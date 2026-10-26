@@ -1,135 +1,34 @@
 # MBufo
 
-專為 AMD Strix Halo 打造的 [gufo](https://github.com/gufo-org/gufo) 分支，
-焦點是**低精度 KV 快取**與**性能調優**。
+專為 AMD Strix Halo 打造的 [gufo](https://github.com/gufo-org/gufo) 分支，聚焦
+兩件事：**高併發混合批次排程**與**低位元 KV 快取**。
 
 > [English version](README.md)
 
-MBufo 保留上游引擎原貌，只改動兩件事：KV 快取用多少精度，以及多路併發時晶片
-到底有多忙。上游 gufo 負責單路的極限效能；MBufo 加入低精度 KV 格式——代價是
-**量出來**的、不是假設的——以及讓 GPU 在多路負載下持續打滿、且不改變模型輸出
-語意的調優。底層引擎、核心與絕大部分程式碼都來自上游開源專案，在此致謝
-gufo-org 及所有貢獻者。
+上游 gufo 負責單路極限效能；MBufo 改問服務端的問題：一台 Strix Halo 節點同時
+面對十六路請求時能跑多滿，每一路又能吃多長的上下文？本分支只動這兩個子系統。
+底層引擎、核心與絕大部分程式碼都來自上游，在此致謝 gufo-org 及所有貢獻者。
+
+| 主軸 | 改了什麼 | 換到什麼 |
+| --- | --- | --- |
+| **混合批次排程** | decode 列與 prefill chunk 共用同一個 `ForwardBatch` 與同一個注意力核心；批次封裝放大到 32 session / 1024 列。 | 小批次 2.1 倍（服務層 5.3 秒對 6.3 秒）；16 路併發 GPU 使用率 99%，零錯誤。 |
+| **低位元 KV 快取** | 上游 blocked Q8 路徑泛化成「格式＋編解碼器」抽象，K、V 兩軸可各自壓成 4-bit 18-byte 區塊。 | 262144 token 的 session 從 6.44 GB 降到 3.42 GB，K4V4 為 1.81 GB——代價是量出來的，不是假設的。 |
+
+混合批次預設開啟；KV 快取預設 `f16`，`q8` 是一個參數就能開。兩者都不改變模型
+語意。
 
 目標硬體：Ryzen AI MAX+ 395 / Radeon 8060S（`gfx1151`），最高 128 GiB 統一
 記憶體。模型重心：Qwen3.8 Flash-Next 與 Qwen3.8 27B。
 
-## MBufo 帶來了什麼
-
-### 低精度 KV 快取
-
-上游的 blocked Q8 KV 路徑被泛化成「格式加編解碼器」抽象，
-且 key 與 value 兩軸都可再壓成 4-bit 的 18-byte 打包區塊（每 32 個元素 18
-位元組）。兩軸精度獨立選擇，因此 K8V8、K4V8、K8V4、K4V4 四種組合都可達成。
-
-| 模式 | 狀態 | 說明 |
-| --- | --- | --- |
-| `f16` | 預設 | 基準數值。KV 快取不做量化。 |
-| `q8` | 支援 | Blocked 8-bit，每 32 個元素配一個 f16 尺度（34 位元組）。 |
-| `q8` + `GUFO_KV_V4=1` | 手動開啟，K8V4 | 4-bit value 打包成 18 位元組，key 維持 8-bit。 |
-| `q8` + `GUFO_KV_Q4=1` | 手動開啟，K4V8 | 4-bit key 打包成 18 位元組，value 維持 8-bit。 |
-| `q8` + 兩者同時 | 手動開啟，K4V4 | key 與 value 都是 4-bit。 |
-
-**建議使用 `q8`。** blocked 模式在編解碼層級是位元精確的，
-實務上可互換；`f16` 仍是預設與基準。4-bit 路徑是給「KV 記憶體成為瓶頸」的
-機器手動開啟的環境變數鉤子，不是 `--kv-quant` 的格式選項，也不會改變任何預設
-值——未設定時引擎與不含這些路徑的版本位元相同（以 logit dump 雜湊比對驗證）。
-完整說明見 [docs/KV-V4.md](docs/KV-V4.md)。
-
-#### 正確性優先
-
-每個 KV 位置的位元組數，以及 `-c 262144`、Qwen3.8 Flash-Next 12 個注意力層下
-單一 session 的總量：
-
-| 模式 | 每位置位元組 | 262144 單一 session |
-| --- | --- | --- |
-| `f16` | 2048 | 6.44 GB |
-| `q8` | 1088 | 3.42 GB |
-| K8V4 / K4V8 | 832 | 2.62 GB |
-| K4V4 | 576 | 1.81 GB |
-
-以 `q8` 為基準的正確性：三個互不相關的 400-token 上下文、各 98 步
-matched-token decode、對三個上下文取平均：
-
-| 模式 | decode KL | decode 最大 KL | 貪婪 argmax 一致率 |
-| --- | --- | --- | --- |
-| K4V8 | 0.0214 | 0.258 | 90.5% |
-| K8V4 | 0.0209 | 0.120 | 93.2% |
-| K4V4 | 0.0335 | 0.411 | 89.8% |
-
-啟用比 `q8` 更窄的模式前，請先讀懂這張表：
-
-- **K4V8 與 K8V4 佔用的記憶體完全相同。** key 是 512 個元素，4-bit key 配
-  8-bit value 與 8-bit key 配 4-bit value 都落在 832 位元組。把精度從一軸搬到
-  另一軸換不到任何記憶體，卻要多付約 2.7 個百分點的貪婪一致率，所以 K4V8 沒有
-  用途。
-- **只有 K4V4 真的縮小佔用**，代價是 decode KL 多 60%、尾巴大 3.4 倍，大約每
-  十個貪婪決策就有一個改變。這是拿正確性換記憶體的明確交易，不是免費。
-- **不要用短 prefill 探針決定 KV 精度。** 在 33-token 的 prompt 上，K4V4 量到
-  的平均 KL 與 K8V4 相同（0.0274）。原因是兩軸的逐位置誤差幾乎不相關，同時
-  量化時會部分互相抵銷，小樣本會把傷害藏起來。只有多上下文、decode 階段的數字
-  能把這些模式排出正確順序。
-- 4-bit 區塊就是 GGML `q4_0` 的佈局（16 個打包 nibble 加一個 f16 尺度），K/V
-  分軸選精度在上游也已是 `--cache-type-k` / `--cache-type-v` 的既有功能。這顆
-  引擎特有的地方在於：兩軸都貫通 blocked kernel、混合批次路徑與 snapshot 身分，
-  而且代價是量出來的、不是假設的。
-
-`q8` 對照 CPU f16 基準：端到端偏差維持在 blocked-KV 設計範圍內，MTP draft 命中率維持在 57% 至 81% 區間，算術題與長文生成保持通順。
-
-必須直說的一點：這些 blocked 模式在貪婪解碼下與 `f16` 的分歧，都比單純用數值
-誤差能解釋的程度來得大。這是既有 blocked-KV 設計的性質，不是 4-bit
-區塊造成的，已另案追蹤；而在它之上再疊 4-bit 區塊，只會把差距放大，不會優雅
-地疊加。
-
-### 性能調優
-
-- **ROCmFP4-FAST 專家走 fp16 WMMA 核心。** 4.25 bpw 的 `Q4_0_ROCMFP4_FAST` down
-  專家現在與 Q4_K/Q8_0 專家共用同一條 fp16 WMMA routed-expert GEMM（perm codebook
-  LUT 餵進既有 Q8_0 反量化），FAST 模型的 MoE prefill 因此跑在矩陣核心上、不再掉
-  進通用 `mul_mat_q`。gfx1151 實測 FAST 模型 prefill 打平或勝過 UD-Q4_K_XL 基線
-  （1.9K／5K token 為 1564／1368 對 1556／1324 tok/s），decode 速度與 64k 工具
-  梯子正確性不變。
-- **int8 WMMA 直讀 prefill。** 單 session 的 causal prefill
-  （`WmmaCausalAttention`）現在直接讀 blocked int8 KV 快取，跳過 F16 staging
-  反量化。它覆蓋快取能持有的所有 KV 區塊佈局（K34/K18 x V34/V18，dense 與
-  sparse），且由與快取寫入端相同的格式/環境變數選取，因此任何佈局都不會被誤
-  讀。在 14K 單流 prefill 上比 scalar 路徑**快 30%**（1085 → 1408 tok/s）。
-
-- **每個 prefill pass 都走 wide 路徑。** wide prefill 路徑（融合投影、成對
-  routed expert tile、WMMA attention）適用於所有寬於一個 vector batch 的
-  prefill pass，不再只限 1024+ token。
-- **混合批次注意力（mixed-batch attention）。** 把 1 個 decode 列與 N 個
-  prefill-chunk 列裝進同一個 `ForwardBatch`，用單一混合注意力核心取代逐項注意
-  力。這消除了低併發時 decode / prefill 輪流空轉的現象：小批次 2.1 倍，服務層
-  實測 5.3 秒對比 6.3 秒。
-- **32 路封裝（32-session envelope）。** `ForwardBatch` 從 8 session / 8 列放大
-  到 32 session / 1024 列，過程中一併修掉三個硬上限（GDN、MoE、logits 緩衝）。
-  16 路併發實測 GPU 使用率穩定在 99%，輸出全數正確、零錯誤。
-- **批次化工作的 MTP 對等。** 進入混合批次的 chunk 會自動補上 predictor-KV
-  （frontier 檢查加上 tail），行為與單次 forward 一致。若某一層無法服務投機列，
-  該列會降級走原本的路徑：正確，只是沒有加速。MTP 預設 draft 深度為 5（loader
-  對 Flash-Next 上限 7）；深度 5 在 decode 上與 7 持平，在 greedy 各 workload
-  上領先 5–6 tok/s。
-- **Serve 併單。** 排程器把 prefill chunk 與一般 decode 合成一批
-  （`TryStepMixedBatch`）。每一層都可獨立降級，任何一步拒絕就退回舊的雙路徑。
-
-混合批次預設開啟。設定環境變數 `GUFO_MIXED_BATCH=0` 即可完全還原上游行為。
-
-## 上游追蹤
-
-MBufo 追隨上游 `main` 並以合併方式跟進，而不是分叉走自己的路。上游的 release
-標籤維持不可變；MBufo 的 release 標籤一律加上 `mbufo-vX.Y.Z` 前綴，因此永遠
-不會與上游的 `vX.Y.Z` 撞名。
-
-| 項目 | 值 |
-| --- | --- |
-| 上游倉庫 | [gufo-org/gufo](https://github.com/gufo-org/gufo) |
-| 上游基準 release | `v0.20.0` |
-| 已合併的上游 `main` | `0c03748a` — *chore(main): release 0.20.0*（2026-10-21） |
-| 合併策略 | 上游 `main` 以 `--no-ff` 合併；MBufo 專屬提交保持可辨識，上游歷史永不改寫 |
-
-上游發布新版本時，「上游基準 release」這一列會在合併它的同一個提交裡更新，
-因此本 README 永遠會標明這棵樹確切包含到上游的哪個狀態。
+**目錄：** [快速開始](#快速開始) ·
+[混合批次排程](#混合批次排程高併發) ·
+[低位元-kv-快取](#低位元-kv-快取) ·
+[核心層加速](#核心層加速) ·
+[服務設定建議](#建議的服務設定) ·
+[效能基準](#效能基準mbufo-v0241gfx1151-strix-halo) ·
+[上游追蹤](#上游追蹤) ·
+[建置](#從原始碼建置) · [文件](#文件索引) ·
+[限制](#相容性與限制)
 
 ## 快速開始
 
@@ -164,9 +63,9 @@ function tools、結構化輸出與串流；詳見[API 契約](docs/SERVER.md)�
 
 | 目標 | 設定 |
 | --- | --- |
-| 單路、最大上下文 | `--sessions 1 -c 262144 --kv-quant q8` |
-| 8 路、長對話 | `--sessions 8 -c 131072 --kv-quant q8`（約 101 GB，餘 21 GB） |
 | 16 路、高併發 | `--sessions 16 -c 65536 --kv-quant q8`（約 103 GB，餘 20 GB） |
+| 8 路、長對話 | `--sessions 8 -c 131072 --kv-quant q8`（約 101 GB，餘 21 GB） |
+| 單路、最大上下文 | `--sessions 1 -c 262144 --kv-quant q8` |
 | 還原上游排程 | 環境變數 `GUFO_MIXED_BATCH=0` |
 
 載入器限制的是「session 數 × 上下文」，不是單一上下文。在 128 GB Strix Halo
@@ -174,6 +73,195 @@ function tools、結構化輸出與串流；詳見[API 契約](docs/SERVER.md)�
 107 GB，只剩 16 GB 餘裕）；16 路拉到 96K 則會被
 `text runner request-state claim exceeds state capacity` 拒載。量測條件為
 UD-Q4_K_XL ＋ MTP Q8_0 sidecar ＋ BF16 mmproj，舊的 32K 上限已不成立。
+
+## 混合批次排程（高併發）
+
+服務迴圈有兩個地方在浪費 GPU，MBufo 兩處都修掉。第一，decode 與 prefill 互相
+敲鐘：一個 decode 列會空等整個 prefill chunk 跑完。第二，上游批次封頂在
+8 session / 8 列，不管記憶體剩多少，併發都有一個硬天花板。
+
+- **一次批次、一個注意力核心。** 1 個 decode 列加上 N 個 prefill-chunk 列裝進
+  同一個 `ForwardBatch`，用單一混合注意力核心取代逐項注意力。這消除了低併發時
+  decode / prefill 輪流空轉的現象：小批次 2.1 倍，服務層實測 5.3 秒對比
+  6.3 秒。
+- **32 路封裝（32-session envelope）。** `ForwardBatch` 從 8 session / 8 列放大
+  到 32 session / 1024 列，過程中一併修掉三個硬上限（GDN、MoE、logits 緩衝）。
+  16 路併發實測 GPU 使用率穩定在 99%，輸出全數正確、零錯誤。
+- **Serve 併單。** 排程器把 prefill chunk 與一般 decode 合成一批
+  （`TryStepMixedBatch`）。每一層都可獨立降級，任何一步拒絕就退回舊的雙路徑。
+- **批次化工作的 MTP 對等。** 進入混合批次的 chunk 會自動補上 predictor-KV
+  （frontier 檢查加上 tail），行為與單次 forward 一致。若某一層無法服務投機列，
+  該列會降級走原本的路徑：正確，只是沒有加速。MTP 預設 draft 深度為 5（loader
+  對 Flash-Next 上限 7）；深度 5 在 decode 上與 7 持平，在 greedy 各 workload
+  上領先 5–6 tok/s。
+- **改的是排程，不是語意。** 混合批次改變的是工作何時跑，不是模型算出什麼。
+  它預設開啟；設定 `GUFO_MIXED_BATCH=0` 即可完全還原上游行為。
+
+| 量測項 | 結果 |
+| --- | --- |
+| 小批次服務，混合批次對上游雙路徑 | 5.3 秒 對 6.3 秒（2.1 倍） |
+| 16 路併發 | GPU 使用率 99%，輸出全數正確，零錯誤 |
+| 批次封裝 | 32 session / 1024 列 |
+| 逃生門 | `GUFO_MIXED_BATCH=0` 完全還原上游行為 |
+
+設計鐵律、驗證矩陣與逐階段量測見
+[docs/MIXED_BATCH.md](docs/MIXED_BATCH.md)。
+
+## 低位元 KV 快取
+
+上游的 blocked Q8 KV 路徑被泛化成「格式加編解碼器」抽象，且 key 與 value 兩軸
+都可再壓成 4-bit 的 18-byte 打包區塊（每 32 個元素 18 位元組）。兩軸精度獨立
+選擇，因此 K8V8、K4V8、K8V4、K4V4 四種組合都可達成。
+
+| 模式 | 狀態 | 說明 |
+| --- | --- | --- |
+| `f16` | 預設 | 基準數值。KV 快取不做量化。 |
+| `q8` | 支援 | Blocked 8-bit，每 32 個元素配一個 f16 尺度（34 位元組）。 |
+| `q8` + `GUFO_KV_V4=1` | 手動開啟，K8V4 | 4-bit value 打包成 18 位元組，key 維持 8-bit。 |
+| `q8` + `GUFO_KV_Q4=1` | 手動開啟，K4V8 | 4-bit key 打包成 18 位元組，value 維持 8-bit。 |
+| `q8` + 兩者同時 | 手動開啟，K4V4 | key 與 value 都是 4-bit。 |
+
+**建議使用 `q8`。** blocked 模式在編解碼層級是位元精確的，實務上可互換；
+`f16` 仍是預設與基準。4-bit 路徑是給「KV 記憶體成為瓶頸」的機器手動開啟的環境
+變數鉤子，不是 `--kv-quant` 的格式選項，也不會改變任何預設值——未設定時引擎與
+不含這些路徑的版本位元相同（以 logit dump 雜湊比對驗證）。完整說明見
+[docs/KV-V4.md](docs/KV-V4.md)。
+
+### 佔用
+
+每個 KV 位置的位元組數，以及 `-c 262144`、Qwen3.8 Flash-Next 12 個注意力層下
+單一 session 的總量：
+
+| 模式 | 每位置位元組 | 262144 單一 session |
+| --- | --- | --- |
+| `f16` | 2048 | 6.44 GB |
+| `q8` | 1088 | 3.42 GB |
+| K8V4 / K4V8 | 832 | 2.62 GB |
+| K4V4 | 576 | 1.81 GB |
+
+### 代價（量出來的）
+
+以 `q8` 為基準的正確性：三個互不相關的 400-token 上下文、各 98 步
+matched-token decode、對三個上下文取平均：
+
+| 模式 | decode KL | decode 最大 KL | 貪婪 argmax 一致率 |
+| --- | --- | --- | --- |
+| K4V8 | 0.0214 | 0.258 | 90.5% |
+| K8V4 | 0.0209 | 0.120 | 93.2% |
+| K4V4 | 0.0335 | 0.411 | 89.8% |
+
+啟用比 `q8` 更窄的模式前，請先讀懂這張表：
+
+- **K4V8 與 K8V4 佔用的記憶體完全相同。** key 是 512 個元素，4-bit key 配
+  8-bit value 與 8-bit key 配 4-bit value 都落在 832 位元組。把精度從一軸搬到
+  另一軸換不到任何記憶體，卻要多付約 2.7 個百分點的貪婪一致率，所以 K4V8 沒有
+  用途。
+- **只有 K4V4 真的縮小佔用**，代價是 decode KL 多 60%、尾巴大 3.4 倍，大約每
+  十個貪婪決策就有一個改變。這是拿正確性換記憶體的明確交易，不是免費。
+- **不要用短 prefill 探針決定 KV 精度。** 在 33-token 的 prompt 上，K4V4 量到
+  的平均 KL 與 K8V4 相同（0.0274）。原因是兩軸的逐位置誤差幾乎不相關，同時
+  量化時會部分互相抵銷，小樣本會把傷害藏起來。只有多上下文、decode 階段的數字
+  能把這些模式排出正確順序。
+- 4-bit 區塊就是 GGML `q4_0` 的佈局（16 個打包 nibble 加一個 f16 尺度），K/V
+  分軸選精度在上游也已是 `--cache-type-k` / `--cache-type-v` 的既有功能。這顆
+  引擎特有的地方在於：兩軸都貫通 blocked kernel、混合批次路徑與 snapshot 身分，
+  而且代價是量出來的、不是假設的。
+
+`q8` 對照 CPU f16 基準：端到端偏差維持在 blocked-KV 設計範圍內，MTP draft 命中
+率維持在 57% 至 81% 區間，算術題與長文生成保持通順。
+
+必須直說的一點：這些 blocked 模式在貪婪解碼下與 `f16` 的分歧，都比單純用數值
+誤差能解釋的程度來得大。這是既有 blocked-KV 設計的性質，不是 4-bit 區塊造成
+的，已另案追蹤；而在它之上再疊 4-bit 區塊，只會把差距放大，不會優雅地疊加。
+
+## 核心層加速
+
+以下改動同時提升單路與批次吞吐，且都不改變模型語意。
+
+- **ROCmFP4-FAST 專家走 fp16 WMMA 核心。** 4.25 bpw 的 `Q4_0_ROCMFP4_FAST` down
+  專家現在與 Q4_K/Q8_0 專家共用同一條 fp16 WMMA routed-expert GEMM（perm codebook
+  LUT 餵進既有 Q8_0 反量化），FAST 模型的 MoE prefill 因此跑在矩陣核心上、不再掉
+  進通用 `mul_mat_q`。gfx1151 實測 FAST 模型 prefill 打平或勝過 UD-Q4_K_XL 基線
+  （1.9K／5K token 為 1564／1368 對 1556／1324 tok/s），decode 速度與 64k 工具
+  梯子正確性不變。
+- **int8 WMMA 直讀 prefill。** 單 session 的 causal prefill
+  （`WmmaCausalAttention`）現在直接讀 blocked int8 KV 快取，跳過 F16 staging
+  反量化。它覆蓋快取能持有的所有 KV 區塊佈局（K34/K18 x V34/V18，dense 與
+  sparse），且由與快取寫入端相同的格式/環境變數選取，因此任何佈局都不會被誤
+  讀。在 14K 單流 prefill 上比 scalar 路徑**快 30%**（1085 → 1408 tok/s）。
+- **每個 prefill pass 都走 wide 路徑。** wide prefill 路徑（融合投影、成對
+  routed expert tile、WMMA attention）適用於所有寬於一個 vector batch 的
+  prefill pass，不再只限 1024+ token。
+
+## 效能基準（MBufo v0.24.1，gfx1151 Strix Halo）
+
+冷 KV（每請求唯一 prompt，`cached_tokens≈0`）、think off、**F16 KV**、`-j 1`、
+ctx 262144。四組設定：27B（UD-Q4_K_XL 對 ROCmFP4-FAST）＋ Flash-Next（ROCmFP4-FAST
+對 UD-Q4_K_XL）。投機：27B＝DFlash2，Flash-Next＝MTP。
+
+這些是單流數字，用來隔離模型與建置版本的選擇；負載下改變的是同時能跑幾條，
+那是[混合批次](#混合批次排程高併發)的故事。
+
+### Prefill（tok/s，越高越好）
+
+| tokens | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+|---:|---:|---:|---:|---:|
+| 2K | 544 | 432 | **1739** | 1301 |
+| 8K | 568 | 534 | **1701** | 1549 |
+| 32K | 526 | 517 | 1598 | **1618** |
+| 128K | 385 | 382 | **1504** | 1507 |
+| 250K | — | — | **1438** | 1415 |
+
+> 27B ROCmFP4-**FAST** 的 prefill ≈ 非 FAST 的 STRIX 版——single-scale 只換 codebook，
+> 不換 fp16-WMMA prefill 引擎（432/534/517/382 對 483/523/520/383）。FAST 真正的速度
+> 來自 int8-MMQ 消費路徑，而那條路徑只餵給 Flash-Next 的 MoE experts，dense 27B 沒接。
+
+### Decode（tok/s，投機開）
+
+標準：5 個冷 KV 情境（標明 temp）＋ 8 任務 ReAct 代理套件。
+
+| 情境 | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+|---|---:|---:|---:|---:|
+| 散文 (temp 0.4) | 21.8 | 21.4 | **45.0** | 43.6 |
+| 費波那契 (temp 0.4) | 68.7 | 60.6 | **87.0** | 75.5 |
+| JSON 約束 (temp 0) | 55.7 | 48.1 | **55.8** | 51.6 |
+| 貪心程式碼 /128 (temp 0) | 62.4 | 57.4 | 69.9 | **71.8** |
+| 重複文本 /256 (temp 0) | 71.1 | 62.0 | **74.9** | 74.5 |
+
+### 代理任務（agent_bench_v2，t1–t8，沙箱工具）
+
+| | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+|---|---:|---:|---:|---:|
+| 通過 | 8/8 | 8/8 | 8/8 | 7/8 |
+| 核爆（須為 0） | 0 | 0 | 0 | 0 |
+| 生成 tps 區間 | 9.4–32.4 | 10.7–21.0 | 21.4–57.4 | 31.8–53.5 |
+
+### 各模型建議（目前最佳）
+
+- **Qwen 3.8 27B → 用 UD-Q4_K_XL。** FP4-FAST 在 FP4 家族內全勝（5 個 decode 情境
+  ＋代理 8/8，勝 STRIX 的 7/8），但 single-scale FP4 的 decode 與草稿接受率仍輸
+  Q4_K_XL，故 27B 以 Q4_K_XL 為最佳。
+- **Qwen 3.8 Flash-Next → 用 ROCmFP4。** decode 最快（散文 45.0、費波那契 87.0）、
+  代理 8/8，且 ~94 GB 比 Q4_K_XL 的 ~111 GB 更省，故 Flash-Next 以 ROCmFP4 為最佳。
+
+> 27B ROCmFP4 decode 為 **v0.24.1 修復後**數值：修復前開 DFlash2 因 verify 走逐行
+> GEMV 迴圈而崩速，修復後 FAST 追平並略勝非 FAST。
+
+## 上游追蹤
+
+MBufo 追隨上游 `main` 並以合併方式跟進，而不是分叉走自己的路。上游的 release
+標籤維持不可變；MBufo 的 release 標籤一律加上 `mbufo-vX.Y.Z` 前綴，因此永遠
+不會與上游的 `vX.Y.Z` 撞名。
+
+| 項目 | 值 |
+| --- | --- |
+| 上游倉庫 | [gufo-org/gufo](https://github.com/gufo-org/gufo) |
+| 上游基準 release | `v0.20.0` |
+| 已合併的上游 `main` | `0c03748a` — *chore(main): release 0.20.0*（2026-10-21） |
+| 合併策略 | 上游 `main` 以 `--no-ff` 合併；MBufo 專屬提交保持可辨識，上游歷史永不改寫 |
+
+上游發布新版本時，「上游基準 release」這一列會在合併它的同一個提交裡更新，
+因此本 README 永遠會標明這棵樹確切包含到上游的哪個狀態。
 
 ## 從原始碼建置
 
@@ -225,55 +313,3 @@ cmake --build --preset release --parallel 4
 MBufo 是 [gufo](https://github.com/gufo-org/gufo)（by gufo-org 及貢獻者）的
 分支。低精度 KV 與性能調優的工作建立在上游的 Q8 KV cache、int8 WMMA、
 persistence 與 history drafting 等改動之上。
-
-
-## 效能基準（MBufo v0.24.1，gfx1151 Strix Halo）
-
-冷 KV（每請求唯一 prompt，`cached_tokens≈0`）、think off、**F16 KV**、`-j 1`、
-ctx 262144。四組設定：27B（UD-Q4_K_XL 對 ROCmFP4-FAST）＋ Flash-Next（ROCmFP4-FAST
-對 UD-Q4_K_XL）。投機：27B＝DFlash2，Flash-Next＝MTP。
-
-### Prefill（tok/s，越高越好）
-
-| tokens | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
-|---:|---:|---:|---:|---:|
-| 2K | 544 | 432 | **1739** | 1301 |
-| 8K | 568 | 534 | **1701** | 1549 |
-| 32K | 526 | 517 | 1598 | **1618** |
-| 128K | 385 | 382 | **1504** | 1507 |
-| 250K | — | — | **1438** | 1415 |
-
-> 27B ROCmFP4-**FAST** 的 prefill ≈ 非 FAST 的 STRIX 版——single-scale 只換 codebook，
-> 不換 fp16-WMMA prefill 引擎（432/534/517/382 對 483/523/520/383）。FAST 真正的速度
-> 來自 int8-MMQ 消費路徑，而那條路徑只餵給 Flash-Next 的 MoE experts，dense 27B 沒接。
-
-### Decode（tok/s，投機開）
-
-標準：5 個冷 KV 情境（標明 temp）＋ 8 任務 ReAct 代理套件。
-
-| 情境 | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
-|---|---:|---:|---:|---:|
-| 散文 (temp 0.4) | 21.8 | 21.4 | **45.0** | 43.6 |
-| 費波那契 (temp 0.4) | 68.7 | 60.6 | **87.0** | 75.5 |
-| JSON 約束 (temp 0) | 55.7 | 48.1 | **55.8** | 51.6 |
-| 貪心程式碼 /128 (temp 0) | 62.4 | 57.4 | 69.9 | **71.8** |
-| 重複文本 /256 (temp 0) | 71.1 | 62.0 | **74.9** | 74.5 |
-
-### 代理任務（agent_bench_v2，t1–t8，沙箱工具）
-
-| | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
-|---|---:|---:|---:|---:|
-| 通過 | 8/8 | 8/8 | 8/8 | 7/8 |
-| 核爆（須為 0） | 0 | 0 | 0 | 0 |
-| 生成 tps 區間 | 9.4–32.4 | 10.7–21.0 | 21.4–57.4 | 31.8–53.5 |
-
-### 各模型建議（目前最佳）
-
-- **Qwen 3.8 27B → 用 UD-Q4_K_XL。** FP4-FAST 在 FP4 家族內全勝（5 個 decode 情境
-  ＋代理 8/8，勝 STRIX 的 7/8），但 single-scale FP4 的 decode 與草稿接受率仍輸
-  Q4_K_XL，故 27B 以 Q4_K_XL 為最佳。
-- **Qwen 3.8 Flash-Next → 用 ROCmFP4。** decode 最快（散文 45.0、費波那契 87.0）、
-  代理 8/8，且 ~94 GB 比 Q4_K_XL 的 ~111 GB 更省，故 Flash-Next 以 ROCmFP4 為最佳。
-
-> 27B ROCmFP4 decode 為 **v0.24.1 修復後**數值：修復前開 DFlash2 因 verify 走逐行
-> GEMV 迴圈而崩速，修復後 FAST 追平並略勝非 FAST。
