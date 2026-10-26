@@ -225,3 +225,35 @@ cmake --build --preset release --parallel 4
 MBufo 是 [gufo](https://github.com/gufo-org/gufo)（by gufo-org 及貢獻者）的
 分支。低精度 KV 與性能調優的工作建立在上游的 Q8 KV cache、int8 WMMA、
 persistence 與 history drafting 等改動之上。
+
+
+## 效能基準（MBufo v0.24.1，gfx1151 Strix Halo）
+
+冷 KV（每請求唯一 prompt，`cached_tokens≈0`）、temp 0、think off、**F16 KV**、
+`-j 1`。四組：27B（UD-Q4_K_XL vs ROCmFP4）＋ Flash-Next（ROCmFP4 vs UD-Q4_K_XL）。
+方法詳見 `docs`／測速方法紀錄。
+
+### Prefill（tok/s，越高越好）
+
+| tokens | 27B Q4_K_XL | 27B ROCmFP4 | FN ROCmFP4 | FN Q4_K_XL |
+|---:|---:|---:|---:|---:|
+| 2K | 544 | 483 | **1739** | 1301 |
+| 8K | 568 | 523 | **1701** | 1549 |
+| 32K | 526 | 520 | 1598 | **1618** |
+| 128K | 385 | 383 | **1504** | 1507 |
+| 250K | — | — | **1438** | 1415 |
+
+Flash-Next（MoE＋GDN）prefill 約為 27B dense 的 3 倍，並穩定到 250K tokens。
+
+### Decode（tok/s，投機開；27B=DFlash2，Flash-Next=MTP）
+
+| 情境 | 27B Q4_K_XL | 27B ROCmFP4 | FN ROCmFP4 | FN Q4_K_XL |
+|---|---:|---:|---:|---:|
+| short | 20.9 | 22.9 | 39.6 | **41.7** |
+| prose | 22.9 | 19.5 | **39.9** | 38.4 |
+| code | 57.0 | 56.2 | 68.1 | **69.6** |
+| json | 51.5 | 52.3 | 64.0 | **64.6** |
+
+> 27B ROCmFP4 decode 為 **v0.24.1 修復後**數值：修復前開 DFlash2 因 verify 走逐行
+> GEMV 迴圈僅 5.8／5.6／13.2／11.9，修復後回到與 Q4_K_XL 相當（+248–340%）。
+> 27B ROCmFP4 spec-off decode（13.2–13.8）本就略贏 Q4_K_XL（11.6–12.2）。
