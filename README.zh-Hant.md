@@ -30,6 +30,26 @@
 [建置](#從原始碼建置) · [文件](#文件索引) ·
 [限制](#相容性與限制)
 
+## 測速結果速覽
+
+兩組結果，皆於單一台 Strix Halo（gfx1151）、冷 KV、greedy。
+
+**單流（冷 KV）** — Qwen3.8 27B Q4_K_XL 與 Flash-Next ROCmFP4，一次一路：prefill
+與投機 decode 吞吐。完整表見[效能基準](#效能基準mbufo-v0241gfx1151-strix-halo)。
+
+**高併發三引擎（開 MTP）** — A Halogen · B gufo-upstream · C MBufo，1–4 路併發、
+同 harness、皆暖機。併發 1 / 2 / 3 / 4 的「總／每 session」decode TPS：
+
+| 引擎 | 總 TPS | 每 session TPS |
+| --- | --- | --- |
+| A Halogen | 85 / 84 / 71 / 88 | 85 / 43 / 24 / 22 |
+| B upstream | 61 / 84 / 110 / 125 | 61 / 42 / 37 / 33 |
+| C MBufo | 66 / 86 / 100 / 138 | 66 / 44 / 34 / 35 |
+
+A 單流峰值最高，但只在單獨執行時投機——一旦併發就關掉投機頭，每 session TPS 掉到
+~22。負載下 **C 擴展最佳**（線性到 138 TPS、每 session 最平）。完整方法與其餘面向
+（prefill、fairness、ITL）見 `高併發測速方法.md`。
+
 ## 快速開始
 
 以建議的快取設定啟動 Qwen3.8 Flash-Next：

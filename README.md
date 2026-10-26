@@ -33,6 +33,29 @@ unified memory. Model focus: Qwen3.8 Flash-Next and Qwen3.8 27B.
 [Build](#build-from-source) · [Docs](#documentation-index) ·
 [Limits](#compatibility-and-limits)
 
+## Benchmarks at a glance
+
+Two result sets, both on one Strix Halo (gfx1151), cold KV, greedy.
+
+**Single-stream (cold KV)** — Qwen3.8 27B Q4_K_XL and Flash-Next ROCmFP4, one
+request at a time: prefill and speculative-decode throughput. Full tables:
+[Benchmark](#benchmark-mbufo-v0241-gfx1151-strix-halo).
+
+**High-concurrency, three engines (MTP on)** — A Halogen · B gufo-upstream · C MBufo,
+1–4 concurrent streams, same harness, warmed up. Total / per-session decode TPS at
+concurrency 1 / 2 / 3 / 4:
+
+| Engine | total TPS | per-session TPS |
+| --- | --- | --- |
+| A Halogen | 85 / 84 / 71 / 88 | 85 / 43 / 24 / 22 |
+| B upstream | 61 / 84 / 110 / 125 | 61 / 42 / 37 / 33 |
+| C MBufo | 66 / 86 / 100 / 138 | 66 / 44 / 34 / 35 |
+
+A has the best single-stream peak but only speculates when running alone — under
+concurrency its draft head switches off and per-session TPS falls to ~22. Under load
+**C scales best** (linear to 138 TPS, flattest per-session). Full method and the other
+axes (prefill, fairness, ITL): `高併發測速方法.md`.
+
 ## Quickstart
 
 Start Qwen3.8 Flash-Next with the recommended cache settings:
