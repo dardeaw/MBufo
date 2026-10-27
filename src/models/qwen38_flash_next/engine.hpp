@@ -96,6 +96,11 @@ public:
   [[nodiscard]] std::uint32_t DecodeConcurrency() const noexcept {
     return options_.decode_concurrency;
   }
+  /// MTP confidence gate (GUFO_MTP_GATE_P, default 0 = off; >0 enables): a
+  /// draft chain stops extending once a position's top-1 candidate mass
+  /// falls below this. Pure speculation-depth policy; verification math
+  /// is untouched, so greedy output stays byte-identical.
+  [[nodiscard]] static float MtpConfidenceGate() noexcept;
   /// Blocked KV rows are byte-addressed 34-byte blocks; F16 rows are half.
   [[nodiscard]] bool KvCacheBlocked() const noexcept {
     return options_.kv_cache_quant != "f16";

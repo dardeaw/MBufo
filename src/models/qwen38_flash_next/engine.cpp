@@ -279,6 +279,17 @@ std::uint32_t Model::PrefillThroughCapacity() const noexcept {
                   options_.max_context);
 }
 
+float Model::MtpConfidenceGate() noexcept {
+  static const float gate = [] {
+    const char* e = std::getenv("GUFO_MTP_GATE_P");
+    // Default off: on ROCmFP4-FAST every gate 0.5..0.9 measured ~25%
+    // decode TPS regression (head top-1 mass is intrinsically low, so
+    // chains trim to 1-2 tokens while MTP overhead stays).
+    return e != nullptr ? std::strtof(e, nullptr) : 0.0F;
+  }();
+  return gate;
+}
+
 bool Model::KvKey4Bit() const noexcept {
   const char* value = std::getenv("GUFO_KV_Q4");
   return options_.kv_cache_quant == "q8" && value != nullptr &&
@@ -1108,6 +1119,21 @@ bool Session::PrepareDecode(const DecodeRequest& request,
       if (AppendLookup(*pending, stop_at_eos)) {
         break;
       }
+      // Confidence gate: stop at the first draft position the head is
+      // unsure about. Greedy chains read top-1 mass from candidates;
+      // sampled chains read the proposal probability.
+      if (const float gate = Model::MtpConfidenceGate(); gate > 0.0F) {
+        const float confidence =
+            sampled
+                ? (pending->proposals.empty()
+                       ? 1.0F
+                       : pending->proposals.back().probability)
+                : DraftConfidence(pending->candidates);
+        if (confidence < gate) {
+          pending->width = pending->chain.size();
+          break;
+        }
+      }
       if (pending->chain.size() < width &&
           !exec.MtpForward(
               *session_, std::span<const std::int32_t>(&pending->draft, 1), -1,
@@ -1555,6 +1581,16 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
       }
       if (session.AppendLookup(p, requests[i].stop_at_eos))
         continue;
+      if (const float gate = Model::MtpConfidenceGate(); gate > 0.0F) {
+        const float confidence =
+            p.sampled
+                ? (p.proposals.empty() ? 1.0F : p.proposals.back().probability)
+                : DraftConfidence(p.candidates);
+        if (confidence < gate) {
+          p.width = p.chain.size();
+          continue;
+        }
+      }
       if (p.chain.size() < p.width)
         bodies.push_back({requests[i].session->session_.get(),
                           std::span<const std::int32_t>(&p.draft, 1), -1});
@@ -1735,6 +1771,16 @@ bool Session::MixedBatchImpl(std::span<const DecodeRequest> requests,
           p.chain.size() >= p.width)
         continue;
       AppendDraft(p);
+      if (const float gate = Model::MtpConfidenceGate(); gate > 0.0F) {
+        const float confidence =
+            p.sampled
+                ? (p.proposals.empty() ? 1.0F : p.proposals.back().probability)
+                : DraftConfidence(p.candidates);
+        if (confidence < gate) {
+          p.width = p.chain.size();
+          continue;
+        }
+      }
       if (p.chain.size() < p.width)
         bodies.push_back({requests[i].session->session_.get(),
                           std::span<const std::int32_t>(&p.draft, 1), -1});
