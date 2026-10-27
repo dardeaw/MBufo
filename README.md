@@ -45,16 +45,18 @@ request at a time: prefill and speculative-decode throughput. Full tables:
 1–4 concurrent streams, same harness, warmed up. Total / per-session decode TPS at
 concurrency 1 / 2 / 3 / 4:
 
-| Engine | total TPS | per-session TPS |
-| --- | --- | --- |
-| A Halogen | 85 / 84 / 71 / 88 | 85 / 43 / 24 / 22 |
-| B upstream | 61 / 84 / 110 / 125 | 61 / 42 / 37 / 33 |
-| C MBufo | 66 / 86 / 100 / 138 | 66 / 44 / 34 / 35 |
+| Engine | total TPS | per-session TPS | fairness A / B |
+| --- | --- | --- | --- |
+| A Halogen | 85 / 82 / 75 / 88 | 85 / 41 / 25 / 22 | 322 / 1140 |
+| B upstream | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
+| C MBufo | 66 / 83 / 110 / 129 | 66 / 42 / 38 / 33 | **19 / 187** |
 
 A has the best single-stream peak but only speculates when running alone — under
 concurrency its draft head switches off and per-session TPS falls to ~22. Under load
-**C scales best** (linear to 138 TPS, flattest per-session). Full method and the other
-axes (prefill, fairness, ITL): `高併發測速方法.md`.
+**C scales best** (linear to ~129 TPS, flattest per-session) and, from v0.25.3, has the
+best fairness too (SRTF prefill + starvation decode-priority cut the long-prefill
+starvation of short requests ~2.3x). Full method and the other axes (prefill, fairness,
+ITL): `高併發測速方法.md`.
 
 ## Quickstart
 
