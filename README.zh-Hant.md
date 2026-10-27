@@ -86,6 +86,8 @@ function tools、結構化輸出與串流；詳見[API 契約](docs/SERVER.md)�
 | 16 路、高併發 | `--sessions 16 -c 65536 --kv-quant q8`（約 103 GB，餘 20 GB） |
 | 8 路、長對話 | `--sessions 8 -c 131072 --kv-quant q8`（約 101 GB，餘 21 GB） |
 | 單路、最大上下文 | `--sessions 1 -c 262144 --kv-quant q8` |
+| 4 路、最大上下文 | `--sessions 4 -c 262144 --kv-quant q8`（約 101 GB，餘 21 GB——總位元組與 8×131072 相同） |
+| 單路、最快最精準 prefill | `--sessions 1 -c 262144 --kv-quant f16`（全精度 KV；每位置最重，但單流裝得下） |
 | 還原上游排程 | 環境變數 `GUFO_MIXED_BATCH=0` |
 
 載入器限制的是「session 數 × 上下文」，不是單一上下文。在 128 GB Strix Halo

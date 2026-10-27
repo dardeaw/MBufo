@@ -95,6 +95,8 @@ images, function tools, structured output and streaming; see the
 | 16 streams, high concurrency | `--sessions 16 -c 65536 --kv-quant q8` (about 103 GB; 20 GB left) |
 | 8 streams, long context | `--sessions 8 -c 131072 --kv-quant q8` (about 101 GB; 21 GB left) |
 | Single stream, max context | `--sessions 1 -c 262144 --kv-quant q8` |
+| 4 streams, max context | `--sessions 4 -c 262144 --kv-quant q8` (about 101 GB; 21 GB left — same total positions as 8×131072) |
+| Single stream, fastest & most precise prefill | `--sessions 1 -c 262144 --kv-quant f16` (full-precision KV; heaviest per position, but one stream fits easily) |
 | Restore upstream scheduling | env `GUFO_MIXED_BATCH=0` |
 
 Sessions times context is what the loader bounds, not context alone. On a
