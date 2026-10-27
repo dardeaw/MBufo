@@ -3,6 +3,20 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.25.3（2026-10-27）
+- **排程器 fairness 第二刀：SRTF prefill 選取＋starvation decode 優先搶佔（near-done 閘）**。
+  治長 prefill 擠壓短請求 TTFT（5 擠 4 的抗飢餓場景），全程不破貪心 byte-identical、不碰
+  `cache::LeasedSlot` 超訂／busy cache entry／mixed-speculative step（避開 v0.25.2 文件化的
+  admission-nest 三死因）。gfx1151 實測（FP4＋f16＋MTP＋sessions 4，同 harness）：
+  fairness-A 退化比 **160 → 7.32**、fairness-B **856 → 191**（短 TTFT 3.4s → 0.7s），ITL 不退步，
+  貪心輸出 sha 對照通過（單獨 vs 併發 24K prefill 同 sha）。
+  - `PickPrefill()`：剩餘 ≤1 chunk 的近完成 prefill 排在長 prefill 續 chunk 前（FIFO 平手）。
+  - starvation decode-priority：有請求排隊等 session slot 時，暫緩長 prefill chunk、改排空
+    resident decode（完成即釋放 slot），讓等待者一有 resident 完成立刻被 admit；有界 ≤32 輪
+    防 prefill 餓死。
+  - near-done 閘：僅當某 resident decoder 距 `token_limit` ≤64 token（slot 即將釋放）才觸發
+    搶佔，避免全為長輸出 decoder 時白延 prefill（此閘把 fairness-A 從 76.5 修回 7.32）。
+
 ## v0.25.2（2026-10-27）
 - **`serve llm` 預設值調整（建議值進 CLI）**：`--sessions` 預設 1→4、`--kv-quant` 預設
   f16→q8（僅 llm 路徑；tts/asr 維持 1／f16 不變，`-j`／`--kv-quant` 顯式指定仍優先）。

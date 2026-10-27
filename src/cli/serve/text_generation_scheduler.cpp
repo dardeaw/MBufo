@@ -2105,6 +2105,29 @@ struct TextGenerationScheduler::Impl {
     return true;
   }
 
+  // Serve the resident prefill that can finish its remaining prompt in a
+  // single chunk ahead of a longer prompt's later chunks, so a short arrival's
+  // first token is not queued behind a long prompt's remaining chunks. Bounded:
+  // a multi-chunk prefill still advances whenever no one-chunk peer is waiting,
+  // and only the service order between independent requests changes (each
+  // request's own token sequence is untouched, so greedy output is
+  // byte-identical). Touches no lease, cache entry, or the mixed/speculative
+  // step (avoids the three measured admission-nest death causes).
+  std::deque<std::shared_ptr<ScheduledRequest>>::iterator PickPrefill(
+      std::deque<std::shared_ptr<ScheduledRequest>>& prefilling) {
+    const std::size_t budget = prefill_policy.decode_active_tokens;
+    for (auto it = prefilling.begin(); it != prefilling.end(); ++it) {
+      const auto& r = *it;
+      if (!r->runner_request)
+        continue;
+      const std::size_t remaining = r->runner_request.prompt_tokens() -
+                                    r->runner_request.prefill_position();
+      if (remaining <= budget)
+        return it;
+    }
+    return prefilling.begin();
+  }
+
   void Run(const std::stop_token& stop_token) noexcept {
     std::deque<std::shared_ptr<ScheduledRequest>> prefilling;
     std::deque<std::shared_ptr<ScheduledRequest>> decoding;
@@ -2115,6 +2138,8 @@ struct TextGenerationScheduler::Impl {
       if (device_lost.load(std::memory_order_acquire))
         break;
       loop_working.store(true, std::memory_order_relaxed);
+      if (queued_count == 0)
+        starved_decode_deferrals = 0;
       ProcessQueuedCancellations();
 
       for (std::size_t count = capturing.size(); count != 0; --count) {
@@ -2202,13 +2227,35 @@ struct TextGenerationScheduler::Impl {
                       [](const auto& request) {
                         return request->result.tokens.empty();
                       });
+      // Anti-starvation preemption: while a request waits for a session
+      // slot, drain the resident decoders (each frees its session on
+      // completion) ahead of advancing a long prefill chunk, so the waiting
+      // request is admitted as soon as any resident finishes. Bounded so a
+      // long prefill is never starved; touches no lease, cache entry, or the
+      // mixed/speculative step, so greedy output stays byte-identical.
+      // Only drain when some resident decoder is within 64 tokens of its
+      // limit, so a session will actually free soon; otherwise (e.g. all
+      // residents are long-output) deferring the prefill would only add
+      // latency without releasing a slot.
+      const bool near_done_decoder = std::any_of(
+          decoding.begin(), decoding.end(), [](const auto& request) {
+            return request->result.tokens.size() + 64 >=
+                   request->token_limit;
+          });
+      if (queued_count != 0 && !decoding.empty() && !due_decoder &&
+          near_done_decoder && starved_decode_deferrals < 32) {
+        ++starved_decode_deferrals;
+        MarkAllDecodersDue(decoding);
+        continue;
+      }
       if (!prefilling.empty() && !decoding.empty() &&
           (!due_decoder || assemble_initial_batch)) {
         if (TryStepMixedBatch(prefilling, decoding, capturing)) {
           continue;
         }
-        auto request = std::move(prefilling.front());
-        prefilling.pop_front();
+        auto chosen = PickPrefill(prefilling);
+        auto request = std::move(*chosen);
+        prefilling.erase(chosen);
         StepPrefill(request, true);
         if (!IsTerminal(request)) {
           if (request->runner_request.SnapshotPending()) {
@@ -2254,8 +2301,9 @@ struct TextGenerationScheduler::Impl {
         continue;
       }
 
-      auto request = std::move(prefilling.front());
-      prefilling.pop_front();
+      auto chosen = PickPrefill(prefilling);
+      auto request = std::move(*chosen);
+      prefilling.erase(chosen);
       const bool short_peer_waiting = std::any_of(
           prefilling.begin(), prefilling.end(), [&](const auto& peer) {
             return peer->runner_request.prompt_tokens() -
@@ -2302,6 +2350,7 @@ struct TextGenerationScheduler::Impl {
           TextGenerationErrorCode::kDeviceLost, kDeviceLostMessage));
   std::vector<std::shared_ptr<ScheduledRequest>> device_lost_requests;
   std::size_t consecutive_active_prefill_chunks{0};
+  std::size_t starved_decode_deferrals{0};
   std::uint64_t last_prefill_request_id{0};
   std::atomic<std::uint64_t> next_request_id{1};
   // Written by the scheduler thread and read by the stall monitor. `progress`
