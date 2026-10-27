@@ -1173,6 +1173,20 @@ struct TextGenerationScheduler::Impl {
     const std::array<const std::deque<std::shared_ptr<ScheduledRequest>>*, 2>
         residents{&prefilling, &capturing};
     // Captures retain their runner lease until decoding resumes.
+    //
+    // Do not re-implement an admission nest here (letting a short arrival
+    // overcommit the resident pool by one lease so its first chunk rides a
+    // decode round). Measured dead on this engine, three ways:
+    //   - cache::LeasedSlot::Acquire throws SlotBusy on an already-leased
+    //     slot, so an over-capacity admission cannot obtain a session at
+    //     all (the request dies as 'slot busy' instead of queueing);
+    //   - borrowing a busy cache entry evicts the live conversation that
+    //     owns it, corrupting a running stream's output;
+    //   - the merged mixed step refuses MTP-speculative batches, so the
+    //     nested chunk never runs while speculation is on.
+    // The starvation this was meant to fix is a capacity problem: raise
+    // --sessions (4 measured: fairness-A degradation 2950 -> ~15 with no
+    // decode/prefill regression).
     while (!stop_token.stop_requested() &&
            prefilling.size() + decoding.size() + capturing.size() <
                runner_pool->capacity()) {

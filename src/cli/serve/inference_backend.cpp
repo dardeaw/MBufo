@@ -1180,6 +1180,8 @@ public:
     };
     // Report actual session widths, including C6. Speculation reserves up to
     // eight token rows per session in the coordinator's existing scratch.
+    // (Qwen3.8 Flash-Next MTP is different: 17 rows per session —
+    // max_draft_tokens 16 + anchor — see rocm::kMtpMaxChain.)
     for (std::size_t width = 2; width <= MaximumDecodeBatchWidth(); ++width) {
       plans.push_back({
           .kind = TextExecutionPlanKind::kBatched,
