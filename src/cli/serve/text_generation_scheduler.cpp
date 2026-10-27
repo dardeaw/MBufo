@@ -2239,8 +2239,7 @@ struct TextGenerationScheduler::Impl {
       // latency without releasing a slot.
       const bool near_done_decoder = std::any_of(
           decoding.begin(), decoding.end(), [](const auto& request) {
-            return request->result.tokens.size() + 64 >=
-                   request->token_limit;
+            return request->result.tokens.size() + 64 >= request->token_limit;
           });
       if (queued_count != 0 && !decoding.empty() && !due_decoder &&
           near_done_decoder && starved_decode_deferrals < 32) {

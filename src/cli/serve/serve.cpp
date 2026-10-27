@@ -1247,8 +1247,8 @@ int RunServe(std::span<const char* const> args) {
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
     llm_parser.AddOption("", "--kv-quant", "MODE",
-                         "KV cache precision: f16 or q8 (default: q8)",
-                         "Model", &kv_cache_quant);
+                         "KV cache precision: f16 or q8 (default: q8)", "Model",
+                         &kv_cache_quant);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",

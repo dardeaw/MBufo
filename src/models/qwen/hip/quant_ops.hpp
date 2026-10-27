@@ -598,13 +598,11 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       return;
     }
     case core::GgmlType::kQ4_0_ROCMFP4_FAST: {
-      DecodeFp4Sub16(static_cast<const std::uint8_t*>(row), sub16, 0,
-                     out);
+      DecodeFp4Sub16(static_cast<const std::uint8_t*>(row), sub16, 0, out);
       return;
     }
     case core::GgmlType::kQ4_0_ROCMFP4: {
-      DecodeFp4Sub16(static_cast<const std::uint8_t*>(row), sub16, 1,
-                     out);
+      DecodeFp4Sub16(static_cast<const std::uint8_t*>(row), sub16, 1, out);
       return;
     }
     case core::GgmlType::kQ4_K: {

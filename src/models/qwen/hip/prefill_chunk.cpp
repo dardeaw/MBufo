@@ -31,11 +31,10 @@ bool UseQwen27bFp16Prefill(const models::QwenModelWeights& weights,
     const unsigned long v = e ? std::strtoul(e, nullptr, 10) : 0UL;
     return v >= 2UL ? static_cast<std::size_t>(v) : 0UL;
   }();
-  const bool fp4 = !weights.layers.empty() &&
-                   (weights.layers[0].ffn_gate.type ==
-                        core::GgmlType::kQ4_0_ROCMFP4_FAST ||
-                    weights.layers[0].ffn_gate.type ==
-                        core::GgmlType::kQ4_0_ROCMFP4);
+  const bool fp4 =
+      !weights.layers.empty() &&
+      (weights.layers[0].ffn_gate.type == core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+       weights.layers[0].ffn_gate.type == core::GgmlType::kQ4_0_ROCMFP4);
   const std::size_t kMinBatch = kEnvMin ? kEnvMin : (fp4 ? 8UL : 1024UL);
   if (batch < kMinBatch || config.hidden_size != 5120 ||
       config.intermediate_size != 17408 || config.num_layers != 64 ||

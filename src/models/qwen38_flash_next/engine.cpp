@@ -1124,11 +1124,10 @@ bool Session::PrepareDecode(const DecodeRequest& request,
       // sampled chains read the proposal probability.
       if (const float gate = Model::MtpConfidenceGate(); gate > 0.0F) {
         const float confidence =
-            sampled
-                ? (pending->proposals.empty()
-                       ? 1.0F
-                       : pending->proposals.back().probability)
-                : DraftConfidence(pending->candidates);
+            sampled ? (pending->proposals.empty()
+                           ? 1.0F
+                           : pending->proposals.back().probability)
+                    : DraftConfidence(pending->candidates);
         if (confidence < gate) {
           pending->width = pending->chain.size();
           break;
