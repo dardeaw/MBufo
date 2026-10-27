@@ -3,6 +3,19 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.25.4（2026-10-28）
+- **修復 `serve llm` 的 `--sessions`／`-j` 被無聲忽略（真 bug）**：預設-4 守衛查錯 parser——
+  `-j`/`--sessions` 由子命令 parser（`llm_parser`）解析，守衛卻查 `server_parser.WasSupplied("-j")`
+  （它從沒見過這旗標）→ 永遠判定「沒供」→ 強制 `session_count=4`。後果：`serve llm -j 8` 實際
+  只跑 4 路（`max batch_width=4`），第 5+ 條退第二波、TTFT 出現階梯斷崖、高併發 decode 吞吐被腰斬。
+  生產 `-j 4` 因預設即 4 而僥倖無感。修法：守衛改查實際收旗標的 `llm_parser`。
+- **gfx1151 實測（FP4＋MTP，ctx 32K，修前後對照）**：`-j 8` 現如實 `sessions=8`、`max batch_width=8`，
+  TTFT 階梯斷崖消失（8 流全 ~165ms）。真 8 流 decode 總吞吐 merge-lists **124.5 → 148.2**、fib
+  **121.1 → 144.4**，decode 隨併發單調上升（不再 4+4 假飽和）。
+- **上游 marketing 數字對照（同方法：prefill 隔離＋加總各流 decode_tps＋greedy tg128）**：mixed 8 流
+  我 FP4 **158.5** 贏上游 Q4 的 127.02（+25%）；上游吹的 194/245 是 **repetitive** 情境（接受率~100%、
+  上游 MTP 在重複文本 commit 鏈更長），非 mixed 實戰數。
+
 ## v0.25.3（2026-10-27）
 - **排程器 fairness 第二刀：SRTF prefill 選取＋starvation decode 優先搶佔（near-done 閘）**。
   治長 prefill 擠壓短請求 TTFT（5 擠 4 的抗飢餓場景），全程不破貪心 byte-identical、不碰

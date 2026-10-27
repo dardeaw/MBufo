@@ -1327,8 +1327,8 @@ int RunServe(std::span<const char* const> args) {
     // measured 2950 at sessions 1-2); 4 sessions on a 124G unified host
     // measured ~15 with no decode/prefill regression. Other modalities
     // keep the shared default of 1.
-    if (!server_parser.WasSupplied("--sessions") &&
-        !server_parser.WasSupplied("-j")) {
+    if (!llm_parser.WasSupplied("--sessions") &&
+        !llm_parser.WasSupplied("-j")) {
       session_count = 4;
     }
     if (!prepare_server_options()) {
