@@ -3,6 +3,24 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.25.2（2026-10-27）
+- **`serve llm` 預設值調整（建議值進 CLI）**：`--sessions` 預設 1→4、`--kv-quant` 預設
+  f16→q8（僅 llm 路徑；tts/asr 維持 1／f16 不變，`-j`／`--kv-quant` 顯式指定仍優先）。
+  依據 gfx1151（124G 統一記憶體）實測：q8 KV 減半 KV 位元組、品質維持；sessions 4 修
+  長文餓死短請求（fairness-A 退化比 2950 → ~15），decode／prefill 吞吐不退步
+  （65.2→66.5、1329→1337 tok/s），貪心輸出 byte-identical 驗證通過。
+- **新增 `GUFO_MTP_GATE_P` 環境變數（預設 0＝關）**：MTP 投機鏈信心早停——draft 位置
+  top-1 候選質量低於閾值即截斷鏈長（halogen 0.18.5 移植）。實測 ROCmFP4-FAST 全閾值
+  0.5–0.9 皆 -26% decode TPS（本模型 head 的 top-1 質量天生低，鏈被砍到 1–2 token 而
+  MTP 開銷照付），故預設關閉、留作未來模型調校鉤子。驗證數學未動，temp 0 輸出
+  byte-identical（sha 對照通過）。
+- **文件化死路（防后人重蹈）**：`Admit()` 容量閘門處註明「勿重寫 admission-nest
+  超額 admission」＋三條實測死因（`cache::LeasedSlot::Acquire` 對已租 slot 直接
+  throw SlotBusy；借 busy entry 會踢掉正在跑的 conversation 損壞輸出；
+  `TryStepMixedBatch` 在 MTP 投機批次直接拒走）；正解是容量問題→調 `--sessions`。
+  另修 `SupportedPlans` 過時註解（8 rows 為 hip/DFlash 路徑；Flash-Next MTP 為
+  17 rows/session＝max_draft_tokens 16＋anchor）。
+
 ## v0.25.1（2026-10-27）
 - **修復 MTP 推測解碼高併發 draft 接受率崩潰（根因）**：gfx1151 併發測速發現開 MTP 時
   batch_width>1 的 draft 接受率從單流 ~85% 崩到 39–49%，使併發 decode 吞吐與穩定性輸給

@@ -770,8 +770,8 @@ void PrintServeHelp(std::string_view program_name,
       << "Server:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
       << "  -p, --port <N>         Port to listen on (default: 8080)\n"
-      << "  -j, --sessions <N>     Preallocated GPU request sessions (default: "
-         "1)\n"
+      << "  -j, --sessions <N>     Preallocated GPU request sessions "
+         "(default: 4 for llm, 1 otherwise)\n"
       << "      --max-connections <N>\n"
       << "                         Maximum simultaneous HTTP connections "
          "(default: 16)\n"
@@ -1153,7 +1153,10 @@ int RunServe(std::span<const char* const> args) {
     std::string vision_model_path;
     std::size_t draft_tokens = 5;
     std::size_t min_draft_tokens = 1;
-    std::string kv_cache_quant = "f16";
+    // q8 KV is the recommended default: it halves KV bytes with quality
+    // held (measured on gfx1151 unified memory). f16 remains for hosts
+    // that need exact KV arithmetic.
+    std::string kv_cache_quant = "q8";
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
@@ -1244,7 +1247,7 @@ int RunServe(std::span<const char* const> args) {
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
     llm_parser.AddOption("", "--kv-quant", "MODE",
-                         "KV cache precision: f16 or q8 (default: f16)",
+                         "KV cache precision: f16 or q8 (default: q8)",
                          "Model", &kv_cache_quant);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
@@ -1318,6 +1321,15 @@ int RunServe(std::span<const char* const> args) {
     }
     if (!llm_parser.WasSupplied("--max-pending-per-client")) {
       max_pending_requests_per_client = max_pending_requests;
+    }
+    // LLM default sessions: 4. A single shared session starves short
+    // requests behind resident long prefills (fairness-A degradation
+    // measured 2950 at sessions 1-2); 4 sessions on a 124G unified host
+    // measured ~15 with no decode/prefill regression. Other modalities
+    // keep the shared default of 1.
+    if (!server_parser.WasSupplied("--sessions") &&
+        !server_parser.WasSupplied("-j")) {
+      session_count = 4;
     }
     if (!prepare_server_options()) {
       return 2;
