@@ -262,7 +262,7 @@ model semantics.
   paired routed expert tiles, WMMA attention) apply to every prefill pass wider
   than a vector batch, not just 1024+ tokens.
 
-## Benchmark (MBufo v0.24.1, gfx1151 Strix Halo)
+## Benchmark (MBufo v0.25.5, gfx1151 Strix Halo)
 
 Cold KV (unique prompt per request, `cached_tokens≈0`), think off, **F16 KV**,
 `-j 1`, ctx 262144. Four configs: 27B (UD-Q4_K_XL vs ROCmFP4-FAST) + Flash-Next
@@ -293,19 +293,19 @@ Standard: 5 cold-KV scenarios (temp labelled) + an 8-task ReAct agent suite.
 
 | scenario | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
 |---|---:|---:|---:|---:|
-| prose (temp 0.4) | 21.8 | 21.4 | **45.0** | 43.6 |
-| fibonacci (temp 0.4) | 68.7 | 60.6 | **87.0** | 75.5 |
-| json (temp 0) | 55.7 | 48.1 | **55.8** | 51.6 |
-| greedy code /128 (temp 0) | 62.4 | 57.4 | 69.9 | **71.8** |
-| repeat text /256 (temp 0) | 71.1 | 62.0 | **74.9** | 74.5 |
+| prose (temp 0.4) | 23.5 | 19.7 | 43.3 | **43.6** |
+| fibonacci (temp 0.4) | 67.9 | 56.2 | **86.3** | 84.7 |
+| json (temp 0) | **55.1** | 46.5 | 51.5 | 51.7 |
+| greedy code /128 (temp 0) | 61.9 | 55.3 | 70.5 | **73.2** |
+| repeat text /256 (temp 0) | 70.6 | 60.8 | 74.8 | **75.3** |
 
 ### Agentic (agent_bench_v2, t1–t8, sandboxed tools)
 
 | | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
 |---|---:|---:|---:|---:|
-| passed | 8/8 | 8/8 | 8/8 | 7/8 |
+| passed | 8/8 | 7/8 | 7/8 | 7/8 |
 | nuclear (must be 0) | 0 | 0 | 0 | 0 |
-| gen tps range | 9.4–32.4 | 10.7–21.0 | 21.4–57.4 | 31.8–53.5 |
+| gen tps range | 9.1–31.1 | 9.3–21.5 | 16.7–56.6 | 16.8–55.1 |
 
 ### Recommended build per model
 
