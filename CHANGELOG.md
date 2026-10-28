@@ -3,6 +3,13 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.25.5（2026-10-28）
+- **CI 綠燈修復：clang-format 21.1.8 格式化 in-scope C++ 檔**。CI 的 `check-format`
+  （`tools/ci/check-format.py`，範圍排除 deepseek runtime/rocm 與 qwen mmq 核心）自 v0.25.1
+  起因我歷次提交未跑 formatter 而持續紅（#445–#55）。以 repo 自帶的 `check-format.py --fix`
+  格式化 CI 實際檢查的 625 檔，`PASS: Checked 625 C++ files`，CI 恢復綠燈（build＋test 全過）。
+  純空白／換行調整，無語意改動。
+
 ## v0.25.4（2026-10-28）
 - **修復 `serve llm` 的 `--sessions`／`-j` 被無聲忽略（真 bug）**：預設-4 守衛查錯 parser——
   `-j`/`--sessions` 由子命令 parser（`llm_parser`）解析，守衛卻查 `server_parser.WasSupplied("-j")`
