@@ -28,7 +28,7 @@ unified memory. Model focus: Qwen3.8 Flash-Next and Qwen3.8 27B.
 [Low-bit KV cache](#low-bit-kv-cache) ·
 [Kernel-level speedups](#kernel-level-speedups) ·
 [Serving presets](#recommended-serving-settings) ·
-[Benchmark](#benchmark-mbufo-v0241-gfx1151-strix-halo) ·
+[Benchmark](#benchmark-mbufo-v0255-gfx1151-strix-halo) ·
 [Upstream tracking](#upstream-tracking) ·
 [Build](#build-from-source) · [Docs](#documentation-index) ·
 [Limits](#compatibility-and-limits)
@@ -39,7 +39,7 @@ Two result sets, both on one Strix Halo (gfx1151), cold KV, greedy.
 
 **Single-stream (cold KV)** — Qwen3.8 27B Q4_K_XL and Flash-Next ROCmFP4, one
 request at a time: prefill and speculative-decode throughput. Full tables:
-[Benchmark](#benchmark-mbufo-v0241-gfx1151-strix-halo).
+[Benchmark](#benchmark-mbufo-v0255-gfx1151-strix-halo).
 
 **High-concurrency, three engines (MTP on)** — A Halogen · B gufo-upstream · C MBufo,
 1–4 concurrent streams, same harness, warmed up. Total / per-session decode TPS at
