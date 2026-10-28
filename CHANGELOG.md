@@ -3,6 +3,12 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.25.7（2026-10-28）
+- **上游 v0.26.0 追趕收尾**：完整 merge 因 #758（chunked DeltaNet 重寫）使 gfx1151 FN FP4
+  prefill 退步 29-46%（實測 1243→857 tok/s@64K）而全數回退；改 cherry-pick 安全小修
+  #732（接受中性 llama.cpp sampler 欄位）＋#736（`--served-model-name` 可重複指定）。
+  README 上游基底行標明 v0.26.0（cherry-picked）＋回退原因。純相容性修復，gfx1151 效能零退步。
+
 ## v0.25.6（2026-10-28）
 - **README benchmark 表重測更新（v0.25.5 資料）**：單流 decode＋agentic 表、27B 兩模型
   （Q4_K_XL＋ROCmFP4-FAST）prefill 表全面以 v0.25.5 冷 KV 重測刷新；修正版本標題
