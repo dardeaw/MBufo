@@ -276,14 +276,14 @@ changes under load is how many of them run at once, which is the
 
 | tokens | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
 |---:|---:|---:|---:|---:|
-| 2K | 544 | 432 | **1739** | 1301 |
-| 8K | 568 | 534 | **1701** | 1549 |
-| 32K | 526 | 517 | 1598 | **1618** |
-| 128K | 385 | 382 | **1504** | 1507 |
+| 2K | 605 | 455 | **1739** | 1301 |
+| 8K | 615 | 564 | **1701** | 1549 |
+| 32K | 567 | 551 | 1598 | **1618** |
+| 128K | 409 | 407 | **1504** | 1507 |
 | 250K | — | — | **1438** | 1415 |
 
 > 27B ROCmFP4-**FAST** prefill ≈ the non-FAST STRIX build — single-scale only
-> changes the codebook, not the fp16-WMMA prefill engine (432/534/517/382 vs
+> changes the codebook, not the fp16-WMMA prefill engine (455/564/551/407 vs
 > 483/523/520/383). FAST's real speed comes from the int8-MMQ consumer path,
 > which is wired for Flash-Next's MoE experts, not the dense 27B.
 
