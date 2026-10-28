@@ -330,8 +330,8 @@ so they can never collide with an upstream `vX.Y.Z`.
 | Item | Value |
 | --- | --- |
 | Upstream repo | [gufo-org/gufo](https://github.com/gufo-org/gufo) |
-| Upstream base release | `v0.20.0` |
-| Merged upstream `main` | `0c03748a` — *chore(main): release 0.20.0* (2026-10-21) |
+| Upstream base release | `v0.26.0` (cherry-picked safe fixes; full merge reverted — see below) |
+| Merged upstream `main` | cherry-picked to `v0.26.0` (2026-10-28): #732 neutral sampler fields, #736 repeated `--served-model-name`. Full 0.21→0.26 merge **reverted**: #758 chunked-DeltaNet prefill regressed gfx1151 FN prefill 30-46% (upstream #850 later removed it); audio/Windows not applicable to this gfx1151 Linux fork. |
 | Merge policy | upstream `main` merged with `--no-ff`; MBufo-specific commits stay identifiable, upstream history is never rewritten |
 
 When upstream ships a new release, the "upstream base release" row is updated in
