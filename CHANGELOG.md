@@ -3,6 +3,11 @@
 以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
 格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
 
+## v0.25.6（2026-10-28）
+- **README benchmark 表重測更新（v0.25.5 資料）**：單流 decode＋agentic 表、27B 兩模型
+  （Q4_K_XL＋ROCmFP4-FAST）prefill 表全面以 v0.25.5 冷 KV 重測刷新；修正版本標題
+  v0.24.1→v0.25.5 後 benchmark 錨點連結失效（check-docs 綠燈）。純文件改動，無語意變更。
+
 ## v0.25.5（2026-10-28）
 - **CI 綠燈修復：clang-format 21.1.8 格式化 in-scope C++ 檔**。CI 的 `check-format`
   （`tools/ci/check-format.py`，範圍排除 deepseek runtime/rocm 與 qwen mmq 核心）自 v0.25.1
