@@ -32,6 +32,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/gemma4/engine.hpp"
 #endif
 
 namespace gufo::cli {
@@ -1050,6 +1051,110 @@ int RunPrompt(std::span<const char* const> args) {
         tokenizer, rendered_prompt, 0, rendered_prompt.size(), content_spans,
         {});
   };
+
+#if defined(ENGINE_ENABLE_HIP)
+  if (reader->GetMetadataString("general.architecture") == "gemma4") {
+    const std::string gemma_prompt = [&] {
+      if (!opt.use_chat_template)
+        return opt.prompt_text;
+      // Gemma 4 canonical template (add_generation_prompt, no thinking):
+      // <bos> is added by the tokenizer; the generation prompt closes with
+      // the empty thought channel when enable_thinking is false.
+      std::string out;
+      if (!opt.system_prompt.empty()) {
+        out += "<|turn>system\n";
+        out += opt.system_prompt;
+        out += "<turn|>\n";
+      }
+      out += "<|turn>user\n";
+      out += opt.prompt_text;
+      out += "<turn|>\n";
+      out += "<|turn>model\n";
+      out += "<|channel>thought\n<channel|>";
+      return out;
+    }();
+    models::gemma4::ModelOptions gopt;
+    gopt.max_context = 8192;
+    auto gmodel = models::gemma4::Model::Load(opt.model_path, gopt, &err);
+    if (!gmodel) {
+      std::cerr << "Gemma4 load failed: " << err << '\n';
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    PrintModelLoadTime(model_load_start, true);
+    auto gsession = gmodel->CreateSession(&err);
+    if (!gsession) {
+      std::cerr << "Gemma4 session failed: " << err << '\n';
+      return 1;
+    }
+    const auto ids = gmodel->Tokenize(gemma_prompt);
+    std::fprintf(stderr, "[gemma4] prompt tokens: %zu\n", ids.size());
+    std::vector<std::int32_t> prompt(ids.begin(), ids.end());
+    const std::vector<tokenization::TokenId> prompt_ids(ids.begin(),
+                                                        ids.end());
+    const auto gstart = std::chrono::steady_clock::now();
+    std::fprintf(stderr, "[gemma4] session ready, syncing\n");
+    if (!gsession->Sync(prompt, &err)) {
+      std::cerr << "Gemma4 prefill failed: " << err << '\n';
+      return 1;
+    }
+    const double prefill_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      gstart)
+            .count();
+    sampling::SamplerState gsampler(opt.sampling, prompt_ids);
+    std::vector<std::int32_t> generated;
+    const auto dstart = std::chrono::steady_clock::now();
+    while (generated.size() < opt.max_tokens) {
+      const tokenization::TokenId token = gsampler.Sample(gsession->Logits());
+      if (opt.verbose) {
+        const auto lg = gsession->Logits();
+        float mx = -1e30F;
+        std::size_t mi = 0;
+        std::vector<float> host(lg.size());
+        hipMemcpy(host.data(), lg.data(), lg.size() * sizeof(float),
+                  hipMemcpyDeviceToHost);
+        for (std::size_t i = 0; i < host.size(); ++i) {
+          if (host[i] > mx) {
+            mx = host[i];
+            mi = i;
+          }
+        }
+        std::fprintf(stderr, "[gemma4] argmax=%zu val=%f sampled=%u\n", mi,
+                     mx, (unsigned)token);
+      }
+      std::cout << gmodel->TokenText(static_cast<std::int32_t>(token))
+                << std::flush;
+      gsampler.Accept(token);
+      generated.push_back(static_cast<std::int32_t>(token));
+      if (gmodel->IsStopToken(token))
+        break;
+      if (!gsession->Evaluate(token, &err)) {
+        std::cerr << "Gemma4 decode failed: " << err << '\n';
+        return 1;
+      }
+    }
+    std::cout << '\n';
+    if (opt.verbose) {
+      const double dseconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        dstart)
+              .count();
+      std::cerr << "\nprefill: " << prompt.size() << " tokens in "
+                << prefill_seconds << "s ("
+                << (prefill_seconds > 0
+                        ? static_cast<double>(prompt.size()) / prefill_seconds
+                        : 0.0)
+                << " tok/s)\ndecode: " << generated.size() << " tokens in "
+                << dseconds << "s ("
+                << (dseconds > 0 ? static_cast<double>(generated.size()) /
+                                       dseconds
+                                 : 0.0)
+                << " tok/s)\n";
+    }
+    return 0;
+  }
+#endif
 
 #if defined(ENGINE_ENABLE_HIP)
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
