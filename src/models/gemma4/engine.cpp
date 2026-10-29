@@ -45,50 +45,46 @@ namespace fn = ::gufo::models::qwen38_flash_next::rocm;
 void F32Gemm(const TensorRef& w, const float* x, float* y,
              std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
              hipStream_t stream, __half* slab, __half* x_slab) {
-  TensorRef dev = w;
-  dev.data = w.device != nullptr ? w.device : w.data;
-  kernels::DequantSlab(dev, m, slab, stream);
-  std::fflush(stderr);
-  const hipError_t deq_err = hipStreamSynchronize(stream);
+  if (n_tokens == 1 && getenv("GEMMA4_NO_FUSED_GEMV") == nullptr) {
+    // Decode fast path: fused dequant-GEMV, no staging slabs.
+    if (w.f16 != nullptr) {
+      kernels::GemvF16Fused(static_cast<const __half*>(w.f16), k, x, y, m,
+                            stream);
+    } else {
+      const void* dev = w.device != nullptr ? w.device : w.data;
+      kernels::GemvFused(dev, static_cast<int>(w.type), w.RowBytes(), k, x, y,
+                         m, stream);
+    }
+    return;
+  }
+  const __half* W = nullptr;
+  if (w.f16 != nullptr) {
+    W = static_cast<const __half*>(w.f16);
+  } else {
+    TensorRef dev = w;
+    dev.data = w.device != nullptr ? w.device : w.data;
+    kernels::DequantSlab(dev, m, slab, stream);
+    W = slab;
+  }
   kernels::F32ToF16(x, x_slab, static_cast<std::size_t>(n_tokens) * k, stream);
-  if (m == 4096 || m == 2048) {
-    std::vector<float> xa(static_cast<std::size_t>(n_tokens) * k);
-    hipMemcpy(xa.data(), x, xa.size() * sizeof(float), hipMemcpyDeviceToHost);
-    double s1 = 0; for (std::size_t i = 0; i < xa.size(); ++i) s1 += xa[i];
-    // probe x directly (f32) to compare with x_slab
-    std::vector<float> xd(static_cast<std::size_t>(n_tokens) * k);
-    hipMemcpy(xd.data(), x, xd.size() * sizeof(float), hipMemcpyDeviceToHost);
-    double s = 0; float mx = 0;
-    for (std::size_t i = 0; i < xd.size(); ++i) { s += xd[i]; float a = xd[i] < 0 ? -xd[i] : xd[i]; if (a > mx) mx = a; }
+  if (getenv("GEMMA4_USE_BLASLT") != nullptr) {
+    namespace fn = ::gufo::models::qwen38_flash_next::rocm;
+    static fn::BlasLt* blas = nullptr;
+    static bool blas_ok = true;
+    if (blas == nullptr && blas_ok) {
+      std::string err;
+      auto b = fn::BlasLt::Create(stream, &err);
+      if (!b) { blas_ok = false; } else { blas = b.release(); }
+      (void)err;
+    }
+    if (blas != nullptr) {
+      std::string err;
+      if (blas->Gemm(W, x_slab, y, HIP_R_16F, static_cast<int>(m),
+                     static_cast<int>(n_tokens), static_cast<int>(k), &err))
+        return;
+    }
   }
-  if (m == 4096 || m == 2048) {
-    const hipError_t xe = hipStreamSynchronize(stream);
-    std::vector<__half> xh(static_cast<std::size_t>(n_tokens) * k);
-    const hipError_t xme = hipMemcpy(xh.data(), x_slab, xh.size() * sizeof(__half), hipMemcpyDeviceToHost);
-    double s = 0; float mx = 0;
-    for (std::size_t i = 0; i < xh.size(); ++i) { float v = __half2float(xh[i]); s += v; float a = v < 0 ? -v : v; if (a > mx) mx = a; }
-  }
-  if (m == 4096) {
-    const hipError_t xe = hipStreamSynchronize(stream);
-    std::vector<float> xf(static_cast<std::size_t>(n_tokens) * k);
-    hipMemcpy(xf.data(), x, xf.size() * sizeof(float), hipMemcpyDeviceToHost);
-    double s = 0; float mx = 0;
-    for (std::size_t i = 0; i < xf.size(); ++i) { s += xf[i]; float a = xf[i] < 0 ? -xf[i] : xf[i]; if (a > mx) mx = a; }
-  }
-  if (m == 262144) {
-    const hipError_t f2e = hipStreamSynchronize(stream);
-  }
-  if (m == 4096) {
-    std::vector<float> xf(static_cast<std::size_t>(n_tokens) * k);
-    hipMemcpy(xf.data(), x, xf.size() * sizeof(float), hipMemcpyDeviceToHost);
-    double s = 0; float mx = 0;
-    for (std::size_t i = 0; i < xf.size(); ++i) { s += xf[i]; float a = xf[i] < 0 ? -xf[i] : xf[i]; if (a > mx) mx = a; }
-  }
-
-  const hipblasStatus_t gst = kernels::F16GemmStatus(slab, x_slab, y, n_tokens, m, k, stream);
-  if (m == 262144) {
-    const hipError_t g2 = hipStreamSynchronize(stream);
-  }
+  kernels::F16GemmStatus(W, x_slab, y, n_tokens, m, k, stream);
 }
 
 [[nodiscard]] bool Check(hipError_t err, std::string* error, const char* what) {
@@ -180,6 +176,48 @@ struct DeviceBuffers {
   return true;
 }
 
+/// Pre-dequantize dense GEMM weights to F16 once at load. Expert tensors
+/// keep on-the-fly dequant (their full F16 set does not fit in free memory).
+[[nodiscard]] bool PredequantWeights(ModelWeights& w, DeviceBuffers& buffers,
+                                    hipStream_t stream, std::string* error) {
+  std::vector<TensorRef*> refs;
+  for (auto& l : w.layers) {
+    for (TensorRef* t :
+         {&l.wq, &l.wk, &l.wv, &l.wo, &l.router, &l.ffn_gate, &l.ffn_up,
+          &l.ffn_down}) {
+      if (!t->empty() && t->f16 == nullptr)
+        refs.push_back(t);
+    }
+  }
+  if (!w.output.empty() && w.output.f16 == nullptr)
+    refs.push_back(&w.output);
+  std::size_t total = 0;
+  for (auto* t : refs)
+    total += (static_cast<std::size_t>(t->rows) * t->cols * t->experts *
+              sizeof(__half) + 255) /
+             256 * 256;
+  void* arena = nullptr;
+  if (!Check(hipMalloc(&arena, total), error, "f16 arena alloc"))
+    return false;
+  buffers.allocations.push_back(arena);
+  std::size_t cursor = 0;
+  for (auto* t : refs) {
+    const std::size_t elems =
+        static_cast<std::size_t>(t->rows) * t->cols * t->experts;
+    auto* d = static_cast<__half*>(arena) + cursor / sizeof(__half);
+    cursor += (elems * sizeof(__half) + 255) / 256 * 256;
+    TensorRef dev = *t;
+    dev.data = t->device != nullptr ? t->device : t->data;
+    kernels::DequantSlab(dev, static_cast<std::uint32_t>(t->rows * t->experts),
+                         d, stream);
+    t->f16 = d;
+  }
+  if (!Check(hipStreamSynchronize(stream), error, "f16 predequant sync"))
+    return false;
+  return true;
+}
+
+
 
 }  // namespace
 
@@ -228,6 +266,13 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       std::move(*weights));
   DeviceBuffers upload;
   if (!UploadWeights(*model_owner->weights_, upload, &load_error)) {
+  DeviceBuffers f16weights;
+  if (!PredequantWeights(*model_owner->weights_, f16weights, 0, &load_error)) {
+    if (error_msg != nullptr)
+      *error_msg = "Failed to pre-dequantize gemma4 weights: " + load_error;
+    return nullptr;
+  }
+  f16weights.allocations.clear();  // arena lives for the process
     if (error_msg != nullptr)
       *error_msg = "Failed to mirror gemma4 weights to device: " + load_error;
     return nullptr;
@@ -549,11 +594,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   // llama.cpp parity: scale the token embedding by sqrt(hidden).
   kernels::ScaleInplace(impl_->hidden, std::sqrt(static_cast<float>(hidden)),
                         static_cast<std::size_t>(n) * hidden, stream);
-  if (!Check(hipStreamSynchronize(stream), error_msg, "embed sync"))
-    return false;
 
-  if (!Check(hipStreamSynchronize(stream), error_msg, "embed sync"))
-    return false;
   // Gemma 4 scales token embeddings by sqrt(hidden) (llama.cpp parity).
   // NOTE: llama.cpp scales token embeddings by sqrt(n_embd); Gemma 4's
   // trained embedding table already carries that scale (llama.cpp's own
@@ -576,14 +617,12 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     kernels::MulInplace(impl_->normed,
                         static_cast<const float*>(l.attn_norm.device),
                         static_cast<std::size_t>(n) * hidden, hidden, stream);
-    if (!Check(hipStreamSynchronize(stream), error_msg, "rmsnorm sync"))
-      return false;
+    
     if (!Check(hipGetLastError(), error_msg, "after rmsnorm"))
       return false;
     StagedGemm(l.wq, qdim, impl_->normed, impl_->qbuf, n, impl_->w_slab,
                impl_->x_slab, stream);
-    if (!Check(hipStreamSynchronize(stream), error_msg, "q gemm sync"))
-      return false;
+    
     // QK norm (per-head gamma over head_dim).
     kernels::RmsNorm(impl_->qbuf, static_cast<const float*>(l.attn_q_norm.device),
                      impl_->qbuf, n * c.num_heads, head_dim, c.rms_eps,
@@ -608,8 +647,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       kernels::Rope(impl_->qbuf, n, c.num_heads, head_dim, c.RotaryDim(il),
                     start_pos, c.RopeTheta(il), stream);
     }
-    if (!Check(hipStreamSynchronize(stream), error_msg, "q rope sync"))
-      return false;
+    
 
     if (l.has_kv && kv_heads > 0) {
       StagedGemm(l.wk, kvdim, impl_->normed, impl_->kbuf, n, impl_->w_slab,
@@ -617,8 +655,6 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       kernels::RmsNorm(impl_->kbuf,
                        static_cast<const float*>(l.attn_k_norm.device),
                        impl_->kbuf, n * kv_heads, head_dim, c.rms_eps, stream);
-      if (!Check(hipStreamSynchronize(stream), error_msg, "k norm sync"))
-        return false;
       // No v_proj on this layer (llama: Vcur=Kcur pre-rope). Capture BEFORE k rope.
       if (!l.has_v_proj) {
         hipMemcpyAsync(impl_->vbuf, impl_->kbuf,
@@ -635,8 +671,6 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         kernels::Rope(impl_->kbuf, n, kv_heads, head_dim, c.RotaryDim(il),
                       start_pos, c.RopeTheta(il), stream);
       }
-      if (!Check(hipStreamSynchronize(stream), error_msg, "k rope sync"))
-        return false;
       if (l.has_v_proj) {
         StagedGemm(l.wv, kvdim, impl_->normed, impl_->vbuf, n, impl_->w_slab,
                    impl_->x_slab, stream);
@@ -650,26 +684,19 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       // Store KV at positions [pos, pos+n).
       kernels::StoreKv(impl_->kbuf, impl_->kv_k[kv_layer], n, kvdim, start_pos,
                        stream);
-      if (!Check(hipStreamSynchronize(stream), error_msg, "storekv k sync"))
-        return false;
       kernels::StoreKv(impl_->vbuf, impl_->kv_v[kv_layer], n, kvdim, start_pos,
                        stream);
-      if (!Check(hipStreamSynchronize(stream), error_msg, "storekv v sync"))
-        return false;
       kernels::Attention(impl_->qbuf, impl_->kv_k[kv_layer],
                          impl_->kv_v[kv_layer], impl_->attn_out, n, start_pos,
                          c.num_heads, kv_heads, head_dim,
                          impl_->kv_stride[kv_layer],
                          c.LayerIsSwa(il) ? c.sliding_window : 0, stream);
-      if (!Check(hipStreamSynchronize(stream), error_msg, "attn sync"))
-        return false;
     }
 
     // wo projection.
     StagedGemm(l.wo, hidden, impl_->attn_out, impl_->attn_out, n,
                impl_->w_slab, impl_->x_slab, stream);
-    if (!Check(hipStreamSynchronize(stream), error_msg, "wo gemm sync"))
-      return false;
+    
     if (getenv("GEMMA4_DEBUG_EMBED") && il < 3) {
       std::vector<float> probe(static_cast<std::size_t>(n) * hidden);
       hipMemcpy(probe.data(), impl_->attn_out, probe.size() * sizeof(float),
@@ -694,8 +721,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     // Residual (llama.cpp: attn_out = attn_post_norm(cur) + inpL).
     kernels::AddInplace(impl_->hidden, impl_->normed,
                         static_cast<std::size_t>(n) * hidden, stream);
-    if (!Check(hipStreamSynchronize(stream), error_msg, "attn resid sync"))
-      return false;
+    
     SyncSum(impl_->hidden, "attn_resid", n, hidden, il);
 
     // FFN block (llama.cpp gemma4.cpp parity).
@@ -712,8 +738,6 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                               stream);
       F32Gemm(l.ffn_down, impl_->mlp_out, impl_->moe_out, n, hidden,
               c.shared_ff, stream, impl_->w_slab, impl_->x_slab);
-      if (!Check(hipStreamSynchronize(stream), error_msg, "ffn down sync"))
-        return false;
       kernels::RmsNorm(impl_->moe_out, nullptr, impl_->expert_out, n, hidden,
                        c.rms_eps, stream);
       kernels::MulInplace(impl_->expert_out,
@@ -722,8 +746,6 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                           stream);
       kernels::AddInplace(impl_->hidden, impl_->expert_out,
                           static_cast<std::size_t>(n) * hidden, stream);
-      if (!Check(hipStreamSynchronize(stream), error_msg, "ffn resid sync"))
-        return false;
     SyncSum(impl_->hidden, "ffn_resid", n, hidden, il);
     } else {
       // Shared expert MLP on attn_out.
@@ -779,17 +801,17 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         if (ids[idx] >= 0 && ids[idx] < static_cast<std::int32_t>(c.num_experts))
           active[static_cast<std::size_t>(ids[idx])] = true;
       }
+      float down_scales[128];
+      if (!l.down_exps_scale.empty()) {
+        hipMemcpy(down_scales, l.down_exps_scale.device,
+                  sizeof(float) * c.num_experts, hipMemcpyDeviceToHost);
+      } else {
+        for (std::uint32_t i = 0; i < c.num_experts; ++i) down_scales[i] = 1.0F;
+      }
       for (std::uint32_t e = 0; e < c.num_experts; ++e) {
         if (!active[e])
           continue;
-        float down_scale = 1.0F;
-        if (!l.down_exps_scale.empty()) {
-          kernels::DownloadMirror(
-              &down_scale,
-              static_cast<const std::uint8_t*>(l.down_exps_scale.device) +
-                  sizeof(float) * e,
-              sizeof(float));
-        }
+        const float down_scale = down_scales[e];
         TensorRef down_ref = l.down_exps;
         down_ref.data = l.down_exps.DeviceExpert(e);
         down_ref.device = down_ref.data;
@@ -872,7 +894,6 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       kernels::AddInplace(impl_->attn_out, impl_->moe_out,
                           static_cast<std::size_t>(n) * hidden, stream);
       SyncSum(impl_->attn_out, "combined", n, hidden, il);
-      hipStreamSynchronize(stream);
       kernels::RmsNorm(impl_->attn_out, nullptr, impl_->normed, n, hidden,
                        c.rms_eps, stream);
       kernels::MulInplace(impl_->normed,
@@ -883,8 +904,6 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     SyncSum(impl_->normed, "ffn_contrib", n, hidden, il);
       kernels::AddInplace(impl_->hidden, impl_->normed,
                           static_cast<std::size_t>(n) * hidden, stream);
-      if (!Check(hipStreamSynchronize(stream), error_msg, "moe resid sync"))
-        return false;
     SyncSum(impl_->hidden, "moe_resid", n, hidden, il);
     }
 
@@ -931,12 +950,10 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   kernels::RmsNorm(impl_->hidden,
                    static_cast<const float*>(w.output_norm.device),
                    impl_->normed, n, hidden, c.rms_eps, stream);
-  if (!Check(hipDeviceSynchronize(), nullptr, "pre-lmhead sync")) {
-  }
+  
   StagedGemm(w.output, c.vocab_size, impl_->normed, impl_->logits, n,
              impl_->w_slab, impl_->x_slab, stream);
-  if (!Check(hipStreamSynchronize(stream), nullptr, "lmhead sync")) {
-  }
+  
   if (c.final_logit_softcapping > 0.0F) {
     kernels::SoftCap(impl_->logits, c.final_logit_softcapping,
                      static_cast<std::size_t>(n) * c.vocab_size, stream);

@@ -154,6 +154,114 @@ __global__ void RmsNormMulKernel(const float* x, const float* gamma,
 
 
 
+
+// Fused decode GEMV: y[m] = dot(dequant(W row m), x), one block per row.
+// Avoids the DequantSlab + F32ToF16 + hipBLAS round-trips for n == 1.
+__global__ void GemvQKernel(const void* w, int type, std::uint64_t row_bytes,
+                           std::uint64_t cols, const float* x, float* y) {
+  const std::uint32_t row = blockIdx.x;
+  const auto* base = static_cast<const std::uint8_t*>(w) + (std::size_t)row * row_bytes;
+  float sum = 0.0F;
+  if (type == 0) {  // F32
+    const auto* r = reinterpret_cast<const float*>(base);
+    for (std::uint64_t i = threadIdx.x; i < cols; i += blockDim.x)
+      sum += r[i] * x[i];
+  } else if (type == 1) {  // F16
+    const auto* r = reinterpret_cast<const __half*>(base);
+    for (std::uint64_t i = threadIdx.x; i < cols; i += blockDim.x)
+      sum += __half2float(r[i]) * x[i];
+  } else if (type == 8) {  // Q8_0
+    for (std::uint64_t b = threadIdx.x; b < cols / 32; b += blockDim.x) {
+      const std::uint8_t* blk = base + (std::size_t)34 * b;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const auto* qs = reinterpret_cast<const std::int8_t*>(blk + 2);
+      const std::size_t off = (std::size_t)b * 32;
+      #pragma unroll
+      for (int q = 0; q < 32; ++q)
+        sum += d * static_cast<float>(qs[q]) * x[off + q];
+    }
+  } else {  // Q4_0 (type 2): lo nibble = q, hi nibble = q+16
+    for (std::uint64_t b = threadIdx.x; b < cols / 32; b += blockDim.x) {
+      const std::uint8_t* blk = base + (std::size_t)18 * b;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const std::uint8_t* qs = blk + 2;
+      const std::size_t off = (std::size_t)b * 32;
+      #pragma unroll
+      for (int q = 0; q < 16; ++q) {
+        const float lo = d * (static_cast<float>(qs[q] & 0xF) - 8.0F);
+        const float hi = d * (static_cast<float>(qs[q] >> 4) - 8.0F);
+        sum += lo * x[off + q] + hi * x[off + q + 16];
+      }
+    }
+  }
+  for (std::uint32_t off = 16; off > 0; off >>= 1)
+    sum += __shfl_down_sync(0xffffffffull, sum, off);
+  __shared__ float shared[kThreads / 32];
+  if ((threadIdx.x & 31) == 0) shared[threadIdx.x / 32] = sum;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float v = threadIdx.x < blockDim.x / 32 ? shared[threadIdx.x] : 0.0F;
+    for (std::uint32_t off = 16; off > 0; off >>= 1)
+      v += __shfl_down_sync(0xffffffffull, v, off);
+    if (threadIdx.x == 0) y[row] = v;
+  }
+}
+
+__global__ void GemvF16Kernel(const __half* w, std::uint64_t cols,
+                             const float* x, float* y) {
+  const std::uint32_t row = blockIdx.x;
+  const __half* r = w + (std::size_t)row * cols;
+  float sum = 0.0F;
+  for (std::uint64_t i = threadIdx.x; i < cols; i += blockDim.x)
+    sum += __half2float(r[i]) * x[i];
+  for (std::uint32_t off = 16; off > 0; off >>= 1)
+    sum += __shfl_down_sync(0xffffffffull, sum, off);
+  __shared__ float shared[kThreads / 32];
+  if ((threadIdx.x & 31) == 0) shared[threadIdx.x / 32] = sum;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float v = threadIdx.x < blockDim.x / 32 ? shared[threadIdx.x] : 0.0F;
+    for (std::uint32_t off = 16; off > 0; off >>= 1)
+      v += __shfl_down_sync(0xffffffffull, v, off);
+    if (threadIdx.x == 0) y[row] = v;
+  }
+}
+
+
+// MoE expert accumulate: attn[t][i] += w_t * down_scale * down[t][i],
+// where w_t = sum of router weights assigned to expert e for token t.
+__global__ void MoeScaledAddKernel(const float* down, float* attn,
+                                   const std::int32_t* ids, const float* wts,
+                                   std::uint32_t expert, float down_scale,
+                                   std::uint32_t n, std::uint32_t hidden,
+                                   std::uint32_t experts_used) {
+  const std::uint32_t t = blockIdx.x;
+  float w = 0.0F;
+  if (t < n) {
+    const std::size_t base = (std::size_t)t * experts_used;
+    for (std::uint32_t s = 0; s < experts_used; ++s)
+      if (ids[base + s] == (std::int32_t)expert) w += wts[base + s];
+    w *= down_scale;
+  }
+  const std::size_t row = (std::size_t)t * hidden;
+  for (std::size_t i = (std::size_t)blockIdx.y * blockDim.x + threadIdx.x;
+       i < hidden; i += (std::size_t)gridDim.y * blockDim.x) {
+    attn[row + i] += w * down[row + i];
+  }
+}
+
+void MoeScaledAdd(const float* down, float* attn, const std::int32_t* ids,
+                  const float* wts, std::uint32_t expert, float down_scale,
+                  std::uint32_t n, std::uint32_t hidden,
+                  std::uint32_t experts_used, hipStream_t stream) {
+  if (n == 0 || hidden == 0) return;
+  const std::uint32_t yblocks =
+      (hidden + kThreads - 1) / kThreads > 16 ? 16 : (hidden + kThreads - 1) / kThreads;
+  hipLaunchKernelGGL(MoeScaledAddKernel, dim3(n, yblocks), dim3(kThreads), 0,
+                     stream, down, attn, ids, wts, expert, down_scale, n,
+                     hidden, experts_used);
+}
+
 __global__ void F32ToF16Kernel(const float* in, __half* out,
                                std::size_t count) {
   for (std::size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count;
@@ -683,6 +791,21 @@ void DequantSlab(const TensorRef& t, std::uint64_t rows, __half* dst,
   const void* src = t.device != nullptr ? t.device : t.data;
   hipLaunchKernelGGL(DequantRowKernel, dim3(blocks), dim3(256), 0, stream,
                      src, static_cast<int>(t.type), t.cols, row_bytes, dst);
+}
+
+void GemvFused(const void* wdev, int type, std::uint64_t row_bytes,
+               std::uint64_t cols, const float* x, float* y, std::uint32_t m,
+               hipStream_t stream) {
+  if (m == 0) return;
+  hipLaunchKernelGGL(GemvQKernel, dim3(m), dim3(kThreads), 0, stream, wdev,
+                     type, row_bytes, cols, x, y);
+}
+
+void GemvF16Fused(const __half* wdev, std::uint64_t cols, const float* x,
+                  float* y, std::uint32_t m, hipStream_t stream) {
+  if (m == 0) return;
+  hipLaunchKernelGGL(GemvF16Kernel, dim3(m), dim3(kThreads), 0, stream, wdev,
+                     cols, x, y);
 }
 
 }  // namespace kernels

@@ -7,6 +7,7 @@
 #include <hipblas/hipblas.h>
 
 #include "src/models/gemma4/weights.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 
 namespace gufo::models::gemma4 {
 namespace kernels {
@@ -131,6 +132,15 @@ void RopeFrequenciesMulti(float* x, std::uint32_t n_tokens,
 /// the F16 staging slab.
 void DequantSlab(const TensorRef& t, std::uint64_t rows, __half* dst,
                  hipStream_t stream);
+
+/// Fused n == 1 decode GEMV over quant weights (no staging slabs).
+void GemvFused(const void* wdev, int type, std::uint64_t row_bytes,
+               std::uint64_t cols, const float* x, float* y, std::uint32_t m,
+               hipStream_t stream);
+
+/// Fused n == 1 decode GEMV over dense F16 weights.
+void GemvF16Fused(const __half* wdev, std::uint64_t cols, const float* x,
+                  float* y, std::uint32_t m, hipStream_t stream);
 
 }  // namespace kernels
 }  // namespace gufo::models::gemma4

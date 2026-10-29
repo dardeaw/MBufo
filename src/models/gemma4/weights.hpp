@@ -17,6 +17,8 @@ struct TensorRef {
   const void* data{nullptr};
   /// Device mirror of `data` (the GGUF mmap is host-only; kernels read this).
   const void* device{nullptr};
+  /// Persistent F16 mirror (pre-dequantized at load; nullptr = dequant on the fly).
+  const void* f16{nullptr};
   /// True when `device` mirrors the host-mapped GGUF payload.
   bool host_mapped{false};
   std::size_t size_bytes{0};
