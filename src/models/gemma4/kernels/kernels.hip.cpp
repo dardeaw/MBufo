@@ -228,40 +228,6 @@ __global__ void GemvF16Kernel(const __half* w, std::uint64_t cols,
 }
 
 
-// MoE expert accumulate: attn[t][i] += w_t * down_scale * down[t][i],
-// where w_t = sum of router weights assigned to expert e for token t.
-__global__ void MoeScaledAddKernel(const float* down, float* attn,
-                                   const std::int32_t* ids, const float* wts,
-                                   std::uint32_t expert, float down_scale,
-                                   std::uint32_t n, std::uint32_t hidden,
-                                   std::uint32_t experts_used) {
-  const std::uint32_t t = blockIdx.x;
-  float w = 0.0F;
-  if (t < n) {
-    const std::size_t base = (std::size_t)t * experts_used;
-    for (std::uint32_t s = 0; s < experts_used; ++s)
-      if (ids[base + s] == (std::int32_t)expert) w += wts[base + s];
-    w *= down_scale;
-  }
-  const std::size_t row = (std::size_t)t * hidden;
-  for (std::size_t i = (std::size_t)blockIdx.y * blockDim.x + threadIdx.x;
-       i < hidden; i += (std::size_t)gridDim.y * blockDim.x) {
-    attn[row + i] += w * down[row + i];
-  }
-}
-
-void MoeScaledAdd(const float* down, float* attn, const std::int32_t* ids,
-                  const float* wts, std::uint32_t expert, float down_scale,
-                  std::uint32_t n, std::uint32_t hidden,
-                  std::uint32_t experts_used, hipStream_t stream) {
-  if (n == 0 || hidden == 0) return;
-  const std::uint32_t yblocks =
-      (hidden + kThreads - 1) / kThreads > 16 ? 16 : (hidden + kThreads - 1) / kThreads;
-  hipLaunchKernelGGL(MoeScaledAddKernel, dim3(n, yblocks), dim3(kThreads), 0,
-                     stream, down, attn, ids, wts, expert, down_scale, n,
-                     hidden, experts_used);
-}
-
 __global__ void F32ToF16Kernel(const float* in, __half* out,
                                std::size_t count) {
   for (std::size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count;
