@@ -128,6 +128,11 @@ void RopeFrequenciesMulti(float* x, std::uint32_t n_tokens,
                           float theta, const float* freq_factors,
                           hipStream_t stream);
 
+/// Lossless Q4_0 -> Q8_0 requant of `rows` rows into a Q8_0 buffer
+/// (34 bytes per 32 elements). For the WMMA DenseF16Gemm prefill path.
+void DequantSlabQ8(const TensorRef& t, std::uint64_t rows, std::uint8_t* dst,
+                   hipStream_t stream);
+
 /// Dequantize `rows` rows of `cols` elements from a GGML quant tensor into
 /// the F16 staging slab.
 void DequantSlab(const TensorRef& t, std::uint64_t rows, __half* dst,

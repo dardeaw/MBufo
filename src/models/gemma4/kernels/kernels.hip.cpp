@@ -750,6 +750,38 @@ __global__ void DequantRowKernel(const void* w, int type, std::uint64_t cols,
   }
 }
 
+
+/// Lossless Q4_0 -> Q8_0 requant: per 32-element block, d8 = d4/16 (f16),
+/// q8 = q4*16 (int8). Exact because q4 in [-8,7] => q8 in [-128,112].
+/// Reads `rows` rows of `cols` elements (cols % 32 == 0).
+__global__ void DequantQ40ToQ8Kernel(const void* __restrict__ w,
+                                     std::uint64_t cols,
+                                     std::uint64_t row_bytes,
+                                     std::uint8_t* __restrict__ out) {
+  const std::uint64_t row = blockIdx.x;
+  const auto* base = static_cast<const std::uint8_t*>(w) + row * row_bytes;
+  std::uint8_t* out_row = out + row * (cols / 32) * 34;
+  const std::uint64_t nblk = cols / 32;
+  for (std::uint64_t b = threadIdx.x; b < nblk;
+       b += static_cast<std::uint64_t>(blockDim.x)) {
+    const auto* q4 = reinterpret_cast<const std::uint8_t*>(base + b * 18);
+    const float d4 = __half2float(*reinterpret_cast<const __half*>(q4));
+    // Lossless: d8 = d4/16, q8 = q4*16 (q4 in [-8,7] -> q8 in [-128,112]).
+    const __half d8 = __float2half_rn(d4 * 0.0625F);
+    *reinterpret_cast<__half*>(out_row + b * 34) = d8;
+    std::int8_t* q8 = reinterpret_cast<std::int8_t*>(out_row + b * 34 + 2);
+    const std::uint8_t* qs = q4 + 2;
+    for (int off = 0; off < 16; ++off) {
+      const std::uint8_t byte = qs[off];
+      const int lo = (byte & 0xF) - 8;
+      const int hi = (byte >> 4) - 8;
+      q8[off]      = static_cast<std::int8_t>(lo * 16);
+      q8[off + 16] = static_cast<std::int8_t>(hi * 16);
+    }
+  }
+}
+
+
 void DequantSlab(const TensorRef& t, std::uint64_t rows, __half* dst,
                  hipStream_t stream) {
   const std::uint64_t row_bytes = t.RowBytes();
@@ -758,6 +790,15 @@ void DequantSlab(const TensorRef& t, std::uint64_t rows, __half* dst,
   hipLaunchKernelGGL(DequantRowKernel, dim3(blocks), dim3(256), 0, stream,
                      src, static_cast<int>(t.type), t.cols, row_bytes, dst);
 }
+
+void DequantSlabQ8(const TensorRef& t, std::uint64_t rows, std::uint8_t* dst,
+                   hipStream_t stream) {
+  const std::uint64_t row_bytes = t.RowBytes();
+  const void* src = t.device != nullptr ? t.device : t.data;
+  hipLaunchKernelGGL(DequantQ40ToQ8Kernel, dim3(static_cast<std::uint32_t>(rows)),
+                     dim3(256), 0, stream, src, t.cols, row_bytes, dst);
+}
+
 
 void GemvFused(const void* wdev, int type, std::uint64_t row_bytes,
                std::uint64_t cols, const float* x, float* y, std::uint32_t m,

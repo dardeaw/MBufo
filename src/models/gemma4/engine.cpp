@@ -46,7 +46,6 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
              std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
              hipStream_t stream, __half* slab, __half* x_slab) {
   if (n_tokens == 1 && getenv("GEMMA4_NO_FUSED_GEMV") == nullptr) {
-    // Decode fast path: fused dequant-GEMV, no staging slabs.
     if (w.f16 != nullptr) {
       kernels::GemvF16Fused(static_cast<const __half*>(w.f16), k, x, y, m,
                             stream);
@@ -67,23 +66,6 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
     W = slab;
   }
   kernels::F32ToF16(x, x_slab, static_cast<std::size_t>(n_tokens) * k, stream);
-  if (getenv("GEMMA4_USE_BLASLT") != nullptr) {
-    namespace fn = ::gufo::models::qwen38_flash_next::rocm;
-    static fn::BlasLt* blas = nullptr;
-    static bool blas_ok = true;
-    if (blas == nullptr && blas_ok) {
-      std::string err;
-      auto b = fn::BlasLt::Create(stream, &err);
-      if (!b) { blas_ok = false; } else { blas = b.release(); }
-      (void)err;
-    }
-    if (blas != nullptr) {
-      std::string err;
-      if (blas->Gemm(W, x_slab, y, HIP_R_16F, static_cast<int>(m),
-                     static_cast<int>(n_tokens), static_cast<int>(k), &err))
-        return;
-    }
-  }
   kernels::F16GemmStatus(W, x_slab, y, n_tokens, m, k, stream);
 }
 
@@ -966,11 +948,21 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
 
 bool Session::Sync(std::span<const std::int32_t> prompt,
                    std::string* error_msg) {
+  if (prompt.size() > impl_->capacity) {
+    if (error_msg != nullptr)
+      *error_msg = "prompt (" + std::to_string(prompt.size()) +
+                   " tokens) exceeds KV capacity (" +
+                   std::to_string(impl_->capacity) + ")";
+    return false;
+  }
   impl_->length = 0;
-  for (std::size_t off = 0; off < prompt.size();
-       off += Session::Impl::kMaxChunk) {
-    const std::size_t len =
-        std::min<std::size_t>(Session::Impl::kMaxChunk, prompt.size() - off);
+  std::size_t chunk = 64;  // gfx1151 hipBLAS faults at batch>=128
+  if (const char* e = getenv("GEMMA4_CHUNK")) {
+    const long v = std::strtol(e, nullptr, 10);
+    if (v >= 1 && v <= (long)Session::Impl::kMaxChunk) chunk = (std::size_t)v;
+  }
+  for (std::size_t off = 0; off < prompt.size(); off += chunk) {
+    const std::size_t len = std::min<std::size_t>(chunk, prompt.size() - off);
     if (!Forward(prompt.subspan(off, len), static_cast<std::uint32_t>(off),
                  error_msg))
       return false;

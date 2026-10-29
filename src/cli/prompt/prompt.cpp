@@ -1074,7 +1074,11 @@ int RunPrompt(std::span<const char* const> args) {
       return out;
     }();
     models::gemma4::ModelOptions gopt;
-    gopt.max_context = 8192;
+    gopt.max_context = 32768;
+    if (const char* e = getenv("GEMMA4_CTX")) {
+      const long v = std::strtol(e, nullptr, 10);
+      if (v >= 1024) gopt.max_context = static_cast<std::uint32_t>(v);
+    }
     auto gmodel = models::gemma4::Model::Load(opt.model_path, gopt, &err);
     if (!gmodel) {
       std::cerr << "Gemma4 load failed: " << err << '\n';
