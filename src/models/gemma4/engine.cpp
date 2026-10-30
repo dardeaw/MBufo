@@ -466,6 +466,12 @@ struct Session::Impl {
   static constexpr std::uint32_t kMaxChunk = 512;
   float* hidden{nullptr};     // [chunk][hidden]
   float* normed{nullptr};     // [chunk][hidden]
+  float* normed_compact{nullptr}; // compact-routed gather target
+  float* compact_gate{nullptr};   // [chunk][expert_ff] compact gate output
+  float* compact_up{nullptr};     // [chunk][expert_ff] compact up output
+  float* compact_down{nullptr};   // [chunk][hidden] compact down output
+  float* compact_wts{nullptr}; // [chunk][used] routing weights (compact view)
+  __half* compact_xhalf{nullptr}; // [compact_cap][hidden] gathered activations
   float* qbuf{nullptr};       // [chunk][heads*head_dim]
   float* kbuf{nullptr};       // [chunk][kv_heads*head_dim]
   float* vbuf{nullptr};       // [chunk][kv_heads*head_dim]
@@ -486,6 +492,7 @@ struct Session::Impl {
   __half* down_half{nullptr};
   float* router_logits_pad{nullptr};  // [chunk][256]
   std::size_t compact_cap{0};
+  bool compact_xhalf_zeroed{false};
   float* expert_out{nullptr};  // [chunk*experts_used][expert_ff]
   float* mlp_out{nullptr};     // [chunk][hidden]
   float* moe_out{nullptr};     // [chunk][hidden]
@@ -548,18 +555,35 @@ struct Session::Impl {
       const std::uint32_t E = w.config.num_experts;
       const std::uint32_t used = w.config.experts_used;
       const std::size_t slots = static_cast<std::size_t>(chunk) * used;
-      compact_cap = ::gufo::models::qwen38_flash_next::rocm::RoutedCompactRows(slots, E);
-      routed_bounds = buffers.Alloc<std::int32_t>(E + 1, error);
-      routed_cursors = buffers.Alloc<std::int32_t>(E, error);
-      rows_token = buffers.Alloc<std::int32_t>(compact_cap, error);
-      rows_slot = buffers.Alloc<std::int32_t>(compact_cap, error);
       routed_tiles = buffers.Alloc<std::int32_t>(slots, error);
-      x_half = buffers.Alloc<__half>(static_cast<std::size_t>(chunk) * w.config.hidden_size, error);
+      if (x_half == nullptr)
+        x_half = buffers.Alloc<__half>(static_cast<std::size_t>(chunk) * w.config.hidden_size, error);
       gate_f32 = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * used * w.config.expert_ff, error);
       up_half = buffers.Alloc<__half>(static_cast<std::size_t>(chunk) * used * w.config.expert_ff, error);
       down_half = buffers.Alloc<__half>(static_cast<std::size_t>(chunk) * used * w.config.hidden_size, error);
       router_logits_pad = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * 256, error);
     }
+    // Compact-routing buffers (used by the compact MoE prefill path).
+    compact_cap = ::gufo::models::qwen38_flash_next::rocm::RoutedCompactRows(
+        static_cast<std::size_t>(chunk) * w.config.experts_used,
+        w.config.num_experts);
+    routed_bounds = buffers.Alloc<std::int32_t>(w.config.num_experts + 1, error);
+    routed_cursors = buffers.Alloc<std::int32_t>(w.config.num_experts, error);
+    rows_token = buffers.Alloc<std::int32_t>(compact_cap, error);
+    rows_slot = buffers.Alloc<std::int32_t>(compact_cap, error);
+    normed_compact = buffers.Alloc<float>(compact_cap * w.config.hidden_size,
+                                          error);
+    x_half = buffers.Alloc<__half>(
+        static_cast<std::size_t>(chunk) * w.config.hidden_size, error);
+    compact_gate = buffers.Alloc<float>(compact_cap * w.config.expert_ff,
+                                        error);
+    compact_up = buffers.Alloc<float>(compact_cap * w.config.expert_ff,
+                                       error);
+    compact_down = buffers.Alloc<float>(compact_cap * hidden, error);
+    compact_wts = buffers.Alloc<float>(
+        static_cast<std::size_t>(chunk) * w.config.experts_used, error);
+    compact_xhalf = buffers.Alloc<__half>(
+        compact_cap * w.config.hidden_size, error);
     // Weight slab: the LM head (vocab x hidden) is the largest projection.
     const std::size_t slab = static_cast<std::size_t>(
         static_cast<std::uint64_t>(w.config.vocab_size) * hidden);
@@ -1364,6 +1388,48 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       hipMemsetAsync(impl_->attn_out, 0,
                      static_cast<std::size_t>(n) * hidden * sizeof(float),
                      stream);
+      bool compact_ok = false;
+      std::vector<std::int32_t> bounds_host;
+      if (getenv("GEMMA4_NO_COMPACT") == nullptr && n > 1 &&
+          impl_->rows_token != nullptr) {
+        namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+        q38::ExpertCounts(impl_->expert_ids, impl_->expert_counts, n,
+                          c.num_experts, c.experts_used, stream);
+        q38::RoutedCompact(impl_->expert_ids, impl_->expert_counts,
+                           impl_->routed_bounds, impl_->routed_cursors,
+                           impl_->rows_token, impl_->rows_slot, n,
+                           c.experts_used, c.num_experts, stream);
+        // RoutedPadBoundsKernel only clears padding rows; rows beyond the
+        // last expert's bucket keep stale assignments from earlier (larger)
+        // chunks. Clear the tail so scatter never reads a stale token index.
+        {
+          std::int32_t last_bound = 0;
+          hipMemcpy(&last_bound, impl_->routed_bounds + c.num_experts,
+                    sizeof(std::int32_t), hipMemcpyDeviceToHost);
+          const std::size_t cap =
+              ::gufo::models::qwen38_flash_next::rocm::RoutedCompactRows(
+                  static_cast<std::size_t>(n) * c.experts_used, c.num_experts);
+          if (static_cast<std::size_t>(last_bound) < cap) {
+            hipMemsetAsync(impl_->rows_token + last_bound, 0xFF,
+                           (cap - last_bound) * sizeof(std::int32_t), stream);
+            hipMemsetAsync(impl_->rows_slot + last_bound, 0xFF,
+                           (cap - last_bound) * sizeof(std::int32_t), stream);
+          }
+        }
+        bounds_host.assign(c.num_experts + 1, 0);
+        hipMemcpy(bounds_host.data(), impl_->routed_bounds,
+                  (c.num_experts + 1) * sizeof(std::int32_t),
+                  hipMemcpyDeviceToHost);
+        // The compact scatter indexes routing weights by rows_slot, a
+        // chunk-local slot index. expert_weights is a per-layer buffer that
+        // later layers overwrite, so the compact view keeps its own copy for
+        // the lifetime of this chunk's expert loop.
+        hipMemcpyAsync(impl_->compact_wts, impl_->expert_weights,
+                       static_cast<std::size_t>(n) * c.experts_used *
+                           sizeof(float),
+                       hipMemcpyDeviceToDevice, stream);
+        compact_ok = true;
+      }
       std::vector<bool> active(c.num_experts, false);
       for (std::size_t idx = 0; idx < ids.size(); ++idx) {
         if (ids[idx] >= 0 && ids[idx] < static_cast<std::int32_t>(c.num_experts))
@@ -1401,6 +1467,44 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         down_ref.data = l.down_exps.DeviceExpert(e);
         down_ref.device = down_ref.data;
         down_ref.experts = 1;
+        // Compact routing: compute this expert only for the tokens routed
+        // to it (rows_token/pad_bounds from RoutedCompact) instead of the
+        // whole chunk. Same kernels and same math per row.
+        std::uint32_t rows_begin = 0, rows_end = n;
+        if (compact_ok) {
+          rows_begin = static_cast<std::uint32_t>(bounds_host[e]);
+          rows_end = static_cast<std::uint32_t>(bounds_host[e + 1]);
+          if (rows_end <= rows_begin) continue;
+          kernels::CompactGatherF16(impl_->normed, impl_->compact_xhalf,
+                                      impl_->rows_token, rows_begin, rows_end,
+                                      hidden, stream);
+        }
+        const std::uint32_t batch = compact_ok ? (rows_end - rows_begin) : n;
+        const __half* xin_f16 = compact_ok
+                                    ? static_cast<const __half*>(impl_->compact_xhalf)
+                                    : nullptr;
+        float* xin = compact_ok ? impl_->normed_compact : impl_->normed;
+        float* gout = impl_->mlp_out;
+        float* uout = impl_->expert_out;
+        float* dout = impl_->expert_down;
+        if (compact_ok) {
+          gout = impl_->compact_gate;
+          uout = impl_->compact_up;
+          dout = impl_->compact_down;
+        }
+        // Expert-local views: the compact buffers are indexed by the GLOBAL
+        // compact row, so every per-expert kernel works on the [begin,end)
+        // slice. The WMMA GEMM reads x rows [0,batch) from xg and writes the
+        // expert's own rows via gg/gu/gd.
+        const __half* xg = nullptr;
+        float *gg = nullptr, *gu = nullptr, *gd = nullptr;
+        if (compact_ok) {
+          xg = static_cast<const __half*>(impl_->compact_xhalf) +
+               static_cast<std::size_t>(rows_begin) * hidden;
+          gg = gout + static_cast<std::size_t>(rows_begin) * c.expert_ff;
+          gu = uout + static_cast<std::size_t>(rows_begin) * c.expert_ff;
+          gd = dout + static_cast<std::size_t>(rows_begin) * hidden;
+        }
         if (!l.gate_up_exps.empty()) {
           TensorRef gate_ref = l.gate_up_exps;
           gate_ref.data = l.gate_up_exps.DeviceExpert(e);
@@ -1412,10 +1516,26 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                         static_cast<std::size_t>(c.expert_ff) *
                             gate_ref.RowBytes();
           up_ref.device = up_ref.data;
-          F32Gemm(gate_ref, impl_->normed, impl_->mlp_out, n, c.expert_ff,
-                  hidden, stream, impl_->w_slab, impl_->x_slab);
-          F32Gemm(up_ref, impl_->normed, impl_->expert_out, n, c.expert_ff,
-                  hidden, stream, impl_->w_slab2, impl_->x_slab);
+          if (compact_ok) {
+              // WMMA path with padded batch (multiple of 16): the small-batch
+              // hipBLAS fallback faults on odd batches below 96 rows.
+              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+              kernels::DequantSlabQ8(gate_ref, c.expert_ff,
+                                     reinterpret_cast<std::uint8_t*>(impl_->w_slab),
+                                     stream);
+              q38::DenseF16Gemm(impl_->w_slab, xg, gg, batch,
+                                c.expert_ff, hidden, stream);
+              kernels::DequantSlabQ8(up_ref, c.expert_ff,
+                                     reinterpret_cast<std::uint8_t*>(impl_->w_slab),
+                                     stream);
+              q38::DenseF16Gemm(impl_->w_slab, xg, gu, batch,
+                                c.expert_ff, hidden, stream);
+            } else {
+              F32Gemm(gate_ref, xin, gout, batch, c.expert_ff,
+                      hidden, stream, impl_->w_slab, impl_->x_slab);
+              F32Gemm(up_ref, xin, uout, batch, c.expert_ff,
+                      hidden, stream, impl_->w_slab2, impl_->x_slab);
+            }
         } else {
           TensorRef gate_ref = l.gate_exps;
           gate_ref.data = l.gate_exps.DeviceExpert(e);
@@ -1425,25 +1545,56 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           up_ref.data = l.up_exps.DeviceExpert(e);
           up_ref.device = up_ref.data;
           up_ref.experts = 1;
-          F32Gemm(gate_ref, impl_->normed, impl_->mlp_out, n, c.expert_ff,
+          F32Gemm(gate_ref, xin, gout, batch, c.expert_ff,
                   hidden, stream, impl_->w_slab, impl_->x_slab);
-          F32Gemm(up_ref, impl_->normed, impl_->expert_out, n, c.expert_ff,
+          F32Gemm(up_ref, xin, uout, batch, c.expert_ff,
                   hidden, stream, impl_->w_slab2, impl_->x_slab);
         }
-        kernels::GeluTanhSwiglu(impl_->mlp_out, impl_->expert_out,
-                                static_cast<std::size_t>(n) * c.expert_ff,
+        if (compact_ok) {
+          kernels::GeluTanhSwiglu(gg, gu,
+                                    static_cast<std::size_t>(batch) * c.expert_ff,
+                                    stream);
+          {
+            if (getenv("GEMMA4_COMPACT_DOWN_WMMA") != nullptr) {
+              // WMMA path for the down GEMM too (m=2816>=256, batch is a
+              // multiple of 16); the hipBLAS fallback mis-handles the compact
+              // batch here.
+              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+              kernels::DequantSlabQ8(down_ref, hidden,
+                                     reinterpret_cast<std::uint8_t*>(impl_->w_slab),
+                                     stream);
+              kernels::F32ToF16(gout, impl_->x_half,
+                                static_cast<std::size_t>(batch) * c.expert_ff,
                                 stream);
-        F32Gemm(down_ref, impl_->mlp_out, impl_->expert_down, n, hidden,
-                c.expert_ff, stream, impl_->w_slab, impl_->x_slab);
-        if (down_scale != 1.0F) {
-          kernels::ScaleInplace(impl_->expert_down, down_scale,
-                                static_cast<std::size_t>(n) * hidden, stream);
+              q38::DenseF16Gemm(impl_->w_slab, impl_->x_half, dout, batch,
+                                hidden, c.expert_ff, stream);
+            } else {
+              F32Gemm(down_ref, gg, gd, batch, hidden,
+                      c.expert_ff, stream, impl_->w_slab, impl_->x_slab);
+            }
+            if (down_scale != 1.0F) {
+              kernels::ScaleInplace(gd, down_scale,
+                                    static_cast<std::size_t>(batch) * hidden,
+                                    stream);
+            }
+          }
+          kernels::MoeScatterAdd(gd, impl_->rows_token, impl_->rows_slot,
+                                   impl_->compact_wts, rows_begin, rows_end,
+                                   impl_->attn_out, hidden, stream);
+        } else {
+          kernels::GeluTanhSwiglu(impl_->mlp_out, impl_->expert_out,
+                                  static_cast<std::size_t>(n) * c.expert_ff,
+                                  stream);
+          F32Gemm(down_ref, impl_->mlp_out, impl_->expert_down, n, hidden,
+                  c.expert_ff, stream, impl_->w_slab, impl_->x_slab);
+          if (down_scale != 1.0F) {
+            kernels::ScaleInplace(impl_->expert_down, down_scale,
+                                  static_cast<std::size_t>(n) * hidden, stream);
+          }
+          kernels::MoeRoutedAdd(impl_->expert_down, impl_->expert_ids,
+                                impl_->expert_weights, e, impl_->attn_out, n,
+                                c.experts_used, hidden, stream);
         }
-        // One launch for all tokens, weights summed on device (this used to
-        // be two launches per (expert, token)).
-        kernels::MoeRoutedAdd(impl_->expert_down, impl_->expert_ids,
-                              impl_->expert_weights, e, impl_->attn_out, n,
-                              c.experts_used, hidden, stream);
       }
 
       }

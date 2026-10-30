@@ -892,6 +892,54 @@ void RouterInput(const float* attn_out, const float* router_scale, float* tmp,
                      stream, attn_out, router_scale, tmp, hidden, eps);
 }
 
+// Gather the rows routed to one expert into a compact batch:
+// dst[i] = src[rows_token[i]] for i in [begin,end); padding rows (token -1)
+// are zero-filled so the GEMM output stays finite (the scatter skips them).
+__global__ void CompactGatherKernel(const float* src, float* dst,
+                                    const std::int32_t* rows,
+                                    std::uint32_t begin, std::uint32_t end,
+                                    std::uint32_t dim) {
+  const std::uint32_t i = blockIdx.x;
+  if (i < begin || i >= end) return;
+  const std::int32_t tok = rows[i];
+  const float* s = src + static_cast<std::size_t>(tok < 0 ? 0 : tok) * dim;
+  float* d = dst + static_cast<std::size_t>(i) * dim;
+  for (std::uint32_t j = threadIdx.x; j < dim; j += blockDim.x)
+    d[j] = tok < 0 ? 0.0F : s[j];
+}
+
+void CompactGather(const float* src, float* dst, const std::int32_t* rows,
+                   std::uint32_t begin, std::uint32_t end, std::uint32_t dim,
+                   hipStream_t stream) {
+  if (end <= begin) return;
+  hipLaunchKernelGGL(CompactGatherKernel, dim3(end), dim3(kThreads), 0, stream,
+                     src, dst, rows, begin, end, dim);
+}
+
+// Gather + convert in one pass: dst_f16[i] = f16(src[rows_token[i]]),
+// padding rows (token -1) zero-filled. The compact MoE path feeds the WMMA
+// GEMM directly, skipping the separate F32->F16 staging pass.
+__global__ void CompactGatherF16Kernel(const float* src, __half* dst,
+                                       const std::int32_t* rows,
+                                       std::uint32_t begin, std::uint32_t end,
+                                       std::uint32_t dim) {
+  const std::uint32_t i = blockIdx.x;
+  if (i < begin || i >= end) return;
+  const std::int32_t tok = rows[i];
+  const float* s = src + static_cast<std::size_t>(tok < 0 ? 0 : tok) * dim;
+  __half* d = dst + static_cast<std::size_t>(i) * dim;
+  for (std::uint32_t j = threadIdx.x; j < dim; j += blockDim.x)
+    d[j] = tok < 0 ? __float2half_rn(0.0F) : __float2half_rn(s[j]);
+}
+
+void CompactGatherF16(const float* src, __half* dst, const std::int32_t* rows,
+                      std::uint32_t begin, std::uint32_t end,
+                      std::uint32_t dim, hipStream_t stream) {
+  if (end <= begin) return;
+  hipLaunchKernelGGL(CompactGatherF16Kernel, dim3(end), dim3(kThreads), 0,
+                     stream, src, dst, rows, begin, end, dim);
+}
+
 // Weighted routed accumulate: out[t] += w(t,e) * expert_down[t] for one
 // expert, where w(t,e) sums this expert's routing weights over the token's
 // slots. Replaces the per-(expert,token) ScaleInplace + AddInplace pair -- the
@@ -913,6 +961,38 @@ __global__ void MoeRoutedAddKernel(const float* expert_down,
   float* dst = out + static_cast<std::size_t>(t) * dim;
   for (std::uint32_t i = threadIdx.x; i < dim; i += blockDim.x)
     dst[i] += w * src[i];
+}
+
+// Scatter variant of the routed accumulate: out[rows_token[i]] +=
+// w(slot) * down[i] over one expert's compact rows. Padding rows are -1 and
+// skipped. w comes from the routing slot, so weights match the old path.
+__global__ void MoeScatterAddKernel(const float* down,
+                                    const std::int32_t* rows_token,
+                                    const std::int32_t* rows_slot,
+                                    const float* wts, std::uint32_t begin,
+                                    std::uint32_t end, float* out,
+                                    std::uint32_t dim) {
+  const std::uint32_t i = blockIdx.x;
+  if (i < begin || i >= end) return;
+  const std::int32_t tok = rows_token[i];
+  if (tok < 0) return;
+  const float w = wts[rows_slot[i]];
+  if (w == 0.0F) return;
+  // down is the per-expert compact output (row 0 == begin), so index it with
+  // the offset within this expert's range, not the global compact index.
+  const float* src = down + static_cast<std::size_t>(i - begin) * dim;
+  float* dst = out + static_cast<std::size_t>(tok) * dim;
+  for (std::uint32_t j = threadIdx.x; j < dim; j += blockDim.x)
+    dst[j] += w * src[j];
+}
+
+void MoeScatterAdd(const float* down, const std::int32_t* rows_token,
+                   const std::int32_t* rows_slot, const float* wts,
+                   std::uint32_t begin, std::uint32_t end, float* out,
+                   std::uint32_t dim, hipStream_t stream) {
+  if (end <= begin) return;
+  hipLaunchKernelGGL(MoeScatterAddKernel, dim3(end), dim3(kThreads), 0, stream,
+                     down, rows_token, rows_slot, wts, begin, end, out, dim);
 }
 
 void MoeRoutedAdd(const float* expert_down, const std::int32_t* ids,

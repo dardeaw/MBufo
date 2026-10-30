@@ -132,6 +132,20 @@ void RouterInput(const float* attn_out, const float* router_scale,
 
 /// out[t][i] = sum_s weights[t][s] * expert_out[t*k + s][i] (no shared
 /// expert gate — Gemma 4 combines the shared MLP separately).
+/// Gather + convert to F16 in one pass for the compact WMMA GEMM.
+void CompactGatherF16(const float* src, __half* dst, const std::int32_t* rows,
+                      std::uint32_t begin, std::uint32_t end,
+                      std::uint32_t dim, hipStream_t stream);
+/// Gather rows routed to one expert into a compact batch (dst==src in-place,
+/// padding rows -1 zero-filled).
+void CompactGather(const float* src, float* dst, const std::int32_t* rows,
+                   std::uint32_t begin, std::uint32_t end, std::uint32_t dim,
+                   hipStream_t stream);
+/// Scatter variant: out[rows_token[i]] += w(slot)*down[i] over compact rows.
+void MoeScatterAdd(const float* down, const std::int32_t* rows_token,
+                   const std::int32_t* rows_slot, const float* wts,
+                   std::uint32_t begin, std::uint32_t end, float* out,
+                   std::uint32_t dim, hipStream_t stream);
 /// Weighted routed accumulate for one expert: out[t] += w(t,e)*expert_down[t]
 /// with w(t,e) summed from the routing slots. One launch per expert.
 void MoeRoutedAdd(const float* expert_down, const std::int32_t* ids,
