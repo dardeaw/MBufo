@@ -452,17 +452,90 @@ void DebugRow(const void* table, std::uint32_t row_bytes,
                      row_bytes, token, d_out, n);
 }
 
+static std::int32_t* g_d_tokens = nullptr;
+static std::size_t g_d_tokens_cap = 0;
+
+__global__ void EmbedScaleKernel(const std::uint8_t* __restrict__ table,
+                                 int type, const std::int32_t* __restrict__ tokens,
+                                 float* __restrict__ res, std::uint32_t hidden,
+                                 float scale) {
+  const std::uint32_t t = blockIdx.x;
+  const std::size_t row_bytes =
+      type == 0 ? static_cast<std::size_t>(hidden) * 4
+                : type == 1 ? static_cast<std::size_t>(hidden) * 2
+                : type == 8 ? static_cast<std::size_t>(hidden) / 32 * 34
+                            : static_cast<std::size_t>(hidden) / 32 * 18;
+  const std::uint8_t* row = table + row_bytes * tokens[t];
+  const std::size_t base = static_cast<std::size_t>(t) * hidden;
+  if (type == 0) {
+    const auto* src = reinterpret_cast<const float*>(row);
+    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x)
+      res[base + i] = src[i] * scale;
+    return;
+  }
+  if (type == 1) {
+    const auto* src = reinterpret_cast<const __half*>(row);
+    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x)
+      res[base + i] = __half2float(src[i]) * scale;
+    return;
+  }
+  if (type == 8) {
+    for (std::uint32_t b = threadIdx.x; b < hidden / 32; b += blockDim.x) {
+      const std::uint8_t* blk = row + static_cast<std::size_t>(34) * b;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk)) * scale;
+      const std::size_t off = base + static_cast<std::size_t>(b) * 32;
+      for (int q = 0; q < 32; ++q)
+        res[off + q] = d * static_cast<float>(static_cast<std::int8_t>(blk[2 + q]));
+    }
+    return;
+  }
+  for (std::uint32_t b = threadIdx.x; b < hidden / 32; b += blockDim.x) {
+    const std::uint8_t* blk = row + static_cast<std::size_t>(18) * b;
+    const float d = __half2float(*reinterpret_cast<const __half*>(blk)) * scale;
+    const std::uint8_t* qs = blk + 2;
+    const std::size_t off = base + static_cast<std::size_t>(b) * 32;
+    for (int q = 0; q < 16; ++q) {
+      const int lo = qs[q] & 0xF;
+      const int hi = qs[q] >> 4;
+      res[off + q] = d * static_cast<float>(lo - 8);
+      res[off + q + 16] = d * static_cast<float>(hi - 8);
+    }
+  }
+}
+
+void EmbedScale(const void* table, core::GgmlType type,
+                const std::int32_t* tokens, float* res, std::uint32_t n_tokens,
+                std::uint32_t hidden, float scale, hipStream_t stream) {
+  UploadTokens(tokens, n_tokens, stream);
+  hipLaunchKernelGGL(EmbedScaleKernel, dim3(n_tokens), dim3(kThreads), 0,
+                     stream, static_cast<const std::uint8_t*>(table),
+                     static_cast<int>(type), g_d_tokens, res, hidden, scale);
+}
+
+void UploadTokens(const std::int32_t* tokens, std::uint32_t n_tokens,
+                  hipStream_t stream) {
+  // Persistent device token staging: malloc/free per call races the async
+  // kernels that read the ids and churns the allocator. Grow-only.
+  if (static_cast<std::size_t>(n_tokens) > g_d_tokens_cap) {
+    void* grown = nullptr;
+    if (hipMalloc(&grown, sizeof(std::int32_t) * n_tokens) != hipSuccess)
+      return;
+    g_d_tokens = static_cast<std::int32_t*>(grown);
+    g_d_tokens_cap = n_tokens;
+  }
+  hipMemcpyAsync(g_d_tokens, tokens, sizeof(std::int32_t) * n_tokens,
+                 hipMemcpyHostToDevice, stream);
+}
+
+std::int32_t* DeviceTokens() { return g_d_tokens; }
+
 void Embed(const void* table, core::GgmlType type,
            const std::int32_t* tokens, float* res, std::uint32_t n_tokens,
            std::uint32_t hidden, hipStream_t stream) {
-  std::int32_t* d_tokens = nullptr;
-  hipMalloc(&d_tokens, sizeof(std::int32_t) * n_tokens);
-  hipMemcpyAsync(d_tokens, tokens, sizeof(std::int32_t) * n_tokens,
-                 hipMemcpyHostToDevice, stream);
+  UploadTokens(tokens, n_tokens, stream);
   hipLaunchKernelGGL(EmbedKernel, dim3(n_tokens), dim3(kThreads), 0, stream,
                      static_cast<const std::uint8_t*>(table),
-                     static_cast<int>(type), d_tokens, res, hidden);
-  hipFree(d_tokens);
+                     static_cast<int>(type), g_d_tokens, res, hidden);
 }
 
 bool CopyHostToDevice(void* dst, const void* host, std::size_t bytes) {
@@ -634,10 +707,14 @@ void RmsNorm(const float* x, const float* gamma, float* out,
   static std::size_t stage_elems = 0;
   const std::size_t need = static_cast<std::size_t>(n_rows) * dim;
   if (x == out && need > stage_elems) {
-    if (stage)
-      hipFree(stage);
-    hipMalloc(&stage, need * sizeof(float));
-    stage_elems = need;
+    // Never free the old stage: a previously launched async RmsNorm kernel
+    // may still be reading it on this stream. Grow-only; the largest need
+    // (kMaxChunk rows x hidden) is reached early and reused thereafter.
+    void* grown = nullptr;
+    if (hipMalloc(&grown, need * sizeof(float)) == hipSuccess) {
+      stage = static_cast<float*>(grown);
+      stage_elems = need;
+    }
   }
   if (x == out && stage != nullptr) {
     hipMemcpyAsync(stage, x, need * sizeof(float), hipMemcpyDeviceToDevice,

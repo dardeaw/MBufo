@@ -50,6 +50,17 @@ void Embed(const void* table, core::GgmlType type,
            const std::int32_t* tokens, float* res, std::uint32_t n_tokens,
            std::uint32_t hidden, hipStream_t stream);
 
+/// Upload token ids to the persistent device staging buffer used by Embed.
+/// Call before any kernel that needs the ids on-device (e.g. the fused
+/// embed+scale path).
+void EmbedScale(const void* table, core::GgmlType type,
+                const std::int32_t* tokens, float* res, std::uint32_t n_tokens,
+                std::uint32_t hidden, float scale, hipStream_t stream);
+
+void UploadTokens(const std::int32_t* tokens, std::uint32_t n_tokens,
+                  hipStream_t stream);
+std::int32_t* DeviceTokens();
+
 /// Copy a host buffer into an existing device buffer via the copy engine.
 bool CopyHostToDevice(void* dst, const void* host, std::size_t bytes);
 

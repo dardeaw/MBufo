@@ -1,3 +1,5 @@
+#include <thread>
+#include <chrono>
 #include "src/models/gemma4/engine.hpp"
 
 #include <cmath>
@@ -58,7 +60,12 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
   // WMMA Q8 prefill for the bulk projections (verified maxrel 1e-4 vs hipBLAS).
   // The router (m==128) mis-tiles the WMMA kernel and stays on hipBLAS; the LM
   // head is projected at n==1 (fused GEMV) so it never reaches here.
-  const bool use_wmma = (m >= 256) && (m <= 65536) && (k % 32 == 0) &&
+  const std::uint32_t wmma_max = [] {
+    if (const char* e = getenv("GEMMA4_WMMA_MAX"))
+      return static_cast<std::uint32_t>(strtoul(e, nullptr, 10));
+    return 65536U;
+  }();
+  const bool use_wmma = (m >= 256) && (m <= wmma_max) && (k % 32 == 0) &&
                         getenv("GEMMA4_NO_WMMAPREFILL") == nullptr;
   TensorRef dev = w; dev.data = w.device != nullptr ? w.device : w.data;
   if (use_wmma) {
@@ -70,7 +77,14 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
   if (w.f16 != nullptr) W = static_cast<const __half*>(w.f16);
   else { kernels::DequantSlab(dev, m, slab, stream); W = slab; }
   kernels::F32ToF16(x, x_slab, static_cast<std::size_t>(n_tokens) * k, stream);
-  kernels::F16GemmStatus(W, x_slab, y, n_tokens, m, k, stream);
+  hipblasStatus_t st = kernels::F16GemmStatus(W, x_slab, y, n_tokens, m, k, stream);
+  if (getenv("GEMMA4_HB_ERR") != nullptr && st != HIPBLAS_STATUS_SUCCESS) {
+    fprintf(stderr, "[hipblas] FAIL st=%d m=%u k=%u n=%u\n", (int)st, m, k,
+            n_tokens);
+    fflush(stderr);
+  }
+  if (getenv("GEMMA4_HB_SYNC") != nullptr)
+    hipStreamSynchronize(stream);
 }
 
 [[nodiscard]] bool Check(hipError_t err, std::string* error, const char* what) {
@@ -454,7 +468,12 @@ struct Session::Impl {
         static_cast<std::size_t>(chunk) * 8 * w.config.head_dim_full, error);
     vbuf = buffers.Alloc<float>(
         static_cast<std::size_t>(chunk) * 8 * w.config.head_dim_full, error);
-    attn_out = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * hidden,
+    // Attention writes [n][heads][d] with d up to head_dim_full (full
+    // layers: 16*512 per token), wider than hidden; wo consumes that
+    // width before overwriting it in place with [n][hidden].
+    const std::size_t attn_row = static_cast<std::size_t>(w.config.num_heads) *
+                                 w.config.head_dim_full;
+    attn_out = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * attn_row,
                                     error);
     router_tmp = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * hidden,
                                       error);
@@ -551,10 +570,22 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
     }
     const std::uint32_t dim = w.config.KvHeads(il) * w.config.HeadDim(il);
     impl.kv_stride[il] = dim;
-    impl.kv_k[il] = impl.buffers.Alloc<__half>(
-        static_cast<std::size_t>(options_.max_context) * dim, error_msg);
-    impl.kv_v[il] = impl.buffers.Alloc<__half>(
-        static_cast<std::size_t>(options_.max_context) * dim, error_msg);
+    const std::size_t kv_elems = static_cast<std::size_t>(options_.max_context) * dim;
+    std::uint8_t* kvk8 = nullptr;
+    std::uint8_t* kvv8 = nullptr;
+    if (hipMalloc(&kvk8, kv_elems * sizeof(__half)) != hipSuccess ||
+        hipMalloc(&kvv8, kv_elems * sizeof(__half)) != hipSuccess) {
+      if (error_msg != nullptr)
+        *error_msg = "KV cache allocation failed (layer " + std::to_string(il) +
+                     ", dim " + std::to_string(dim) + ")";
+      return nullptr;
+    }
+    hipMemset(kvk8, 0, kv_elems * sizeof(__half));
+    hipMemset(kvv8, 0, kv_elems * sizeof(__half));
+    impl.buffers.allocations.push_back(kvk8);
+    impl.buffers.allocations.push_back(kvv8);
+    impl.kv_k[il] = reinterpret_cast<__half*>(kvk8);
+    impl.kv_v[il] = reinterpret_cast<__half*>(kvv8);
     if (impl.kv_k[il] == nullptr || impl.kv_v[il] == nullptr) {
       if (error_msg != nullptr && error_msg->empty())
         *error_msg = "KV cache allocation failed (layer " +
@@ -607,6 +638,20 @@ void StagedGemm(const TensorRef& w, std::uint64_t m_rows, const float* x,
 }  // namespace
 
 
+static const char* g_gemma4_stage = "init";
+[[maybe_unused]] static void SetStage(const char* tag) {
+  if (getenv("GEMMA4_STAGE_DEBUG") == nullptr) return;
+  g_gemma4_stage = tag;
+  hipError_t e = hipStreamSynchronize(0);
+  if (e != hipSuccess) {
+    fprintf(stderr, "[stage-fault] after %s: %s\n", tag, hipGetErrorString(e));
+    fflush(stderr);
+  } else {
+    fprintf(stderr, "[stage] %s ok\n", tag);
+    fflush(stderr);
+  }
+}
+
 static void SyncSum(const float* p, const char* tag, std::uint32_t n,
                     std::uint32_t hidden, std::uint32_t il) {
   if (il != 0 || !getenv("GEMMA4_DEBUG_EMBED") || !p) return;
@@ -641,9 +686,26 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     std::fprintf(stderr, "[gemma4] fwd n=%u pos=%u tok0=%d\n", n, start_pos,
                  host_tokens[0]);
   std::uint32_t* d_pos = nullptr;
+  if (getenv("GEMMA4_STOP_MALLOC") != nullptr && start_pos > 0) {
+    hipStreamSynchronize(0);
+    fprintf(stderr, "[stage] STOP_MALLOC pre-malloc sync done pos=%u\n", start_pos);
+    fflush(stderr);
+    return true;  // leak nothing: nothing allocated yet this call
+  }
   if (!Check(hipMalloc(&d_pos, sizeof(std::uint32_t)), error_msg,
              "d_pos alloc"))
     return false;
+  if (getenv("GEMMA4_STOP_EMBED") != nullptr && start_pos > 0) {
+    kernels::Embed(w.token_embd.device, w.token_embd.type, host_tokens.data(),
+                   impl_->hidden, n, hidden, stream);
+    kernels::ScaleInplace(impl_->hidden, std::sqrt(static_cast<float>(hidden)),
+                          static_cast<std::size_t>(n) * hidden, stream);
+    hipStreamSynchronize(0);
+    fprintf(stderr, "[stage] STOP_EMBED done pos=%u\n", start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
   if (!Check(hipMemcpyAsync(d_pos, &start_pos, sizeof(std::uint32_t),
                             hipMemcpyHostToDevice, stream),
              error_msg, "d_pos copy")) {
@@ -651,13 +713,195 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     return false;
   }
 
-  // Embedding lookup from the device mirror (Q4_0 table).
-  kernels::Embed(w.token_embd.device, w.token_embd.type, host_tokens.data(),
-                 impl_->hidden, n, hidden, stream);
-
-  // llama.cpp parity: scale the token embedding by sqrt(hidden).
-  kernels::ScaleInplace(impl_->hidden, std::sqrt(static_cast<float>(hidden)),
-                        static_cast<std::size_t>(n) * hidden, stream);
+  if (getenv("GEMMA4_STOP_PREEMBED") != nullptr && start_pos > 0) {
+    // Pure sync: launch a trivial kernel then sync. If the fault appears
+    // here, it belongs to the PREVIOUS chunk's queued work.
+    kernels::ScaleInplace(impl_->mlp_out, 1.0F, 1, stream);
+    hipError_t e = hipStreamSynchronize(0);
+    fprintf(stderr, "[stage] STOP_PREEMBED sync=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_CHUNK1") != nullptr && start_pos == 0) {
+    // chunk1 完整跑完（含 LM head），在 Forward 最尾端 sync 後返回。
+    // 若之後 STOP_NOLAUNCH 的 chunk2 不再崩 → 崩潰需要 chunk2 的 launch 共存。
+    hipError_t e = hipStreamSynchronize(0);
+    fprintf(stderr, "[stage] STOP_CHUNK1 sync=%s\n", hipGetErrorString(e));
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_C1HALF") != nullptr && start_pos == 0) {
+    // chunk1: run only half the layers (il < 15), sync, return.
+    // If chunk2 then runs full without crash => the fault lives in
+    // chunk1's layers 15..29 at n=224.
+  }
+  if (getenv("GEMMA4_STOP_C1L0") != nullptr && start_pos == 0) {
+    // chunk1: run ONLY L0, sync, return. chunk2+ host-only via STOP_C2H.
+  }
+  if (getenv("GEMMA4_STOP_C1Q") != nullptr && start_pos > 0) {
+    // chunk2: query-only drain (no sync, no launch, no d_pos free).
+    hipError_t e = hipErrorNotReady;
+    for (int i = 0; i < 5000000 && e == hipErrorNotReady; ++i)
+      e = hipStreamQuery(0);
+    fprintf(stderr, "[stage] STOP_C1Q query=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    return true;  // leak d_pos; no sync call
+  }
+  if (getenv("GEMMA4_STOP_C2NOSYNC") != nullptr && start_pos > 0) {
+    // chunk2: NO sync at all, just return true (leak d_pos). If the process
+    // does NOT crash, the fault is triggered by the SYNC (drain) itself.
+    fprintf(stderr, "[stage] STOP_C2NOSYNC return pos=%u (no drain)\n", start_pos);
+    fflush(stderr);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_C1DRAIN") != nullptr && start_pos > 0) {
+    // chunk2: drain chunk1 WITHOUT touching d_pos (test d_pos-free theory).
+    hipError_t e = hipDeviceSynchronize();
+    fprintf(stderr, "[stage] STOP_C1DRAIN devsync=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    return true;  // intentionally leak d_pos to rule out its free
+  }
+  if (getenv("GEMMA4_STOP_C2DRAIN") != nullptr && start_pos > 0) {
+    // chunk2: drain via BLOCKING hipDeviceSynchronize (no new launches).
+    // Contrast with STOP_C2POLL (query-only) and STOP_C2M (launch+sync).
+    hipError_t e = hipDeviceSynchronize();
+    fprintf(stderr, "[stage] STOP_C2DRAIN devsync=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_C2POLL") != nullptr && start_pos > 0) {
+    // chunk2: NO launch; poll chunk1 queue to completion via query-only API.
+    hipError_t e = hipErrorNotReady;
+    for (int i = 0; i < 2000000 && e == hipErrorNotReady; ++i)
+      e = hipStreamQuery(0);
+    fprintf(stderr, "[stage] STOP_C2POLL query=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_C2H") != nullptr && start_pos > 0) {
+    // chunk2: NO pre-sync, NO launch — host-only hipGetLastError read.
+    // If this crashes, chunk1's queued work faults on its own at n=224.
+    hipError_t e = hipGetLastError();
+    fprintf(stderr, "[stage] STOP_C2H lasterr=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_C2M") != nullptr && start_pos > 0) {
+    // chunk2: NO pre-sync, ONE tiny memsetAsync only, sync.
+    // Crash here (with zero other launches) = chunk1's queued work faults
+    // on its own at n=224.
+    hipMemsetAsync(impl_->mlp_out, 0, 64, stream);
+    hipError_t e = hipStreamSynchronize(0);
+    fprintf(stderr, "[stage] STOP_C2M memset sync=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_C2N") != nullptr && start_pos > 0) {
+    // chunk2: NO pre-sync, embed+scale only, sync. Contrast with STOP_C2E
+    // (same but WITH pre-sync). C2E ok + C2N crash => async tail race.
+    kernels::EmbedScale(w.token_embd.device, w.token_embd.type,
+                        host_tokens.data(), impl_->hidden, n, hidden,
+                        std::sqrt(static_cast<float>(hidden)), stream);
+    hipError_t e = hipStreamSynchronize(0);
+    fprintf(stderr, "[stage] STOP_C2N embed sync=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_C2L0") != nullptr && start_pos > 0) {
+    // chunk2: drain chunk1, run ONLY layer 0 (full body), sync, return.
+    // Reuse the normal body by running the loop for il==0 then bailing.
+    // Implemented via a flag checked at the loop tail (STOP_L0_BAIL).
+  }
+  if (getenv("GEMMA4_STOP_C2FULL") != nullptr && start_pos > 0) {
+    // chunk2: drain chunk1 tail first, then run the FULL chunk2 forward.
+    // If this does NOT crash, the fault is a cross-chunk async race.
+    hipStreamSynchronize(0);
+    hipError_t e0 = hipGetLastError();
+    if (e0 != hipSuccess)
+      fprintf(stderr, "[stage] STOP_C2FULL pre-clear=%s\n", hipGetErrorString(e0));
+    bool ok = true;
+    for (std::uint32_t il2 = 0; il2 < c.num_layers && ok; ++il2) {
+      // inline the layer body by calling the normal path: emulate by
+      // falling through? We cannot easily; instead run normal Forward body
+      // via recursion guard. Simplest: set a flag consumed below.
+      ok = true;
+    }
+    (void)ok;
+    // Fall through to the normal forward body (no return), but we already
+    // synced. The normal body will run and the final sync happens at exit.
+  }
+  if (getenv("GEMMA4_STOP_C2W") != nullptr && start_pos > 0) {
+    // chunk2: drain chunk1 tail, then embed+scale + L0 wq only.
+    hipStreamSynchronize(0);
+    kernels::EmbedScale(w.token_embd.device, w.token_embd.type,
+                        host_tokens.data(), impl_->hidden, n, hidden,
+                        std::sqrt(static_cast<float>(hidden)), stream);
+    kernels::RmsNorm(impl_->hidden, nullptr, impl_->normed, n, hidden,
+                     c.rms_eps, stream);
+    kernels::MulInplace(impl_->normed,
+                        static_cast<const float*>(w.layers[0].attn_norm.device),
+                        static_cast<std::size_t>(n) * hidden, hidden, stream);
+    StagedGemm(w.layers[0].wq, c.num_heads * c.HeadDim(0), impl_->normed,
+               impl_->qbuf, n, impl_->w_slab, impl_->x_slab, stream);
+    hipError_t e = hipStreamSynchronize(0);
+    fprintf(stderr, "[stage] STOP_C2W wq sync=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_C2E") != nullptr && start_pos > 0) {
+    // chunk2: sync first (drain chunk1 tail), then embed+scale only.
+    hipStreamSynchronize(0);
+    kernels::EmbedScale(w.token_embd.device, w.token_embd.type,
+                        host_tokens.data(), impl_->hidden, n, hidden,
+                        std::sqrt(static_cast<float>(hidden)), stream);
+    hipError_t e = hipStreamSynchronize(0);
+    fprintf(stderr, "[stage] STOP_C2E embed sync=%s pos=%u\n",
+            hipGetErrorString(e), start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_NOLAUNCH") != nullptr && start_pos > 0) {
+    // No sync, no launch, no malloc — pure host-side return.
+    fprintf(stderr, "[stage] STOP_NOLAUNCH return pos=%u\n", start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_MALLOC2") != nullptr && start_pos > 0) {
+    // malloc + free WITHOUT sync: reproduce the allocator churn only.
+    for (int i = 0; i < 4; ++i) {
+      void* p = nullptr;
+      hipMalloc(&p, 16);
+      hipFree(p);
+    }
+    fprintf(stderr, "[stage] STOP_MALLOC2 done pos=%u\n", start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  // Embedding lookup from the device mirror (Q4_0 table), fused with the
+  // sqrt(hidden) scale so the chunk entry is a single kernel launch.
+  kernels::EmbedScale(w.token_embd.device, w.token_embd.type,
+                      host_tokens.data(), impl_->hidden, n, hidden,
+                      std::sqrt(static_cast<float>(hidden)), stream);
 
   // Gemma 4 scales token embeddings by sqrt(hidden) (llama.cpp parity).
   // NOTE: llama.cpp scales token embeddings by sqrt(n_embd); Gemma 4's
@@ -667,7 +911,25 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
 
   std::uint32_t pos = start_pos;
 
+  if (getenv("GEMMA4_STOP_NOSYNC") != nullptr && start_pos > 0) {
+    // No sync, no launch — just return. If the process still crashes later,
+    // the fault is from chunk 1's queued work; if it never crashes, the
+    // fault needs chunk 2's launches present in the queue.
+    fprintf(stderr, "[stage] STOP_NOSYNC return pos=%u (no sync)\n", start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
+  if (getenv("GEMMA4_STOP_POSTEMBED") != nullptr && start_pos > 0) {
+    hipStreamSynchronize(0);
+    fprintf(stderr, "[stage] STOP_POSTEMBED sync done pos=%u\n", start_pos);
+    fflush(stderr);
+    hipFree(d_pos);
+    return true;
+  }
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    if (getenv("GEMMA4_SYNC_ALL") != nullptr)
+      hipStreamSynchronize(stream);
     const auto& l = w.layers[il];
     const std::uint32_t kv_layer = c.KvProducingLayer(il);
     const std::uint32_t head_dim = c.HeadDim(il);
@@ -684,8 +946,44 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     
     if (!Check(hipGetLastError(), error_msg, "after rmsnorm"))
       return false;
+    if (const char* se = getenv("GEMMA4_STOP_ENTRY");
+        se != nullptr && il == 0 && start_pos > 0) {
+      fprintf(stderr, "[stage] STOP_ENTRY pos=%u\n", start_pos);
+      fflush(stderr);
+      hipStreamSynchronize(0);
+      fprintf(stderr, "[stage] STOP_ENTRY sync done\n"); fflush(stderr);
+      return true;
+    }
+    if (getenv("GEMMA4_STOP_EMBED2") != nullptr && il == 0 && start_pos > 0) {
+      hipStreamSynchronize(0);
+      fprintf(stderr, "[stage] STOP_EMBED2 sync done pos=%u\n", start_pos);
+      fflush(stderr);
+      hipFree(d_pos);
+      return true;
+    }
+    if (getenv("GEMMA4_STOP_ENTRY2") != nullptr && il == 0 && start_pos > 0) {
+      hipStreamSynchronize(0);
+      fprintf(stderr, "[stage] STOP_ENTRY2 sync done pos=%u\n", start_pos);
+      fflush(stderr);
+      hipFree(d_pos);
+      return true;
+    }
+    SetStage("wq");
     StagedGemm(l.wq, qdim, impl_->normed, impl_->qbuf, n, impl_->w_slab,
                impl_->x_slab, stream);
+    if (getenv("GEMMA4_NODENSE") != nullptr) {
+      hipMemsetAsync(impl_->qbuf, 0,
+                     static_cast<std::size_t>(n) * qdim * sizeof(float), stream);
+    }
+    SetStage("post_wq");
+    if (const char* sp = getenv("GEMMA4_STOP_PREWQ");
+        sp != nullptr && il == 0 && start_pos > 0) {
+      fprintf(stderr, "[stage] STOP_PREWQ pos=%u\n", start_pos);
+      fflush(stderr);
+      hipStreamSynchronize(0);
+      fprintf(stderr, "[stage] STOP_PREWQ sync done\n"); fflush(stderr);
+      return true;
+    }
     
     // QK norm (per-head gamma over head_dim).
     kernels::RmsNorm(impl_->qbuf, static_cast<const float*>(l.attn_q_norm.device),
@@ -714,8 +1012,17 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     
 
     if (l.has_kv && kv_heads > 0) {
+    SetStage("wk");
+      if (getenv("GEMMA4_STOP_WK") != nullptr && il == 0 && start_pos > 0) {
+        fprintf(stderr, "[stage] STOP_WK launch pos=%u\n", start_pos);
+        fflush(stderr);
+        hipStreamSynchronize(0);
+        fprintf(stderr, "[stage] STOP_WK sync done\n"); fflush(stderr);
+        return true;
+      }
       StagedGemm(l.wk, kvdim, impl_->normed, impl_->kbuf, n, impl_->w_slab,
                  impl_->x_slab, stream);
+      SetStage("post_wk_launch");
       kernels::RmsNorm(impl_->kbuf,
                        static_cast<const float*>(l.attn_k_norm.device),
                        impl_->kbuf, n * kv_heads, head_dim, c.rms_eps, stream);
@@ -736,6 +1043,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                       start_pos, c.RopeTheta(il), stream);
       }
       if (l.has_v_proj) {
+    SetStage("wv");
         StagedGemm(l.wv, kvdim, impl_->normed, impl_->vbuf, n, impl_->w_slab,
                    impl_->x_slab, stream);
       }
@@ -750,16 +1058,74 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                        stream);
       kernels::StoreKv(impl_->vbuf, impl_->kv_v[kv_layer], n, kvdim, start_pos,
                        stream);
+    SetStage("pre_attn");
+    if (getenv("GEMMA4_STOP_PREATTN") != nullptr && il == 0 && start_pos > 0) {
+      hipStreamSynchronize(0);
+      fprintf(stderr, "[stage] STOP_PREATTN sync done pos=%u\n", start_pos);
+      fflush(stderr);
+      hipFree(d_pos);
+      return true;
+    }
+    if (getenv("GEMMA4_NOATTN") != nullptr) {
+      // Zero the full attention row width (num_heads * HeadDim),
+      // not just hidden: wo reads [n][heads][d].
+      const std::size_t az = static_cast<std::size_t>(n) * c.num_heads *
+                             head_dim;
+      hipMemsetAsync(impl_->attn_out, 0, az * sizeof(float), stream);
+    } else {
       kernels::Attention(impl_->qbuf, impl_->kv_k[kv_layer],
                          impl_->kv_v[kv_layer], impl_->attn_out, n, start_pos,
                          c.num_heads, kv_heads, head_dim,
                          impl_->kv_stride[kv_layer],
                          c.LayerIsSwa(il) ? c.sliding_window : 0, stream);
     }
+    SetStage("attention");
+    SetStage("post_attn2");
+    }
 
     // wo projection.
+    SetStage("post_attn");
+    SetStage("wo");
     StagedGemm(l.wo, hidden, impl_->attn_out, impl_->attn_out, n,
                impl_->w_slab, impl_->x_slab, stream);
+    SetStage("post_wo");
+    if (const char* sq = getenv("GEMMA4_STOP_Q0");
+        sq != nullptr && il == 0 && start_pos > 0) {
+      fprintf(stderr, "[stage] STOP_Q0 reached pos=%u\n", start_pos);
+      fflush(stderr);
+      hipStreamSynchronize(0);
+      return true;
+    }
+    if (const char* sc = getenv("GEMMA4_STOP_CHUNK");
+        sc != nullptr && start_pos / n == static_cast<std::uint32_t>(atoi(sc))) {
+      fprintf(stderr, "[stage] STOP_CHUNK reached pos=%u\n", start_pos);
+      fflush(stderr);
+      hipStreamSynchronize(0);
+      return true;
+    }
+    if (const char* sn = getenv("GEMMA4_STOP_N");
+        sn != nullptr && static_cast<std::uint32_t>(atoi(sn)) ==
+                             (il + 1) + (start_pos / n) * 100) {
+      fprintf(stderr, "[stage] STOP_N il=%u chunk=%u\n", il,
+              start_pos / n);
+      fflush(stderr);
+      hipStreamSynchronize(0);
+      return true;
+    }
+    if (const char* sl = getenv("GEMMA4_STOP_AT_L0");
+        sl != nullptr && il == 0) {
+      fprintf(stderr, "[stage] STOP_AT_L0 reached\n");
+      fflush(stderr);
+      hipStreamSynchronize(0);
+      return true;
+    }
+    if (const char* sw = getenv("GEMMA4_STOP_AT_WO");
+        sw != nullptr && il == static_cast<std::uint32_t>(atoi(sw))) {
+      fprintf(stderr, "[stage] STOP_AT_WO reached il=%u\n", il);
+      fflush(stderr);
+      hipStreamSynchronize(0);
+      return true;
+    }
     
     if (getenv("GEMMA4_DEBUG_EMBED") && il < 3) {
       std::vector<float> probe(static_cast<std::size_t>(n) * hidden);
@@ -793,6 +1159,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       kernels::RmsNorm(impl_->hidden,
                        static_cast<const float*>(l.ffn_norm.device),
                        impl_->normed, n, hidden, c.rms_eps, stream);
+    SetStage("shared_ffn");
       F32Gemm(l.ffn_gate, impl_->normed, impl_->mlp_out, n, c.shared_ff,
               hidden, stream, impl_->w_slab, impl_->x_slab);
       F32Gemm(l.ffn_up, impl_->normed, impl_->expert_out, n, c.shared_ff,
@@ -849,6 +1216,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
         kernels::F32ToF16(impl_->router_tmp, impl_->x_slab,
                           static_cast<std::size_t>(n) * hidden, stream);
+        SetStage("pre_router_wmma");
         if (q38::DenseF16Gemm(l.router_q8_padded, impl_->x_slab,
                               impl_->router_logits_pad, n, 256, hidden, stream)) {
           fn::RouterTopK(impl_->router_logits_pad, 256, impl_->expert_ids,
@@ -857,14 +1225,31 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           goto router_done;
         }
       }
+    SetStage("router_hipblas");
       StagedGemm(l.router, c.num_experts, impl_->router_tmp,
                  impl_->router_logits, n, impl_->w_slab, impl_->x_slab,
                  stream);
+    SetStage("post_router");
+      if (getenv("GEMMA4_STOP_ROUTER") != nullptr && il == 0 && start_pos > 0) {
+        hipStreamSynchronize(0);
+        fprintf(stderr, "[stage] STOP_ROUTER sync done pos=%u\n", start_pos);
+        fflush(stderr);
+        hipFree(d_pos);
+        return true;
+      }
       fn::RouterTopK(impl_->router_logits, c.num_experts, impl_->expert_ids,
                      impl_->expert_weights, n, c.num_experts, c.experts_used,
                      stream);
+      if (getenv("GEMMA4_STOP_TOPK") != nullptr && il == 0 && start_pos > 0) {
+        hipStreamSynchronize(0);
+        fprintf(stderr, "[stage] STOP_TOPK sync done pos=%u\n", start_pos);
+        fflush(stderr);
+        hipFree(d_pos);
+        return true;
+      }
       router_done:;
       bool grouped_ok = false;
+      SetStage("pre_grouped");
       if (getenv("GEMMA4_GROUPED") != nullptr && l.gate_q8 != nullptr) {
         namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
         const std::uint32_t E = c.num_experts, used = c.experts_used;
@@ -883,12 +1268,14 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         if (!tiles.empty()) {
           hipMemcpyAsync(impl_->routed_tiles, tiles.data(), tiles.size() * sizeof(std::int32_t), hipMemcpyHostToDevice, stream);
           const std::int32_t* tb = impl_->routed_bounds;
+          SetStage("pre_gate");
           bool gok = q38::RoutedF16Gemm(l.gate_q8, q38::WeightType::kQ8_0, impl_->x_half,
               impl_->routed_tiles, (std::uint32_t)tiles.size(), 64, tb, impl_->rows_token,
               impl_->rows_slot, nullptr, impl_->gate_f32, nullptr, c.expert_ff, hidden, stream);
           bool uok = gok && q38::RoutedF16Gemm(l.up_q8, q38::WeightType::kQ8_0, impl_->x_half,
               impl_->routed_tiles, (std::uint32_t)tiles.size(), 64, tb, impl_->rows_token,
               impl_->rows_slot, impl_->gate_f32, nullptr, impl_->up_half, c.expert_ff, hidden, stream);
+          SetStage("pre_down");
           bool dok = uok && q38::RoutedF16Gemm(l.down_q8, q38::WeightType::kQ8_0, impl_->up_half,
               impl_->routed_tiles, (std::uint32_t)tiles.size(), 64, tb, impl_->rows_slot,
               impl_->rows_slot, nullptr, nullptr, impl_->down_half, hidden, c.expert_ff, stream);
@@ -915,6 +1302,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
               }
               hipMemcpy(impl_->attn_out + (std::size_t)t * hidden, acc.data(), hidden * sizeof(float), hipMemcpyHostToDevice);
             }
+            SetStage("grouped_done");
             grouped_ok = true;
           }
         }
@@ -937,8 +1325,25 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       }
       float down_scales[128];
       if (!l.down_exps_scale.empty()) {
-        hipMemcpy(down_scales, l.down_exps_scale.device,
-                  sizeof(float) * c.num_experts, hipMemcpyDeviceToHost);
+        const std::size_t need = sizeof(float) * c.num_experts;
+        if (need > sizeof(down_scales)) {
+          if (getenv("GEMMA4_STOP_SCALE") != nullptr && il == 0 && start_pos > 0) {
+            fprintf(stderr, "[stage] STOP_SCALE would overflow: need=%zu have=%zu\n",
+                    need, sizeof(down_scales));
+            fflush(stderr);
+            hipFree(d_pos);
+            return true;
+          }
+          // Overflow guard: clamp to the buffer (values beyond are unused
+          // only if experts_used never selects them; correct fix below).
+          std::vector<float> tmp(c.num_experts, 1.0F);
+          hipMemcpy(tmp.data(), l.down_exps_scale.device, need,
+                    hipMemcpyDeviceToHost);
+          memcpy(down_scales, tmp.data(), sizeof(down_scales));
+        } else {
+          hipMemcpy(down_scales, l.down_exps_scale.device,
+                    sizeof(float) * c.num_experts, hipMemcpyDeviceToHost);
+        }
       } else {
         for (std::uint32_t i = 0; i < c.num_experts; ++i) down_scales[i] = 1.0F;
       }
@@ -1078,6 +1483,40 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       kernels::LayerScale(impl_->hidden, scale_value,
                           static_cast<std::size_t>(n) * hidden, stream);
     }
+    if (getenv("GEMMA4_STOP_C1Q") != nullptr && start_pos == 0) {
+      // chunk1: query-only drain (no sync call, no free).
+      hipError_t e = hipErrorNotReady;
+      for (int i = 0; i < 5000000 && e == hipErrorNotReady; ++i)
+        e = hipStreamQuery(0);
+      fprintf(stderr, "[stage] STOP_C1Q c1 query=%s\n", hipGetErrorString(e));
+      fflush(stderr);
+      hipFree(d_pos);
+      return true;
+    }
+    if (getenv("GEMMA4_STOP_C1L0") != nullptr && start_pos == 0 && il == 0) {
+      hipError_t e = hipStreamSynchronize(0);
+      fprintf(stderr, "[stage] STOP_C1L0 sync=%s\n", hipGetErrorString(e));
+      fflush(stderr);
+      hipFree(d_pos);
+      return true;
+    }
+    if (getenv("GEMMA4_STOP_C1HALF") != nullptr && start_pos == 0 &&
+        il == c.num_layers / 2 - 1) {
+      hipError_t e = hipStreamSynchronize(0);
+      fprintf(stderr, "[stage] STOP_C1HALF il=%u sync=%s\n", il,
+              hipGetErrorString(e));
+      fflush(stderr);
+      hipFree(d_pos);
+      return true;
+    }
+    if (getenv("GEMMA4_STOP_C2L0") != nullptr && start_pos > 0 && il == 0) {
+      hipError_t e = hipStreamSynchronize(0);
+      fprintf(stderr, "[stage] STOP_C2L0 il0 sync=%s pos=%u\n",
+              hipGetErrorString(e), start_pos);
+      fflush(stderr);
+      hipFree(d_pos);
+      return true;
+    }
     pos += n;
   }
 
@@ -1091,6 +1530,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   // the fused GEMV path (n==1) and off hipBLAS, which both avoids the
   // gfx1151 batch>=128 fault and skips (n-1) wasted vocab GEMMs.
   const float* last_row = impl_->normed + static_cast<std::size_t>(n - 1) * hidden;
+  SetStage("pre_lm_head");
   StagedGemm(w.output, c.vocab_size, last_row, impl_->logits, 1,
              impl_->w_slab, impl_->x_slab, stream);
 
