@@ -838,6 +838,15 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                std::uint32_t kv_stride, std::uint32_t window,
                hipStream_t stream) {
   const std::uint32_t kv_len = start_pos + n_tokens;
+  // WMMA flash prefill for the sliding-window (d=256) layers: default, with
+  // the sliding window clamped per key. GEMMA4_ATTN_NO_WMMA=1 reverts to the
+  // scalar GQA kernel for A/B.
+  if (getenv("GEMMA4_ATTN0") == nullptr &&
+      getenv("GEMMA4_ATTN_NO_WMMA") == nullptr) {
+    if (wmma::AttentionWmma(q, k_cache, v_cache, out, n_tokens, start_pos, d,
+                            kv_stride, window, stream))
+      return;
+  }
   // GEMMA4_ATTN0=1 uses the per-(token,q-head) kernel (re-reads KV per head);
   // default is the GQA kernel (streams KV once per kv-head group).
   if (getenv("GEMMA4_ATTN0") == nullptr) {

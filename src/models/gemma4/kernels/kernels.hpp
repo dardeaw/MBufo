@@ -91,6 +91,15 @@ void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
 /// q: [n_tokens][heads][d]; k/v caches: [capacity][kv_heads][d] at
 /// positions start_pos + t. When window > 0, keys older than
 /// (start_pos + t - window + 1) are masked out for query t.
+namespace wmma {
+// WMMA flash prefill attention (sliding-window geometry only). Returns false
+// if the shape is unsupported; the caller then uses the scalar kernel.
+bool AttentionWmma(const float* q, const __half* k_cache, const __half* v_cache,
+                   float* out, std::uint32_t n_tokens, std::uint32_t start_pos,
+                   std::uint32_t d, std::uint32_t kv_stride,
+                   std::uint32_t window, hipStream_t stream);
+}  // namespace wmma
+
 void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                float* out, std::uint32_t n_tokens,
                std::uint32_t start_pos, std::uint32_t heads,
