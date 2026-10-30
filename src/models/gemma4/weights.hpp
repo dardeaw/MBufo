@@ -87,6 +87,12 @@ struct LayerWeights {
   std::uint8_t* gate_q8{nullptr};  ///< [experts][expert_ff][hidden] Q8_0
   std::uint8_t* up_q8{nullptr};    ///< [experts][expert_ff][hidden] Q8_0
   std::uint8_t* down_q8{nullptr};  ///< [experts][hidden][expert_ff] Q8_0
+  // GEMMA4_F16WQ: raw F16 pre-dequant of the fused gate_up slab and the down
+  // slab (row-major halves, UnquantizedF16Gemm weight contract). nullptr
+  // unless the flag is set at load. void* to keep hip headers out of this
+  // header (same convention as TensorRef::f16).
+  void* gate_up_f16{nullptr};  ///< [experts][2*expert_ff][hidden] __half
+  void* down_f16{nullptr};     ///< [experts][hidden][expert_ff] __half
 
   [[nodiscard]] bool IsMoe() const noexcept { return !router.empty(); }
 };

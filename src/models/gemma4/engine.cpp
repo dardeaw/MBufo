@@ -217,6 +217,59 @@ struct DeviceBuffers {
   return true;
 }
 
+/// GEMMA4_F16WQ: dequantize the fused gate_up and down expert slabs to raw
+/// F16 once at load (~12.7 GB VRAM for this model). The compact MoE path then
+/// runs UnquantizedF16Gemm straight off these arenas with zero per-expert
+/// dequant launches.
+[[nodiscard]] bool ConvertExpertsF16(ModelWeights& w, DeviceBuffers& buffers,
+                                     hipStream_t stream, std::string* error) {
+  const std::uint32_t ff = w.config.expert_ff;
+  const std::uint32_t hidden = w.config.hidden_size;
+  for (auto& l : w.layers) {
+    if (!l.gate_up_exps.empty() && l.gate_up_exps.experts > 0) {
+      const std::size_t per =
+          static_cast<std::size_t>(2) * ff * hidden * sizeof(__half);
+      __half* arena = nullptr;
+      if (!Check(hipMalloc(&arena, per * l.gate_up_exps.experts),
+                 error, "gate_up f16 alloc"))
+        return false;
+      buffers.allocations.push_back(arena);
+      for (std::uint32_t e = 0; e < l.gate_up_exps.experts; ++e) {
+        TensorRef one = l.gate_up_exps;
+        one.experts = 1;
+        one.data = l.gate_up_exps.DeviceExpert(e);
+        one.device = one.data;
+        kernels::DequantSlab(one, static_cast<std::uint32_t>(2) * ff,
+                             arena + static_cast<std::size_t>(e) * (per / sizeof(__half)),
+                             stream);
+      }
+      l.gate_up_f16 = arena;
+    }
+    if (!l.down_exps.empty() && l.down_exps.experts > 0) {
+      const std::size_t per =
+          static_cast<std::size_t>(hidden) * ff * sizeof(__half);
+      __half* arena = nullptr;
+      if (!Check(hipMalloc(&arena, per * l.down_exps.experts),
+                 error, "down f16 alloc"))
+        return false;
+      buffers.allocations.push_back(arena);
+      for (std::uint32_t e = 0; e < l.down_exps.experts; ++e) {
+        TensorRef one = l.down_exps;
+        one.experts = 1;
+        one.data = l.down_exps.DeviceExpert(e);
+        one.device = one.data;
+        kernels::DequantSlab(one, hidden,
+                             arena + static_cast<std::size_t>(e) * (per / sizeof(__half)),
+                             stream);
+      }
+      l.down_f16 = arena;
+    }
+  }
+  if (!Check(hipStreamSynchronize(stream), error, "expert f16 sync"))
+    return false;
+  return true;
+}
+
 [[nodiscard]] bool ConvertExpertsQ8(ModelWeights& w, DeviceBuffers& buffers,
                                     hipStream_t stream, std::string* error) {
   auto conv_one = [&](TensorRef& src, std::uint8_t** dst, std::uint32_t rows,
@@ -395,6 +448,13 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       l.rope_freqs.cols = 1;
       l.rope_freqs.type = core::GgmlType::kF32;
     }
+  }
+  DeviceBuffers expert_f16;
+  if (getenv("GEMMA4_F16WQ") != nullptr) {
+    if (!ConvertExpertsF16(*model_owner->weights_, expert_f16, 0, &load_error)) {
+      return nullptr;
+    }
+    expert_f16.allocations.clear();  // owned by the engine lifetime
   }
   DeviceBuffers expert_q8;
   if (getenv("GEMMA4_GROUPED") != nullptr) {
@@ -1519,7 +1579,17 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                         static_cast<std::size_t>(c.expert_ff) *
                             gate_ref.RowBytes();
           up_ref.device = up_ref.data;
-          if (f16w) {
+          if (f16w && l.gate_up_f16 != nullptr) {
+              // Pre-dequantized F16 arena: zero per-expert dequant launches.
+              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+              const __half* wbase = static_cast<const __half*>(l.gate_up_f16) +
+                  static_cast<std::size_t>(e) * 2 * c.expert_ff * hidden;
+              q38::UnquantizedF16Gemm(wbase, xg, gg, batch,
+                                      c.expert_ff, hidden, stream);
+              q38::UnquantizedF16Gemm(
+                  wbase + static_cast<std::size_t>(c.expert_ff) * hidden, xg,
+                  gu, batch, c.expert_ff, hidden, stream);
+            } else if (f16w) {
               // F16 dequant path: write the dequantized weights once as raw
               // F16 rows (half the Q8_0 slab traffic) and feed the raw-F16
               // GEMM variant.
@@ -1571,7 +1641,16 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                                     static_cast<std::size_t>(batch) * c.expert_ff,
                                     stream);
           {
-            if (f16wd) {
+            if (f16wd && l.down_f16 != nullptr) {
+              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+              kernels::F32ToF16(gg, impl_->x_half,
+                                static_cast<std::size_t>(batch) * c.expert_ff,
+                                stream);
+              q38::UnquantizedF16Gemm(
+                  static_cast<const __half*>(l.down_f16) +
+                      static_cast<std::size_t>(e) * hidden * c.expert_ff,
+                  impl_->x_half, gd, batch, hidden, c.expert_ff, stream);
+            } else if (f16wd) {
               namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               kernels::DequantSlabF16(down_ref, hidden, impl_->w_slab,
                                       stream);
