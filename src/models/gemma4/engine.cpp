@@ -1439,24 +1439,11 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           kernels::ScaleInplace(impl_->expert_down, down_scale,
                                 static_cast<std::size_t>(n) * hidden, stream);
         }
-        for (std::uint32_t t = 0; t < n; ++t) {
-          float weight = 0.0F;
-          for (std::uint32_t s = 0; s < c.experts_used; ++s) {
-            const auto idx = static_cast<std::size_t>(t) * c.experts_used + s;
-            if (ids[idx] == static_cast<std::int32_t>(e))
-              weight += wts[idx];
-          }
-          if (weight == 0.0F)
-            continue;
-          kernels::ScaleInplace(impl_->expert_down + static_cast<std::size_t>(t) *
-                                                        hidden,
-                                weight, hidden, stream);
-          kernels::AddInplace(impl_->attn_out + static_cast<std::size_t>(t) *
-                                                    hidden,
-                              impl_->expert_down + static_cast<std::size_t>(t) *
-                                                       hidden,
-                              hidden, stream);
-        }
+        // One launch for all tokens, weights summed on device (this used to
+        // be two launches per (expert, token)).
+        kernels::MoeRoutedAdd(impl_->expert_down, impl_->expert_ids,
+                              impl_->expert_weights, e, impl_->attn_out, n,
+                              c.experts_used, hidden, stream);
       }
 
       }

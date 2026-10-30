@@ -132,6 +132,13 @@ void RouterInput(const float* attn_out, const float* router_scale,
 
 /// out[t][i] = sum_s weights[t][s] * expert_out[t*k + s][i] (no shared
 /// expert gate — Gemma 4 combines the shared MLP separately).
+/// Weighted routed accumulate for one expert: out[t] += w(t,e)*expert_down[t]
+/// with w(t,e) summed from the routing slots. One launch per expert.
+void MoeRoutedAdd(const float* expert_down, const std::int32_t* ids,
+                  const float* wts, std::uint32_t expert, float* out,
+                  std::uint32_t n_tokens, std::uint32_t used,
+                  std::uint32_t dim, hipStream_t stream);
+
 void MoeEpilogue(const float* expert_out, const float* weights, float* out,
                  std::uint32_t n_tokens, std::uint32_t k, std::uint32_t dim,
                  hipStream_t stream);

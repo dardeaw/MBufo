@@ -892,6 +892,37 @@ void RouterInput(const float* attn_out, const float* router_scale, float* tmp,
                      stream, attn_out, router_scale, tmp, hidden, eps);
 }
 
+// Weighted routed accumulate: out[t] += w(t,e) * expert_down[t] for one
+// expert, where w(t,e) sums this expert's routing weights over the token's
+// slots. Replaces the per-(expert,token) ScaleInplace + AddInplace pair -- the
+// dense MoE fallback issued those two launches 512*128 times per layer, which
+// showed up as the dominant elementwise cost. Same expression and same expert
+// order, so results are bit-identical.
+__global__ void MoeRoutedAddKernel(const float* expert_down,
+                                   const std::int32_t* ids, const float* wts,
+                                   std::uint32_t expert, float* out,
+                                   std::uint32_t used, std::uint32_t dim) {
+  const std::uint32_t t = blockIdx.x;
+  float w = 0.0F;
+  for (std::uint32_t s = 0; s < used; ++s) {
+    const std::size_t i = static_cast<std::size_t>(t) * used + s;
+    if (ids[i] == static_cast<std::int32_t>(expert)) w += wts[i];
+  }
+  if (w == 0.0F) return;  // uniform across the block
+  const float* src = expert_down + static_cast<std::size_t>(t) * dim;
+  float* dst = out + static_cast<std::size_t>(t) * dim;
+  for (std::uint32_t i = threadIdx.x; i < dim; i += blockDim.x)
+    dst[i] += w * src[i];
+}
+
+void MoeRoutedAdd(const float* expert_down, const std::int32_t* ids,
+                  const float* wts, std::uint32_t expert, float* out,
+                  std::uint32_t n_tokens, std::uint32_t used,
+                  std::uint32_t dim, hipStream_t stream) {
+  hipLaunchKernelGGL(MoeRoutedAddKernel, dim3(n_tokens), dim3(kThreads), 0,
+                     stream, expert_down, ids, wts, expert, out, used, dim);
+}
+
 void MoeEpilogue(const float* expert_out, const float* weights, float* out,
                  std::uint32_t n_tokens, std::uint32_t k, std::uint32_t dim,
                  hipStream_t stream) {
