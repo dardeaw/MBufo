@@ -30,6 +30,48 @@ in-process repetitions (`-r 3`) and at least two alternating pairs. A single
 pair below that margin is noise. The routed bucket histogram behind the first
 row lives on the unmerged `perf/route-stats` branch behind `GUFO_ROUTE_STATS=1`.
 
+## GDN chunked feasibility (October 31, 2026)
+
+The gated DeltaNet recurrence owns 36 linear layers and 8.1% of prefill, and it
+runs no matrix-core work: `GdnRowSplitKernel` is FP32 and serial over tokens.
+Question: can it be rewritten in the chunked intra/inter (WY) form that matrix
+cores need, and what does that cost numerically?
+
+CPU prototype, d=128, 48 value heads, 1,734 tokens, relative L2 against a
+float64 serial truth:
+
+| Variant | rel L2 |
+| --- | --- |
+| float32 serial (today's arithmetic) | 1.7e-7 |
+| float32 chunked, C=16 / 32 / 64 / 128 | 2.1e-7 / 1.9e-7 / 2.6e-7 / 2.6e-7 |
+| float64 chunked (algebra check) | 5e-16 |
+| float16 operands, serial | 3.6e-4 |
+| float16 operands, chunked | 3.6e-4 |
+| float16 operands and state, chunked | 4.4e-4 |
+| bfloat16 operands, serial | 2.9e-3 |
+
+The error does not grow with the prefix: 1.87e-7 at 128 tokens against 1.95e-7
+at 1,734.
+
+Readings:
+
+- The chunked algebra is exact, and at float32 it costs nothing beyond ordinary
+  rounding (2e-7 against 1.7e-7 of the serial rule). Chunking is not what costs
+  precision; the operand width is.
+- It changes result bits, so it cannot be retained under the current
+  bit-identical rule. It would need the quality-gate route `GUFO_KV_V4` took.
+- RDNA matrix cores take float16 or bfloat16 operands, so the only way to reach
+  them is 3.6e-4 (f16) or 2.9e-3 (bf16) relative error on the linear-attention
+  path, 2,000x and 20,000x today's rounding. At float32 the reformulation has the
+  same FLOPs as the serial rule, 3 * d^2 per token, and no matrix core to
+  exploit, so it would only add the triangular solve.
+- `GdnCheckpoint` writes state at an arbitrary token and MTP rollback restores
+  at arbitrary positions, while a chunked kernel commits at chunk boundaries.
+  It would need chunk-aligned checkpoints or a serial tail.
+
+Conclusion: not worth a 5 to 8 day implementation unless a float16 GDN is
+accepted as an opt-in numerical mode. Recorded as rejected for now.
+
 ## Exact sampled decode (October 21, 2026)
 
 | Experiment | Outcome |
