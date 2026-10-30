@@ -72,6 +72,25 @@ Readings:
 Conclusion: not worth a 5 to 8 day implementation unless a float16 GDN is
 accepted as an opt-in numerical mode. Recorded as rejected for now.
 
+### Float16 GDN against an accepted yardstick (October 31, 2026)
+
+`--cpu` refuses Flash-Next (`Flash-Next requires ROCm`), so an end-to-end logit
+KL cannot be produced without the GPU. The CPU arithmetic still bounds the
+risk:
+
+| Perturbation | relative L2 |
+| --- | --- |
+| float16 rounding of one tensor | 2.1e-4 |
+| float16 GDN operands and state | 4.4e-4 |
+| `GUFO_KV_V4` value quantization (shipped, opt-in) | 9.7e-2 gaussian, 1.4e-1 heavy tail |
+
+Next to a single float16 rounding the value-cache quantization is 467 to 692
+times coarser, and next to a float16 GDN it is still 220 to 323 times coarser.
+The retained sparse attention work sits at mean KL 5.8e-4 with 256/256 top-1
+agreement. A float16 GDN is therefore a policy question rather than a precision
+question: it has to be an opt-in mode like `GUFO_KV_V4`, and the gate it must
+pass is a GPU KL against the float32 recurrence, not a bit-identity check.
+
 ## Exact sampled decode (October 21, 2026)
 
 | Experiment | Outcome |
