@@ -337,6 +337,96 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
   }
 }
 
+// GQA attention: one block per (token, kv-head) computes ALL q-heads of the
+// group while streaming each K/V row once. The per-q-head AttentionKernel
+// re-reads the same KV rows heads/kv_heads times (8x on full layers with
+// kv_heads=2). Math per (t,h) is identical to AttentionKernel (same fp32
+// online-softmax recurrence), so results match bit-for-bit.
+template <std::uint32_t MaxD>
+__global__ void AttentionGqaKernel(
+    const float* q, const __half* k_cache, const __half* v_cache, float* out,
+    std::uint32_t start_pos, std::uint32_t heads, std::uint32_t kv_heads,
+    std::uint32_t d, std::uint32_t kv_stride, std::uint32_t window,
+    std::uint32_t kv_len) {
+  constexpr std::uint32_t MaxQ = 8;
+  const std::uint32_t t = blockIdx.x;
+  const std::uint32_t kv_h = blockIdx.y;
+  const std::uint32_t qpg = heads / kv_heads;
+  const std::uint32_t pos = start_pos + t;
+  const float* qbase = q + static_cast<std::size_t>(t) * heads * d +
+                       static_cast<std::size_t>(kv_h) * qpg * d;
+  __shared__ float qsm[MaxQ][MaxD];
+  for (std::uint32_t qq = 0; qq < qpg; ++qq) {
+    const float* qrow = qbase + static_cast<std::size_t>(qq) * d;
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x)
+      qsm[qq][i] = qrow[i];
+  }
+  __syncthreads();
+  const std::uint32_t lo =
+      window > 0 && pos + 1 > window ? pos + 1 - window : 0;
+  __shared__ float mls[MaxQ][2];
+  __shared__ float acc[MaxQ][MaxD];
+  for (std::uint32_t qq = 0; qq < qpg; ++qq) {
+    if (threadIdx.x < 2)
+      mls[qq][threadIdx.x] = threadIdx.x == 0 ? -INFINITY : 0.0F;
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x)
+      acc[qq][i] = 0.0F;
+  }
+  __syncthreads();
+  __shared__ float red[8][MaxQ];
+  __shared__ float cw[MaxQ][2];
+  for (std::uint32_t pp = lo; pp <= pos && pp < kv_len; ++pp) {
+    const __half* krow =
+        k_cache + static_cast<std::size_t>(pp) * kv_stride + kv_h * d;
+    float dot[MaxQ];
+    for (std::uint32_t qq = 0; qq < qpg; ++qq) dot[qq] = 0.0F;
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
+      const float kv = __half2float(krow[i]);
+      for (std::uint32_t qq = 0; qq < qpg; ++qq)
+        dot[qq] += qsm[qq][i] * kv;
+    }
+    for (std::uint32_t off = 16; off > 0; off >>= 1)
+      for (std::uint32_t qq = 0; qq < qpg; ++qq)
+        dot[qq] += __shfl_down_sync(0xffffffffull, dot[qq], off);
+    if ((threadIdx.x & 31) == 0) {
+      const std::uint32_t w = threadIdx.x / 32;
+      for (std::uint32_t qq = 0; qq < qpg; ++qq) red[w][qq] = dot[qq];
+    }
+    __syncthreads();
+    if (threadIdx.x < MaxQ) {
+      const std::uint32_t qq = threadIdx.x;
+      if (qq < qpg) {
+        float sc = 0.0F;
+        for (std::uint32_t w = 0; w < blockDim.x / 32; ++w) sc += red[w][qq];
+        const float m_new = fmaxf(mls[qq][0], sc);
+        const float corr = __expf(mls[qq][0] - m_new);
+        const float wgt = __expf(sc - m_new);
+        mls[qq][0] = m_new;
+        mls[qq][1] = mls[qq][1] * corr + wgt;
+        cw[qq][0] = corr;
+        cw[qq][1] = wgt;
+      }
+    }
+    __syncthreads();
+    const __half* vrow =
+        v_cache + static_cast<std::size_t>(pp) * kv_stride + kv_h * d;
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
+      const float vv = __half2float(vrow[i]);
+      for (std::uint32_t qq = 0; qq < qpg; ++qq)
+        acc[qq][i] = acc[qq][i] * cw[qq][0] + cw[qq][1] * vv;
+    }
+    __syncthreads();
+  }
+  for (std::uint32_t qq = 0; qq < qpg; ++qq) {
+    float* orow = out + (static_cast<std::size_t>(t) * heads +
+                         static_cast<std::size_t>(kv_h) * qpg + qq) *
+                            d;
+    const float linv = 1.0F / mls[qq][1];
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x)
+      orow[i] = acc[qq][i] * linv;
+  }
+}
+
 __global__ void RouterInputKernel(const float* attn_out,
                                   const float* router_scale, float* tmp,
                                   std::uint32_t hidden, float eps) {
@@ -748,6 +838,22 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                std::uint32_t kv_stride, std::uint32_t window,
                hipStream_t stream) {
   const std::uint32_t kv_len = start_pos + n_tokens;
+  // GEMMA4_ATTN0=1 uses the per-(token,q-head) kernel (re-reads KV per head);
+  // default is the GQA kernel (streams KV once per kv-head group).
+  if (getenv("GEMMA4_ATTN0") == nullptr) {
+    if (d <= 256) {
+      hipLaunchKernelGGL((AttentionGqaKernel<256>), dim3(n_tokens, kv_heads),
+                         dim3(kThreads), 0, stream, q, k_cache, v_cache, out,
+                         start_pos, heads, kv_heads, d, kv_stride, window,
+                         kv_len);
+      return;
+    }
+    hipLaunchKernelGGL((AttentionGqaKernel<512>), dim3(n_tokens, kv_heads),
+                       dim3(kThreads), 0, stream, q, k_cache, v_cache, out,
+                       start_pos, heads, kv_heads, d, kv_stride, window,
+                       kv_len);
+    return;
+  }
   if (d <= 256) {
     hipLaunchKernelGGL((AttentionKernel<256>), dim3(n_tokens, heads),
                        dim3(kThreads), 0, stream, q, k_cache, v_cache, out,

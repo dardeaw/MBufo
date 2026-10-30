@@ -255,6 +255,52 @@ struct DeviceBuffers {
     if (!conv_one(l.gate_exps, &l.gate_q8, w.config.expert_ff, w.config.hidden_size)) return false;
     if (!conv_one(l.up_exps, &l.up_q8, w.config.expert_ff, w.config.hidden_size)) return false;
     if (!conv_one(l.down_exps, &l.down_q8, w.config.hidden_size, w.config.expert_ff)) return false;
+    // Fused gate+up experts: the GGUF stores ffn_gate_up_exps.weight as
+    // [E][2*expert_ff][hidden], so gate_exps/up_exps are empty and the grouped
+    // MoE path (which needs separate gate_q8/up_q8) never activates -- it falls
+    // back to computing every expert against all tokens. Split the fused slab
+    // into a gate half and an up half, each Q8_0 [E][expert_ff][hidden], so
+    // RoutedF16Gemm can drive the grouped path unchanged.
+    // NOTE: the fused-slab split below is NOT validated yet -- enabling it
+    // activates a routed-GEMM path whose row mapping was only ever exercised
+    // on qwen38, and it currently disagrees with the dense fallback on gemma4
+    // (L0 moe_accum sum sign flips). Keep it opt-in until the routing layout
+    // is verified; default stays on the correct dense fallback.
+    if (getenv("GEMMA4_GATEUP_Q8") != nullptr && l.gate_q8 == nullptr &&
+        !l.gate_up_exps.empty() && l.gate_up_exps.experts > 0) {
+      const std::uint32_t ff = w.config.expert_ff;
+      const std::uint32_t hidden = w.config.hidden_size;
+      const std::uint64_t E2 = l.gate_up_exps.experts;
+      const std::size_t per =
+          static_cast<std::size_t>(ff) * (hidden / 32) * 34;
+      std::uint8_t* gate_arena = nullptr;
+      std::uint8_t* up_arena = nullptr;
+      if (!Check(hipMalloc(&gate_arena, per * E2), error, "gate q8 alloc"))
+        return false;
+      if (!Check(hipMalloc(&up_arena, per * E2), error, "up q8 alloc"))
+        return false;
+      buffers.allocations.push_back(gate_arena);
+      buffers.allocations.push_back(up_arena);
+      const std::size_t row_bytes = l.gate_up_exps.RowBytes();
+      for (std::uint64_t e = 0; e < E2; ++e) {
+        const std::uint8_t* base = l.gate_up_exps.DeviceExpert(e);
+        TensorRef g = l.gate_up_exps;
+        g.experts = 1;
+        g.rows = ff;
+        g.device = base;
+        g.data = base;
+        kernels::DequantSlabQ8(g, ff, gate_arena + e * per, stream);
+        TensorRef u = g;
+        const std::uint8_t* up_base = base + row_bytes * ff;
+        u.device = up_base;
+        u.data = up_base;
+        kernels::DequantSlabQ8(u, ff, up_arena + e * per, stream);
+      }
+      if (!Check(hipStreamSynchronize(stream), error, "gate_up q8 sync"))
+        return false;
+      l.gate_q8 = gate_arena;
+      l.up_q8 = up_arena;
+    }
   }
   return true;
 }
