@@ -45,26 +45,30 @@ namespace fn = ::gufo::models::qwen38_flash_next::rocm;
 void F32Gemm(const TensorRef& w, const float* x, float* y,
              std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
              hipStream_t stream, __half* slab, __half* x_slab) {
+  namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
   if (n_tokens == 1 && getenv("GEMMA4_NO_FUSED_GEMV") == nullptr) {
     if (w.f16 != nullptr) {
-      kernels::GemvF16Fused(static_cast<const __half*>(w.f16), k, x, y, m,
-                            stream);
+      kernels::GemvF16Fused(static_cast<const __half*>(w.f16), k, x, y, m, stream);
     } else {
       const void* dev = w.device != nullptr ? w.device : w.data;
-      kernels::GemvFused(dev, static_cast<int>(w.type), w.RowBytes(), k, x, y,
-                         m, stream);
+      kernels::GemvFused(dev, static_cast<int>(w.type), w.RowBytes(), k, x, y, m, stream);
     }
     return;
   }
-  const __half* W = nullptr;
-  if (w.f16 != nullptr) {
-    W = static_cast<const __half*>(w.f16);
-  } else {
-    TensorRef dev = w;
-    dev.data = w.device != nullptr ? w.device : w.data;
-    kernels::DequantSlab(dev, m, slab, stream);
-    W = slab;
+  // WMMA Q8 prefill for the bulk projections (verified maxrel 1e-4 vs hipBLAS).
+  // The router (m==128) mis-tiles the WMMA kernel and stays on hipBLAS; the LM
+  // head is projected at n==1 (fused GEMV) so it never reaches here.
+  const bool use_wmma = (m >= 256) && (m <= 65536) && (k % 32 == 0) &&
+                        getenv("GEMMA4_NO_WMMAPREFILL") == nullptr;
+  TensorRef dev = w; dev.data = w.device != nullptr ? w.device : w.data;
+  if (use_wmma) {
+    kernels::DequantSlabQ8(dev, m, reinterpret_cast<std::uint8_t*>(slab), stream);
+    kernels::F32ToF16(x, x_slab, static_cast<std::size_t>(n_tokens) * k, stream);
+    if (q38::DenseF16Gemm(slab, x_slab, y, n_tokens, m, k, stream)) return;
   }
+  const __half* W = nullptr;
+  if (w.f16 != nullptr) W = static_cast<const __half*>(w.f16);
+  else { kernels::DequantSlab(dev, m, slab, stream); W = slab; }
   kernels::F32ToF16(x, x_slab, static_cast<std::size_t>(n_tokens) * k, stream);
   kernels::F16GemmStatus(W, x_slab, y, n_tokens, m, k, stream);
 }
@@ -199,6 +203,48 @@ struct DeviceBuffers {
   return true;
 }
 
+[[nodiscard]] bool ConvertExpertsQ8(ModelWeights& w, DeviceBuffers& buffers,
+                                    hipStream_t stream, std::string* error) {
+  auto conv_one = [&](TensorRef& src, std::uint8_t** dst, std::uint32_t rows,
+                      std::uint32_t cols) -> bool {
+    if (src.empty() || src.experts == 0) return true;
+    const std::size_t per = static_cast<std::size_t>(rows) * (cols / 32) * 34;
+    std::uint8_t* arena = nullptr;
+    if (!Check(hipMalloc(&arena, per * src.experts), error, "expert q8 alloc"))
+      return false;
+    buffers.allocations.push_back(arena);
+    TensorRef one = src; one.experts = 1;
+    for (std::uint32_t e = 0; e < src.experts; ++e) {
+      one.data = static_cast<const std::uint8_t*>(src.device) +
+                 static_cast<std::size_t>(e) * src.RowBytes() * rows;
+      one.device = one.data;
+      kernels::DequantSlabQ8(one, rows, arena + e * per, stream);
+    }
+    if (!Check(hipStreamSynchronize(stream), error, "expert q8 sync")) return false;
+    *dst = arena;
+    return true;
+  };
+  const std::uint32_t E = w.config.num_experts;
+  for (auto& l : w.layers) {
+    if (!l.router.empty()) {
+      const std::uint32_t hidden = w.config.hidden_size;
+      const std::uint32_t m_pad = 256;
+      const std::size_t per = static_cast<std::size_t>(m_pad) * (hidden / 32) * 34;
+      std::uint8_t* arena = nullptr;
+      if (!Check(hipMalloc(&arena, per), error, "router q8 pad alloc")) return false;
+      buffers.allocations.push_back(arena);
+      hipMemsetAsync(arena, 0, per, stream);
+      kernels::DequantSlabQ8(l.router, E, arena, stream);  // first E rows
+      if (!Check(hipStreamSynchronize(stream), error, "router q8 pad sync")) return false;
+      l.router_q8_padded = arena;
+    }
+    if (!conv_one(l.gate_exps, &l.gate_q8, w.config.expert_ff, w.config.hidden_size)) return false;
+    if (!conv_one(l.up_exps, &l.up_q8, w.config.expert_ff, w.config.hidden_size)) return false;
+    if (!conv_one(l.down_exps, &l.down_q8, w.config.hidden_size, w.config.expert_ff)) return false;
+  }
+  return true;
+}
+
 
 
 }  // namespace
@@ -290,6 +336,15 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       l.rope_freqs.type = core::GgmlType::kF32;
     }
   }
+  DeviceBuffers expert_q8;
+  if (getenv("GEMMA4_GROUPED") != nullptr) {
+    if (!ConvertExpertsQ8(*model_owner->weights_, expert_q8, 0, &load_error)) {
+      if (error_msg != nullptr)
+        *error_msg = "Failed to convert gemma4 experts to Q8: " + load_error;
+      return nullptr;
+    }
+    expert_q8.allocations.clear();
+  }
   upload.allocations.clear();  // arena lives for the process
   auto tokenizer = tokenization::QwenTokenizer::CreateFromGguf(
       *model_owner->reader_, &load_error);
@@ -360,6 +415,17 @@ struct Session::Impl {
   std::int32_t* expert_ids{nullptr};   // [chunk][experts_used]
   float* expert_weights{nullptr};      // [chunk][experts_used]
   std::uint32_t* expert_counts{nullptr};  // [experts]
+  std::int32_t* routed_bounds{nullptr};
+  std::int32_t* routed_cursors{nullptr};
+  std::int32_t* rows_token{nullptr};
+  std::int32_t* rows_slot{nullptr};
+  std::int32_t* routed_tiles{nullptr};
+  __half* x_half{nullptr};
+  float* gate_f32{nullptr};
+  __half* up_half{nullptr};
+  __half* down_half{nullptr};
+  float* router_logits_pad{nullptr};  // [chunk][256]
+  std::size_t compact_cap{0};
   float* expert_out{nullptr};  // [chunk*experts_used][expert_ff]
   float* mlp_out{nullptr};     // [chunk][hidden]
   float* moe_out{nullptr};     // [chunk][hidden]
@@ -413,6 +479,22 @@ struct Session::Impl {
                                        error);
     logits = buffers.Alloc<float>(
         static_cast<std::size_t>(kMaxChunk) * w.config.vocab_size, error);
+    if (getenv("GEMMA4_GROUPED") != nullptr) {
+      const std::uint32_t E = w.config.num_experts;
+      const std::uint32_t used = w.config.experts_used;
+      const std::size_t slots = static_cast<std::size_t>(chunk) * used;
+      compact_cap = ::gufo::models::qwen38_flash_next::rocm::RoutedCompactRows(slots, E);
+      routed_bounds = buffers.Alloc<std::int32_t>(E + 1, error);
+      routed_cursors = buffers.Alloc<std::int32_t>(E, error);
+      rows_token = buffers.Alloc<std::int32_t>(compact_cap, error);
+      rows_slot = buffers.Alloc<std::int32_t>(compact_cap, error);
+      routed_tiles = buffers.Alloc<std::int32_t>(slots, error);
+      x_half = buffers.Alloc<__half>(static_cast<std::size_t>(chunk) * w.config.hidden_size, error);
+      gate_f32 = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * used * w.config.expert_ff, error);
+      up_half = buffers.Alloc<__half>(static_cast<std::size_t>(chunk) * used * w.config.expert_ff, error);
+      down_half = buffers.Alloc<__half>(static_cast<std::size_t>(chunk) * used * w.config.hidden_size, error);
+      router_logits_pad = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * 256, error);
+    }
     // Weight slab: the LM head (vocab x hidden) is the largest projection.
     const std::size_t slab = static_cast<std::size_t>(
         static_cast<std::uint64_t>(w.config.vocab_size) * hidden);
@@ -762,12 +844,82 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       kernels::RouterInput(impl_->hidden,
                            static_cast<const float*>(l.router_scale.device),
                            impl_->router_tmp, n, hidden, c.rms_eps, stream);
+      if (getenv("GEMMA4_GROUPED") != nullptr && l.router_q8_padded != nullptr &&
+          getenv("GEMMA4_NORT_WMMAP") == nullptr) {
+        namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+        kernels::F32ToF16(impl_->router_tmp, impl_->x_slab,
+                          static_cast<std::size_t>(n) * hidden, stream);
+        if (q38::DenseF16Gemm(l.router_q8_padded, impl_->x_slab,
+                              impl_->router_logits_pad, n, 256, hidden, stream)) {
+          fn::RouterTopK(impl_->router_logits_pad, 256, impl_->expert_ids,
+                         impl_->expert_weights, n, c.num_experts, c.experts_used,
+                         stream);
+          goto router_done;
+        }
+      }
       StagedGemm(l.router, c.num_experts, impl_->router_tmp,
                  impl_->router_logits, n, impl_->w_slab, impl_->x_slab,
                  stream);
       fn::RouterTopK(impl_->router_logits, c.num_experts, impl_->expert_ids,
                      impl_->expert_weights, n, c.num_experts, c.experts_used,
                      stream);
+      router_done:;
+      bool grouped_ok = false;
+      if (getenv("GEMMA4_GROUPED") != nullptr && l.gate_q8 != nullptr) {
+        namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+        const std::uint32_t E = c.num_experts, used = c.experts_used;
+        const std::uint32_t slots = n * used;
+        q38::ExpertCounts(impl_->expert_ids, impl_->expert_counts, n, E, used, stream);
+        std::vector<std::uint32_t> counts_host(E);
+        hipMemcpy(counts_host.data(), impl_->expert_counts, E * sizeof(std::uint32_t), hipMemcpyDeviceToHost);
+        kernels::F32ToF16(impl_->normed, impl_->x_half, static_cast<std::size_t>(n) * hidden, stream);
+        q38::RoutedCompact(impl_->expert_ids, impl_->expert_counts,
+                           impl_->routed_bounds, impl_->routed_cursors,
+                           impl_->rows_token, impl_->rows_slot, n, used, E, stream);
+        std::vector<std::int32_t> tiles;
+        for (std::uint32_t e = 0; e < E; ++e)
+          for (std::uint32_t j = 0; j < (counts_host[e] + 63) / 64; ++j)
+            tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+        if (!tiles.empty()) {
+          hipMemcpyAsync(impl_->routed_tiles, tiles.data(), tiles.size() * sizeof(std::int32_t), hipMemcpyHostToDevice, stream);
+          const std::int32_t* tb = impl_->routed_bounds;
+          bool gok = q38::RoutedF16Gemm(l.gate_q8, q38::WeightType::kQ8_0, impl_->x_half,
+              impl_->routed_tiles, (std::uint32_t)tiles.size(), 64, tb, impl_->rows_token,
+              impl_->rows_slot, nullptr, impl_->gate_f32, nullptr, c.expert_ff, hidden, stream);
+          bool uok = gok && q38::RoutedF16Gemm(l.up_q8, q38::WeightType::kQ8_0, impl_->x_half,
+              impl_->routed_tiles, (std::uint32_t)tiles.size(), 64, tb, impl_->rows_token,
+              impl_->rows_slot, impl_->gate_f32, nullptr, impl_->up_half, c.expert_ff, hidden, stream);
+          bool dok = uok && q38::RoutedF16Gemm(l.down_q8, q38::WeightType::kQ8_0, impl_->up_half,
+              impl_->routed_tiles, (std::uint32_t)tiles.size(), 64, tb, impl_->rows_slot,
+              impl_->rows_slot, nullptr, nullptr, impl_->down_half, hidden, c.expert_ff, stream);
+          if (dok) {
+            hipMemsetAsync(impl_->attn_out, 0, static_cast<std::size_t>(n) * hidden * sizeof(float), stream);
+            std::vector<std::int32_t> gids(slots);
+            std::vector<float> gwts(slots);
+            hipMemcpy(gids.data(), impl_->expert_ids, slots * sizeof(std::int32_t), hipMemcpyDeviceToHost);
+            hipMemcpy(gwts.data(), impl_->expert_weights, slots * sizeof(float), hipMemcpyDeviceToHost);
+            std::vector<float> dscale(E, 1.0F);
+            if (!l.down_exps_scale.empty())
+              hipMemcpy(dscale.data(), l.down_exps_scale.device, E * sizeof(float), hipMemcpyDeviceToHost);
+            std::vector<float> acc(hidden);
+            std::vector<__half> drow(hidden);
+            for (std::uint32_t t = 0; t < n; ++t) {
+              for (std::uint32_t i = 0; i < hidden; ++i) acc[i] = 0.0F;
+              for (std::uint32_t s = 0; s < used; ++s) {
+                const std::uint32_t slot = t * used + s;
+                const int e = gids[slot];
+                if (e < 0 || e >= (int)E || gwts[slot] == 0.0F) continue;
+                const float w = gwts[slot] * dscale[e];
+                hipMemcpy(drow.data(), impl_->down_half + (std::size_t)slot * hidden, hidden * sizeof(__half), hipMemcpyDeviceToHost);
+                for (std::uint32_t i = 0; i < hidden; ++i) acc[i] += w * __half2float(drow[i]);
+              }
+              hipMemcpy(impl_->attn_out + (std::size_t)t * hidden, acc.data(), hidden * sizeof(float), hipMemcpyHostToDevice);
+            }
+            grouped_ok = true;
+          }
+        }
+      }
+      if (!grouped_ok) {
       std::vector<std::int32_t> ids(static_cast<std::size_t>(n) *
                                     c.experts_used);
       hipMemcpy(ids.data(), impl_->expert_ids,
@@ -856,6 +1008,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         }
       }
 
+      }
       SyncSum(impl_->attn_out, "moe_accum", n, hidden, il);
 
       kernels::RmsNorm(impl_->attn_out, nullptr, impl_->normed, n, hidden,
@@ -933,15 +1086,20 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                    static_cast<const float*>(w.output_norm.device),
                    impl_->normed, n, hidden, c.rms_eps, stream);
   
-  StagedGemm(w.output, c.vocab_size, impl_->normed, impl_->logits, n,
+  // The sampler only consumes the LAST token's logits (see Logits()), so the
+  // LM head projects just that row. This keeps the vocab-sized projection on
+  // the fused GEMV path (n==1) and off hipBLAS, which both avoids the
+  // gfx1151 batch>=128 fault and skips (n-1) wasted vocab GEMMs.
+  const float* last_row = impl_->normed + static_cast<std::size_t>(n - 1) * hidden;
+  StagedGemm(w.output, c.vocab_size, last_row, impl_->logits, 1,
              impl_->w_slab, impl_->x_slab, stream);
-  
+
   if (c.final_logit_softcapping > 0.0F) {
     kernels::SoftCap(impl_->logits, c.final_logit_softcapping,
-                     static_cast<std::size_t>(n) * c.vocab_size, stream);
+                     static_cast<std::size_t>(c.vocab_size), stream);
   }
   hipFree(d_pos);
-  impl_->last_chunk_n = n;
+  impl_->last_chunk_n = 1;
   impl_->length = start_pos + n;
   return true;
 }

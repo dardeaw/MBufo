@@ -72,6 +72,7 @@ struct LayerWeights {
   TensorRef ffn_post_norm;      ///< [hidden] blk.N.post_ffw_norm
 
   TensorRef router;             ///< [hidden -> experts] (ffn_gate_inp)
+  std::uint8_t* router_q8_padded{nullptr};  ///< [256][hidden] Q8_0 (rows>=experts zero)
   TensorRef router_scale;       ///< [hidden] f32 (ffn_gate_inp.scale)
   TensorRef ffn_pre_norm_2;     ///< [hidden] blk.N.pre_ffw_norm_2
   TensorRef ffn_post_norm_1;    ///< [hidden] blk.N.post_ffw_norm_1
@@ -81,6 +82,11 @@ struct LayerWeights {
   TensorRef gate_up_exps;       ///< [hidden -> 2*expert_ff] x experts (merged)
   TensorRef down_exps;          ///< [expert_ff -> hidden] x experts
   TensorRef down_exps_scale;    ///< [experts] f32 (blk.N.ffn_down_exps.scale)
+  // Grouped-expert WMMA path: Q8_0 copies of the stacked expert matrices.
+  // Layout per expert: [rows][cols/32*34] Q8_0 blocks, experts contiguous.
+  std::uint8_t* gate_q8{nullptr};  ///< [experts][expert_ff][hidden] Q8_0
+  std::uint8_t* up_q8{nullptr};    ///< [experts][expert_ff][hidden] Q8_0
+  std::uint8_t* down_q8{nullptr};  ///< [experts][hidden][expert_ff] Q8_0
 
   [[nodiscard]] bool IsMoe() const noexcept { return !router.empty(); }
 };
