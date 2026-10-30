@@ -4,7 +4,7 @@ Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth
 Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) only, never upstream.
 
 ## v0.25.7 (2026-10-28)
-- **Upstream v0.26.0 catch-up wrap-up**: the full merge was reverted entirely because #758 (chunked DeltaNet rewrite) regressed gfx1151 FN FP4 prefill by 29-46% (measured 1243→857 tok/s@64K); switched to cherry-picking the safe small fixes #732 (accept neutral llama.cpp sampler fields) + #736 (`--served-model-name` repeatable). README upstream-base line marked v0.26.0 (cherry-picked) + revert reason. Pure compatibility fix, zero gfx1151 performance regression.
+- **Upstream v0.26.0 catch-up wrap-up**: the full merge was reverted entirely because #758 (chunked DeltaNet rewrite) regressed gfx1151 FN FP4 prefill by 29-46% (measured 1243→857 tok/s@64K); switched to cherry-picking the safe small fixes #732 (accept neutral llama.cpp sampler fields) + #736 (`--served-model-name` repeatable). Pure compatibility fix, zero gfx1151 performance regression.
 
 ## v0.25.6 (2026-10-28)
 - **README benchmark table re-measured and updated (v0.25.5 data)**: single-stream decode + agentic tables, and the 27B two-model (Q4_K_XL + ROCmFP4-FAST) prefill table, all refreshed with v0.25.5 cold-KV re-measurements; fixed benchmark anchor links broken by the version-title change v0.24.1→v0.25.5 (check-docs green). Documentation-only change, no semantic changes.
@@ -88,9 +88,6 @@ Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) on
 - Fixed the K4V8 (`GUFO_KV_Q4` without V4, K18/V34) GPU page fault (signal 6): the `AttentionQ8Gemm` fused-projection path hard-codes the 34-byte Q8_0 K block; K4 (18-byte K rows) wrongly entered `fused_projection` → 256 B overflow per token → out-of-bounds abort around 30k tokens. Fix: add `!KvKeyIs4Bit(...)` to the `fused_projection` switch (mirroring the V4 exclusion); K4V8 now takes `Dense` + `PrepareAttentionKv` (independent K/V block sizes, handles mixed layouts correctly).
 - Verification (64k tool ladder N=10, `GUFO_KV_WMMA=1 GUFO_KV_I8=1`, fixed binary): K8V8 / K8V4 / K4V4 / K4V8 all **30/30**; production instance (`+GUFO_KV_V4=1`) 9/9 pass. Prefill keeps WMMA speed (64k full prefill ~1350 tok/s; fused path ~990 tok/s).
 
-
-## v0.20.7 (2026-10-22)
-- Docs: updated high-concurrency guidance. The old `--sessions 16 -c 32768` is no longer the ceiling; with q8 KV + 4-bit value rows, measured `8 × 131072` loads 101.0 GB (21 GB free), `16 × 65536` 102.9 GB (20 GB free), `8 × 196608` 106.8 GB (16 GB free). `16 × 98304` refuses to load with `text runner request-state claim exceeds state capacity`. README synced in both languages, keeping only the 8-way and 16-way scenarios.
 
 ## v0.20.6 (2026-10-22)
 - Fixed continuity snapshots under `GUFO_KV_V4` **using the key-row width (544 B) for value rows**: `ContinuationLayout` now takes key/value row widths separately (288 B for V4); capture/restore no longer reads past the value cache.
