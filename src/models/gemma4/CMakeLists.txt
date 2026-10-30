@@ -12,9 +12,11 @@ if (ENGINE_ENABLE_HIP)
   target_sources(gufo_gemma4 PRIVATE
     kernels/kernels.hip.cpp
     kernels/attention_wmma.hip.cpp
+    kernels/attention_wmma512.hip.cpp
     engine.cpp)
   set_source_files_properties(kernels/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/attention_wmma.hip.cpp PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(kernels/attention_wmma512.hip.cpp PROPERTIES LANGUAGE HIP)
   target_compile_options(gufo_gemma4 PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O2>
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)

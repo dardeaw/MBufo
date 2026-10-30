@@ -172,8 +172,11 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   constexpr std::uint32_t kOTilesPerWave = (kRowBlocks * kWmmaKSteps) / 8;
   constexpr std::uint32_t kSoftmaxLanes = 4;
   constexpr std::uint32_t kVtStride = kKeys + 8;
+  // Output dim tiles owned per wave: 8 waves x this = kHeadDim/16.
+  constexpr std::uint32_t kDimTilesPerWave = kHeadDim / 128;
   static_assert(kSTiles == (kPackHeads ? 3 : 2), "two waves per S tile");
   static_assert(kOTilesPerWave == 2 * kRowBlocks, "O tiles per wave");
+  static_assert(kDimTilesPerWave * 8 * 16 == kHeadDim, "dim tiles cover head");
   static_assert(kKeys % 16 == 0 && (kPackHeads || kQueryRows % 16 == 0),
                 "16-row WMMA tiles");
   static_assert(kKStepsPerWave * 2 == kWmmaKSteps, "k split");
@@ -387,7 +390,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   }
 
   // This wave owns dim tiles `wave` and `wave + 8` for every row block.
-  v8f o_acc[kRowBlocks][2] = {};
+  v8f o_acc[kRowBlocks][kDimTilesPerWave] = {};
   // The same four threads own each softmax row throughout the key sweep.
   // Keep its running statistics in registers; only the final denominator
   // and each tile's rescale factor need to cross waves.
@@ -946,7 +949,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
           scale[i] = row_scale[(rb * 16) + (2 * i) + half_id];
       }
 #pragma unroll
-      for (std::uint32_t t = 0; t < 2; ++t) {
+      for (std::uint32_t t = 0; t < kDimTilesPerWave; ++t) {
 #pragma unroll
         for (std::uint32_t i = 0; i < 8; ++i) {
           o_acc[rb][t][i] *= scale[i];
@@ -954,7 +957,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       }
     }
 #pragma unroll
-    for (std::uint32_t t = 0; t < 2; ++t) {
+    for (std::uint32_t t = 0; t < kDimTilesPerWave; ++t) {
       const std::uint32_t dim_tile = wave + (t * 8);
       v16h v_frag[kKeyBlocks];
 #pragma unroll
@@ -1057,7 +1060,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 #pragma unroll
     for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb)
 #pragma unroll
-      for (std::uint32_t t = 0; t < 2; ++t)
+      for (std::uint32_t t = 0; t < kDimTilesPerWave; ++t)
         asm volatile("" : "+v"(o_acc[rb][t]));
     SyncLds();
     // Phase B.
@@ -1089,7 +1092,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 #pragma unroll
   for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
 #pragma unroll
-    for (std::uint32_t t = 0; t < 2; ++t) {
+    for (std::uint32_t t = 0; t < kDimTilesPerWave; ++t) {
       const std::uint32_t dim_tile = wave + (t * 8);
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {

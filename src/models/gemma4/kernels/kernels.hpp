@@ -100,6 +100,17 @@ bool AttentionWmma(const float* q, const __half* k_cache, const __half* v_cache,
                    std::uint32_t window, hipStream_t stream);
 }  // namespace wmma
 
+namespace wmma512 {
+// WMMA flash prefill attention for the full (d=512) layers. Same kernel with
+// head_dim 512 geometry (16 query heads / 2 KV heads). window is 0 (dense
+// causal) for these layers.
+bool AttentionWmma512(const float* q, const __half* k_cache,
+                      const __half* v_cache, float* out,
+                      std::uint32_t n_tokens, std::uint32_t start_pos,
+                      std::uint32_t d, std::uint32_t kv_stride,
+                      std::uint32_t window, hipStream_t stream);
+}  // namespace wmma512
+
 void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                float* out, std::uint32_t n_tokens,
                std::uint32_t start_pos, std::uint32_t heads,

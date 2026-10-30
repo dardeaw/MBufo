@@ -843,9 +843,18 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
   // scalar GQA kernel for A/B.
   if (getenv("GEMMA4_ATTN0") == nullptr &&
       getenv("GEMMA4_ATTN_NO_WMMA") == nullptr) {
-    if (wmma::AttentionWmma(q, k_cache, v_cache, out, n_tokens, start_pos, d,
-                            kv_stride, window, stream))
-      return;
+    if (d <= 256) {
+      // GEMMA4_ATTN_ONLY512 keeps SWA on the scalar kernel so the d=512 path
+      // can be validated in isolation (identical upstream hidden state).
+      if (getenv("GEMMA4_ATTN_ONLY512") == nullptr &&
+          wmma::AttentionWmma(q, k_cache, v_cache, out, n_tokens, start_pos, d,
+                              kv_stride, window, stream))
+        return;
+    } else {
+      if (wmma512::AttentionWmma512(q, k_cache, v_cache, out, n_tokens,
+                                    start_pos, d, kv_stride, window, stream))
+        return;
+    }
   }
   // GEMMA4_ATTN0=1 uses the per-(token,q-head) kernel (re-reads KV per head);
   // default is the GQA kernel (streams KV once per kv-head group).
