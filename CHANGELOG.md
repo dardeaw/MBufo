@@ -1,271 +1,123 @@
-# MBufo Changelog（Qwen3.8-Flash-Next 推論分支）
+# MBufo Changelog (Qwen3.8-Flash-Next inference branch)
 
-以 `gufo-org/gufo` 上游為基底，專注低精度 KV、decode 頻寬與 MTP 推測解碼。
-格式：`version.txt` 即版號；只推 fork（`dardeaw/MBufo`），不上游。
+Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
+Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) only, never upstream.
 
-## v0.25.7（2026-10-28）
-- **上游 v0.26.0 追趕收尾**：完整 merge 因 #758（chunked DeltaNet 重寫）使 gfx1151 FN FP4
-  prefill 退步 29-46%（實測 1243→857 tok/s@64K）而全數回退；改 cherry-pick 安全小修
-  #732（接受中性 llama.cpp sampler 欄位）＋#736（`--served-model-name` 可重複指定）。
-  README 上游基底行標明 v0.26.0（cherry-picked）＋回退原因。純相容性修復，gfx1151 效能零退步。
+## v0.25.7 (2026-10-28)
+- **Upstream v0.26.0 catch-up wrap-up**: the full merge was reverted entirely because #758 (chunked DeltaNet rewrite) regressed gfx1151 FN FP4 prefill by 29-46% (measured 1243→857 tok/s@64K); switched to cherry-picking the safe small fixes #732 (accept neutral llama.cpp sampler fields) + #736 (`--served-model-name` repeatable). Pure compatibility fix, zero gfx1151 performance regression.
 
-## v0.25.6（2026-10-28）
-- **README benchmark 表重測更新（v0.25.5 資料）**：單流 decode＋agentic 表、27B 兩模型
-  （Q4_K_XL＋ROCmFP4-FAST）prefill 表全面以 v0.25.5 冷 KV 重測刷新；修正版本標題
-  v0.24.1→v0.25.5 後 benchmark 錨點連結失效（check-docs 綠燈）。純文件改動，無語意變更。
+## v0.25.4 (2026-10-28)
+- **Fixed `serve llm` silently ignoring `--sessions`/`-j` (real bug)**: the default-4 guard checked the wrong parser — `-j`/`--sessions` are parsed by the subcommand parser (`llm_parser`), but the guard queried `server_parser.WasSupplied("-j")` (which never sees the flag) → always concluded "not supplied" → forced `session_count=4`. Consequence: `serve llm -j 8` actually ran only 4 ways (`max batch_width=4`), the 5th+ stream fell to a second wave, TTFT showed a staircase cliff, and high-concurrency decode throughput was halved. Production `-j 4` was accidentally unaffected since the default is 4. Fix: the guard now queries `llm_parser`, which actually receives the flag.
+- **gfx1151 measurements (FP4 + MTP, ctx 32K, before/after)**: `-j 8` now honestly reports `sessions=8`, `max batch_width=8`; the TTFT staircase is gone (all 8 streams ~165ms). True 8-stream decode total throughput: merge-lists **124.5 → 148.2**, fib **121.1 → 144.4**; decode now scales monotonically with concurrency (no more fake 4+4 saturation).
+- **Upstream marketing-number comparison (same method: isolated prefill + summed per-stream decode_tps + greedy tg128)**: mixed 8-stream, my FP4 **158.5** beats upstream Q4's 127.02 (+25%); upstream's touted 194/245 come from **repetitive** scenarios (acceptance ~100%, upstream MTP commits longer chains on repetitive text), not mixed real-world numbers.
 
-## v0.25.5（2026-10-28）
-- **CI 綠燈修復：clang-format 21.1.8 格式化 in-scope C++ 檔**。CI 的 `check-format`
-  （`tools/ci/check-format.py`，範圍排除 deepseek runtime/rocm 與 qwen mmq 核心）自 v0.25.1
-  起因我歷次提交未跑 formatter 而持續紅（#445–#55）。以 repo 自帶的 `check-format.py --fix`
-  格式化 CI 實際檢查的 625 檔，`PASS: Checked 625 C++ files`，CI 恢復綠燈（build＋test 全過）。
-  純空白／換行調整，無語意改動。
+## v0.25.3 (2026-10-27)
+- **Scheduler fairness, second cut: SRTF prefill selection + starvation decode-priority preemption (near-done gate)**. Fixes long prefills squeezing short-request TTFT (5-into-4 anti-starvation scenario), keeping greedy byte-identical throughout and not touching `cache::LeasedSlot` overbooking / busy cache entries / mixed-speculative steps (avoiding the three documented admission-nest death causes from v0.25.2). gfx1151 measurements (FP4 + f16 + MTP + sessions 4, same harness): fairness-A degradation ratio **160 → 7.32**, fairness-B **856 → 191** (short TTFT 3.4s → 0.7s), ITL unchanged, greedy-output sha comparison passes (24K prefill alone vs concurrent produce the same sha).
+  - `PickPrefill()`: a near-done prefill with ≤1 chunk remaining is scheduled ahead of long-prefill continuation chunks (FIFO on ties).
+  - Starvation decode-priority: while requests queue for a session slot, long prefill chunks are deferred and resident decode is drained instead (a completion frees its slot), so waiters get admitted as soon as any resident finishes; bounded to ≤32 rounds to prevent prefill starvation.
+  - Near-done gate: preemption triggers only when some resident decoder is within ≤64 tokens of `token_limit` (slot about to free), avoiding pointless prefill delay when all residents are long-output decoders (this gate restored fairness-A from 76.5 back to 7.32).
 
-## v0.25.4（2026-10-28）
-- **修復 `serve llm` 的 `--sessions`／`-j` 被無聲忽略（真 bug）**：預設-4 守衛查錯 parser——
-  `-j`/`--sessions` 由子命令 parser（`llm_parser`）解析，守衛卻查 `server_parser.WasSupplied("-j")`
-  （它從沒見過這旗標）→ 永遠判定「沒供」→ 強制 `session_count=4`。後果：`serve llm -j 8` 實際
-  只跑 4 路（`max batch_width=4`），第 5+ 條退第二波、TTFT 出現階梯斷崖、高併發 decode 吞吐被腰斬。
-  生產 `-j 4` 因預設即 4 而僥倖無感。修法：守衛改查實際收旗標的 `llm_parser`。
-- **gfx1151 實測（FP4＋MTP，ctx 32K，修前後對照）**：`-j 8` 現如實 `sessions=8`、`max batch_width=8`，
-  TTFT 階梯斷崖消失（8 流全 ~165ms）。真 8 流 decode 總吞吐 merge-lists **124.5 → 148.2**、fib
-  **121.1 → 144.4**，decode 隨併發單調上升（不再 4+4 假飽和）。
-- **上游 marketing 數字對照（同方法：prefill 隔離＋加總各流 decode_tps＋greedy tg128）**：mixed 8 流
-  我 FP4 **158.5** 贏上游 Q4 的 127.02（+25%）；上游吹的 194/245 是 **repetitive** 情境（接受率~100%、
-  上游 MTP 在重複文本 commit 鏈更長），非 mixed 實戰數。
+## v0.25.2 (2026-10-27)
+- **`serve llm` default changes (recommended values into the CLI)**: `--sessions` default 1→4, `--kv-quant` default f16→q8 (llm path only; tts/asr keep 1/f16; explicit `-j`/`--kv-quant` still wins). Based on gfx1151 (124G unified memory) measurements: q8 KV halves KV bytes with quality retained; sessions 4 fixes long prompts starving short requests (fairness-A degradation ratio 2950 → ~15); decode/prefill throughput unchanged (65.2→66.5, 1329→1337 tok/s); greedy output byte-identical verification passes.
+- **New `GUFO_MTP_GATE_P` env var (default 0 = off)**: MTP speculative-chain confidence early stop — truncate the chain when a draft position's top-1 candidate probability falls below the threshold (ported from halogen 0.18.5). Measured on ROCmFP4-FAST: all thresholds 0.5–0.9 cost -26% decode TPS (this model's head has inherently low top-1 probability, so the chain is cut to 1–2 tokens while MTP overhead is still paid); hence off by default, kept as a tuning hook for future models. Verification math untouched; temp 0 output byte-identical (sha comparison passes).
+## v0.25.1 (2026-10-27)
+- **Fixed MTP speculative-decoding draft-acceptance collapse under high concurrency (root cause)**: gfx1151 concurrency benchmarking found that with MTP on, draft acceptance at batch_width>1 collapsed from ~85% single-stream to 39–49%, making concurrent decode throughput and stability lose to the upstream same-weights build. Same Q4_K_XL weights with only the binary swapped confirmed it was neither ROCmFP4 nor client-side measurement.
+- **Root cause**: `qwen38_flash_next`'s mixed-batch attention (`WmmaMixedAttention`) folded the speculative verify chain into the packed WMMA kernel; that kernel reads the mixed decode/prefill row family, whose logits differ from the single-session path the MTP draft relies on (the "chunk family noise" documented in `docs/MIXED_BATCH.md`), so target argmax and draft disagreed and rejected en masse.
+- **Fix**: the mixed-batch gate in `ForwardBatch` excludes speculative items (`std::any_of(... it.speculative)`) — batches containing speculative verify now take the legacy per-session attention cores (the verified-correct path); non-speculative (prefill/pure decode) batches still get the mixed-batch speedup. No effect on prefill/MoE/non-speculative concurrency.
+- **gfx1151 measurements** (27B-Flash-Next Q4_K_XL + MTP, default env, temp 0 greedy, same-weights comparison): batch_width 2/3/4 acceptance **48.8/38.9/41.7% → 88.7/91.6/89.5%**, and no longer decays with batch size (upstream decays 95→82→68; this build stays steady ~90%); per-stream decode **27/22/19 → 49/37/33 tok/s**; aggregate throughput **97/111/133** overtakes upstream (70/105/112) at every width.
 
-## v0.25.3（2026-10-27）
-- **排程器 fairness 第二刀：SRTF prefill 選取＋starvation decode 優先搶佔（near-done 閘）**。
-  治長 prefill 擠壓短請求 TTFT（5 擠 4 的抗飢餓場景），全程不破貪心 byte-identical、不碰
-  `cache::LeasedSlot` 超訂／busy cache entry／mixed-speculative step（避開 v0.25.2 文件化的
-  admission-nest 三死因）。gfx1151 實測（FP4＋f16＋MTP＋sessions 4，同 harness）：
-  fairness-A 退化比 **160 → 7.32**、fairness-B **856 → 191**（短 TTFT 3.4s → 0.7s），ITL 不退步，
-  貪心輸出 sha 對照通過（單獨 vs 併發 24K prefill 同 sha）。
-  - `PickPrefill()`：剩餘 ≤1 chunk 的近完成 prefill 排在長 prefill 續 chunk 前（FIFO 平手）。
-  - starvation decode-priority：有請求排隊等 session slot 時，暫緩長 prefill chunk、改排空
-    resident decode（完成即釋放 slot），讓等待者一有 resident 完成立刻被 admit；有界 ≤32 輪
-    防 prefill 餓死。
-  - near-done 閘：僅當某 resident decoder 距 `token_limit` ≤64 token（slot 即將釋放）才觸發
-    搶佔，避免全為長輸出 decoder 時白延 prefill（此閘把 fairness-A 從 76.5 修回 7.32）。
+## v0.25.0 (2026-10-27)
+- **New `GUFO_NO_BATCHED_VERIFY` env var**: when set, speculative decoding switches to per-session serial verification (`use_batched_verification=false`); unset = batched verification, default behavior unchanged.
+- **Background (high-concurrency MTP acceptance collapse)**: gfx1151 high-concurrency benchmarking found MBufo with MTP on saw draft acceptance at batch_width>1 collapse from 85% single-stream to 46–55%, making concurrent decode throughput and stability lose to the upstream same-weights build (upstream held 68–95%). Swapping only the binary with the **same Q4_K_XL weights** confirmed it was not the ROCmFP4 quantization but a regression in the fork's batched speculative verification path.
+- **Mitigation effect** (same weights, same binary, same requests, only the switch toggled, temp 0 greedy): batch_width 2/3/4 acceptance **48.8/38.9/41.7% (ON) → 60.0/53.8/53.4% (OFF)**, roughly +10–15pt at every width; set `GUFO_NO_BATCHED_VERIFY=1` to get this fallback.
+- **Follow-up**: even with batched verification off, acceptance still trails upstream, and Flash-Next MTP uses a model-specific speculative engine (not the generic `speculative_verifier` path); the exact kernel line is not yet pinned down, left for later.
 
-## v0.25.2（2026-10-27）
-- **`serve llm` 預設值調整（建議值進 CLI）**：`--sessions` 預設 1→4、`--kv-quant` 預設
-  f16→q8（僅 llm 路徑；tts/asr 維持 1／f16 不變，`-j`／`--kv-quant` 顯式指定仍優先）。
-  依據 gfx1151（124G 統一記憶體）實測：q8 KV 減半 KV 位元組、品質維持；sessions 4 修
-  長文餓死短請求（fairness-A 退化比 2950 → ~15），decode／prefill 吞吐不退步
-  （65.2→66.5、1329→1337 tok/s），貪心輸出 byte-identical 驗證通過。
-- **新增 `GUFO_MTP_GATE_P` 環境變數（預設 0＝關）**：MTP 投機鏈信心早停——draft 位置
-  top-1 候選質量低於閾值即截斷鏈長（halogen 0.18.5 移植）。實測 ROCmFP4-FAST 全閾值
-  0.5–0.9 皆 -26% decode TPS（本模型 head 的 top-1 質量天生低，鏈被砍到 1–2 token 而
-  MTP 開銷照付），故預設關閉、留作未來模型調校鉤子。驗證數學未動，temp 0 輸出
-  byte-identical（sha 對照通過）。
-- **文件化死路（防后人重蹈）**：`Admit()` 容量閘門處註明「勿重寫 admission-nest
-  超額 admission」＋三條實測死因（`cache::LeasedSlot::Acquire` 對已租 slot 直接
-  throw SlotBusy；借 busy entry 會踢掉正在跑的 conversation 損壞輸出；
-  `TryStepMixedBatch` 在 MTP 投機批次直接拒走）；正解是容量問題→調 `--sessions`。
-  另修 `SupportedPlans` 過時註解（8 rows 為 hip/DFlash 路徑；Flash-Next MTP 為
-  17 rows/session＝max_draft_tokens 16＋anchor）。
+## v0.24.1 (2026-10-26)
+- **Fixed 27B ROCmFP4 decode collapse with DFlash2 speculative decoding**: the speculative verify (batch≤8) weight matmuls went through `LaunchBatchedQuantGEMMFp32`, but ROCmFP4 was not included in the batch≤8 small-batch GEMM routing (neither `SupportsExactSharedProjection` nor `IsNativeWmmaQuant` listed FP4), so `batched_decode.cpp` fell to a per-row `LaunchGEMV` loop — re-reading the entire weights per token, making FP4 decode slower with spec on than off (short 5.8 vs spec-off 13.2).
+- **Fix**: include `kQ4_0_ROCMFP4(_FAST)` in the verify batch≤8 routing — `SupportsExactSharedProjection` allows FP4, the `LaunchBatchedQuantGEMMFp32` batch≤8 branch allows FP4, and `LaunchKQuantSmallBatchByType` gains an FP4 case, reusing the existing `SmallBatchKQuantExactFp32GEMMKernel` (its `DecodeQuantSub16` already supports FP4 with `offset=0`, same as the verified IQ4_XS no-offset path). `IsNativeWmmaQuant` itself is unchanged, so prefill/MoE routing is unaffected.
+- **gfx1151 measurements** (27B FP4 + DFlash2, cold KV, temp 0): decode short/prose/code/json **5.8/5.6/13.2/11.9 → 22.9/19.5/56.2/52.3 tok/s (+248–340%)**; acceptance completely unchanged (33.3/26.5/88.3/78.6%) → output correct. After the fix, FP4 dflash2 decode matches UD-Q4_K_XL (20.9/22.9/57.0/51.5), reversing the previous situation where FP4 with speculation was actually slower.
 
-## v0.25.1（2026-10-27）
-- **修復 MTP 推測解碼高併發 draft 接受率崩潰（根因）**：gfx1151 併發測速發現開 MTP 時
-  batch_width>1 的 draft 接受率從單流 ~85% 崩到 39–49%，使併發 decode 吞吐與穩定性輸給
-  上游同權重版。以相同 Q4_K_XL 權重只換 binary 對照，確認非 ROCmFP4、非 client 量測問題。
-- **根因**：`qwen38_flash_next` 的 mixed-batch attention（`WmmaMixedAttention`）把投機
-  verify chain 一併塞進 packed WMMA 核；該核讀 mixed decode/prefill 行家族，其 logits 與
-  MTP draft 所依的单-session 路径不同家族（`docs/MIXED_BATCH.md` 所稱 "chunk family noise"），
-  導致 target argmax 與 draft 不一致而大面積誤拒。
-- **修法**：`ForwardBatch` 的 mixed-batch gate 排除投機項（`std::any_of(... it.speculative)`）——
-  含投機 verify 的批次改走 legacy 逐 session attention cores（已驗證正確路徑）；非投機
-  （prefill／純 decode）仍享 mixed-batch 加速。不影響 prefill／MoE／非投機併發。
-- **gfx1151 實測**（27B-Flash-Next Q4_K_XL＋MTP，預設 env，temp 0 greedy，同權重對照）：
-  batch_width 2／3／4 接受率 **48.8／38.9／41.7% → 88.7／91.6／89.5%**，且不再隨 batch 衰減
-  （上游 95→82→68 遞減，本版平穩 ~90%）；per-stream decode **27／22／19 → 49／37／33 tok/s**，
-  聚合吞吐 **97／111／133** 全線反超上游（70／105／112）。
+## v0.24.0 (2026-10-26)
+- **Fixed 27B ROCmFP4 `half_prefill` correctness**: prefill runs **FP16 WMMA**; output is stable across different token counts for the same prompt. Verified: exact-repeat 29–2962 tokens all pass; WMMA vs fallback bit-identical character-by-character (batch 13–200); tool_ladder 72 cases up to 128K with **0 failures**.
+- **ROCmFP4 prefill threshold lowered**: `UseQwen27bFp16Prefill` for FP4 from batch≥1024 down to **≥8** (Q4_K keeps 1024; `GUFO_HALF_PREFILL_MIN_BATCH` overrides). Lets the in-kernel-decode FP16 WMMA cover nearly all prefill, avoiding the sub-threshold `dequant→BF16` full-weight re-decode path — short-prompt fixed cost **2.5s→1.55s**; 256–1023-token prefill **+63–79%**.
+- **Magic dequant** (`PackHalves`): FP4 nibble→half2 now uses the `0x64646464` magic + `hfma2` (aligned with the flash-next `kFastCodebook` path), marginal prefill **+3–4%**.
+- **DIAG dead-code cleanup**: removed accuracy-diagnostic leftovers; diff converges back to 4 files.
 
-## v0.25.0（2026-10-27）
-- **新增 `GUFO_NO_BATCHED_VERIFY` 環境變數**：設定後投機解碼改走逐 session 串行驗證
-  （`use_batched_verification=false`）；不設＝維持批次驗證，預設行為不變。
-- **背景（高併發 MTP 接受率崩潰）**：gfx1151 高併發測速發現 MBufo 開 MTP 時，
-  batch_width>1 的 draft 接受率從單流 85% 崩到 46–55%，使併發 decode 吞吐與穩定性
-  輸給上游同權重版（上游維持 68–95%）。以**相同 Q4_K_XL 權重**只換 binary 對照，
-  確認非 ROCmFP4 量化問題，而是 fork 的 batched speculative verification 路徑回歸。
-- **緩解效果**（同權重、同 binary、同請求，僅切開關，temp 0 greedy）：
-  batch_width 2／3／4 接受率 **48.8／38.9／41.7%（ON）→ 60.0／53.8／53.4%（OFF）**，
-  每級回升約 10–15pt；設 `GUFO_NO_BATCHED_VERIFY=1` 即得此 fallback。
-- **待追**：關掉批次驗證後接受率仍低於上游，且 Flash-Next MTP 走模型專屬投機引擎
-  （非通用 `speculative_verifier` 路徑），確切 kernel 行尚未揪出，留待後續。
+## v0.23.1 (2026-10-25)
+- **Hooked up the ROCmFP4-FAST HIP kernels** (completing the prefill GEMM marked "not yet wired" in v0.23.0):
+  - **Large-batch prefill**: `RoutedF16GEMMKernel` gains a FAST decode branch — FAST blocks (16B codebook codes + 1B UE4M3 scale) are expanded in `fetch_stage` via a perm LUT into Q8-shaped int8 codebook bytes, after which the whole Q8_0 dequant (1152 magic) + fp16 WMMA core is reused as-is; `WmmaExperts()` allows FAST down experts, so the entire MoE (gate/up Q4_K + down FAST) runs on fp16 matrix cores instead of falling back to generic `mul_mat_q`.
+  - **Medium batch**: down experts FAST takes int8 MMQ (`load_tiles_rocmfp4_fast` + `vec_dot_rocmfp4_fast_q8_1_mma`, codebook LUT + UE4M3 scale, Q8_1 activations).
+  - On gfx1151, int8 and fp16 WMMA peak at the same throughput (57.3 TFLOP/s, 1.00x), so prefill uses fp16, reusing the production `RoutedF16GEMMKernel` path.
+- Performance (vs the UD-Q4_K_XL production baseline): prefill 1891/5041 tokens at **1563.7/1367.6 tok/s** (prod 1555.9/1323.6, +0.5%/+3.3%); decode 48.5 tok/s with no regression; 64k tool ladder Q4/Q8 both **30/30**; 12-question greedy faithful to the MMQ path (same fp16-rounding-level differences).
+- `projection_ops_test` oracle fix: FAST scale uses `d=amax/127` (aligned with the kernel); added FAST mini/real-shape/FP64 oracle assertions.
 
-## v0.24.1（2026-10-26）
-- **修復 27B ROCmFP4 開 DFlash2 推測解碼 decode 崩速**：投機 verify（batch≤8）的權重
-  matmul 原走 `LaunchBatchedQuantGEMMFp32`，但 ROCmFP4 未被納入 batch≤8 的小批量
-  GEMM 路由（`SupportsExactSharedProjection`／`IsNativeWmmaQuant` 皆未列 FP4），
-  於 `batched_decode.cpp` 落到逐行 `LaunchGEMV` 迴圈——每 token 重讀整份權重，
-  造成 FP4 decode 反而比 spec-off 更慢（short 5.8 vs spec-off 13.2）。
-- **修法**：把 `kQ4_0_ROCMFP4(_FAST)` 納入 verify 的 batch≤8 路由——
-  `SupportsExactSharedProjection` 放行 FP4、`LaunchBatchedQuantGEMMFp32` batch≤8
-  分支放行 FP4、`LaunchKQuantSmallBatchByType` 新增 FP4 case，重用既有
-  `SmallBatchKQuantExactFp32GEMMKernel`（其 `DecodeQuantSub16` 已支援 FP4，
-  `offset=0`，與已驗證的 IQ4_XS no-offset 路徑同）。不改 `IsNativeWmmaQuant`
-  本身，prefill／MoE 路由不受影響。
-- **gfx1151 實測**（27B FP4＋DFlash2，冷 KV，temp 0）：decode short／prose／code／
-  json **5.8／5.6／13.2／11.9 → 22.9／19.5／56.2／52.3 tok/s（+248–340%）**；
-  acceptance 完全不變（33.3／26.5／88.3／78.6%）→ 輸出正確。修復後 FP4 dflash2
-  decode 與 UD-Q4_K_XL（20.9／22.9／57.0／51.5）相當，逆轉原先 FP4 開投機反而變慢。
+## v0.23.0 (2026-10-24)
+- **Ported the ROCmFP4 / ROCmFPx quantization family** (spec and reference implementation: agentionai/llama.cpp, MIT):
+  - `GgmlType` gains `kQ4_0_ROCMFP4=100` (18B/32, dual UE4M3 scales), `kQ4_0_ROCMFP4_FAST=101` (17B/32, single scale = 4.25bpw), `kQ3_0_ROCMFPX=104` (14B/32 = 3.5bpw, 8 codes packed in 3 bytes).
+  - CPU reference path: `DequantizeQ4_0_ROCMFP4[_FAST]`/`DequantizeQ3_0_ROCMFPX` + DotProduct + scale verification; codebook (E2M1 top tier 12→10 AMD tuning) and UE4M3 scale copied bit-for-bit from rocmfp4.c/rocmfpx.c; golden vectors generated directly by the reference implementation (bit-exact comparison).
+  - NgramTable supports the type-104 table (PLE 3.5bpw); O_DIRECT unaligned 70B rows take the existing page-window read path, tests include unaligned offsets and counter identities.
+  - Flash-Next loader whitelist allows ROCmFP4-FAST artifacts (experts/mixer/dense/ssm/ple); `cpu_ops` dequant dispatch gains the three types.
+  - `tools/qwen-flash/rocmfp4_v2_repack.cpp`: offline v2-artifact Q6_K→Q8_0 repack (gufo kernels do not accept Q6_K embedding/dense/routed; decoding uses gufo's own `DequantizeQ6_K`, requantization follows q8_0 reference semantics, lossless with respect to Q6_K content).
+- HIP kernels (down-experts FAST GEMV, prefill GEMM) not yet wired; loading and weight verification pass (v2q8 94.5G, sessions 2, 262144, MTP).
 
-## v0.24.0（2026-10-26）
-- **修復 27B ROCmFP4 `half_prefill` 正確性**：prefill 走 **FP16 WMMA**，同 prompt
-  跨不同 token 數輸出穩定。驗證：exact-repeat 29–2962 token 全過、WMMA 與 fallback
-  逐字元 bit-identical（batch 13–200）、tool_ladder 72 案例到 128K **0 失敗**。
-- **ROCmFP4 prefill 門檻下調**：`UseQwen27bFp16Prefill` 對 FP4 從 batch≥1024 降到
-  **≥8**（Q4_K 維持 1024；`GUFO_HALF_PREFILL_MIN_BATCH` 可覆寫）。讓 in-kernel-decode
-  的 FP16 WMMA 覆蓋幾乎全部 prefill，避開 sub-threshold 的 `dequant→BF16` 全權重
-  重解碼路徑——短 prompt 固定成本 **2.5s→1.55s**；256–1023 token prefill **+63–79%**。
-- **magic dequant**（`PackHalves`）：FP4 nibble→half2 改走 `0x64646464` magic＋`hfma2`
-  （對齊 flash-next `kFastCodebook` 路），邊際 prefill **+3–4%**。
-- **清理 DIAG 死碼**：移除精確度診斷殘留的 dead code，diff 收斂回 4 檔。
+## v0.22.2 (2026-10-24)
+- **Fixed 100% crash with blocked(q8) KV × MTP × 2+ concurrent decoding** (GPU page fault, addressing ~0x212000). Root cause: batched MTP catch-up (the cache-only projection in `MtpForwardBatch`) wrote draft K/V into the F16 draft cache, but under blocked KV that pointer is null, so the kernel wrote unmapped pages outright. Single sessions go through per-session `MtpForward` (which has a blocked branch), so production serial runs never hit it; two resident sessions switch to `DraftCatchUpBatch` and it always crashes. Fix: write into the blocked draft rows (`k_cache_kv`/`v_cache_kv`) according to `KvBlocked`, with codec/range/block bytes consistent with the single-session path.
+- Defensive hardening: `RoundsGuard` (recursive mutex + outermost entry stream sync) serializes round submission — the pinned host staging (control/tokens/logits) is shared across sessions and read by work launched asynchronously.
+- Verification: C2/C4@2K, C4@16K, **C4×250K four-way 262K concurrency** all with 0 errors 0 faults (before the fix, C2 crashed 100%); 64k tool ladder 6/6; stdbench no regression (decode 46.8 tok/s, 16K cache turn2 1.46s).
 
-## v0.23.1（2026-10-25）
-- 接上 **ROCmFP4-FAST 的 HIP kernel**（補 v0.23.0 標註「尚未接」的 prefill GEMM）：
-  - **prefill 大 batch**：`RoutedF16GEMMKernel` 新增 FAST 解碼分支——FAST block
-    （16B codebook codes＋1B UE4M3 scale）在 `fetch_stage` 以 perm LUT 展開成
-    Q8 形狀的 int8 codebook bytes，之後整套 Q8_0 反量化（1152 magic）＋fp16 WMMA
-    核心直接重用；`WmmaExperts()` 放行 FAST down experts，整個 MoE（gate/up Q4_K
-    ＋down FAST）改走 fp16 矩陣核心，不再掉進通用 `mul_mat_q`。
-  - **中 batch**：down experts FAST 走 int8 MMQ（`load_tiles_rocmfp4_fast`＋
-    `vec_dot_rocmfp4_fast_q8_1_mma`，codebook LUT＋UE4M3 scale、Q8_1 激活）。
-  - gfx1151 實測 int8 與 fp16 WMMA 峰值同吞吐（57.3 TFLOP/s、1.00x），故 prefill
-    走 fp16、重用 prod 那條 `RoutedF16GEMMKernel`。
-- 效能（對 UD-Q4_K_XL 生產基線）：prefill 1891／5041 tok **1563.7／1367.6 tok/s**
-  （prod 1555.9／1323.6，+0.5%／+3.3%）；decode 48.5 tok/s 不退步；64k 工具梯子
-  Q4／Q8 皆 **30/30**；12 題 greedy 對 MMQ 路忠實（同 fp16 捨入級差異）。
-- `projection_ops_test` oracle 修正：FAST scale 用 `d=amax/127`（對齊 kernel）；
-  新增 FAST mini／real-shape／FP64 oracle 斷言。
-
-## v0.23.0（2026-10-24）
-- 移植 **ROCmFP4 / ROCmFPx 量化家族**（規格與參考實作：agentionai/llama.cpp，MIT）：
-  - `GgmlType` 新增 `kQ4_0_ROCMFP4=100`（18B/32 雙 UE4M3 scale）、
-    `kQ4_0_ROCMFP4_FAST=101`（17B/32 單 scale＝4.25bpw）、`kQ3_0_ROCMFPX=104`
-    （14B/32＝3.5bpw，8 codes 塞 3 bytes）。
-  - CPU 參考路徑：`DequantizeQ4_0_ROCMFP4[_FAST]`／`DequantizeQ3_0_ROCMFPX`＋
-    DotProduct＋scale 驗證；codebook（E2M1 頂階 12→10 AMD 調校）與 UE4M3
-    scale 逐位元對抄 rocmfp4.c/rocmfpx.c，golden vectors 由參考實作直接產出
-    （bit-exact 比對）。
-  - NgramTable 支援 type 104 表（PLE 3.5bpw）；O_DIRECT 非對齊 70B row 走
-    既有 page-window 讀取路徑，測試含 unaligned offset 與 counter 恆等式。
-  - Flash-Next loader 白名單放行 ROCmFP4-FAST 工件（experts/mixer/dense/ssm/
-    ple）；`cpu_ops` 反量化分派補三型別。
-  - `tools/qwen-flash/rocmfp4_v2_repack.cpp`：v2 工件 Q6_K→Q8_0 離線重打包
-    （gufo kernel 不收 Q6_K embedding/dense/routed；解碼用 gufo 自己的
-    `DequantizeQ6_K`，重量化採 q8_0 參考語意，對 Q6_K 內容等同無損）。
-- HIP kernel（down experts FAST GEMV、prefill GEMM）尚未接，載入與 weight
-  驗證已通過（v2q8 94.5G、sessions 2、262144、MTP）。
-
-## v0.22.2（2026-10-24）
-- 修正 **blocked(q8) KV × MTP × 兩路以上並發解碼 100% 崩潰**（GPU page fault，
-  定址 ~0x212000）。根因：批次 MTP catch-up（`MtpForwardBatch` 的 cache-only
-  投影）把 draft K/V 寫進 F16 draft cache，但 blocked KV 下該指標為 null，
-  kernel 直接寫未映射頁面。單 session 走 per-session `MtpForward`（有 blocked
-  分支）所以生產串行從未觸發；兩路常駐改走 `DraftCatchUpBatch` 即必崩。
-  修法：依 `KvBlocked` 改寫入 blocked draft rows（`k_cache_kv`/`v_cache_kv`，
-  codec／range／block bytes 與單 session 路徑一致）。
-- 防禦性加固：`RoundsGuard`（recursive mutex＋最外層 entry stream sync）串行化
-  round 提交——pinned host staging（control／tokens／logits）跨 session 共享且
-  被非同步發射的工作讀取。
-- 驗證：C2／C4@2K、C4@16K、**C4×250K 四路 262K 併發**全數 0 errors 0 faults
-  （修前 C2 起 100% 崩潰）；64k 工具梯子 6/6；stdbench 無回歸
-  （decode 46.8 tok/s、16K cache turn2 1.46s）。
-
-## v0.22.1（2026-10-23）
-- 併入上游 `gufo-org/gufo` v0.22.0（v0.21.0＋v0.22.0，共 14 commits）：
-  - #714 indexer BF16 投影改純 K-order 求和——token 分數不再受 batch 位置／
-    prefill chunk 邊界影響（top-k 接近平手時不再因 KV 重用選到不同 key）。
-  - #707 每條 HIP stream 獨立 qfn_mmq scratch arena。
-  - #350 opt-in YaRN 長 context；啟用 YaRN 時 KV 強制 f16（blocked Q8 kernel
-    尚未支援 YaRN 頻率縮放）。
-  - #703 unseeded sampled MTP draft 依目前 decode occupancy 計價。
-- Snapshot header 同時帶 rope 欄位與 `kv_format`（`payload_bytes` 偏移 112），
-  `kSnapshotPayloadVersion` 19→20（舊快照一律拒收）。
-- 64k 工具梯子回歸：生產配置（`GUFO_KV_WMMA=1 GUFO_KV_I8=1 GUFO_KV_V4=1`）
-  **30/30**。
+## v0.22.1 (2026-10-23)
+- Merged upstream `gufo-org/gufo` v0.22.0 (v0.21.0 + v0.22.0, 14 commits total):
+  - #714 indexer BF16 projections now sum in pure K order — token scores no longer depend on batch position / prefill chunk boundaries (near-tie top-k no longer picks a different key due to KV reuse).
+  - #707 per-HIP-stream dedicated qfn_mmq scratch arena.
+  - #350 opt-in YaRN long context; when YaRN is enabled KV is forced to f16 (the blocked Q8 kernel does not yet support YaRN frequency scaling).
+  - #703 unseeded sampled MTP drafts priced at current decode occupancy.
+- Snapshot header now carries both rope fields and `kv_format` (`payload_bytes` offset 112); `kSnapshotPayloadVersion` 19→20 (old snapshots always rejected).
+- 64k tool-ladder regression: production config (`GUFO_KV_WMMA=1 GUFO_KV_I8=1 GUFO_KV_V4=1`) **30/30**.
 
 
-## v0.20.8（2026-10-23）
-- 修正 blocked-WMMA 路徑的 **double-gate**：`WmmaCausalAttentionKernel` 已在 kernel
-  內施加 `SigmoidF(gate)`（kernel 5583 行註明 epilogue apply sigmoid output gate），
-  但 blocked-WMMA 跑完又掉到 `executor.cpp:3088` 的 `SigmoidMul` 再 gate 一次，
-  輸出剩 ~1/4 大小、corr 0.88，64k 工具呼叫 22/30（27% 失敗）。
-  修法：WMMA 走過（`wmma_used`）就跳過該 `SigmoidMul`（fused `AttentionKv`
-  簽名無 gate 參數，只靠它 gate 一次）。f16 early-return 在 `SigmoidMul` 前返回
-  （kernel 內單次，正確），decode（`rocm::Attention` 無 gate）不受影響。
-- 修正 K4V8（`GUFO_KV_Q4` 不帶 V4，K18/V34）的 GPU page fault（signal 6）：
-  `AttentionQ8Gemm` 融合投影路徑寫死 34-byte Q8_0 K 塊，K4（18-byte K 列）誤入
-  `fused_projection` → 每 token 溢寫 256 B → 30k tok 左右越界 abort。
-  修法：`fused_projection` 開關加 `!KvKeyIs4Bit(...)`（鏡像 V4 排除），K4V8 改走
-  `Dense` + `PrepareAttentionKv`（獨立 K/V block sizes，正確處理混排）。
-- 驗證（64k 工具梯子 N=10，`GUFO_KV_WMMA=1 GUFO_KV_I8=1`，修後 binary）：
-  K8V8 / K8V4 / K4V4 / K4V8 皆 **30/30**；生產實例（`+GUFO_KV_V4=1`）9/9 通過。
-  prefill 保留 WMMA 速度（64k 全 prefill ~1350 tok/s；fused 路徑約 990 tok/s）。
+## v0.20.8 (2026-10-23)
+- Fixed the **double-gate** on the blocked-WMMA path: `WmmaCausalAttentionKernel` already applies `SigmoidF(gate)` inside the kernel (kernel line 5583 notes "epilogue apply sigmoid output gate"), but after blocked-WMMA finished it fell into `executor.cpp:3088`'s `SigmoidMul` and got gated again — output shrank to ~1/4, corr 0.88, 64k tool calls 22/30 (27% failure). Fix: skip that `SigmoidMul` when WMMA ran (`wmma_used`) (the fused `AttentionKv` signature has no gate parameter and relies on it gating exactly once). The f16 early-return returns before `SigmoidMul` (single application inside the kernel, correct); decode (`rocm::Attention`, no gate) is unaffected.
+- Fixed the K4V8 (`GUFO_KV_Q4` without V4, K18/V34) GPU page fault (signal 6): the `AttentionQ8Gemm` fused-projection path hard-codes the 34-byte Q8_0 K block; K4 (18-byte K rows) wrongly entered `fused_projection` → 256 B overflow per token → out-of-bounds abort around 30k tokens. Fix: add `!KvKeyIs4Bit(...)` to the `fused_projection` switch (mirroring the V4 exclusion); K4V8 now takes `Dense` + `PrepareAttentionKv` (independent K/V block sizes, handles mixed layouts correctly).
+- Verification (64k tool ladder N=10, `GUFO_KV_WMMA=1 GUFO_KV_I8=1`, fixed binary): K8V8 / K8V4 / K4V4 / K4V8 all **30/30**; production instance (`+GUFO_KV_V4=1`) 9/9 pass. Prefill keeps WMMA speed (64k full prefill ~1350 tok/s; fused path ~990 tok/s).
 
 
-## v0.20.7（2026-10-22）
-- 文件：更新高併發建議。舊的 `--sessions 16 -c 32768` 已非上限；q8 KV＋4-bit
-  value 列下實測 `8 × 131072` 載入 101.0 GB（餘 21 GB）、`16 × 65536`
-  102.9 GB（餘 20 GB）、`8 × 196608` 106.8 GB（餘 16 GB）。
-  `16 × 98304` 會以 `text runner request-state claim exceeds state capacity`
-  拒載。README 中英同步，只保留 8 路與 16 路兩種情境。
+## v0.20.6 (2026-10-22)
+- Fixed continuity snapshots under `GUFO_KV_V4` **using the key-row width (544 B) for value rows**: `ContinuationLayout` now takes key/value row widths separately (288 B for V4); capture/restore no longer reads past the value cache.
+- Symptom: requests with prompt ≥ ~139k tokens (beyond `max_context × 288 / 544`) returned 200 and then the server SIGABRT'd with `Memory access fault ... Page not present` in the log; still reproducible with the decode copy disabled. Root cause: the value snapshot read 256 B extra per row, crossing the 72 MiB V-cache allocation at 154k.
+- After the fix, a 154k prompt captures completely (snapshot 3.11 GB → 2.60 GB) and restores normally (turn2 0.32 s, correct answer). `kSnapshotPayloadVersion` 18 → 19; old snapshots auto-invalidate.
+- Verification: 154k prefill + two-turn conversation, 154k snapshot restore, 16K cache tests all pass; `build/gpu-test` fails only `kernel_resources_test` (WMMA scratch baseline), unrelated to this fix.
 
-## v0.20.6（2026-10-22）
-- 修正 `GUFO_KV_V4` 下連續性快照把 **value 列誤用 key 列寬度**（544 B）的問題：
-  `ContinuationLayout` 現在分別取 key/value 列寬（V4 為 288 B），capture/restore
-  不再越界讀取 value 快取。
-- 症狀：prompt ≥ ~139k tokens（超過 `max_context × 288 / 544`）的請求回 200 後
-  服務 SIGABRT，日誌 `Memory access fault ... Page not present`；關閉 decode 副本
-  仍重現。根因是 value 快照每列多讀 256 B，154k 時越過 72 MiB 的 V 快取配置。
-- 修正後 154k prompt 可完整 capture（快照 3.11 GB → 2.60 GB）並正常 restore
-  （turn2 0.32 s，答案正確）。`kSnapshotPayloadVersion` 18 → 19，舊快照自動失效。
-- 驗證：154k prefill + 兩輪對話、154k 快照 restore、16K 快取測試全過；
-  `build/gpu-test` 僅 `kernel_resources_test`（WMMA scratch 基線）失敗，與本修正無關。
+## v0.20.5 (2026-10-22)
+- Large dense projections during decode now read Q4_1 copies (`ssm_in/out`, `attn_qkv/out`, 20 B/block, 41% fewer bytes than Q8_0; prefill still uses Q8_0). `GUFO_DECODE_Q4=0` switches to Q5_1 copies; `GUFO_DECODE_Q5=0` disables copies (pure Q8_0).
+- Measured (UD-Q4_K_XL, MTP on, pure decode 256 tok × 5 median): Q4_1 **47.68 tok/s** vs Q8_0 40.63 tok/s (**+17.4%**); 4 exact-answer questions unchanged; copies 1.56 GiB.
 
-## v0.20.5（2026-10-22）
-- Decode 大型 dense 投影改讀 Q4_1 副本（`ssm_in/out`、`attn_qkv/out`，20 B/block，
-  較 Q8_0 少 41% 位元組；prefill 仍走 Q8_0）。
-  `GUFO_DECODE_Q4=0` 切 Q5_1 副本，`GUFO_DECODE_Q5=0` 關閉副本（純 Q8_0）。
-- 實測（UD-Q4_K_XL，MTP 開，純 decode 256 tok×5 中位）：Q4_1 **47.68 tok/s**
-  vs Q8_0 40.63 tok/s（**+17.4%**）；4 題精確答案無變；副本 1.56 GiB。
+## v0.20.4 (2026-10-21)
+- Prefill chunk tile is now tunable via `GUFO_PREFILL_TILE` (default 4096, override without rebuild). Verified 8192 vs 4096 on 24K/48K prompts differs within noise (±2%), so the 4096 default stands.
 
-## v0.20.4（2026-10-21）
-- Prefill chunk tile 改為 `GUFO_PREFILL_TILE` 可調（預設 4096，覆寫免重編）。
-  驗證 8192 在 24K/48K 提示下與 4096 差異在噪聲內（±2%），故維持預設 4096。
+## v0.20.3 (2026-10-21)
+- Merged upstream `origin/main` v0.20.0 (incl. #699 MTP sampling overhead, #702 bench interruption fix). Resolved the `gpu_probe.cpp` argparse conflict; release + gpu-test all green.
 
-## v0.20.3（2026-10-21）
-- 合併上游 `origin/main` v0.20.0（含 #699 MTP 取樣開銷、#702 bench 中斷修正）。
-  解決 `gpu_probe.cpp` argparse 衝突；release + gpu-test 全綠。
+## v0.20.2 (2026-10-21)
+- Fixed small q8 prefills wrongly entering the fused projection and crashing config C: added a `q8_fused_ok` gate (`kv_format==kQ8` requires `n_tokens>=1024`). `attention_ops` passes in 33s; 28-token prefill output correct.
 
-## v0.20.2（2026-10-21）
-- 修正小 q8 prefill 誤入 fused 投影導致 config C 崩潰：
-  加 `q8_fused_ok` 閘門（`kv_format==kQ8` 需 `n_tokens>=1024`）。
-  `attention_ops` 33s 通過，28-token prefill 輸出正確。
+## v0.20.1 (2026-10-20)
+- Decode adaptive key-tile splits (splitting narrow attention batches, `use_splits`). Overnight-restart A/B +6.9% (41.7→44.6 tok/s); config A decode mean 43.65.
 
-## v0.20.1（2026-10-20）
-- Decode 自適應 key-tile splits（窄 attention batch 切分，`use_splits`）。
-  隔夜重啟 A/B +6.9%（41.7→44.6 tok/s）；config A decode 均值 43.65。
+## v0.20.0 (upstream base)
+- Aligned with upstream v0.20.0; MTP default draft depth 5; #690 wide prefill fully on; F16 GEMM relaxed to `n_tokens==0`.
 
-## v0.20.0（上游基底）
-- 對齊上游 v0.20.0；MTP 預設 draft depth 5；#690 寬 prefill 全開；
-  F16 GEMM 放寬至 `n_tokens==0`。
+## Before v0.19.0 (fork mainline)
+- **int8 WMMA**: blocked-KV causal prefill goes straight to int8 WMMA (`GUFO_KV_WMMA`).
+- **Q8 KV**: per-32-block scale (K34/V34 8-bit + scale@32, K18/V18 4-bit + scale@16).
+- **4-bit KV**: `GUFO_KV_Q4` (4-bit key), `GUFO_KV_V4` (4-bit value pack 18B).
+- **Mixed batch**: P0–P3 (envelope 32 sessions/1024 rows, MTP parity, mixed on by default).
+- **MTP**: draft depth, ngram prefetch, sampling-overhead optimization.
+- Only KV recommendation is `q8` (`--kv-quant fp8` removed; gfx1151 has no fp8 WMMA, and Q8 + Q4_1 copies already deliver +17% decode).
 
-## v0.19.0 以前（fork 主軸）
-- **int8 WMMA**：blocked-KV causal prefill 直走 int8 WMMA（`GUFO_KV_WMMA`）。
-- **Q8 KV**：per-32-block scale（K34/V34 8-bit+scale@32，K18/V18 4-bit+scale@16）。
-- **4-bit KV**：`GUFO_KV_Q4`（4-bit key）、`GUFO_KV_V4`（4-bit value pack 18B）。
-- **Mixed batch**：P0–P3（envelope 32 sessions/1024 rows、MTP parity、mixed 預設開）。
-- **MTP**：draft depth、ngram 預取、取樣開銷優化。
-- KV 唯一推薦 `q8`（`--kv-quant fp8` 已移除；gfx1151 無 fp8 WMMA，且 Q8 + Q4_1 副本已達 +17% decode）。
-
-## 環境開關速查（config A 預設全開）
-`GUFO_KV_WMMA=1`、`GUFO_KV_I8=1`、`GUFO_KV_Q4=1`、`GUFO_KV_V4=1`；
-`GUFO_DECODE_Q4/Q5` 控制 decode 副本；`GUFO_PREFILL_TILE` 控制 prefill 切塊；
-`GUFO_MIXED_BATCH=0` 關 mixed；MTP `-d 5`（實測 `-d 7` 無益，loader 拒 `-d 9`）。
+## Environment switch quick reference (config A = all on by default)
+`GUFO_KV_WMMA=1`, `GUFO_KV_I8=1`, `GUFO_KV_Q4=1`, `GUFO_KV_V4=1`;
+`GUFO_DECODE_Q4/Q5` control decode copies; `GUFO_PREFILL_TILE` controls prefill chunking;
+`GUFO_MIXED_BATCH=0` disables mixed; MTP `-d 5` (measured `-d 7` no gain, loader rejects `-d 9`).
 # Changelog
 
 Notable user-facing changes are recorded here. Gufo follows
