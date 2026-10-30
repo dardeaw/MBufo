@@ -1,5 +1,35 @@
 # Qwen3.8 Flash-Next experiments
 
+## Prefill tiling and bandwidth limits (October 31, 2026)
+
+Context: gfx1151 Strix Halo, ROCmFP4-FAST v2q8k, KV q8 with `GUFO_KV_WMMA=1`,
+`GUFO_KV_I8=1` and `GUFO_KV_V4=1`, pp2048 unless noted. A rocprofv3 kernel trace
+over a 1,734-token prefill attributes 1.109 s of kernel time across 3,066
+dispatches: routed expert F16 WMMA 35.6% (415 ms in 48 launches), dense F16
+WMMA 29.5%, MoE HC combine 10.2%, int8/K-quant WMMA 8.4%, GDN 8.1%, WMMA causal
+attention 2.7% (12 full-attention layers), requant Q8 to Q4_1 1.8%.
+
+| Experiment | Outcome |
+| --- | --- |
+| 16-token tiles for shallow routed buckets | Rejected. Buckets of 16 rows or fewer take one tile at any height, so tiling them at 16 token rows removes 42% of the padded gate/up rows and 33% of the padded down rows without changing weight traffic. Alternating pp2048 runs read 1763.68/1763.57/1757.71 tok/s before and 1720.98/1686.04/1716.59 after, a 2.6% regression. The padded rows are free: they fill WMMA issue slots while the tile waits for the expert's weights, so a shallow tile is weight-stream bound, not compute bound. |
+| Four tokens per block in the MoE HC combine | Rejected without a build. `HcCombineMoeF16Kernel` moves about 185 KB per token (51.2 KB expert rows, 41.0 KB residual read, 41.0 KB residual write, 30.7 KB shared expert plus gated mixer, 20.5 KB F16 norm, 10.9 KB Q8 norm, 10.2 KB prior residual), so 321 MB in 1.62 ms is 198 GB/s against roughly 200 GB/s of sustained LPDDR5X bandwidth. Block granularity is not the limit; only moving fewer bytes is. |
+| `GUFO_KV_V4` as a prefill cost | Not retained as a change. Three alternating pp2048 pairs read 1743.75/1705.33/1717.70 with V4 and 1763.03/1749.59/1742.57 without, but in-process pairs at repetitions=3 are tied (1664.01 +/- 51.53 and 1747.70 +/- 13.24 with, 1748.54 +/- 4.62 and 1742.17 +/- 6.03 without), and tg128 slightly favours V4 (35.01/35.02 against 34.67/34.59). Keep V4 for its 800 MB per session KV saving, not for speed. |
+| Merging the per-tensor tail memsets | Rejected. 1,245 of the 1,293 `fillBufferAligned` launches (15.9 ms) belong to model load; prefill owns 48 launches for 0.2 ms. |
+
+Remaining lead: GDN is the only block that runs no matrix-core work (8.1% of
+prefill; 36 linear layers, `GdnRowSplitKernel` about 1.78 ms per layer, FP32
+serial over tokens). The routed expert GEMMs are weight-stream bound.
+
+pp against prompt length, median of two runs: pp512 1,271, pp1024 1,532,
+pp2048 1,756, pp4096 1,823, pp8192 1,789, pp16384 1,732 tok/s. The per-chunk
+fixed cost is about 140 ms, which 2,048 tokens already amortizes.
+
+Measurement note: fresh-process variance on this host is 1.5 to 2.6% (pp2048
+sightings from 1,705 to 1,764 on one binary), so a claim below 3% needs
+in-process repetitions (`-r 3`) and at least two alternating pairs. A single
+pair below that margin is noise. The routed bucket histogram behind the first
+row lives on the unmerged `perf/route-stats` branch behind `GUFO_ROUTE_STATS=1`.
+
 ## Exact sampled decode (October 21, 2026)
 
 | Experiment | Outcome |
