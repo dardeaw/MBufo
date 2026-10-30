@@ -1066,6 +1066,33 @@ __global__ void DequantRowKernel(const void* w, int type, std::uint64_t cols,
 /// Lossless Q4_0 -> Q8_0 requant: per 32-element block, d8 = d4/16 (f16),
 /// q8 = q4*16 (int8). Exact because q4 in [-8,7] => q8 in [-128,112].
 /// Reads `rows` rows of `cols` elements (cols % 32 == 0).
+// Q4_0 weight row -> F16, fused straight into the GEMM's weight buffer so the
+// compact MoE path skips the separate Q8 dequant launch (and its re-read).
+// Layout matches the F16 GEMM contract: row-major [cols] halves.
+__global__ void DequantQ40ToF16Kernel(const void* __restrict__ w,
+                                      std::uint64_t cols,
+                                      std::uint64_t row_bytes,
+                                      __half* __restrict__ out) {
+  const std::uint64_t row = blockIdx.x;
+  const auto* base = static_cast<const std::uint8_t*>(w) + row * row_bytes;
+  __half* out_row = out + row * cols;
+  const std::uint64_t nblk = cols / 32;
+  for (std::uint64_t b = threadIdx.x; b < nblk;
+       b += static_cast<std::uint64_t>(blockDim.x)) {
+    const auto* q4 = reinterpret_cast<const std::uint8_t*>(base + b * 18);
+    const float d4 = __half2float(*reinterpret_cast<const __half*>(q4));
+    const std::uint8_t* qs = q4 + 2;
+    __half* dst = out_row + b * 32;
+    for (int off = 0; off < 16; ++off) {
+      const std::uint8_t byte = qs[off];
+      const int lo = (byte & 0xF) - 8;
+      const int hi = (byte >> 4) - 8;
+      dst[off] = __float2half_rn(static_cast<float>(lo) * d4);
+      dst[off + 16] = __float2half_rn(static_cast<float>(hi) * d4);
+    }
+  }
+}
+
 __global__ void DequantQ40ToQ8Kernel(const void* __restrict__ w,
                                      std::uint64_t cols,
                                      std::uint64_t row_bytes,
@@ -1109,6 +1136,15 @@ void DequantSlabQ8(const TensorRef& t, std::uint64_t rows, std::uint8_t* dst,
   const void* src = t.device != nullptr ? t.device : t.data;
   hipLaunchKernelGGL(DequantQ40ToQ8Kernel, dim3(static_cast<std::uint32_t>(rows)),
                      dim3(256), 0, stream, src, t.cols, row_bytes, dst);
+}
+
+void DequantSlabF16(const TensorRef& t, std::uint64_t rows, __half* dst,
+                    hipStream_t stream) {
+  const std::uint64_t row_bytes = t.RowBytes();
+  const void* src = t.device != nullptr ? t.device : t.data;
+  hipLaunchKernelGGL(DequantQ40ToF16Kernel,
+                     dim3(static_cast<std::uint32_t>(rows)), dim3(256), 0,
+                     stream, src, t.cols, row_bytes, dst);
 }
 
 

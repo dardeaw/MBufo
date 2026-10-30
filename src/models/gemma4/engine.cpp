@@ -1480,6 +1480,9 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                                       hidden, stream);
         }
         const std::uint32_t batch = compact_ok ? (rows_end - rows_begin) : n;
+        const bool f16w = compact_ok && getenv("GEMMA4_F16W") != nullptr;
+        const bool f16wd =
+            compact_ok && getenv("GEMMA4_F16WD") != nullptr;
         const __half* xin_f16 = compact_ok
                                     ? static_cast<const __half*>(impl_->compact_xhalf)
                                     : nullptr;
@@ -1516,7 +1519,20 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                         static_cast<std::size_t>(c.expert_ff) *
                             gate_ref.RowBytes();
           up_ref.device = up_ref.data;
-          if (compact_ok) {
+          if (f16w) {
+              // F16 dequant path: write the dequantized weights once as raw
+              // F16 rows (half the Q8_0 slab traffic) and feed the raw-F16
+              // GEMM variant.
+              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+              kernels::DequantSlabF16(gate_ref, c.expert_ff, impl_->w_slab,
+                                      stream);
+              q38::UnquantizedF16Gemm(impl_->w_slab, xg, gg, batch,
+                                      c.expert_ff, hidden, stream);
+              kernels::DequantSlabF16(up_ref, c.expert_ff, impl_->w_slab,
+                                      stream);
+              q38::UnquantizedF16Gemm(impl_->w_slab, xg, gu, batch,
+                                      c.expert_ff, hidden, stream);
+            } else if (compact_ok) {
               // WMMA path with padded batch (multiple of 16): the small-batch
               // hipBLAS fallback faults on odd batches below 96 rows.
               namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
@@ -1555,7 +1571,16 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                                     static_cast<std::size_t>(batch) * c.expert_ff,
                                     stream);
           {
-            if (getenv("GEMMA4_COMPACT_DOWN_WMMA") != nullptr) {
+            if (f16wd) {
+              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+              kernels::DequantSlabF16(down_ref, hidden, impl_->w_slab,
+                                      stream);
+              kernels::F32ToF16(gg, impl_->x_half,
+                                static_cast<std::size_t>(batch) * c.expert_ff,
+                                stream);
+              q38::UnquantizedF16Gemm(impl_->w_slab, impl_->x_half, gd,
+                                      batch, hidden, c.expert_ff, stream);
+            } else if (getenv("GEMMA4_COMPACT_DOWN_WMMA") != nullptr) {
               // WMMA path for the down GEMM too (m=2816>=256, batch is a
               // multiple of 16); the hipBLAS fallback mis-handles the compact
               // batch here.

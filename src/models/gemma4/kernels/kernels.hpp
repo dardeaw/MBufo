@@ -185,6 +185,11 @@ void RopeFrequenciesMulti(float* x, std::uint32_t n_tokens,
 void DequantSlabQ8(const TensorRef& t, std::uint64_t rows, std::uint8_t* dst,
                    hipStream_t stream);
 
+/// Q4_0 -> F16 dequant of `rows` rows into row-major [cols] halves, matching
+/// the UnquantizedF16Gemm weight contract (row stride = cols halves).
+void DequantSlabF16(const TensorRef& t, std::uint64_t rows, __half* dst,
+                    hipStream_t stream);
+
 /// Dequantize `rows` rows of `cols` elements from a GGML quant tensor into
 /// the F16 staging slab.
 void DequantSlab(const TensorRef& t, std::uint64_t rows, __half* dst,
