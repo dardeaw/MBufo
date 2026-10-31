@@ -83,7 +83,20 @@ public:
   /// Runs a forward over `tokens` starting at `start_pos`.
   [[nodiscard]] bool Forward(std::span<const std::int32_t> tokens,
                              std::uint32_t start_pos,
-                             std::string* error_msg = nullptr);
+                             std::string* error_msg = nullptr,
+                             bool all_logits = false);
+  /// Attaches a Gemma 4 MTP draft head (speculative decoding for Evaluate).
+  [[nodiscard]] bool EnableMtp(const std::string& drafts_path,
+                               std::string* error_msg = nullptr);
+  [[nodiscard]] bool MtpEnabled() const noexcept;
+  /// One speculative round: drafts up to `n_draft` tokens after `last_token`,
+  /// verifies them with the target in a single batched forward, keeps the
+  /// longest matching prefix plus the target's correction token, rolls the KV
+  /// back, and appends the accepted tokens to `out`.
+  [[nodiscard]] bool SpeculativeRound(std::int32_t last_token,
+                                      std::uint32_t n_draft,
+                                      std::vector<std::int32_t>* out,
+                                      std::string* error_msg = nullptr);
   [[nodiscard]] std::span<const float> Logits() const noexcept;
   [[nodiscard]] std::uint32_t Length() const noexcept;
   [[nodiscard]] std::int32_t SampleGreedy() const;

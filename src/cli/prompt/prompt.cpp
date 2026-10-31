@@ -1108,6 +1108,74 @@ int RunPrompt(std::span<const char* const> args) {
             .count();
     sampling::SamplerState gsampler(opt.sampling, prompt_ids);
     std::vector<std::int32_t> generated;
+    // Speculative decoding with the Gemma 4 MTP draft head (greedy only).
+    const char* mtp_path = getenv("GEMMA4_MTP");
+    if (mtp_path != nullptr && *mtp_path != '\0') {
+      if (!gsession->EnableMtp(mtp_path, &err)) {
+        std::cerr << "Gemma4 MTP enable failed: " << err << '\n';
+        return 1;
+      }
+      std::uint32_t n_draft = 4;
+      if (const char* e = getenv("GEMMA4_MTP_DRAFT")) {
+        const long v = std::strtol(e, nullptr, 10);
+        if (v >= 1 && v <= 16) n_draft = static_cast<std::uint32_t>(v);
+      }
+      std::fprintf(stderr, "[gemma4] MTP enabled (%s), draft=%u\n", mtp_path,
+                   n_draft);
+      const auto dstart = std::chrono::steady_clock::now();
+      const auto emit = [&](std::int32_t tok) {
+        std::cout << gmodel->TokenText(tok) << std::flush;
+        generated.push_back(tok);
+      };
+      // First token from the prompt's own logits.
+      std::int32_t last = gsession->SampleGreedy();
+      emit(last);
+      std::uint64_t rounds = 0, drafted = 0, accepted_total = 0;
+      if (!gmodel->IsStopToken(last)) {
+        while (generated.size() < opt.max_tokens) {
+          std::vector<std::int32_t> block;
+          if (!gsession->SpeculativeRound(last, n_draft, &block, &err)) {
+            std::cerr << "Gemma4 speculative round failed: " << err << '\n';
+            return 1;
+          }
+          ++rounds;
+          drafted += n_draft;
+          if (block.size() > 1) accepted_total += block.size() - 1;
+          bool stop = false;
+          for (std::int32_t tok : block) {
+            if (generated.size() >= opt.max_tokens) break;
+            emit(tok);
+            last = tok;
+            if (gmodel->IsStopToken(tok)) { stop = true; break; }
+          }
+          if (stop) break;
+        }
+      }
+      std::cout << '\n';
+      if (opt.verbose) {
+        const double dseconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          dstart)
+                .count();
+        std::fprintf(stderr,
+                     "\nprefill: %zu tokens in %fs (%f tok/s)\n"
+                     "decode: %zu tokens in %fs (%f tok/s)\n"
+                     "MTP: rounds=%llu accepted/round=%.2f\n",
+                     prompt.size(), prefill_seconds,
+                     prefill_seconds > 0
+                         ? static_cast<double>(prompt.size()) / prefill_seconds
+                         : 0.0,
+                     generated.size(), dseconds,
+                     dseconds > 0
+                         ? static_cast<double>(generated.size()) / dseconds
+                         : 0.0,
+                     (unsigned long long)rounds,
+                     rounds > 0 ? static_cast<double>(accepted_total) /
+                                      static_cast<double>(rounds)
+                                : 0.0);
+      }
+      return 0;
+    }
     const auto dstart = std::chrono::steady_clock::now();
     while (generated.size() < opt.max_tokens) {
       const tokenization::TokenId token = gsampler.Sample(gsession->Logits());

@@ -1,6 +1,7 @@
 #include <thread>
 #include <chrono>
 #include "src/models/gemma4/engine.hpp"
+#include "src/models/gemma4/mtp.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -464,7 +465,14 @@ struct Session::Impl {
   float* moe_vec_up{nullptr};
   float* moe_vec_down{nullptr};
   float* logits{nullptr};      // [kMaxChunk][vocab]
-  std::uint32_t last_chunk_n{0};  // tokens in the last chunk
+  std::uint32_t last_chunk_n{0};  // logit rows in the last chunk
+  std::uint32_t last_fwd_n{1};    // tokens in the last forward
+  // MTP (Gemma 4 Assistant) speculative draft head, optional.
+  std::unique_ptr<MtpDrafter> mtp;
+  float* d_tgt_emb{nullptr};    // [hidden] target embedding of the last token
+  float* d_draft_fb{nullptr};   // [hidden] draft feedback hidden
+  int32_t* d_draft_tok{nullptr};
+  float* logits_prev{nullptr};   // [vocab] pre-verification row
   __half* w_slab{nullptr};     // dequant staging (largest matrix)
   __half* w_slab2{nullptr};    // second staging (up projection)
   __half* x_slab{nullptr};     // F16 activation staging
@@ -567,6 +575,10 @@ struct Session::Impl {
         qdim_max > hidden ? qdim_max : hidden;
     x_slab = buffers.Alloc<__half>(
         static_cast<std::size_t>(chunk) * xwidth, error);
+    d_tgt_emb = buffers.Alloc<float>(hidden, error);
+    d_draft_fb = buffers.Alloc<float>(hidden, error);
+    d_draft_tok = buffers.Alloc<std::int32_t>(1, error);
+    logits_prev = buffers.Alloc<float>(w.config.vocab_size, error);
     if (this->hidden == nullptr || normed == nullptr || qbuf == nullptr ||
         kbuf == nullptr || vbuf == nullptr || attn_out == nullptr ||
         router_tmp == nullptr || router_logits == nullptr ||
@@ -694,7 +706,8 @@ namespace {
 }  // namespace
 
 bool Session::Forward(std::span<const std::int32_t> tokens,
-                      std::uint32_t start_pos, std::string* error_msg) {
+                      std::uint32_t start_pos, std::string* error_msg,
+                      bool all_logits) {
   const auto& w = *model_->weights_;
   const auto& c = w.config;
   const std::uint32_t hidden = c.hidden_size;
@@ -1000,11 +1013,14 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       // more RoutedF16Gemm does down for every expert. No compact gather,
       // no per-expert dequant/GEMM launches, half the weight traffic of the
       // F16-arena path.
+      // Q4-direct grouped MoE is the default: it reads Q4_0 straight off the
+      // GGUF slabs (in-LDS dequant) instead of materialising a 12.7 GB F16
+      // expert arena, halving weight traffic. GEMMA4_NO_Q4DIRECT opts out.
       const bool q4d =
           compact_ok && !l.gate_up_exps.empty() &&
           l.gate_up_exps.device != nullptr && !l.down_exps.empty() &&
           l.down_exps.device != nullptr &&
-          getenv("GEMMA4_Q4DIRECT") != nullptr;
+          getenv("GEMMA4_NO_Q4DIRECT") == nullptr;
       if (q4d) {
         namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
         // Full-token F16 activations; the grouped kernel gathers rows itself
@@ -1345,16 +1361,25 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   // LM head projects just that row. This keeps the vocab-sized projection on
   // the fused GEMV path (n==1) and off hipBLAS, which both avoids the
   // gfx1151 batch>=128 fault and skips (n-1) wasted vocab GEMMs.
-  const float* last_row = impl_->normed + static_cast<std::size_t>(n - 1) * hidden;
-  StagedGemm(w.output, c.vocab_size, last_row, impl_->logits, 1,
+  // Speculative verification needs every row's logits; the plain sampler path
+  // projects only the last row so the vocab projection stays on the fused
+  // GEMV (n==1) path.
+  const std::uint32_t logit_rows = all_logits ? n : 1;
+  const float* last_row = all_logits
+                              ? impl_->normed
+                              : impl_->normed +
+                                    static_cast<std::size_t>(n - 1) * hidden;
+  StagedGemm(w.output, c.vocab_size, last_row, impl_->logits, logit_rows,
              impl_->w_slab, impl_->x_slab, stream);
 
   if (c.final_logit_softcapping > 0.0F) {
     kernels::SoftCap(impl_->logits, c.final_logit_softcapping,
-                     static_cast<std::size_t>(c.vocab_size), stream);
+                     static_cast<std::size_t>(c.vocab_size) * logit_rows,
+                     stream);
   }
   hipFree(d_pos);
-  impl_->last_chunk_n = 1;
+  impl_->last_fwd_n = n;
+  impl_->last_chunk_n = logit_rows;
   impl_->length = start_pos + n;
   return true;
 }
@@ -1386,5 +1411,173 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
 bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
   return Forward({&token, 1}, impl_->length, error_msg);
 }
+
+bool Session::EnableMtp(const std::string& drafts_path, std::string* error_msg) {
+  const auto& w = *model_->weights_;
+  auto drafter = MtpDrafter::Load(drafts_path, w.config.hidden_size, error_msg);
+  if (drafter == nullptr)
+    return false;
+  if (drafter->VocabSize() != w.config.vocab_size) {
+    if (error_msg != nullptr)
+      *error_msg = "MTP vocab (" + std::to_string(drafter->VocabSize()) +
+                   ") does not match the target vocab (" +
+                   std::to_string(w.config.vocab_size) + ")";
+    return false;
+  }
+  impl_->mtp = std::move(drafter);
+  return true;
+}
+
+bool Session::MtpEnabled() const noexcept { return impl_->mtp != nullptr; }
+
+bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
+                               std::vector<std::int32_t>* out,
+                               std::string* error_msg) {
+  if (!impl_->mtp || n_draft == 0 || out == nullptr) {
+    return false;
+  }
+  const auto& w = *model_->weights_;
+  const auto& c = w.config;
+  const std::uint32_t hidden = c.hidden_size;
+  const std::uint32_t vocab = c.vocab_size;
+  hipStream_t stream = 0;
+  if (impl_->length == 0) {
+    if (error_msg != nullptr) *error_msg = "speculative round needs a prompt";
+    return false;
+  }
+  // Cross-attention sources: the full-length KV of the last sliding layer and
+  // of the last full-attention layer (llama.cpp stores both unwindowed).
+  int swa_l = -1;
+  int full_l = -1;
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    if (!c.LayerHasKv(il) || impl_->kv_k[il] == nullptr) continue;
+    if (c.LayerIsSwa(il)) {
+      swa_l = static_cast<int>(il);
+    } else {
+      full_l = static_cast<int>(il);
+    }
+  }
+  if (swa_l < 0 || full_l < 0) {
+    if (error_msg != nullptr) *error_msg = "speculative KV layers missing";
+    return false;
+  }
+  auto embed_token = [&](std::int32_t tok, float* dst) {
+    // Same embedding scale the target prefill/decode path uses.
+    kernels::EmbedScale(w.token_embd.device, w.token_embd.type, &tok, dst, 1,
+                        hidden, std::sqrt(static_cast<float>(hidden)), stream);
+  };
+
+  // Target's own next token (the last committed token's logits are current).
+  std::int32_t cur = SampleGreedy();
+  hipMemcpyAsync(impl_->logits_prev, impl_->logits,
+                 static_cast<std::size_t>(vocab) * sizeof(float),
+                 hipMemcpyDeviceToDevice, stream);
+  hipStreamSynchronize(stream);
+
+  const std::uint32_t kPos = impl_->length - 1;
+  const std::uint32_t old_length = impl_->length;
+
+  std::vector<std::int32_t> draft(n_draft);
+  std::int32_t feed_tok = last_token;
+  const float* feed_hidden =
+      impl_->hidden +
+      static_cast<std::size_t>(impl_->last_fwd_n - 1) * hidden;
+  for (std::uint32_t i = 0; i < n_draft; ++i) {
+    embed_token(feed_tok, impl_->d_tgt_emb);
+    if (!impl_->mtp->Step(feed_tok, impl_->d_tgt_emb, feed_hidden,
+                          impl_->kv_k[swa_l], impl_->kv_v[swa_l],
+                          impl_->kv_stride[swa_l], c.KvHeads(static_cast<std::uint32_t>(swa_l)),
+                          impl_->kv_k[full_l], impl_->kv_v[full_l],
+                          impl_->kv_stride[full_l], c.KvHeads(static_cast<std::uint32_t>(full_l)),
+                          kPos, c.rope_theta_swa, c.rope_theta_full,
+                          c.sliding_window, impl_->d_draft_fb,
+                          impl_->d_draft_tok, error_msg)) {
+      return false;
+    }
+    draft[i] = *impl_->d_draft_tok;
+    feed_tok = draft[i];
+    feed_hidden = impl_->d_draft_fb;
+  }
+
+  // Verify the whole draft block with one batched target forward.
+  bool all_ok = true;
+  if (!Forward(draft, old_length, error_msg, /*all_logits=*/true))
+    return false;
+
+  if (getenv("GEMMA4_MTP_TRACE") != nullptr) {
+    static int traced = 0;
+    if (traced < 24) {
+      std::fprintf(stderr, "[mtp] cur=%d draft0=%d draft1=%d draft2=%d %s\n",
+                   cur, draft[0], n_draft > 1 ? draft[1] : -1,
+                   n_draft > 2 ? draft[2] : -1,
+                   draft[0] == cur ? "HIT" : "miss");
+      ++traced;
+    }
+  }
+  std::uint32_t accepted = 0;
+  if (draft[0] == cur) {
+    accepted = 1;
+    for (std::uint32_t i = 1; i < n_draft; ++i) {
+      const float* row = impl_->logits +
+                         static_cast<std::size_t>(i - 1) * vocab;
+      std::int32_t best = 0;
+      float bv = row[0];
+      for (std::uint32_t v = 1; v < vocab; ++v) {
+        if (row[v] > bv) { bv = row[v]; best = static_cast<std::int32_t>(v); }
+      }
+      if (draft[i] == best) {
+        ++accepted;
+      } else {
+        // Keep the target's correction and stop.
+        out->assign(draft.begin(), draft.begin() + i);
+        out->push_back(best);
+        all_ok = false;
+        break;
+      }
+    }
+    if (all_ok) {
+      const float* row = impl_->logits +
+                         static_cast<std::size_t>(n_draft - 1) * vocab;
+      std::int32_t best = 0;
+      float bv = row[0];
+      for (std::uint32_t v = 1; v < vocab; ++v) {
+        if (row[v] > bv) { bv = row[v]; best = static_cast<std::int32_t>(v); }
+      }
+      out->assign(draft.begin(), draft.end());
+      out->push_back(best);
+    }
+  } else {
+    out->clear();
+    out->push_back(cur);
+  }
+
+  if (accepted == 0) {
+    // The draft block wrote its own (rejected) token at `old_length`; the
+    // target's own token must take that slot or the loop can never advance.
+    const std::int32_t pending = cur;
+    if (!Forward({&pending, 1}, old_length, error_msg)) {
+      return false;
+    }
+    out->clear();
+    out->push_back(cur);
+    impl_->last_chunk_n = 1;
+    return true;
+  }
+  // Roll the KV back to the accepted prefix and restore the logits row that
+  // predicts the next token.
+  const std::uint32_t keep_rows = accepted - 1;
+  const std::uint32_t new_length = old_length + accepted;
+  impl_->length = new_length;
+  const float* src_row = impl_->logits +
+                         static_cast<std::size_t>(keep_rows) * vocab;
+  if (src_row != impl_->logits) {
+    hipMemcpyAsync(impl_->logits, src_row,
+                   static_cast<std::size_t>(vocab) * sizeof(float),
+                   hipMemcpyDeviceToDevice, stream);
+  }
+  impl_->last_chunk_n = 1;
+  return true;
+}
+
 
 }  // namespace gufo::models::gemma4
