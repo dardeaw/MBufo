@@ -623,6 +623,30 @@ void GeluTanhSwiglu(float* gate, const float* up, std::size_t count,
                      dim3(kThreads), 0, stream, gate, up, count);
 }
 
+// Compact MoE prefill epilogue: act[i] = f16(silu(gate[i]) * up[i]).
+// Fuses GeluTanhSwiglu + F32ToF16 into one pass; the F32 silu and multiply
+// happen on the same inputs and the single rounding to F16 matches the old
+// float->float->half chain bit for bit.
+__global__ void SwigluF16Kernel(const float* __restrict__ gate,
+                                const float* __restrict__ up,
+                                __half* __restrict__ act,
+                                std::size_t count) {
+  const std::size_t stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+  for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
+                      threadIdx.x;
+       i < count; i += stride) {
+    act[i] = __float2half_rn(GeluTanhOne(gate[i]) * up[i]);
+  }
+}
+
+void SwigluF16(const float* gate, const float* up, __half* act,
+               std::size_t count, hipStream_t stream) {
+  if (count == 0)
+    return;
+  hipLaunchKernelGGL(SwigluF16Kernel, dim3(Blocks(count)), dim3(kThreads), 0,
+                     stream, gate, up, act, count);
+}
+
 void GeluTanh(float* x, std::size_t count, hipStream_t stream) {
   if (count == 0)
     return;

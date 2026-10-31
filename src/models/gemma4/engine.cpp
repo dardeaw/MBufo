@@ -1123,15 +1123,14 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                   hidden, stream, impl_->w_slab2, impl_->x_slab);
         }
         if (compact_ok) {
-          kernels::GeluTanhSwiglu(gg, gu,
-                                    static_cast<std::size_t>(batch) * c.expert_ff,
-                                    stream);
           {
             if (f16wd && l.down_f16 != nullptr) {
               namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
-              kernels::F32ToF16(gg, impl_->x_half,
-                                static_cast<std::size_t>(batch) * c.expert_ff,
-                                stream);
+              // Fused epilogue: act_half = f16(silu(gate)*up) in one pass
+              // (replaces the GeluTanhSwiglu + F32ToF16 pair, bit-identical).
+              kernels::SwigluF16(gg, gu, impl_->x_half,
+                                 static_cast<std::size_t>(batch) * c.expert_ff,
+                                 stream);
               q38::UnquantizedF16Gemm(
                   static_cast<const __half*>(l.down_f16) +
                       static_cast<std::size_t>(e) * hidden * c.expert_ff,
@@ -1140,9 +1139,9 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
               namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               kernels::DequantSlabF16(down_ref, hidden, impl_->w_slab,
                                       stream);
-              kernels::F32ToF16(gg, impl_->x_half,
-                                static_cast<std::size_t>(batch) * c.expert_ff,
-                                stream);
+              kernels::SwigluF16(gg, gu, impl_->x_half,
+                                 static_cast<std::size_t>(batch) * c.expert_ff,
+                                 stream);
               q38::UnquantizedF16Gemm(impl_->w_slab, impl_->x_half, gd,
                                       batch, hidden, c.expert_ff, stream);
             } else if (getenv("GEMMA4_COMPACT_DOWN_WMMA") != nullptr) {
@@ -1153,9 +1152,9 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
               kernels::DequantSlabQ8(down_ref, hidden,
                                      reinterpret_cast<std::uint8_t*>(impl_->w_slab),
                                      stream);
-              kernels::F32ToF16(gout, impl_->x_half,
-                                static_cast<std::size_t>(batch) * c.expert_ff,
-                                stream);
+              kernels::SwigluF16(gg, gu, impl_->x_half,
+                                 static_cast<std::size_t>(batch) * c.expert_ff,
+                                 stream);
               q38::DenseF16Gemm(impl_->w_slab, impl_->x_half, dout, batch,
                                 hidden, c.expert_ff, stream);
             } else {

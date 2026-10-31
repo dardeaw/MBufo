@@ -17,6 +17,12 @@ namespace kernels {
 void GeluTanhSwiglu(float* gate, const float* up, std::size_t count,
                     hipStream_t stream);
 
+/// act[i] = f16(gelu_tanh(gate[i]) * up[i]) in one pass. Bit-identical to
+/// GeluTanhSwiglu followed by F32ToF16; used by the compact MoE prefill to
+/// skip the F32 intermediate and one launch.
+void SwigluF16(const float* gate, const float* up, __half* act,
+               std::size_t count, hipStream_t stream);
+
 /// out[i] = gelu_tanh(x[i]) over `count` elements.
 void GeluTanh(float* x, std::size_t count, hipStream_t stream);
 
