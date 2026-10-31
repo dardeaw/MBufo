@@ -446,6 +446,11 @@ struct Session::Impl {
   std::int32_t* routed_cursors{nullptr};
   std::int32_t* rows_token{nullptr};
   std::int32_t* rows_slot{nullptr};
+  std::int32_t* q4_tiles{nullptr};    // grouped-MoE tile map (expert|tile<<16)
+  std::int32_t* q4_identity{nullptr}; // identity rows_out map [compact_cap]
+  float* q4_gateup{nullptr};          // [compact_cap][2*expert_ff] grouped out
+  __half* q4_act{nullptr};            // [compact_cap][expert_ff] silu act
+  bool q4_identity_ready{false};
   __half* x_half{nullptr};
   std::size_t compact_cap{0};
   bool compact_xhalf_zeroed{false};
@@ -531,6 +536,11 @@ struct Session::Impl {
     routed_cursors = buffers.Alloc<std::int32_t>(w.config.num_experts, error);
     rows_token = buffers.Alloc<std::int32_t>(compact_cap, error);
     rows_slot = buffers.Alloc<std::int32_t>(compact_cap, error);
+    q4_tiles = buffers.Alloc<std::int32_t>(compact_cap, error);
+    q4_identity = buffers.Alloc<std::int32_t>(compact_cap, error);
+    q4_gateup = buffers.Alloc<float>(
+        compact_cap * 2 * w.config.expert_ff, error);
+    q4_act = buffers.Alloc<__half>(compact_cap * w.config.expert_ff, error);
     normed_compact = buffers.Alloc<float>(compact_cap * w.config.hidden_size,
                                           error);
     x_half = buffers.Alloc<__half>(
@@ -983,6 +993,65 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                        hipMemcpyDeviceToDevice, stream);
         compact_ok = true;
       }
+      // Q4-direct grouped MoE (GEMMA4_Q4DIRECT): the fused gate/up slab goes
+      // through ONE RoutedF16Gemm (m = 2*ff, so the kernel's expert stride
+      // matches the fused layout) reading Q4_0 straight off the GGUF slabs
+      // with in-LDS dequant; a fused split+silu writes the down input; ONE
+      // more RoutedF16Gemm does down for every expert. No compact gather,
+      // no per-expert dequant/GEMM launches, half the weight traffic of the
+      // F16-arena path.
+      const bool q4d =
+          compact_ok && !l.gate_up_exps.empty() &&
+          l.gate_up_exps.device != nullptr && !l.down_exps.empty() &&
+          l.down_exps.device != nullptr &&
+          getenv("GEMMA4_Q4DIRECT") != nullptr;
+      if (q4d) {
+        namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+        // Full-token F16 activations; the grouped kernel gathers rows itself
+        // through rows_token, so CompactGatherF16 is skipped below.
+        kernels::F32ToF16(impl_->normed, impl_->x_half,
+                          static_cast<std::size_t>(n) * hidden, stream);
+        if (!impl_->q4_identity_ready) {
+          std::vector<std::int32_t> ident(impl_->compact_cap);
+          for (std::size_t i = 0; i < ident.size(); ++i)
+            ident[i] = static_cast<std::int32_t>(i);
+          hipMemcpyAsync(impl_->q4_identity, ident.data(),
+                         ident.size() * sizeof(std::int32_t),
+                         hipMemcpyHostToDevice, stream);
+          impl_->q4_identity_ready = true;
+        }
+        // One (expert | tile<<16) entry per 16-row bucket tile.
+        std::vector<std::int32_t> tiles;
+        tiles.reserve(impl_->compact_cap);
+        for (std::uint32_t e = 0; e < c.num_experts; ++e) {
+          const std::uint32_t rows_e = static_cast<std::uint32_t>(
+              bounds_host[e + 1] - bounds_host[e]);
+          for (std::uint32_t j = 0; j < (rows_e + 15) / 16; ++j)
+            tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+        }
+        const std::uint32_t q4_rows =
+            static_cast<std::uint32_t>(bounds_host[c.num_experts]);
+        if (!tiles.empty()) {
+          hipMemcpyAsync(impl_->q4_tiles, tiles.data(),
+                         tiles.size() * sizeof(std::int32_t),
+                         hipMemcpyHostToDevice, stream);
+          const std::uint32_t ff = c.expert_ff;
+          q38::RoutedF16Gemm(l.gate_up_exps.device, q38::WeightType::kQ4_0,
+                             impl_->x_half, impl_->q4_tiles,
+                             static_cast<std::uint32_t>(tiles.size()), 16,
+                             impl_->routed_bounds, impl_->rows_token,
+                             impl_->q4_identity, nullptr, impl_->q4_gateup,
+                             nullptr, 2 * ff, hidden, stream);
+          kernels::SwigluSplitF16(impl_->q4_gateup, impl_->q4_act, q4_rows,
+                                  ff, stream);
+          q38::RoutedF16Gemm(l.down_exps.device, q38::WeightType::kQ4_0,
+                             impl_->q4_act, impl_->q4_tiles,
+                             static_cast<std::uint32_t>(tiles.size()), 16,
+                             impl_->routed_bounds, impl_->q4_identity,
+                             impl_->q4_identity, nullptr, impl_->compact_down,
+                             nullptr, hidden, ff, stream);
+        }
+      }
       std::vector<bool> active(c.num_experts, false);
       for (std::size_t idx = 0; idx < ids.size(); ++idx) {
         if (ids[idx] >= 0 && ids[idx] < static_cast<std::int32_t>(c.num_experts))
@@ -1021,7 +1090,8 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           rows_begin = static_cast<std::uint32_t>(bounds_host[e]);
           rows_end = static_cast<std::uint32_t>(bounds_host[e + 1]);
           if (rows_end <= rows_begin) continue;
-          kernels::CompactGatherF16(impl_->normed, impl_->compact_xhalf,
+          if (!q4d)
+            kernels::CompactGatherF16(impl_->normed, impl_->compact_xhalf,
                                       impl_->rows_token, rows_begin, rows_end,
                                       hidden, stream);
         }
@@ -1053,6 +1123,19 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           gg = gout + static_cast<std::size_t>(rows_begin) * c.expert_ff;
           gu = uout + static_cast<std::size_t>(rows_begin) * c.expert_ff;
           gd = dout + static_cast<std::size_t>(rows_begin) * hidden;
+        }
+        // Q4-direct: grouped gate/up + down already ran above; only the
+        // per-expert scale + scatter remain for this expert.
+        if (q4d) {
+          if (down_scale != 1.0F) {
+            kernels::ScaleInplace(gd, down_scale,
+                                  static_cast<std::size_t>(batch) * hidden,
+                                  stream);
+          }
+          kernels::MoeScatterAdd(gd, impl_->rows_token, impl_->rows_slot,
+                                 impl_->compact_wts, rows_begin, rows_end,
+                                 impl_->attn_out, hidden, stream);
+          continue;
         }
         if (!l.gate_up_exps.empty()) {
           TensorRef gate_ref = l.gate_up_exps;

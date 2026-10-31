@@ -647,6 +647,32 @@ void SwigluF16(const float* gate, const float* up, __half* act,
                      stream, gate, up, act, count);
 }
 
+// Fused split+silu for the Q4-direct grouped MoE prefill.
+__global__ void SwigluSplitF16Kernel(const float* __restrict__ combined,
+                                     __half* __restrict__ act,
+                                     std::uint32_t ff, std::size_t rows) {
+  const std::size_t stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+  const std::size_t count = rows * ff;
+  for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
+                      threadIdx.x;
+       i < count; i += stride) {
+    const std::size_t c = i / ff;
+    const std::size_t j = i % ff;
+    const float g = combined[c * (2 * ff) + j];
+    const float u = combined[c * (2 * ff) + ff + j];
+    act[i] = __float2half_rn(GeluTanhOne(g) * u);
+  }
+}
+
+void SwigluSplitF16(const float* combined, __half* act, std::size_t rows,
+                    std::uint32_t ff, hipStream_t stream) {
+  if (rows == 0 || ff == 0)
+    return;
+  const std::size_t count = rows * ff;
+  hipLaunchKernelGGL(SwigluSplitF16Kernel, dim3(Blocks(count)),
+                     dim3(kThreads), 0, stream, combined, act, ff, rows);
+}
+
 void GeluTanh(float* x, std::size_t count, hipStream_t stream) {
   if (count == 0)
     return;

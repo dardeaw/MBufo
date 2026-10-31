@@ -22,6 +22,12 @@ void GeluTanhSwiglu(float* gate, const float* up, std::size_t count,
 /// skip the F32 intermediate and one launch.
 void SwigluF16(const float* gate, const float* up, __half* act,
                std::size_t count, hipStream_t stream);
+/// act[c*ff+j] = f16(silu(comb[c*2ff+j]) * comb[c*2ff+ff+j]) over `rows`
+/// compact rows. Fused split+silu for the Q4-direct grouped MoE (the grouped
+/// gate/up GEMM writes gate and up stacked); same rounding chain as
+/// SwigluF16.
+void SwigluSplitF16(const float* combined, __half* act, std::size_t rows,
+                    std::uint32_t ff, hipStream_t stream);
 
 /// out[i] = gelu_tanh(x[i]) over `count` elements.
 void GeluTanh(float* x, std::size_t count, hipStream_t stream);

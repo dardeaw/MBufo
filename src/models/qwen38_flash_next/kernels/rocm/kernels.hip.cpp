@@ -6940,7 +6940,8 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
          : kType == WeightType::kQ4_0_ROCMFP4_FAST
              ? (k / 32) * 17
-             : (k / 32) * sizeof(Q8_0Block);
+         : kType == WeightType::kQ4_0 ? (k / 32) * 18
+                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
 /// Bit `s` of each of the four bytes of `w`, packed into bits 0-3.
@@ -7031,7 +7032,8 @@ __launch_bounds__(256) __global__
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
   constexpr bool kQ8 = kType == WeightType::kQ8_0;
   constexpr bool kFast = kType == WeightType::kQ4_0_ROCMFP4_FAST;
-  constexpr bool kQ8Like = kQ8 || kFast;
+  constexpr bool kQ40 = kType == WeightType::kQ4_0;
+  constexpr bool kQ8Like = kQ8 || kFast || kQ40;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
@@ -7194,6 +7196,30 @@ __launch_bounds__(256) __global__
         f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
         __builtin_memcpy(&f_codes[u], blk + 2, 16);
         __builtin_memcpy(&f_codes_hi[u], blk + 18, 16);
+      } else if constexpr (kQ40) {
+        // GGML Q4_0 block is 18 bytes: F16 scale + 16 nibble bytes (low
+        // nibbles are elements 0-15, high nibbles 16-31, value = nibble-8).
+        // Lossless Q8_0 presentation (same math as DequantQ40ToQ8Kernel):
+        // d8 = d/16, q8 = (q-8)*16, so d8*q8 == d*(q-8) exactly.
+        const auto* blk = f_ptr[u] + ((kb0 + f_c) * 18);
+        const float d =
+            __half2float(*reinterpret_cast<const __half*>(blk));
+        f_dm[u] = __builtin_bit_cast(
+            std::uint32_t, __floats2half2_rn(d * 0.0625F, 0.0f));
+        uint4 q;
+        __builtin_memcpy(&q, blk + 2, 16);
+        std::uint8_t qs[16];
+        __builtin_memcpy(qs, &q, 16);
+        std::int8_t c0[16], c1[16];
+#pragma unroll
+        for (int j = 0; j < 16; ++j) {
+          c0[j] = static_cast<std::int8_t>(
+              (static_cast<int>(qs[j] & 0xF) - 8) * 16);
+          c1[j] = static_cast<std::int8_t>(
+              (static_cast<int>(qs[j] >> 4) - 8) * 16);
+        }
+        __builtin_memcpy(&f_codes[u], c0, 16);
+        __builtin_memcpy(&f_codes_hi[u], c1, 16);
       } else if constexpr (kFast) {
         // block_rocmfp4_fast is 17 bytes: 16 packed 4-bit codes then one
         // UE4M3 scale. Expand the codes to codebook bytes (low nibbles are
@@ -8236,6 +8262,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
       return true;
     case WeightType::kQ8_0:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ8_0, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
+    case WeightType::kQ4_0:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ4_0, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);
