@@ -271,72 +271,6 @@ __global__ void StoreKvKernel(const float* src, __half* cache,
   }
 }
 
-/// One block per (token, head). Walks the KV extent in tiles of 32 keys,
-/// online-softmax in registers (d <= 512 staged in LDS).
-template <std::uint32_t MaxD>
-__global__ void AttentionKernel(const float* q, const __half* k_cache,
-                                const __half* v_cache, float* out,
-                                std::uint32_t start_pos, std::uint32_t heads,
-                                std::uint32_t kv_heads, std::uint32_t d,
-                                std::uint32_t kv_stride, std::uint32_t window,
-                                std::uint32_t kv_len) {
-  const std::uint32_t t = blockIdx.x;
-  const std::uint32_t h = blockIdx.y;
-  const std::uint32_t kv_h = h / (heads / kv_heads);
-  const std::uint32_t pos = start_pos + t;
-  const float* qrow = q + (static_cast<std::size_t>(t) * heads + h) * d;
-  __shared__ float qsm[MaxD];
-  for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
-    qsm[i] = qrow[i];
-  }
-  __syncthreads();
-  // llama.cpp gemma4: f_attention_scale = 1.0 (no 1/sqrt(d) scaling).
-  const float scale = 1.0F;
-  const std::uint32_t lo =
-      window > 0 && pos + 1 > window ? pos + 1 - window : 0;
-  float m = -INFINITY;
-  float l = 0.0F;
-  __shared__ float acc[MaxD];
-  for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) acc[i] = 0.0F;
-  __syncthreads();
-  for (std::uint32_t p = lo; p <= pos && p < kv_len; ++p) {
-    const __half* krow =
-        k_cache + static_cast<std::size_t>(p) * kv_stride + kv_h * d;
-    float dot = 0.0F;
-    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
-      dot += qsm[i] * __half2float(krow[i]);
-    }
-    for (std::uint32_t off = 16; off > 0; off >>= 1) {
-      dot += __shfl_down_sync(0xffffffffull, dot, off);
-    }
-    __shared__ float warp[8];
-    if ((threadIdx.x & 31) == 0) warp[threadIdx.x / 32] = dot;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      float s = 0.0F;
-      for (std::uint32_t w = 0; w < blockDim.x / 32; ++w) s += warp[w];
-      warp[0] = s;
-    }
-    __syncthreads();
-    const float score = warp[0] * scale;
-    const float m_new = fmaxf(m, score);
-    const float corr = __expf(m - m_new);
-    const float w = __expf(score - m_new);
-    m = m_new;
-    l = l * corr + w;
-    const __half* vrow =
-        v_cache + static_cast<std::size_t>(p) * kv_stride + kv_h * d;
-    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
-      acc[i] = acc[i] * corr + w * __half2float(vrow[i]);
-    }
-    __syncthreads();
-  }
-  float* orow = out + (static_cast<std::size_t>(t) * heads + h) * d;
-  for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
-    orow[i] = acc[i] / l;
-  }
-}
-
 // GQA attention: one block per (token, kv-head) computes ALL q-heads of the
 // group while streaming each K/V row once. The per-q-head AttentionKernel
 // re-reads the same KV rows heads/kv_heads times (8x on full layers with
@@ -838,51 +772,33 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                std::uint32_t kv_stride, std::uint32_t window,
                hipStream_t stream) {
   const std::uint32_t kv_len = start_pos + n_tokens;
-  // WMMA flash prefill for the sliding-window (d=256) layers: default, with
-  // the sliding window clamped per key. GEMMA4_ATTN_NO_WMMA=1 reverts to the
-  // scalar GQA kernel for A/B.
-  if (getenv("GEMMA4_ATTN0") == nullptr &&
-      getenv("GEMMA4_ATTN_NO_WMMA") == nullptr) {
+  // WMMA flash prefill (d=256 sliding-window and d=512 full layers); the
+  // scalar GQA kernel is the fallback when the WMMA launch is unsupported.
+  if (getenv("GEMMA4_ATTN_NO_WMMA") == nullptr) {
     if (d <= 256) {
-      // GEMMA4_ATTN_ONLY512 keeps SWA on the scalar kernel so the d=512 path
-      // can be validated in isolation (identical upstream hidden state).
-      if (getenv("GEMMA4_ATTN_ONLY512") == nullptr &&
-          wmma::AttentionWmma(q, k_cache, v_cache, out, n_tokens, start_pos, d,
+      if (wmma::AttentionWmma(q, k_cache, v_cache, out, n_tokens, start_pos, d,
                               kv_stride, window, stream))
         return;
-    } else {
-      if (wmma512::AttentionWmma512(q, k_cache, v_cache, out, n_tokens,
-                                    start_pos, d, kv_stride, window, stream))
-        return;
-    }
-  }
-  // GEMMA4_ATTN0=1 uses the per-(token,q-head) kernel (re-reads KV per head);
-  // default is the GQA kernel (streams KV once per kv-head group).
-  if (getenv("GEMMA4_ATTN0") == nullptr) {
-    if (d <= 256) {
-      hipLaunchKernelGGL((AttentionGqaKernel<256>), dim3(n_tokens, kv_heads),
-                         dim3(kThreads), 0, stream, q, k_cache, v_cache, out,
-                         start_pos, heads, kv_heads, d, kv_stride, window,
-                         kv_len);
+    } else if (wmma512::AttentionWmma512(q, k_cache, v_cache, out, n_tokens,
+                                         start_pos, d, kv_stride, window,
+                                         stream)) {
       return;
     }
-    hipLaunchKernelGGL((AttentionGqaKernel<512>), dim3(n_tokens, kv_heads),
-                       dim3(kThreads), 0, stream, q, k_cache, v_cache, out,
-                       start_pos, heads, kv_heads, d, kv_stride, window,
-                       kv_len);
-    return;
   }
+  // Scalar GQA fallback: streams KV once per kv-head group.
   if (d <= 256) {
-    hipLaunchKernelGGL((AttentionKernel<256>), dim3(n_tokens, heads),
+    hipLaunchKernelGGL((AttentionGqaKernel<256>), dim3(n_tokens, kv_heads),
                        dim3(kThreads), 0, stream, q, k_cache, v_cache, out,
                        start_pos, heads, kv_heads, d, kv_stride, window,
                        kv_len);
     return;
   }
-  hipLaunchKernelGGL((AttentionKernel<512>), dim3(n_tokens, heads),
+  hipLaunchKernelGGL((AttentionGqaKernel<512>), dim3(n_tokens, kv_heads),
                      dim3(kThreads), 0, stream, q, k_cache, v_cache, out,
                      start_pos, heads, kv_heads, d, kv_stride, window,
                      kv_len);
+  // (the per-q-head scalar kernel was removed: GQA covers it)
+
 }
 
 void RouterInput(const float* attn_out, const float* router_scale, float* tmp,
