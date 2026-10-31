@@ -436,8 +436,13 @@ bool MtpDrafter::Step(int32_t token, const float* tgt_emb,
       q38::UnquantizedF16Gemm(L.wq, im.d_norm_h, im.d_q, 1, kHeads * L.hd,
                               kHidden, s);
       kernels::RmsNorm(im.d_q, L.wq_norm, im.d_q, kHeads, L.hd, 1e-6F, s);
-      // Gemma 4 Assistant keeps position_ids constant (0), so the draft query
-      // needs no rotation; the target KV is already rotated at real positions.
+      // NOTE: llama.cpp rotates the draft query with a constant position; with
+      // the engine's causal Attention() the identity rotation is the closest
+      // match measured so far. The remaining gap is the ISWA bidirectional
+      // mask, which the engine kernel does not implement yet.
+      (void)rope_theta_swa;
+      (void)rope_theta_full;
+      (void)window_swa;
       kernels::Attention(im.d_q, k, v, im.d_attn, 1, pos, kHeads, kvh, L.hd,
                          stride, 0, s);
       kernels::F32ToF16(im.d_attn, im.d_attn_h, kHeads * L.hd, s);
