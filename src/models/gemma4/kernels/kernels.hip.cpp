@@ -818,13 +818,29 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
   const std::uint32_t kv_len = start_pos + n_tokens;
   // WMMA flash prefill (d=256 sliding-window and d=512 full layers); the
   // scalar GQA kernel is the fallback when the WMMA launch is unsupported.
+  // SWA window clipping for the WMMA path only: dense full-scan wastes
+  // ~7.8x KV reads at 8k context. Shift k/v base forward by lo and reduce
+  // start_pos by lo; the window itself is unchanged and the relative mask
+  // comparison is translation-invariant. Scalar fallback keeps raw values.
+  const __half* k2 = k_cache;
+  const __half* v2 = v_cache;
+  std::uint32_t sp2 = start_pos;
+  if (window != 0 && start_pos + 1 > window && getenv("GEMMA4_NO_SWA_SHIFT") == nullptr) {
+    std::uint32_t lo = (start_pos + 1 - window) & ~3u;
+    if (lo != 0 && lo <= start_pos) {
+      const std::size_t off = static_cast<std::size_t>(lo) * kv_stride;
+      k2 += off;
+      v2 += off;
+      sp2 -= lo;
+    }
+  }
   if (getenv("GEMMA4_ATTN_NO_WMMA") == nullptr) {
     if (d <= 256) {
-      if (wmma::AttentionWmma(q, k_cache, v_cache, out, n_tokens, start_pos, d,
+      if (wmma::AttentionWmma(q, k2, v2, out, n_tokens, sp2, d,
                               kv_stride, window, stream))
         return;
-    } else if (wmma512::AttentionWmma512(q, k_cache, v_cache, out, n_tokens,
-                                         start_pos, d, kv_stride, window,
+    } else if (wmma512::AttentionWmma512(q, k2, v2, out, n_tokens,
+                                         sp2, d, kv_stride, window,
                                          stream)) {
       return;
     }
