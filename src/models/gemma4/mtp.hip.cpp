@@ -50,19 +50,16 @@ __global__ void MtpQ4GemvKernel(const void* __restrict__ w,
       sum += lo * __half2float(xv[q]) + hi * __half2float(xv[q + 16]);
     }
   }
-  __shared__ float red[32];
-  for (std::uint32_t off = 16; off > 0; off >>= 1)
-    sum += __shfl_down_sync(0xffffffffull, sum, off);
-  if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = sum;
+  __shared__ float red[256];
+  red[threadIdx.x] = sum;
   __syncthreads();
-  if (threadIdx.x < 32) {
-    float v = threadIdx.x < (blockDim.x >> 5) ? red[threadIdx.x] : 0.0F;
-    for (std::uint32_t off = 16; off > 0; off >>= 1)
-      v += __shfl_down_sync(0xffffffffull, v, off);
-    if (threadIdx.x == 0) {
-      // One argmax slot per row; the host reduces over rows.
-      out_argmax[row] = __float_as_int(v);
-    }
+  for (std::uint32_t ss = 128; ss > 0; ss >>= 1) {
+    if (threadIdx.x < ss) red[threadIdx.x] += red[threadIdx.x + ss];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    // One argmax slot per row; the host reduces over rows.
+    out_argmax[row] = __float_as_int(red[0]);
   }
   (void)rows;
 }
@@ -158,6 +155,7 @@ struct MtpDrafter::Impl {
   __half* d_ffn_h{nullptr};      // [ff]
   float* d_ffn{nullptr};         // [ff]
   float* d_logits_arg{nullptr};  // [vocab] float-as-int
+  float* d_tgt_hn{nullptr};       // [backbone] post-final-norm target hidden
   int32_t* d_argmax{nullptr};
 
   void Alloc(std::uint32_t backbone_hidden) {
@@ -186,6 +184,7 @@ struct MtpDrafter::Impl {
     up(d_ffn_h, kFf * sizeof(__half));
     up(d_ffn, 2 * kFf * sizeof(float));  // gate and up live side by side
     up(d_logits_arg, vocab * sizeof(float));
+    up(d_tgt_hn, backbone_hidden * sizeof(float));
     up(d_argmax, sizeof(int32_t));
     if (hipStreamCreate(&stream) != hipSuccess) {
       throw std::runtime_error("MTP stream creation failed");
@@ -305,7 +304,45 @@ std::unique_ptr<MtpDrafter> MtpDrafter::Load(const std::string& path,
         im.allocs.push_back(dev);
         return static_cast<const __half*>(dev);
       }
-      return im.Upload(static_cast<const std::uint8_t*>(t->data), rows, cols);
+      {
+        // Proven path: the same DequantQ40ToF16Kernel the F16W MoE
+        // prefill path uses. Reads the host-mapped GGUF bytes directly.
+        TensorRef tr;
+        tr.data = t->data;
+        tr.type = core::GgmlType::kQ4_0;
+        tr.cols = cols;
+        tr.rows = rows;
+        void* qdev = nullptr;
+        const std::size_t qbytes = tr.SizeBytes();
+        if (hipMalloc(&qdev, qbytes) != hipSuccess ||
+            hipMemcpy(qdev, t->data, qbytes, hipMemcpyHostToDevice) !=
+                hipSuccess) {
+          if (qdev != nullptr) (void)hipFree(qdev);
+          throw std::runtime_error("MTP quant upload failed");
+        }
+        tr.device = qdev;
+        im.allocs.push_back(qdev);
+        void* dev = nullptr;
+        const std::size_t bytes =
+            static_cast<std::size_t>(rows * cols) * sizeof(__half);
+        if (hipMalloc(&dev, bytes) != hipSuccess) {
+          throw std::runtime_error("MTP alloc failed");
+        }
+        if (getenv("GEMMA4_MTP_NODEQUANT") != nullptr) {
+          (void)hipMemset(dev, 0, bytes);
+        } else {
+        hipStream_t ls = nullptr;
+        if (hipStreamCreate(&ls) != hipSuccess) {
+          (void)hipFree(qdev);
+          throw std::runtime_error("MTP stream failed");
+        }
+        kernels::DequantSlabF16(tr, rows, static_cast<__half*>(dev), ls);
+        (void)hipStreamSynchronize(ls);
+        (void)hipStreamDestroy(ls);
+        }
+        im.allocs.push_back(dev);
+        return static_cast<const __half*>(dev);
+      }
     };
 
     // Vocab from the draft embedding table (rows = vocab, cols = kHidden).
@@ -391,12 +428,33 @@ std::uint32_t MtpDrafter::BackboneHidden() const noexcept {
 int MtpDrafter::SwaLayer() const noexcept { return impl_->swa_layer; }
 int MtpDrafter::FullLayer() const noexcept { return impl_->full_layer; }
 
+bool MtpDrafter::SetTargetNorm(const float* raw_hidden, const float* norm_w,
+                               float eps) {
+#if defined(ENGINE_ENABLE_HIP)
+  auto& im = *impl_;
+  kernels::RmsNorm(raw_hidden, norm_w, im.d_tgt_hn, 1, im.backbone, eps,
+                   im.stream);
+  return true;
+#else
+  (void)raw_hidden; (void)norm_w; (void)eps;
+  return false;
+#endif
+}
+
+const float* MtpDrafter::TargetNorm() const {
+#if defined(ENGINE_ENABLE_HIP)
+  return impl_->d_tgt_hn;
+#else
+  return nullptr;
+#endif
+}
+
 bool MtpDrafter::Step(int32_t token, const float* tgt_emb,
                       const float* tgt_hidden, const void* swa_k,
                       const void* swa_v, std::uint32_t swa_stride,
                       std::uint32_t swa_kv_heads, const void* full_k,
                       const void* full_v, std::uint32_t full_stride,
-                      std::uint32_t full_kv_heads, std::uint32_t pos, float rope_theta_swa, float rope_theta_full, std::uint32_t window_swa,
+                      std::uint32_t full_kv_heads, std::uint32_t pos, float rope_theta_swa, float rope_theta_full, const float* rope_freqs_full, std::uint32_t rope_pos,
                       float* feedback_hidden, int32_t* out_token,
                       std::string* error_msg) {
 #if defined(ENGINE_ENABLE_HIP)
@@ -419,6 +477,8 @@ bool MtpDrafter::Step(int32_t token, const float* tgt_emb,
                        hipMemcpyDeviceToDevice, s) != hipSuccess) {
       throw std::runtime_error("MTP residual copy failed");
     }
+    const bool bypass_attn = getenv("GEMMA4_MTP_NOATTN") != nullptr;
+    const bool bypass_ffn = getenv("GEMMA4_MTP_NOFFN") != nullptr;
     for (std::uint32_t il = 0; il < kLayers; ++il) {
       const auto& L = im.layer[il];
       const __half* k = static_cast<const __half*>(L.hd == kHeadDimSwa ? swa_k : full_k);
@@ -436,15 +496,27 @@ bool MtpDrafter::Step(int32_t token, const float* tgt_emb,
       q38::UnquantizedF16Gemm(L.wq, im.d_norm_h, im.d_q, 1, kHeads * L.hd,
                               kHidden, s);
       kernels::RmsNorm(im.d_q, L.wq_norm, im.d_q, kHeads, L.hd, 1e-6F, s);
-      // NOTE: llama.cpp rotates the draft query with a constant position; with
-      // the engine's causal Attention() the identity rotation is the closest
-      // match measured so far. The remaining gap is the ISWA bidirectional
-      // mask, which the engine kernel does not implement yet.
-      (void)rope_theta_swa;
-      (void)rope_theta_full;
-      (void)window_swa;
-      kernels::Attention(im.d_q, k, v, im.d_attn, 1, pos, kHeads, kvh, L.hd,
-                         stride, 0, s);
+      // llama.cpp gemma4-assistant rotates the draft query: plain RoPE for
+      // SWA layers, per-dimension rope_freqs for the full layer, at the
+      // absolute position of the token being predicted. K/V come from the
+      // target's shared full-length cache (already rotated the same way).
+      if (L.hd == kHeadDimSwa) {
+        kernels::Rope(im.d_q, 1, kHeads, L.hd, L.hd, rope_pos, rope_theta_swa,
+                      s);
+      } else if (rope_freqs_full != nullptr) {
+        kernels::RopeFrequenciesMulti(im.d_q, 1, kHeads, L.hd, L.hd, rope_pos,
+                                      rope_theta_full, rope_freqs_full, s);
+      } else {
+        kernels::Rope(im.d_q, 1, kHeads, L.hd, L.hd, rope_pos, rope_theta_full,
+                      s);
+      }
+      if (bypass_attn) {
+        (void)hipMemsetAsync(im.d_attn, 0,
+                             (std::size_t)kHeads * L.hd * sizeof(float), s);
+      } else {
+        kernels::Attention(im.d_q, k, v, im.d_attn, 1, pos, kHeads, kvh, L.hd,
+                           stride, 0, s);
+      }
       kernels::F32ToF16(im.d_attn, im.d_attn_h, kHeads * L.hd, s);
       q38::UnquantizedF16Gemm(L.wo, im.d_attn_h, im.d_proj, 1, kHidden,
                               kHeads * L.hd, s);
@@ -452,6 +524,7 @@ bool MtpDrafter::Step(int32_t token, const float* tgt_emb,
                        1e-6F, s);
       kernels::AddInplace(im.d_h, im.d_norm, kHidden, s);
       kernels::RmsNorm(im.d_h, L.ffn_norm, im.d_norm, 1, kHidden, 1e-6F, s);
+      if (!bypass_ffn) {
       kernels::F32ToF16(im.d_norm, im.d_norm_h, kHidden, s);
       q38::UnquantizedF16Gemm(L.w_gate, im.d_norm_h, im.d_ffn, 1, kFf, kHidden,
                               s);
@@ -465,6 +538,7 @@ bool MtpDrafter::Step(int32_t token, const float* tgt_emb,
       kernels::RmsNorm(im.d_proj, L.post_ffw_norm, im.d_norm, 1, kHidden,
                        1e-6F, s);
       kernels::AddInplace(im.d_h, im.d_norm, kHidden, s);
+      }
       float lscale = 1.0F;
       kernels::DownloadMirror(&lscale, L.lscale, sizeof(float));
       kernels::LayerScale(im.d_h, lscale, kHidden, s);
@@ -487,6 +561,80 @@ bool MtpDrafter::Step(int32_t token, const float* tgt_emb,
     if (hipMemcpy(host.data(), im.d_logits_arg, im.vocab * sizeof(float),
                   hipMemcpyDeviceToHost) != hipSuccess) {
       throw std::runtime_error("MTP logits download failed");
+    }
+    if (getenv("GEMMA4_MTP_DIAG") != nullptr) {
+      std::vector<float> hg(kHidden), hf(im.backbone);
+      (void)hipMemcpy(hg.data(), im.d_g, kHidden * sizeof(float),
+                      hipMemcpyDeviceToHost);
+      (void)hipMemcpy(hf.data(), feedback_hidden,
+                      im.backbone * sizeof(float), hipMemcpyDeviceToHost);
+      double ng = 0, nf = 0;
+      for (float v : hg) ng += (double)v * v;
+      for (float v : hf) nf += (double)v * v;
+      std::uint32_t order[5] = {0,0,0,0,0};
+      for (int t = 0; t < 5; ++t) {
+        float bv = -INFINITY;
+        for (std::uint32_t i = 0; i < im.vocab; ++i) {
+          bool used = false;
+          for (int u = 0; u < t; ++u) used = used || (order[u] == i);
+          if (!used && host[i] > bv) { bv = host[i]; order[t] = i; }
+        }
+      }
+      std::fprintf(stderr, "[mtp-diag] rms_pre=%.3f rms_fb=%.3f top=%u:%u:%u:%u:%u\n",
+                   std::sqrt(ng / kHidden), std::sqrt(nf / im.backbone),
+                   order[0], order[1], order[2], order[3], order[4]);
+      if (getenv("GEMMA4_MTP_DUMP") != nullptr) {
+        static int dumped = 0;
+        if (dumped == 0) {
+          dumped = 1;
+          std::vector<float> inp(2 * im.backbone);
+          (void)hipMemcpy(inp.data(), im.d_pre_in,
+                        inp.size() * sizeof(float), hipMemcpyDeviceToHost);
+          FILE* f = std::fopen("/home/dardeaw/mtp_in.bin", "wb");
+          if (f != nullptr) {
+            (void)std::fwrite(inp.data(), sizeof(float), inp.size(), f);
+            std::fclose(f);
+          }
+          const std::uint32_t nrows = pos + 1;
+          auto dump_half = [&](const char* path, const void* dev,
+                               std::size_t n) {
+            std::vector<__half> h(n);
+            (void)hipMemcpy(h.data(), dev, n * sizeof(__half),
+                            hipMemcpyDeviceToHost);
+            FILE* f2 = std::fopen(path, "wb");
+            if (f2 != nullptr) {
+              (void)std::fwrite(h.data(), sizeof(__half), n, f2);
+              std::fclose(f2);
+            }
+          };
+          dump_half("/home/dardeaw/mtp_swak.bin", swa_k,
+                    (std::size_t)nrows * swa_stride);
+          dump_half("/home/dardeaw/mtp_swav.bin", swa_v,
+                    (std::size_t)nrows * swa_stride);
+          dump_half("/home/dardeaw/mtp_fullk.bin", full_k,
+                    (std::size_t)nrows * full_stride);
+          dump_half("/home/dardeaw/mtp_fullv.bin", full_v,
+                    (std::size_t)nrows * full_stride);
+          if (rope_freqs_full != nullptr) {
+            std::vector<float> fr(256);
+            (void)hipMemcpy(fr.data(), rope_freqs_full,
+                            256 * sizeof(float), hipMemcpyDeviceToHost);
+            FILE* f3 = std::fopen("/home/dardeaw/mtp_freqs.bin", "wb");
+            if (f3 != nullptr) {
+              (void)std::fwrite(fr.data(), sizeof(float), 256, f3);
+              std::fclose(f3);
+            }
+          }
+          std::fprintf(stderr,
+                       "[mtp-dump] pos=%u swa_stride=%u full_stride=%u "
+                       "swa_kvh=%u full_kvh=%u th_swa=%f th_full=%f "
+                       "has_freqs=%d bb=%u\n",
+                       pos, swa_stride, full_stride, swa_kv_heads,
+                       full_kv_heads, (double)rope_theta_swa,
+                       (double)rope_theta_full,
+                       rope_freqs_full != nullptr ? 1 : 0, im.backbone);
+        }
+      }
     }
     std::uint32_t best = 0;
     float best_v = -INFINITY;

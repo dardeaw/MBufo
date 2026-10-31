@@ -1118,7 +1118,7 @@ int RunPrompt(std::span<const char* const> args) {
       std::uint32_t n_draft = 4;
       if (const char* e = getenv("GEMMA4_MTP_DRAFT")) {
         const long v = std::strtol(e, nullptr, 10);
-        if (v >= 1 && v <= 16) n_draft = static_cast<std::uint32_t>(v);
+        if (v >= 0 && v <= 16) n_draft = static_cast<std::uint32_t>(v);
       }
       std::fprintf(stderr, "[gemma4] MTP enabled (%s), draft=%u\n", mtp_path,
                    n_draft);
@@ -1127,11 +1127,16 @@ int RunPrompt(std::span<const char* const> args) {
         std::cout << gmodel->TokenText(tok) << std::flush;
         generated.push_back(tok);
       };
-      // First token from the prompt's own logits.
-      std::int32_t last = gsession->SampleGreedy();
-      emit(last);
+      // No pre-emit: round 1 verifies against cur (the first new token)
+      // and emits it as block[0]. Pre-emitting here double-emits it.
+      // Feed for round 1 is the last prompt token (matched pair).
+      std::int32_t last = prompt.empty() ? 0 : prompt.back();
       std::uint64_t rounds = 0, drafted = 0, accepted_total = 0;
-      if (!gmodel->IsStopToken(last)) {
+      const bool mtp_load_only = getenv("GEMMA4_MTP_LOADONLY") != nullptr;
+      if (mtp_load_only) {
+        std::fprintf(stderr, "[gemma4] MTP load-only, baseline decode\n");
+      }
+      if (!mtp_load_only && !gmodel->IsStopToken(last)) {
         while (generated.size() < opt.max_tokens) {
           std::vector<std::int32_t> block;
           if (!gsession->SpeculativeRound(last, n_draft, &block, &err)) {
@@ -1174,7 +1179,7 @@ int RunPrompt(std::span<const char* const> args) {
                                       static_cast<double>(rounds)
                                 : 0.0);
       }
-      return 0;
+      if (!mtp_load_only) return 0;
     }
     const auto dstart = std::chrono::steady_clock::now();
     while (generated.size() < opt.max_tokens) {

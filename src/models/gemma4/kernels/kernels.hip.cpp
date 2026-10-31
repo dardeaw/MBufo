@@ -194,17 +194,14 @@ __global__ void GemvQKernel(const void* w, int type, std::uint64_t row_bytes,
       }
     }
   }
-  for (std::uint32_t off = 16; off > 0; off >>= 1)
-    sum += __shfl_down_sync(0xffffffffull, sum, off);
-  __shared__ float shared[kThreads / 32];
-  if ((threadIdx.x & 31) == 0) shared[threadIdx.x / 32] = sum;
+  __shared__ float red[256];
+  red[threadIdx.x] = sum;
   __syncthreads();
-  if (threadIdx.x < 32) {
-    float v = threadIdx.x < blockDim.x / 32 ? shared[threadIdx.x] : 0.0F;
-    for (std::uint32_t off = 16; off > 0; off >>= 1)
-      v += __shfl_down_sync(0xffffffffull, v, off);
-    if (threadIdx.x == 0) y[row] = v;
+  for (std::uint32_t s = 128; s > 0; s >>= 1) {
+    if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+    __syncthreads();
   }
+  if (threadIdx.x == 0) y[row] = red[0];
 }
 
 __global__ void GemvF16Kernel(const __half* w, std::uint64_t cols,
@@ -214,17 +211,14 @@ __global__ void GemvF16Kernel(const __half* w, std::uint64_t cols,
   float sum = 0.0F;
   for (std::uint64_t i = threadIdx.x; i < cols; i += blockDim.x)
     sum += __half2float(r[i]) * x[i];
-  for (std::uint32_t off = 16; off > 0; off >>= 1)
-    sum += __shfl_down_sync(0xffffffffull, sum, off);
-  __shared__ float shared[kThreads / 32];
-  if ((threadIdx.x & 31) == 0) shared[threadIdx.x / 32] = sum;
+  __shared__ float red[256];
+  red[threadIdx.x] = sum;
   __syncthreads();
-  if (threadIdx.x < 32) {
-    float v = threadIdx.x < blockDim.x / 32 ? shared[threadIdx.x] : 0.0F;
-    for (std::uint32_t off = 16; off > 0; off >>= 1)
-      v += __shfl_down_sync(0xffffffffull, v, off);
-    if (threadIdx.x == 0) y[row] = v;
+  for (std::uint32_t s = 128; s > 0; s >>= 1) {
+    if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+    __syncthreads();
   }
+  if (threadIdx.x == 0) y[row] = red[0];
 }
 
 

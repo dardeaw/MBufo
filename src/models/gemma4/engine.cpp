@@ -43,6 +43,29 @@ namespace fn = ::gufo::models::qwen38_flash_next::rocm;
   }
 }
 
+namespace {
+// Grow-only F32 staging for in-place fused GEMV (x == y, as used by wo):
+// blocks read the whole x row while other blocks write y, so reading the
+// live buffer races. Staging one exact F32 copy removes the race.
+float* g_gemv_stage = nullptr;
+std::uint32_t g_gemv_stage_k = 0;
+const float* StageGemvInput(const float* x, std::uint32_t k,
+                            hipStream_t stream) {
+  if (k > g_gemv_stage_k) {
+    void* grown = nullptr;
+    if (hipMalloc(&grown, static_cast<std::size_t>(k) * sizeof(float)) !=
+        hipSuccess) {
+      return x;
+    }
+    g_gemv_stage = static_cast<float*>(grown);
+    g_gemv_stage_k = k;
+  }
+  (void)hipMemcpyAsync(g_gemv_stage, x, static_cast<std::size_t>(k) * sizeof(float),
+                       hipMemcpyDeviceToDevice, stream);
+  return g_gemv_stage;
+}
+}  // namespace
+
 /// y[n][m] = x[n][k] @ W[m][k]^T over GGML quant weights: dequantize the
 /// matrix into the F16 staging slab, then run one hipBLAS GEMM.
 void F32Gemm(const TensorRef& w, const float* x, float* y,
@@ -50,11 +73,13 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
              hipStream_t stream, __half* slab, __half* x_slab) {
   namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
   if (n_tokens == 1 && getenv("GEMMA4_NO_FUSED_GEMV") == nullptr) {
+    const float* xr = x;
+    if (x == y) xr = StageGemvInput(x, k, stream);
     if (w.f16 != nullptr) {
-      kernels::GemvF16Fused(static_cast<const __half*>(w.f16), k, x, y, m, stream);
+      kernels::GemvF16Fused(static_cast<const __half*>(w.f16), k, xr, y, m, stream);
     } else {
       const void* dev = w.device != nullptr ? w.device : w.data;
-      kernels::GemvFused(dev, static_cast<int>(w.type), w.RowBytes(), k, x, y, m, stream);
+      kernels::GemvFused(dev, static_cast<int>(w.type), w.RowBytes(), k, xr, y, m, stream);
     }
     return;
   }
@@ -759,6 +784,20 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     
     StagedGemm(l.wq, qdim, impl_->normed, impl_->qbuf, n, impl_->w_slab,
                impl_->x_slab, stream);
+    if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && il == 0 && n <= 4) {
+      hipDeviceSynchronize();
+      auto hsum = [&](const float* d, std::size_t cnt) {
+        std::vector<float> h(cnt);
+        (void)hipMemcpy(h.data(), d, cnt * sizeof(float),
+                        hipMemcpyDeviceToHost);
+        double ss = 0;
+        for (float v : h) ss += (double)v;
+        return ss;
+      };
+      std::fprintf(stderr, "[gemma4] L0 n=%u norm0=%.6f qbuf0=%.6f\n", n,
+                   hsum(impl_->normed, hidden),
+                   hsum(impl_->qbuf, static_cast<std::size_t>(qdim)));
+    }
     
     // QK norm (per-head gamma over head_dim).
     kernels::RmsNorm(impl_->qbuf, static_cast<const float*>(l.attn_q_norm.device),
@@ -831,8 +870,26 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                        c.LayerIsSwa(il) ? c.sliding_window : 0, stream);
 
     // wo projection.
+    if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && il == 0 && n <= 4) {
+      hipDeviceSynchronize();
+      std::vector<float> ah(hidden);
+      (void)hipMemcpy(ah.data(), impl_->attn_out, hidden * sizeof(float),
+                      hipMemcpyDeviceToHost);
+      double asum = 0;
+      for (float v : ah) asum += (double)v;
+      std::fprintf(stderr, "[gemma4] L0 n=%u attn_raw0=%.6f\n", n, asum);
+    }
     StagedGemm(l.wo, hidden, impl_->attn_out, impl_->attn_out, n,
                impl_->w_slab, impl_->x_slab, stream);
+    if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && il == 0 && n == 1) {
+      hipDeviceSynchronize();
+      std::vector<float> ah2(static_cast<std::size_t>(n) * hidden);
+      (void)hipMemcpy(ah2.data(), impl_->attn_out, ah2.size() * sizeof(float),
+                      hipMemcpyDeviceToHost);
+      double asum2 = 0;
+      for (float v : ah2) asum2 += (double)v;
+      std::fprintf(stderr, "[gemma4] L0decode attn_post_wo=%.6f\n", asum2);
+    }
     
     if (getenv("GEMMA4_DEBUG_EMBED") && il < 3) {
       std::vector<float> probe(static_cast<std::size_t>(n) * hidden);
@@ -917,6 +974,33 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       fn::RouterTopK(impl_->router_logits, c.num_experts, impl_->expert_ids,
                      impl_->expert_weights, n, c.num_experts, c.experts_used,
                      stream);
+      if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && il == 0 && n <= 4) {
+        hipDeviceSynchronize();
+        std::vector<std::int32_t> eids(static_cast<std::size_t>(n) * c.experts_used);
+        std::vector<float> ewts(static_cast<std::size_t>(n) * c.experts_used);
+        (void)hipMemcpy(eids.data(), impl_->expert_ids,
+                        eids.size() * sizeof(std::int32_t), hipMemcpyDeviceToHost);
+        (void)hipMemcpy(ewts.data(), impl_->expert_weights,
+                        ewts.size() * sizeof(float), hipMemcpyDeviceToHost);
+        std::fprintf(stderr, "[gemma4] L0 n=%u experts0=", n);
+        for (std::uint32_t k = 0; k < c.experts_used; ++k)
+          std::fprintf(stderr, "%d:%.3f ", eids[k], ewts[k]);
+        std::fprintf(stderr, "\n");
+      }
+      if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && il == 0) {
+        hipDeviceSynchronize();
+        std::vector<float> rl(static_cast<std::size_t>(n) * c.num_experts);
+        (void)hipMemcpy(rl.data(), impl_->router_logits,
+                        rl.size() * sizeof(float), hipMemcpyDeviceToHost);
+        double rs = 0; float rm = 0;
+        for (float v : rl) {
+          rs += (double)v;
+          float a = v < 0 ? -v : v;
+          if (a > rm) rm = a;
+        }
+        std::fprintf(stderr, "[gemma4] L0 router sum=%.4f maxabs=%.4f\n", rs,
+                     rm);
+      }
       // Decode fast path (n == 1): NO host readback of ids/wts, NO
       // active-expert loop, NO per-expert scale/add kernels. THREE launches
       // per layer drive the whole routed MoE with device-side routing:
@@ -947,6 +1031,11 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         kernels::GemvQSlot(dn_dev, l.down_exps.RowBytes(), dn_stride,
                            impl_->moe_vec_gate, impl_->expert_ids,
                            impl_->moe_vec_down, used, hidden, ff, stream);
+        // Zero attn_out before accumulate (matches grouped path): without
+        // this the epilogue adds MoE onto the stale wo() output.
+        hipMemsetAsync(impl_->attn_out, 0,
+                       static_cast<std::size_t>(n) * hidden * sizeof(float),
+                       stream);
         kernels::MoeSlotEpilogue(
             impl_->moe_vec_down, impl_->expert_ids, impl_->expert_weights,
             l.down_exps_scale.empty()
@@ -1257,6 +1346,13 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
               q38::DenseF16Gemm(impl_->w_slab, impl_->x_half, dout, batch,
                                 hidden, c.expert_ff, stream);
             } else {
+              // Compact fallback was missing the SwiGLU activation: gg held the
+              // raw gate projection and gu was discarded, so down() saw
+              // down(gate) instead of down(silu(gate)*up). Match the non-compact
+              // path (gate activated in place, up consumed).
+              kernels::GeluTanhSwiglu(
+                  gg, gu, static_cast<std::size_t>(batch) * c.expert_ff,
+                  stream);
               F32Gemm(down_ref, gg, gd, batch, hidden,
                       c.expert_ff, stream, impl_->w_slab, impl_->x_slab);
             }
@@ -1303,6 +1399,29 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       kernels::AddInplace(impl_->attn_out, impl_->moe_out,
                           static_cast<std::size_t>(n) * hidden, stream);
       SyncSum(impl_->attn_out, "combined", n, hidden, il);
+      if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && il == 0) {
+        hipDeviceSynchronize();
+        std::vector<float> mr(hidden);
+        (void)hipMemcpy(mr.data(), impl_->attn_out, hidden * sizeof(float),
+                        hipMemcpyDeviceToHost);
+        double ms = 0;
+        for (float v : mr) ms += (double)v;
+        std::fprintf(stderr, "[gemma4] L%d n=%u moe_row0=%.6f\n", il, n, ms);
+      }
+      if (getenv("GEMMA4_DEBUG_EMBED") != nullptr) {
+        hipDeviceSynchronize();
+        std::vector<float> hb(static_cast<std::size_t>(n) * hidden);
+        (void)hipMemcpy(hb.data(), impl_->hidden, hb.size() * sizeof(float),
+                        hipMemcpyDeviceToHost);
+        double hs = 0; float hm = 0;
+        for (float v : hb) {
+          hs += (double)v;
+          float a = v < 0 ? -v : v;
+          if (a > hm) hm = a;
+        }
+        std::fprintf(stderr, "[gemma4] L%u hidden sum=%.4f maxabs=%.4f\n", il,
+                     hs, hm);
+      }
       kernels::RmsNorm(impl_->attn_out, nullptr, impl_->normed, n, hidden,
                        c.rms_eps, stream);
       kernels::MulInplace(impl_->normed,
@@ -1356,6 +1475,15 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   kernels::RmsNorm(impl_->hidden,
                    static_cast<const float*>(w.output_norm.device),
                    impl_->normed, n, hidden, c.rms_eps, stream);
+  if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && n <= 4) {
+    hipDeviceSynchronize();
+    std::vector<float> fh(hidden);
+    (void)hipMemcpy(fh.data(), impl_->normed, hidden * sizeof(float),
+                    hipMemcpyDeviceToHost);
+    double fs = 0;
+    for (float v : fh) fs += (double)v;
+    std::fprintf(stderr, "[gemma4] finalnorm_row0_n%u=%.6f\n", n, fs);
+  }
   
   // The sampler only consumes the LAST token's logits (see Logits()), so the
   // LM head projects just that row. This keeps the vocab-sized projection on
@@ -1364,8 +1492,13 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   // Speculative verification needs every row's logits; the plain sampler path
   // projects only the last row so the vocab projection stays on the fused
   // GEMV (n==1) path.
-  const std::uint32_t logit_rows = all_logits ? n : 1;
-  const float* last_row = all_logits
+  const bool force_all = getenv("GEMMA4_FORCE_ALLLOGITS") != nullptr;
+  const std::uint32_t logit_rows = (all_logits || force_all) ? n : 1;
+  if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && n <= 16) {
+    std::fprintf(stderr, "[gemma4] head n=%u all_logits=%d logit_rows=%u\n", n,
+                 (int)all_logits, logit_rows);
+  }
+  const float* last_row = (all_logits || force_all)
                               ? impl_->normed
                               : impl_->normed +
                                     static_cast<std::size_t>(n - 1) * hidden;
@@ -1469,6 +1602,20 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
 
   // Target's own next token (the last committed token's logits are current).
   std::int32_t cur = SampleGreedy();
+  if (getenv("GEMMA4_MTP_DUMP") != nullptr) {
+    static int tgt_dumped = 0;
+    if (tgt_dumped == 0) {
+      tgt_dumped = 1;
+    std::vector<float> tl(vocab);
+    (void)hipMemcpy(tl.data(), impl_->logits, vocab * sizeof(float),
+                    hipMemcpyDeviceToHost);
+    FILE* tf = std::fopen("/home/dardeaw/mtp_tgt_logits.bin", "wb");
+    if (tf != nullptr) {
+      (void)std::fwrite(tl.data(), sizeof(float), vocab, tf);
+      std::fclose(tf);
+    }
+    }
+  }
   hipMemcpyAsync(impl_->logits_prev, impl_->logits,
                  static_cast<std::size_t>(vocab) * sizeof(float),
                  hipMemcpyDeviceToDevice, stream);
@@ -1476,12 +1623,30 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
 
   const std::uint32_t kPos = impl_->length - 1;
   const std::uint32_t old_length = impl_->length;
+  if (getenv("GEMMA4_MTP_NOVERIFY") != nullptr) {
+    // Passthrough: no draft steps, no verify. Pure re-forward loop.
+    // Isolates whether Steps/verify perturb later rounds.
+    out->clear();
+    out->push_back(cur);
+    if (!Forward({&cur, 1}, old_length, error_msg)) return false;
+    impl_->last_chunk_n = 1;
+    return true;
+  }
 
-  std::vector<std::int32_t> draft(n_draft);
+  std::vector<std::int32_t> draft(n_draft, 0);
   std::int32_t feed_tok = last_token;
-  const float* feed_hidden =
-      impl_->hidden +
-      static_cast<std::size_t>(impl_->last_fwd_n - 1) * hidden;
+  const bool oracle = getenv("GEMMA4_MTP_ORACLE") != nullptr;
+  if (!oracle) {
+  // The reference (llama.cpp gemma4.cpp h_nextn, transformers, vLLM) feeds
+  // the drafter the target post-final-norm hidden, not the raw residual.
+  if (!impl_->mtp->SetTargetNorm(
+          impl_->hidden +
+              static_cast<std::size_t>(impl_->last_fwd_n - 1) * hidden,
+          static_cast<const float*>(w.output_norm.device), c.rms_eps)) {
+    if (error_msg != nullptr) *error_msg = "MTP target-norm failed";
+    return false;
+  }
+  const float* feed_hidden = impl_->mtp->TargetNorm();
   for (std::uint32_t i = 0; i < n_draft; ++i) {
     embed_token(feed_tok, impl_->d_tgt_emb);
     if (!impl_->mtp->Step(feed_tok, impl_->d_tgt_emb, feed_hidden,
@@ -1490,7 +1655,8 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
                           impl_->kv_k[full_l], impl_->kv_v[full_l],
                           impl_->kv_stride[full_l], c.KvHeads(static_cast<std::uint32_t>(full_l)),
                           kPos, c.rope_theta_swa, c.rope_theta_full,
-                          c.sliding_window, impl_->d_draft_fb,
+                          !w.layers[static_cast<std::uint32_t>(full_l)].rope_freqs.empty() ? static_cast<const float*>(w.layers[static_cast<std::uint32_t>(full_l)].rope_freqs.device) : nullptr,
+                          kPos, impl_->d_draft_fb,
                           impl_->d_draft_tok, error_msg)) {
       return false;
     }
@@ -1498,8 +1664,30 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
     feed_tok = draft[i];
     feed_hidden = impl_->d_draft_fb;
   }
+  }
+  if (oracle) {
+    // Oracle-C: optionally override draft0 (default cur) to test input
+    // sensitivity. If row0 ignores draft0, the input path is broken.
+    long d0override = -1;
+    if (const char* e = getenv("GEMMA4_MTP_ORACLED0")) d0override = std::strtol(e, nullptr, 10);
+    // Oracle-B: draft0=cur (must accept), rest=FILL (must reject unless true
+    // continuation really equals FILL). Bonus must equal true next token.
+    // Vary FILL across runs: if verify-row0 changes, row0 is contaminated
+    // by future tokens (causal violation).
+    long fill = 0;
+    if (const char* e = getenv("GEMMA4_MTP_ORACLEFILL")) fill = std::strtol(e, nullptr, 10);
+    for (std::uint32_t i = 0; i < n_draft; ++i) {
+      if (i == 0 && d0override >= 0)
+        draft[i] = static_cast<std::int32_t>(d0override);
+      else if (i == 0)
+        draft[i] = cur;
+      else
+        draft[i] = static_cast<std::int32_t>(fill);
+    }
+    std::fprintf(stderr, "[mtp-oracle] draft=[%d,%ld,..] cur=%d\n", cur, fill,
+                 cur);
+  }
 
-  // Verify the whole draft block with one batched target forward.
   bool all_ok = true;
   if (!Forward(draft, old_length, error_msg, /*all_logits=*/true))
     return false;
@@ -1513,6 +1701,10 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
                    draft[0] == cur ? "HIT" : "miss");
       ++traced;
     }
+  }
+  if (getenv("GEMMA4_MTP_TRACE") != nullptr) {
+    std::fprintf(stderr, "[mtp-state] old_len=%u len_after_verify=%u last_fwd_n=%u\n",
+                 old_length, impl_->length, impl_->last_fwd_n);
   }
   std::uint32_t accepted = 0;
   if (draft[0] == cur) {
@@ -1551,12 +1743,79 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
     out->push_back(cur);
   }
 
+  std::vector<float> vrow;
+  if (getenv("GEMMA4_MTP_CMPLOGITS") != nullptr) {
+    // Diagnostic: verify-row0 (batched n=4) vs fresh n=1 re-forward.
+    vrow.resize(vocab);
+    (void)hipMemcpy(vrow.data(), impl_->logits, vocab * sizeof(float),
+                    hipMemcpyDeviceToHost);
+    std::uint32_t vv = 0;
+    float vmx = -1e30F;
+    for (std::uint32_t i = 0; i < vocab; ++i) {
+      if (vrow[i] > vmx) { vmx = vrow[i]; vv = i; }
+    }
+    std::fprintf(stderr, "[mtp-cmp] verify_row0_argmax=%u val=%.3f\n", vv,
+                   vmx);
+    std::fprintf(stderr,
+                 "[mtp-cmp] ctx old_len=%u impl_len=%u n_draft=%u d0=%d\n",
+                 old_length, impl_->length, n_draft, draft.empty() ? -1 : draft[0]);
+    {
+      // Top-5 for margin analysis.
+      std::uint32_t idx[5] = {0, 0, 0, 0, 0};
+      float bval[5] = {-1e30F, -1e30F, -1e30F, -1e30F, -1e30F};
+      for (std::uint32_t i = 0; i < vocab; ++i) {
+        float v = vrow[i];
+        for (int k = 0; k < 5; ++k) {
+          if (v > bval[k]) {
+            for (int j = 4; j > k; --j) {
+              bval[j] = bval[j - 1];
+              idx[j] = idx[j - 1];
+            }
+            bval[k] = v;
+            idx[k] = i;
+            break;
+          }
+        }
+      }
+      std::fprintf(stderr,
+                   "[mtp-cmp] verify_row0_top5=%u:%.2f %u:%.2f %u:%.2f %u:%.2f "
+                   "%u:%.2f\n",
+                   idx[0], bval[0], idx[1], bval[1], idx[2], bval[2], idx[3],
+                   bval[3], idx[4], bval[4]);
+    for (std::uint32_t rr = 1; rr < 4; ++rr) {
+      const float* rowp = vrow.data() + static_cast<std::size_t>(rr) * vocab;
+      std::uint32_t bb2 = 0;
+      float bmx2 = -1e30F;
+      for (std::uint32_t i = 0; i < vocab; ++i) {
+        if (rowp[i] > bmx2) { bmx2 = rowp[i]; bb2 = i; }
+      }
+      std::fprintf(stderr, "[mtp-cmp] verify_row%u_argmax=%u val=%.3f\n", rr,
+                   bb2, bmx2);
+    }
+    }
+  }
   if (accepted == 0) {
     // The draft block wrote its own (rejected) token at `old_length`; the
     // target's own token must take that slot or the loop can never advance.
     const std::int32_t pending = cur;
     if (!Forward({&pending, 1}, old_length, error_msg)) {
       return false;
+    }
+    if (getenv("GEMMA4_MTP_CMPLOGITS") != nullptr && !vrow.empty()) {
+      std::vector<float> brow(vocab);
+      (void)hipMemcpy(brow.data(), impl_->logits, vocab * sizeof(float),
+                      hipMemcpyDeviceToHost);
+      double diff = 0;
+      std::uint32_t bv = 0;
+      float bmx = -1e30F;
+      for (std::uint32_t i = 0; i < vocab; ++i) {
+        double d = (double)vrow[i] - (double)brow[i];
+        diff += d * d;
+        if (brow[i] > bmx) { bmx = brow[i]; bv = i; }
+      }
+      std::fprintf(stderr,
+                   "[mtp-cmp] refwd_argmax=%u verify_vs_refwd_rmsdiff=%.6f\n",
+                   bv, std::sqrt(diff / vocab));
     }
     out->clear();
     out->push_back(cur);

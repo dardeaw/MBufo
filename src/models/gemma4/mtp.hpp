@@ -43,15 +43,18 @@ public:
   /// wide, device F32). Returns the drafted token id (argmax of the draft
   /// logits) and writes the post_projection feedback row, which the next
   /// step consumes as its hidden input.
-  [[nodiscard]] bool Step(int32_t token, const float* tgt_emb,
+  [[nodiscard]] bool SetTargetNorm(const float* raw_hidden, const float* norm_w, float eps);
+  const float* TargetNorm() const;
+  bool Step(int32_t token, const float* tgt_emb,
                           const float* tgt_hidden, const void* swa_k,
                           const void* swa_v, std::uint32_t swa_stride,
                           std::uint32_t swa_kv_heads, const void* full_k,
                           const void* full_v, std::uint32_t full_stride,
                           std::uint32_t full_kv_heads, std::uint32_t pos,
                           float rope_theta_swa, float rope_theta_full,
-                          std::uint32_t window_swa, float* feedback_hidden,
-                          int32_t* out_token, std::string* error_msg);
+                          const float* rope_freqs_full, std::uint32_t rope_pos,
+                          float* feedback_hidden, int32_t* out_token,
+                          std::string* error_msg);
 
 private:
   MtpDrafter();
