@@ -148,6 +148,32 @@ void MoeScatterAdd(const float* down, const std::int32_t* rows_token,
                    std::uint32_t dim, hipStream_t stream);
 /// Weighted routed accumulate for one expert: out[t] += w(t,e)*expert_down[t]
 /// with w(t,e) summed from the routing slots. One launch per expert.
+/// Decode-time fused MoE gate/up over Q4_0 experts with DEVICE-side
+/// routing: one launch computes gate/up for all `slots` (= n*used)
+/// (token,slot) rows; ids select the expert (negative = skip). gate_up is the
+/// fused [E][2*ff][hidden] slab; x is [n][hidden]; gout/uout are [slots][ff].
+void MoeVecGateUp(const void* gate_up_dev, std::uint64_t row_bytes,
+                  std::uint64_t expert_stride_bytes, const float* x,
+                  const std::int32_t* ids, float* gout, float* uout,
+                  std::uint32_t slots, std::uint32_t used, std::uint32_t ff,
+                  std::uint32_t hidden, hipStream_t stream);
+
+/// Fused Q4_0 down GEMV for the decode MoE: grid (slots, hidden); block
+/// (slot, h) = dot(dequant(down[e][h][:]), act[slot][:]) with e = ids[slot]
+/// read on the device (negative -> writes 0). down slab [E][hidden][ff].
+void GemvQSlot(const void* down_dev, std::uint64_t row_bytes,
+               std::uint64_t expert_stride_bytes, const float* act,
+               const std::int32_t* ids, float* out, std::uint32_t slots,
+               std::uint32_t hidden, std::uint32_t ff, hipStream_t stream);
+
+/// Decode routed-MoE epilogue: out[t] += sum_s wts[t*used+s] * dscale[ids[..]]
+/// * slot_down[t*used+s]. Device-side routing; replaces the per-expert
+/// ScaleInplace + MoeRoutedAdd pair (and the host ids/wts readback).
+void MoeSlotEpilogue(const float* slot_down, const std::int32_t* ids,
+                     const float* wts, const float* dscale, float* out,
+                     std::uint32_t n_tokens, std::uint32_t used,
+                     std::uint32_t dim, hipStream_t stream);
+
 void MoeRoutedAdd(const float* expert_down, const std::int32_t* ids,
                   const float* wts, std::uint32_t expert, float* out,
                   std::uint32_t n_tokens, std::uint32_t used,

@@ -453,6 +453,11 @@ struct Session::Impl {
   float* mlp_out{nullptr};     // [chunk][hidden]
   float* moe_out{nullptr};     // [chunk][hidden]
   float* expert_down{nullptr}; // [chunk][hidden] routed-expert down output
+  // Decode fused-MoE staging (slot-major): [chunk*used][expert_ff] and
+  // [chunk*used][hidden].
+  float* moe_vec_gate{nullptr};
+  float* moe_vec_up{nullptr};
+  float* moe_vec_down{nullptr};
   float* logits{nullptr};      // [kMaxChunk][vocab]
   std::uint32_t last_chunk_n{0};  // tokens in the last chunk
   __half* w_slab{nullptr};     // dequant staging (largest matrix)
@@ -505,6 +510,17 @@ struct Session::Impl {
                                    error);
     expert_down = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * hidden,
                                        error);
+    moe_vec_gate = buffers.Alloc<float>(
+        static_cast<std::size_t>(chunk) * w.config.experts_used *
+            w.config.expert_ff,
+        error);
+    moe_vec_up = buffers.Alloc<float>(
+        static_cast<std::size_t>(chunk) * w.config.experts_used *
+            w.config.expert_ff,
+        error);
+    moe_vec_down = buffers.Alloc<float>(
+        static_cast<std::size_t>(chunk) * w.config.experts_used * hidden,
+        error);
     logits = buffers.Alloc<float>(
         static_cast<std::size_t>(kMaxChunk) * w.config.vocab_size, error);
     // Compact-routing buffers (used by the compact MoE prefill path).
@@ -878,6 +894,43 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       fn::RouterTopK(impl_->router_logits, c.num_experts, impl_->expert_ids,
                      impl_->expert_weights, n, c.num_experts, c.experts_used,
                      stream);
+      // Decode fast path (n == 1): NO host readback of ids/wts, NO
+      // active-expert loop, NO per-expert scale/add kernels. THREE launches
+      // per layer drive the whole routed MoE with device-side routing:
+      // fused gate/up over all used slots -> SwiGLU -> fused slot down GEMV
+      // -> fused epilogue applying wts[slot]*dscale[e].
+      // (Old path: 2 blocking D2H + ~24 launches + 2x n*hidden extra traffic.)
+      if (n == 1 && !l.gate_up_exps.empty() && !l.down_exps.empty() &&
+          l.down_exps.type == core::GgmlType::kQ4_0 &&
+          getenv("GEMMA4_NO_DECODE_VEC") == nullptr) {
+        const std::uint32_t used = c.experts_used;
+        const std::uint32_t ff = c.expert_ff;
+        const void* gu_dev = l.gate_up_exps.device != nullptr
+                                 ? l.gate_up_exps.device
+                                 : l.gate_up_exps.data;
+        const void* dn_dev = l.down_exps.device != nullptr
+                                 ? l.down_exps.device
+                                 : l.down_exps.data;
+        const std::uint64_t gu_stride =
+            static_cast<std::uint64_t>(2) * ff * l.gate_up_exps.RowBytes();
+        const std::uint64_t dn_stride =
+            static_cast<std::uint64_t>(hidden) * l.down_exps.RowBytes();
+        kernels::MoeVecGateUp(gu_dev, l.gate_up_exps.RowBytes(), gu_stride,
+                              impl_->normed, impl_->expert_ids,
+                              impl_->moe_vec_gate, impl_->moe_vec_up,
+                              used, used, ff, hidden, stream);
+        kernels::GeluTanhSwiglu(impl_->moe_vec_gate, impl_->moe_vec_up,
+                                static_cast<std::size_t>(used) * ff, stream);
+        kernels::GemvQSlot(dn_dev, l.down_exps.RowBytes(), dn_stride,
+                           impl_->moe_vec_gate, impl_->expert_ids,
+                           impl_->moe_vec_down, used, hidden, ff, stream);
+        kernels::MoeSlotEpilogue(
+            impl_->moe_vec_down, impl_->expert_ids, impl_->expert_weights,
+            l.down_exps_scale.empty()
+                ? nullptr
+                : static_cast<const float*>(l.down_exps_scale.device),
+            impl_->attn_out, 1, used, hidden, stream);
+      } else {
       std::vector<std::int32_t> ids(static_cast<std::size_t>(n) *
                                     c.experts_used);
       hipMemcpy(ids.data(), impl_->expert_ids,
@@ -1132,6 +1185,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                                 impl_->expert_weights, e, impl_->attn_out, n,
                                 c.experts_used, hidden, stream);
         }
+      }
       }
 
       SyncSum(impl_->attn_out, "moe_accum", n, hidden, il);

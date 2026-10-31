@@ -911,6 +911,200 @@ void MoeScatterAdd(const float* down, const std::int32_t* rows_token,
                      down, rows_token, rows_slot, wts, begin, end, out, dim);
 }
 
+// Decode-time fused MoE gate/up: one block per (slot, output row). Expert
+// comes from the DEVICE ids array (negative = skip). 16-byte vector weight
+// loads (one uint4 = one 32-block's nibble payload); fp32 x stays scalar with
+// the same per-element products and low-before-high order as GemvQKernel.
+__global__ void MoeVecGateUpKernel(const void* __restrict__ gate_up,
+                                   std::uint64_t row_bytes,
+                                   std::uint64_t expert_stride_bytes,
+                                   const float* __restrict__ x,
+                                   const std::int32_t* __restrict__ ids,
+                                   float* __restrict__ gout,
+                                   float* __restrict__ uout,
+                                   std::uint32_t used, std::uint32_t ff,
+                                   std::uint32_t hidden) {
+  const std::uint32_t row = blockIdx.x;  // token*used + slot
+  const std::uint32_t r = blockIdx.y;    // 0..2*ff-1 (first ff = gate rows)
+  const std::int32_t e = ids[row];
+  if (e < 0) return;
+  const bool is_up = r >= ff;
+  const std::uint32_t out_row = is_up ? r - ff : r;
+  const auto* wrow = static_cast<const std::uint8_t*>(gate_up) +
+                     static_cast<std::size_t>(e) * expert_stride_bytes +
+                     static_cast<std::size_t>(r) * row_bytes;
+  const float* xr = x + static_cast<std::size_t>(row / used) * hidden;
+  float sum = 0.0F;
+  const std::uint64_t nblk = hidden / 32;
+  for (std::uint64_t b = threadIdx.x; b < nblk;
+       b += static_cast<std::uint64_t>(blockDim.x)) {
+    const float d =
+        __half2float(*reinterpret_cast<const __half*>(wrow + b * 18));
+    const uint4 q = *reinterpret_cast<const uint4*>(wrow + b * 18 + 2);
+    const float* xv = xr + b * 32;
+    const std::uint32_t qw[4] = {q.x, q.y, q.z, q.w};
+    #pragma unroll
+    for (int q4 = 0; q4 < 4; ++q4) {
+      const std::uint32_t byte0 = qw[q4] & 0xFF;
+      const std::uint32_t byte1 = (qw[q4] >> 8) & 0xFF;
+      const std::uint32_t byte2 = (qw[q4] >> 16) & 0xFF;
+      const std::uint32_t byte3 = (qw[q4] >> 24) & 0xFF;
+      const float lo0 = d * (static_cast<float>(byte0 & 0xF) - 8.0F);
+      const float hi0 = d * (static_cast<float>(byte0 >> 4) - 8.0F);
+      const float lo1 = d * (static_cast<float>(byte1 & 0xF) - 8.0F);
+      const float hi1 = d * (static_cast<float>(byte1 >> 4) - 8.0F);
+      const float lo2 = d * (static_cast<float>(byte2 & 0xF) - 8.0F);
+      const float hi2 = d * (static_cast<float>(byte2 >> 4) - 8.0F);
+      const float lo3 = d * (static_cast<float>(byte3 & 0xF) - 8.0F);
+      const float hi3 = d * (static_cast<float>(byte3 >> 4) - 8.0F);
+      sum += lo0 * xv[q4 * 4 + 0];
+      sum += hi0 * xv[q4 * 4 + 16];
+      sum += lo1 * xv[q4 * 4 + 1];
+      sum += hi1 * xv[q4 * 4 + 17];
+      sum += lo2 * xv[q4 * 4 + 2];
+      sum += hi2 * xv[q4 * 4 + 18];
+      sum += lo3 * xv[q4 * 4 + 3];
+      sum += hi3 * xv[q4 * 4 + 19];
+    }
+  }
+  for (std::uint32_t off = 16; off > 0; off >>= 1)
+    sum += __shfl_down_sync(0xffffffffull, sum, off);
+  __shared__ float shared[kThreads / 32];
+  if ((threadIdx.x & 31) == 0) shared[threadIdx.x / 32] = sum;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float v = threadIdx.x < blockDim.x / 32 ? shared[threadIdx.x] : 0.0F;
+    for (std::uint32_t off = 16; off > 0; off >>= 1)
+      v += __shfl_down_sync(0xffffffffull, v, off);
+    if (threadIdx.x == 0)
+      (is_up ? uout : gout)[static_cast<std::size_t>(row) * ff + out_row] = v;
+  }
+}
+
+void MoeVecGateUp(const void* gate_up_dev, std::uint64_t row_bytes,
+                  std::uint64_t expert_stride_bytes, const float* x,
+                  const std::int32_t* ids, float* gout, float* uout,
+                  std::uint32_t slots, std::uint32_t used, std::uint32_t ff,
+                  std::uint32_t hidden, hipStream_t stream) {
+  if (slots == 0) return;
+  hipLaunchKernelGGL(MoeVecGateUpKernel, dim3(slots, 2 * ff), dim3(kThreads),
+                     0, stream, gate_up_dev, row_bytes, expert_stride_bytes,
+                     x, ids, gout, uout, used, ff, hidden);
+}
+
+// Decode routed-MoE epilogue: out[t] += sum_s wts[t*used+s] * dscale[ids[..]]
+// * slot_down[t*used+s]. One block per token; replaces the per-expert
+// ScaleInplace + MoeRoutedAdd pair of the old loop.
+__global__ void MoeSlotEpilogueKernel(const float* __restrict__ slot_down,
+                                      const std::int32_t* __restrict__ ids,
+                                      const float* __restrict__ wts,
+                                      const float* __restrict__ dscale,
+                                      float* __restrict__ out,
+                                      std::uint32_t used,
+                                      std::uint32_t dim) {
+  const std::uint32_t t = blockIdx.x;
+  float* dst = out + static_cast<std::size_t>(t) * dim;
+  for (std::uint32_t i = threadIdx.x; i < dim; i += blockDim.x) {
+    float sum = 0.0F;
+    for (std::uint32_t s = 0; s < used; ++s) {
+      const std::uint32_t row = t * used + s;
+      const std::int32_t e = ids[row];
+      if (e < 0) continue;
+      const float w = wts[row];
+      if (w == 0.0F) continue;
+      const float scale = dscale != nullptr ? dscale[e] : 1.0F;
+      sum += w * scale *
+             slot_down[static_cast<std::size_t>(row) * dim + i];
+    }
+    dst[i] += sum;
+  }
+}
+
+void MoeSlotEpilogue(const float* slot_down, const std::int32_t* ids,
+                     const float* wts, const float* dscale, float* out,
+                     std::uint32_t n_tokens, std::uint32_t used,
+                     std::uint32_t dim, hipStream_t stream) {
+  hipLaunchKernelGGL(MoeSlotEpilogueKernel, dim3(n_tokens), dim3(kThreads), 0,
+                     stream, slot_down, ids, wts, dscale, out, used, dim);
+}
+
+// Fused Q4_0 down GEMV for the decode MoE: expert row selected per slot from
+// the DEVICE ids array (negative -> output 0). uint4 vector weight loads,
+// same per-element math as GemvQKernel.
+__global__ void GemvQSlotKernel(const void* __restrict__ down,
+                                std::uint64_t row_bytes,
+                                std::uint64_t expert_stride_bytes,
+                                const float* __restrict__ act,
+                                const std::int32_t* __restrict__ ids,
+                                float* __restrict__ out,
+                                std::uint32_t hidden, std::uint32_t ff) {
+  const std::uint32_t slot = blockIdx.x;
+  const std::uint32_t h = blockIdx.y;
+  const std::size_t orow = static_cast<std::size_t>(slot) * hidden + h;
+  const std::int32_t e = ids[slot];
+  if (e < 0) {
+    if (threadIdx.x == 0) out[orow] = 0.0F;
+    return;
+  }
+  const auto* wrow = static_cast<const std::uint8_t*>(down) +
+                     static_cast<std::size_t>(e) * expert_stride_bytes +
+                     static_cast<std::size_t>(h) * row_bytes;
+  const float* ar = act + static_cast<std::size_t>(slot) * ff;
+  float sum = 0.0F;
+  const std::uint64_t nblk = ff / 32;
+  for (std::uint64_t b = threadIdx.x; b < nblk;
+       b += static_cast<std::uint64_t>(blockDim.x)) {
+    const float d =
+        __half2float(*reinterpret_cast<const __half*>(wrow + b * 18));
+    const uint4 q = *reinterpret_cast<const uint4*>(wrow + b * 18 + 2);
+    const float* xv = ar + b * 32;
+    const std::uint32_t qw[4] = {q.x, q.y, q.z, q.w};
+    #pragma unroll
+    for (int q4 = 0; q4 < 4; ++q4) {
+      const std::uint32_t byte0 = qw[q4] & 0xFF;
+      const std::uint32_t byte1 = (qw[q4] >> 8) & 0xFF;
+      const std::uint32_t byte2 = (qw[q4] >> 16) & 0xFF;
+      const std::uint32_t byte3 = (qw[q4] >> 24) & 0xFF;
+      const float lo0 = d * (static_cast<float>(byte0 & 0xF) - 8.0F);
+      const float hi0 = d * (static_cast<float>(byte0 >> 4) - 8.0F);
+      const float lo1 = d * (static_cast<float>(byte1 & 0xF) - 8.0F);
+      const float hi1 = d * (static_cast<float>(byte1 >> 4) - 8.0F);
+      const float lo2 = d * (static_cast<float>(byte2 & 0xF) - 8.0F);
+      const float hi2 = d * (static_cast<float>(byte2 >> 4) - 8.0F);
+      const float lo3 = d * (static_cast<float>(byte3 & 0xF) - 8.0F);
+      const float hi3 = d * (static_cast<float>(byte3 >> 4) - 8.0F);
+      sum += lo0 * xv[q4 * 4 + 0];
+      sum += hi0 * xv[q4 * 4 + 16];
+      sum += lo1 * xv[q4 * 4 + 1];
+      sum += hi1 * xv[q4 * 4 + 17];
+      sum += lo2 * xv[q4 * 4 + 2];
+      sum += hi2 * xv[q4 * 4 + 18];
+      sum += lo3 * xv[q4 * 4 + 3];
+      sum += hi3 * xv[q4 * 4 + 19];
+    }
+  }
+  for (std::uint32_t off = 16; off > 0; off >>= 1)
+    sum += __shfl_down_sync(0xffffffffull, sum, off);
+  __shared__ float shared[kThreads / 32];
+  if ((threadIdx.x & 31) == 0) shared[threadIdx.x / 32] = sum;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float v = threadIdx.x < blockDim.x / 32 ? shared[threadIdx.x] : 0.0F;
+    for (std::uint32_t off = 16; off > 0; off >>= 1)
+      v += __shfl_down_sync(0xffffffffull, v, off);
+    if (threadIdx.x == 0) out[orow] = v;
+  }
+}
+
+void GemvQSlot(const void* down_dev, std::uint64_t row_bytes,
+               std::uint64_t expert_stride_bytes, const float* act,
+               const std::int32_t* ids, float* out, std::uint32_t slots,
+               std::uint32_t hidden, std::uint32_t ff, hipStream_t stream) {
+  hipLaunchKernelGGL(GemvQSlotKernel, dim3(slots, hidden), dim3(kThreads), 0,
+                     stream, down_dev, row_bytes, expert_stride_bytes, act,
+                     ids, out, hidden, ff);
+}
+
 void MoeRoutedAdd(const float* expert_down, const std::int32_t* ids,
                   const float* wts, std::uint32_t expert, float* out,
                   std::uint32_t n_tokens, std::uint32_t used,
