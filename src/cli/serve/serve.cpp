@@ -1635,7 +1635,19 @@ int RunServe(std::span<const char* const> args) {
             sampling_config);
         return fresh;
       };
-      admin = std::make_shared<server::ModelAdminService>(registry, loader);
+      // Free-memory probe for the load gate + LRU eviction. hipMemGetInfo
+      // reports device heap free; on a unified-memory APU this tracks the
+      // same pool weights and KV are carved from.
+      const auto probe = []() -> std::optional<std::size_t> {
+#if defined(ENGINE_ENABLE_HIP)
+        std::size_t free_bytes = 0, total_bytes = 0;
+        if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess)
+          return free_bytes;
+#endif
+        return std::nullopt;
+      };
+      admin =
+          std::make_shared<server::ModelAdminService>(registry, loader, probe);
       server::Logger::Info(
           "server", "event=multi_model primary=" + primary +
                         " admin=/admin/models,/admin/load,/admin/eject");

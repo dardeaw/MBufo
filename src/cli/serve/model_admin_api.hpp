@@ -5,8 +5,11 @@
 #ifndef GUFO_SERVER_MODEL_ADMIN_API_HPP_
 #define GUFO_SERVER_MODEL_ADMIN_API_HPP_
 
+#include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 
 #include "src/cli/serve/http_server.hpp"
@@ -32,12 +35,20 @@ struct AdminLoadRequest {
 using ModelLoader = std::function<std::shared_ptr<TextGenerationBackend>(
     const AdminLoadRequest& request, std::string* error)>;
 
+/// Reports currently-free device memory in bytes, or nullopt when unknown.
+/// Injected by serve.cpp (hipMemGetInfo) so this module stays HIP-free. Used
+/// to gate a load and drive LRU eviction under memory pressure.
+using MemoryProbe = std::function<std::optional<std::size_t>()>;
+
 /// Serializes load/eject so two concurrent admin calls cannot race the
 /// registry or over-commit GPU memory.
 class ModelAdminService final {
 public:
-  ModelAdminService(std::shared_ptr<ModelRegistry> registry, ModelLoader loader)
-      : registry_(std::move(registry)), loader_(std::move(loader)) {}
+  ModelAdminService(std::shared_ptr<ModelRegistry> registry, ModelLoader loader,
+                    MemoryProbe probe = {})
+      : registry_(std::move(registry)),
+        loader_(std::move(loader)),
+        probe_(std::move(probe)) {}
 
   /// Dispatches an /admin/* request. `req` is the parsed HTTP request.
   HttpResponse Handle(const HttpRequest& req);
@@ -49,6 +60,8 @@ private:
 
   std::shared_ptr<ModelRegistry> registry_;
   ModelLoader loader_;
+  MemoryProbe probe_;
+  std::mutex load_mutex_;  // one load/eject at a time
 };
 
 }  // namespace gufo::server

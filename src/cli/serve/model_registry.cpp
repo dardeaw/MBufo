@@ -116,6 +116,31 @@ bool ModelRegistry::HasName(std::string_view name) const {
   return by_name_.count(std::string(name)) != 0;
 }
 
+std::vector<std::string> ModelRegistry::LruCandidates() const {
+  std::lock_guard lock(mutex_);
+  // The default is the first ready entry in registration order; it is never a
+  // candidate so eviction cannot leave the registry empty.
+  std::string default_id;
+  for (const auto& entry : order_) {
+    if (entry->backend && entry->backend->ready()) {
+      default_id = entry->id;
+      break;
+    }
+  }
+  std::vector<std::pair<std::uint64_t, std::string>> ranked;
+  for (const auto& entry : order_) {
+    if (entry->id == default_id) continue;
+    ranked.emplace_back(entry->last_used.load(std::memory_order_relaxed),
+                        entry->id);
+  }
+  std::sort(ranked.begin(), ranked.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::vector<std::string> out;
+  out.reserve(ranked.size());
+  for (const auto& [_, id] : ranked) out.push_back(id);
+  return out;
+}
+
 std::size_t ModelRegistry::Size() const {
   std::lock_guard lock(mutex_);
   return order_.size();

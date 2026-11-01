@@ -1,9 +1,12 @@
 #include "src/cli/serve/model_admin_api.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "src/core/json.hpp"
 
@@ -32,6 +35,17 @@ std::string DeriveId(const std::string& path) {
   std::string name = p.stem().string();
   if (name.empty()) name = path;
   return name;
+}
+
+// GGUF file size is a lower bound on resident weight bytes; KV cache and
+// scratch add on top. A 1.25x factor plus a fixed floor gives a conservative
+// estimate that avoids over-committing while not rejecting viable loads.
+std::size_t EstimateResidentBytes(const std::string& path) {
+  std::error_code ec;
+  const auto size = std::filesystem::file_size(path, ec);
+  if (ec) return 0;  // unknown; caller treats 0 as "cannot gate"
+  constexpr std::size_t kMib = 1024ull * 1024ull;
+  return static_cast<std::size_t>(size + size / 4 + 512 * kMib);
 }
 
 }  // namespace
@@ -90,6 +104,11 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
   request.vision_model_path = body.member_str("vision_model_path");
   request.enable_yarn = body.find("enable_yarn") != nullptr &&
                         body.find("enable_yarn")->as_bool(false);
+  // allow_evict (default true): under memory pressure, LRU-eject other
+  // models to make room. When false, a short-free load fails with 409.
+  const bool allow_evict =
+      body.find("allow_evict") == nullptr ||
+      body.find("allow_evict")->as_bool(true);
   if (request.path.empty())
     return AdminErr(400, "Bad Request", "'path' is required", "missing_path");
   if (request.session_count == 0) request.session_count = 1;
@@ -98,6 +117,45 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
     return AdminErr(409, "Conflict",
                     "model '" + request.id + "' is already loaded",
                     "already_loaded");
+
+  // Serialize loads/ejects so concurrent admin calls cannot both pass the
+  // free-memory gate and over-commit the device.
+  std::lock_guard serialize(load_mutex_);
+
+  // Memory gate: estimate this model's resident bytes and, when free memory
+  // is short, LRU-eject other loaded models until it fits. A probe that
+  // reports nothing (no HIP) skips the gate and loads optimistically.
+  json::Value evicted = json::Value::array();
+  const std::size_t needed = EstimateResidentBytes(request.path);
+  if (probe_ && needed > 0) {
+    auto free_bytes = probe_();
+    if (free_bytes.has_value() && *free_bytes < needed) {
+      if (!allow_evict) {
+        return AdminErr(409, "Conflict",
+                        "insufficient free device memory for '" + request.id +
+                            "': need ~" + std::to_string(needed >> 20) +
+                            " MiB, have ~" + std::to_string(*free_bytes >> 20) +
+                            " MiB; set allow_evict=true or eject a model",
+                        "insufficient_memory");
+      }
+      for (const auto& victim : registry_->LruCandidates()) {
+        std::string rm_err;
+        if (!registry_->Remove(victim, &rm_err)) continue;
+        evicted.push_back(victim);
+        free_bytes = probe_();
+        if (!free_bytes.has_value() || *free_bytes >= needed) break;
+      }
+      if (free_bytes.has_value() && *free_bytes < needed) {
+        return AdminErr(
+            409, "Conflict",
+            "insufficient free device memory for '" + request.id +
+                "': need ~" + std::to_string(needed >> 20) + " MiB, have ~" +
+                std::to_string(*free_bytes >> 20) +
+                " MiB after evicting loaded models",
+            "insufficient_memory");
+      }
+    }
+  }
 
   std::string error;
   auto backend = loader_(request, &error);
@@ -111,6 +169,8 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
   resp["id"] = request.id;
   resp["path"] = request.path;
   resp["status"] = "loaded";
+  resp["estimated_resident_mib"] = needed >> 20;
+  if (!evicted.empty()) resp["evicted"] = std::move(evicted);
   return AdminOk(std::move(resp));
 }
 

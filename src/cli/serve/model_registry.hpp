@@ -65,6 +65,12 @@ public:
   /// True when `name` resolves to any loaded model (id or alias).
   [[nodiscard]] bool HasName(std::string_view name) const;
 
+  /// Ejectable candidates for memory-pressure eviction: primary ids ordered
+  /// by last_used ascending (least-recently-used first). The default (first
+  /// registered ready) model is excluded so eviction never empties the
+  /// registry. Empty when there is nothing safe to evict.
+  [[nodiscard]] std::vector<std::string> LruCandidates() const;
+
   [[nodiscard]] std::size_t Size() const;
 
 private:
