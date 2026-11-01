@@ -1,7 +1,8 @@
 # MBufo
 
-專為 AMD Strix Halo 打造的 [gufo](https://github.com/gufo-org/gufo) 分支，聚焦
-兩件事：**高併發混合批次排程**與**低位元 KV 快取**。
+專為 AMD Strix Halo 打造的 [gufo](https://github.com/gufo-org/gufo) 分支，定位
+為**高併發混合批次多模型推論引擎**：**混合批次排程**、**低位元 KV 快取**，以及
+開發中的**多模型 router**——同一個 port 服務多顆模型。
 
 > [English version](README.md)
 
@@ -13,12 +14,14 @@
 | --- | --- | --- |
 | **混合批次排程** | decode 列與 prefill chunk 共用同一個 `ForwardBatch` 與同一個注意力核心；批次封裝放大到 32 session / 1024 列。 | 負載下 ITL 穩定、服務公平：串流中的 token 只等一步而不是兩步（5 列批次每 token 121 ms → 57 ms）；16 路併發 GPU 使用率 99%，16 路 15.3 秒對 17.0 秒。 |
 | **低位元 KV 快取** | 上游 blocked Q8 路徑泛化成「格式＋編解碼器」抽象，K、V 兩軸可各自壓成 4-bit 18-byte 區塊。 | 262144 token 的 session 從 6.44 GB 降到 3.42 GB，K4V4 為 1.81 GB——代價是量出來的，不是假設的。 |
+| **多模型 router** *（開發中）* | 單一 HTTP port 掛多顆 GGUF 模型，依請求的 `model` 欄位路由；`POST /admin/load` 與 `/admin/eject` 在執行期增減模型，附免費記憶體閘門與 LRU 卸載。 | 高併發混合批次的**多模型**引擎：不重啟就能換模型、預設模型常駐、記憶體吃緊時踢掉最久未用的。 |
 
 混合批次預設開啟；KV 快取預設 `f16`，`q8` 是一個參數就能開。兩者都不改變模型
 語意。
 
 目標硬體：Ryzen AI MAX+ 395 / Radeon 8060S（`gfx1151`），最高 128 GiB 統一
-記憶體。模型重心：Qwen3.8 Flash-Next 與 Qwen3.8 27B。
+記憶體。模型重心：**Qwen3.8 Flash-Next**（主打）與 Qwen3.8 27B，並支援
+**Gemma 4 26B-A4B** 系列作為補完（走各自的專用引擎）。
 
 **目錄：** [快速開始](#快速開始) ·
 [混合批次排程](#混合批次排程高併發) ·
@@ -95,6 +98,62 @@ function tools、結構化輸出與串流；詳見[API 契約](docs/SERVER.md)�
 107 GB，只剩 16 GB 餘裕）；16 路拉到 96K 則會被
 `text runner request-state claim exceeds state capacity` 拒載。量測條件為
 UD-Q4_K_XL ＋ MTP Q8_0 sidecar ＋ BF16 mmproj，舊的 32K 上限已不成立。
+
+## 多模型 router *（開發中）*
+
+一個 port、多顆模型。`serve llm --multi-model` 把伺服器變成模型 registry：啟動
+模型成為**預設**，每個請求依 `model` 欄位路由到對應模型。模型可在執行期增減
+（admin API）——不重啟、不斷線。
+
+啟動時指定預設模型並開啟 router：
+
+```sh
+./build/release/gufo serve llm --multi-model \
+  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  --served-model-name flash-next -c 262144 --kv-quant q8 --sessions 4
+```
+
+依名稱路由（不帶 `model` 就打預設模型）：
+
+```sh
+curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "flash-next", "messages": [{"role": "user", "content": "hi"}]}'
+```
+
+執行期載入另一顆模型（例如 Gemma 4），再路由過去：
+
+```sh
+curl http://localhost:8080/admin/load -H "Content-Type: application/json" \
+  -d '{"id": "gemma4",
+       "path": "models/gemma-4-26b/gemma-4-26B-A4B-it-Q4_0.gguf",
+       "max_context": 262144, "session_count": 2, "kv_cache_quant": "q8"}'
+
+curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "gemma4", "messages": [{"role": "user", "content": "hi"}]}'
+```
+
+列出已載入的模型，用完就卸載：
+
+```sh
+curl http://localhost:8080/admin/models
+curl http://localhost:8080/admin/eject -H "Content-Type: application/json" \
+  -d '{"id": "gemma4"}'
+```
+
+**記憶體安全。** 每次 `/admin/load` 先估計模型佔用、比對免費裝置記憶體。塞不下
+時，router 會 **LRU 卸載**最久未用的非預設模型騰出空間（在 `evicted` 回報踢了
+哪些）；帶 `"allow_evict": false` 則改回 `409 insufficient_memory` 失敗。預設
+模型永不被踢，registry 不會被清空。卸載模型時，其 GPU 記憶體要等 in-flight 請求
+跑完才釋放，不會打到一半斷掉。
+
+| Admin 端點 | 方法 | Body | 效果 |
+| --- | --- | --- | --- |
+| `/admin/models` | GET | — | 列出已載入模型、context、最後使用時間 |
+| `/admin/load` | POST | `{id, path, max_context?, session_count?, kv_cache_quant?, vision_model_path?, enable_yarn?, allow_evict?}` | 載入並註冊模型（記憶體吃緊時 LRU 卸載） |
+| `/admin/eject` | POST | `{id}` | 卸載模型；記憶體等 in-flight 請求排空後才釋放 |
+
+router 是選擇性的：不帶 `--multi-model` 時，伺服器就是純粹的單模型版，位元級
+不變。
 
 ## 混合批次排程（高併發）
 
