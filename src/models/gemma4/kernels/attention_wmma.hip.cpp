@@ -1020,7 +1020,11 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   Tile next;    // tile j + 1: K in k_lds
   Tile k_tile;  // tile j + 2: K in k_regs
   Tile v_tile;  // tile j + 1 V in v_regs
-  std::uint32_t cursor = gather_tile(0, cur);
+  const std::uint32_t init_block =
+      (!sparse && window > 0u && start_pos + query_start + 1u > window)
+          ? ((start_pos + query_start + 1u - window) / ratio)
+          : 0u;
+  std::uint32_t cursor = gather_tile(init_block, cur);
   if (cur.count != 0) {
     load_k(cur, k_regs, bcur);
     load_v(cur, v_regs);

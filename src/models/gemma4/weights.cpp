@@ -1,5 +1,9 @@
 #include "src/models/gemma4/weights.hpp"
 
+#include <bit>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <unordered_set>
 
@@ -143,9 +147,11 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
         reader.FindTensor(p + "layer_output_scale.weight") != nullptr;
 
     l.attn_norm = b.Get(p + "attn_norm.weight", hidden);
-    std::fprintf(stderr, "[gemma4] bind L%u swa=%d head_dim=%u wq want %llu\n",
-                 il, (int)l.swa, head_dim,
-                 (unsigned long long)(config->num_heads) * head_dim);
+    if (std::getenv("GEMMA4_DEBUG_EMBED") != nullptr) {
+      std::fprintf(stderr, "[gemma4] bind L%u swa=%d head_dim=%u wq want %llu\n",
+                   il, (int)l.swa, head_dim,
+                   (unsigned long long)(config->num_heads) * head_dim);
+    }
     l.wq = b.Get(p + "attn_q.weight", hidden,
                  static_cast<std::uint64_t>(config->num_heads) * head_dim);
     l.wo = b.Get(p + "attn_output.weight",
@@ -155,6 +161,15 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     l.attn_post_norm = b.Get(p + "post_attention_norm.weight", hidden);
     if (l.has_out_scale) {
       l.out_scale = b.Get(p + "layer_output_scale.weight", 1);
+      if (l.out_scale.data != nullptr) {
+        if (l.out_scale.type == core::GgmlType::kF32) {
+          std::memcpy(&l.out_scale_val, l.out_scale.data, sizeof(float));
+        } else if (l.out_scale.type == core::GgmlType::kBF16) {
+          std::uint16_t bits = 0;
+          std::memcpy(&bits, l.out_scale.data, sizeof(bits));
+          l.out_scale_val = std::bit_cast<float>(static_cast<std::uint32_t>(bits) << 16);
+        }
+      }
     }
     if (!l.swa) {
       // full_attention layers use GGUF rope_freqs for proportional rope.

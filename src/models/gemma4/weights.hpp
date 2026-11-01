@@ -19,6 +19,8 @@ struct TensorRef {
   const void* device{nullptr};
   /// Persistent F16 mirror (pre-dequantized at load; nullptr = dequant on the fly).
   const void* f16{nullptr};
+  /// Persistent Q8_0 mirror (losslessly converted from Q4_0 at load for W8A8/WMMA prefill).
+  const void* q8{nullptr};
   /// True when `device` mirrors the host-mapped GGUF payload.
   bool host_mapped{false};
   std::size_t size_bytes{0};
@@ -52,6 +54,7 @@ struct LayerWeights {
   bool has_kv{false};           ///< Layer owns wk/wv/attn_k_norm tensors.
   bool has_v_proj{false};       ///< wv present (else V reuses K).
   bool has_out_scale{false};    ///< per-layer output scalar present.
+  float out_scale_val{1.0F};    ///< host-cached value of out_scale[0].
 
   TensorRef attn_norm;          ///< [hidden]
   TensorRef wq;                 ///< [hidden -> heads * head_dim]

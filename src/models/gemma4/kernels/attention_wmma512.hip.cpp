@@ -155,7 +155,8 @@ __launch_bounds__(256, 1) __global__ void WmmaCausalAttentionKernel(
     const std::uint32_t* __restrict__ mask, std::uint32_t mask_words,
     float* __restrict__ out, std::uint32_t start_pos, std::uint32_t n_tokens,
     std::uint32_t first_query_group = 0, std::uint32_t k_block_bytes = 0,
-    std::uint32_t v_block_bytes = 0, std::uint32_t window = 0) {
+    std::uint32_t v_block_bytes = 0, std::uint32_t window = 0,
+    bool lpt_order = false) {
   // The launcher accepts only four-token selection blocks. Keep that
   // geometry constant throughout the key sweep.
   constexpr std::uint32_t ratio = kWmmaRatio;
@@ -193,15 +194,19 @@ __launch_bounds__(256, 1) __global__ void WmmaCausalAttentionKernel(
   // Keep the two KV heads of nearby queries together in the launch order.
   // This improves cache reuse without changing any query's key sweep.
   const std::uint32_t linear = blockIdx.y * gridDim.x + blockIdx.x;
+  const bool lpt_grid = (!kPackHeads && lpt_order);
   const std::uint32_t query_group =
-      first_query_group + (kPackHeads ? linear / kWmmaKvHeads : blockIdx.x);
+      first_query_group +
+      (kPackHeads ? linear / kWmmaKvHeads
+                  : (lpt_grid ? (gridDim.y - 1u - blockIdx.y) : blockIdx.x));
   const std::uint32_t query_start = query_group * kQueryRows;
+  const std::uint32_t head_axis = lpt_grid ? blockIdx.x : blockIdx.y;
   const std::uint32_t kv_head =
-      kPackHeads ? linear % kWmmaKvHeads : blockIdx.y / (kWmmaGqa / kWmmaHeads);
+      kPackHeads ? linear % kWmmaKvHeads : head_axis / (kWmmaGqa / kWmmaHeads);
   const std::uint32_t first_query_head =
       kPackHeads ? kv_head * kWmmaGqa
                  : (kv_head * kWmmaGqa) +
-                       ((blockIdx.y % (kWmmaGqa / kWmmaHeads)) * kWmmaHeads);
+                       ((head_axis % (kWmmaGqa / kWmmaHeads)) * kWmmaHeads);
   // Gemma 4 sets f_attention_scale = 1.0 (llama.cpp gemma4: no 1/sqrt(d)).
   constexpr float attention_scale = 1.0F;
 
@@ -1139,12 +1144,14 @@ bool AttentionWmma512(const float* q, const __half* k_cache, const __half* v_cac
   if (d != kWmmaHeadDim) return false;
   if (kv_stride != kWmmaKvWidth) return false;
   if (n_tokens == 0) return true;
-  const dim3 grid((n_tokens + kWmmaQueryRows - 1) / kWmmaQueryRows,
-                  kWmmaKvHeads * (kWmmaGqa / kWmmaHeads));
+  const std::uint32_t n_qg = (n_tokens + kWmmaQueryRows - 1) / kWmmaQueryRows;
+  const std::uint32_t n_hp = kWmmaKvHeads * (kWmmaGqa / kWmmaHeads);
+  const bool use_lpt = (getenv("GEMMA4_NO_WMMA512_LPT") == nullptr);
+  const dim3 grid = use_lpt ? dim3(n_hp, n_qg) : dim3(n_qg, n_hp);
   hipLaunchKernelGGL(
       (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false, false>),
       grid, dim3(256), 0, stream, q, nullptr, k_cache, v_cache, nullptr, 0u,
-      out, start_pos, n_tokens, 0u, 0u, 0u, window);
+      out, start_pos, n_tokens, 0u, 0u, 0u, window, use_lpt);
   return true;
 }
 

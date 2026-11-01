@@ -49,6 +49,12 @@ void RmsNorm(const float* x, const float* gamma, float* out,
              std::uint32_t n_rows, std::uint32_t dim, float eps,
              hipStream_t stream);
 
+/// Fused post-norm + residual (+ optional post_scale):
+/// residual_inout[t] = (residual_inout[t] + rms(x[t]) * gamma) * post_scale.
+void RmsNormAdd(const float* x, const float* gamma, float* residual_inout,
+                std::uint32_t n_rows, std::uint32_t dim, float eps,
+                float post_scale, hipStream_t stream);
+
 /// Copy a host buffer into device memory (plain hipMalloc + full copy).
 /// Returns nullptr on failure.
 void* UploadMirror(const void* host, std::size_t bytes);
@@ -68,6 +74,12 @@ void Embed(const void* table, core::GgmlType type,
 void EmbedScale(const void* table, core::GgmlType type,
                 const std::int32_t* tokens, float* res, std::uint32_t n_tokens,
                 std::uint32_t hidden, float scale, hipStream_t stream);
+
+/// Device-token variant of EmbedScale (no H2D copy; reads `d_tokens` directly).
+void EmbedScaleDevice(const void* table, core::GgmlType type,
+                      const std::int32_t* d_tokens, float* res,
+                      std::uint32_t n_tokens, std::uint32_t hidden, float scale,
+                      hipStream_t stream);
 
 void UploadTokens(const std::int32_t* tokens, std::uint32_t n_tokens,
                   hipStream_t stream);
@@ -130,6 +142,16 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                std::uint32_t kv_stride, std::uint32_t window,
                hipStream_t stream);
 
+/// Cross/decode attention with explicit query position base (`query_pos + t`)
+/// and explicit valid KV cache length (`kv_len`). Uses Split-K Flash-Decoding
+/// GQA across all CUs for narrow batches (decode, MTP verify, MTP draft).
+void AttentionCross(const float* q, const __half* k_cache,
+                    const __half* v_cache, float* out, std::uint32_t n_tokens,
+                    std::uint32_t query_pos, std::uint32_t kv_len,
+                    std::uint32_t heads, std::uint32_t kv_heads,
+                    std::uint32_t d, std::uint32_t kv_stride,
+                    std::uint32_t window, hipStream_t stream);
+
 /// Stores f32 rows into the f16 cache at positions start_pos + t.
 void StoreKv(const float* src, __half* cache, std::uint32_t n_tokens,
              std::uint32_t row_dim, std::uint32_t start_pos,
@@ -170,6 +192,14 @@ void MoeVecGateUp(const void* gate_up_dev, std::uint64_t row_bytes,
                   std::uint32_t slots, std::uint32_t used, std::uint32_t ff,
                   std::uint32_t hidden, hipStream_t stream);
 
+/// Wave32 fused MoE gate+up+GeluTanhSwiglu: writes act_out[slots][ff] directly.
+void MoeVecGateUpSwiglu(const void* gate_up_dev, std::uint64_t row_bytes,
+                        std::uint64_t expert_stride_bytes, const float* x,
+                        const std::int32_t* ids, float* act_out,
+                        std::uint32_t slots, std::uint32_t used,
+                        std::uint32_t ff, std::uint32_t hidden,
+                        hipStream_t stream);
+
 /// Fused Q4_0 down GEMV for the decode MoE: grid (slots, hidden); block
 /// (slot, h) = dot(dequant(down[e][h][:]), act[slot][:]) with e = ids[slot]
 /// read on the device (negative -> writes 0). down slab [E][hidden][ff].
@@ -185,6 +215,13 @@ void MoeSlotEpilogue(const float* slot_down, const std::int32_t* ids,
                      const float* wts, const float* dscale, float* out,
                      std::uint32_t n_tokens, std::uint32_t used,
                      std::uint32_t dim, hipStream_t stream);
+
+/// Overwriting twin of MoeSlotEpilogue (`out[t] = sum_s ...`), removing the
+/// separate hipMemsetAsync(out, 0) while guaranteeing zero stale residue.
+void MoeSlotEpilogueOverwrite(const float* slot_down, const std::int32_t* ids,
+                              const float* wts, const float* dscale, float* out,
+                              std::uint32_t n_tokens, std::uint32_t used,
+                              std::uint32_t dim, hipStream_t stream);
 
 void MoeRoutedAdd(const float* expert_down, const std::int32_t* ids,
                   const float* wts, std::uint32_t expert, float* out,
@@ -241,6 +278,65 @@ void GemvFused(const void* wdev, int type, std::uint64_t row_bytes,
 /// Fused n == 1 decode GEMV over dense F16 weights.
 void GemvF16Fused(const __half* wdev, std::uint64_t cols, const float* x,
                   float* y, std::uint32_t m, hipStream_t stream);
+
+/// Wave32 multi-row GEMV/narrow-GEMM for n_tokens in [1, 8], reading the
+/// quantized/F16 weight matrix once across all tokens. Optional softcap > 0
+/// applies tanh(v / softcap) * softcap in registers before writing y.
+void GemvBatched(const void* wdev, int type, std::uint64_t row_bytes,
+                 std::uint64_t cols, const float* x, float* y,
+                 std::uint32_t n_tokens, std::uint32_t m, float softcap,
+                 hipStream_t stream);
+
+/// Wave32 fused gate + up + GeluTanhSwiglu for n_tokens in [1, 8].
+void GemvGateUpSwiglu(const void* w_gate, const void* w_up, int type,
+                      std::uint64_t row_bytes, std::uint64_t cols,
+                      const float* x, float* out_act, std::uint32_t n_tokens,
+                      std::uint32_t m, hipStream_t stream);
+
+/// Wave32 fused Q + K (+ optional V) narrow-batch GEMV for n_tokens in [1, 8].
+void GemvQkv(const void* w_q, int type_q, std::uint64_t rb_q,
+             std::uint32_t qdim, const void* w_k, int type_k,
+             std::uint64_t rb_k, const void* w_v, int type_v,
+             std::uint64_t rb_v, std::uint32_t kvdim, std::uint64_t cols,
+             const float* x, float* q_out, float* k_out, float* v_out,
+             std::uint32_t n_tokens, hipStream_t stream);
+
+/// Fused Q/K/V per-head RMSNorm + RoPE/RopeFrequencies + F16 KV cache store.
+void PrepAttnQkv(float* qbuf, const float* kbuf, const float* vbuf,
+                 const float* q_norm, const float* k_norm, const float* v_norm,
+                 __half* kv_k, __half* kv_v, std::uint32_t n_tokens,
+                 std::uint32_t num_heads, std::uint32_t kv_heads,
+                 bool has_kv, bool has_v_proj, std::uint32_t head_dim,
+                 std::uint32_t rotary_dim, std::uint32_t start_pos,
+                 float theta, const float* freq_factors, float eps,
+                 hipStream_t stream);
+
+/// Fused MoE pre-FFN triple norm: computes rms(x) once and writes
+/// out_ffn = rms(x) * gamma_ffn, out_pre2 = rms(x) * gamma_pre2, and
+/// out_router = rms(x) * (1/sqrt(dim)) * router_scale.
+void FfnTripleNorm(const float* x, const float* gamma_ffn,
+                   const float* gamma_pre2, const float* router_scale,
+                   float* out_ffn, float* out_pre2, float* out_router,
+                   std::uint32_t n_rows, std::uint32_t dim, float eps,
+                   hipStream_t stream);
+
+/// Fused MoE combine + post norms + residual + layer output scale:
+/// routed = sum_s wts * dscale * slot_down
+/// combined = rms(shared_down) * gamma_post1 + rms(routed) * gamma_post2
+/// residual_inout = (residual_inout + rms(combined) * gamma_post) * post_scale
+void MoeCombinePostNormResidual(
+    const float* slot_down, const std::int32_t* ids, const float* wts,
+    const float* dscale, const float* shared_down, const float* gamma_post1,
+    const float* gamma_post2, const float* gamma_post, float* residual_inout,
+    std::uint32_t n_tokens, std::uint32_t used, std::uint32_t dim, float eps,
+    float post_scale, hipStream_t stream);
+
+/// Device-side builder for RoutedF16Gemm's `(expert | (tile << 16))` list from
+/// `routed_bounds[0..num_experts]`. Writes `[n_tiles, q4_rows]` to `d_meta`.
+void BuildRoutedTiles(const std::int32_t* routed_bounds,
+                      std::int32_t* q4_tiles, std::uint32_t* d_meta,
+                      std::uint32_t num_experts, std::uint32_t tile_rows,
+                      hipStream_t stream);
 
 }  // namespace kernels
 }  // namespace gufo::models::gemma4

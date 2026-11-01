@@ -1182,23 +1182,33 @@ int RunPrompt(std::span<const char* const> args) {
       if (!mtp_load_only) return 0;
     }
     const auto dstart = std::chrono::steady_clock::now();
+    const bool trace_tokens = getenv("GEMMA4_TRACE_TOKENS") != nullptr;
+    const bool pure_greedy =
+        gsampler.config().can_use_unmodified_argmax() &&
+        !gsampler.NeedsConstraintMask();
+    std::vector<float> host_logits;
     while (generated.size() < opt.max_tokens) {
-      const tokenization::TokenId token = gsampler.Sample(gsession->Logits());
-      if (opt.verbose) {
+      tokenization::TokenId token = 0;
+      if (pure_greedy && !trace_tokens) {
+        token = static_cast<tokenization::TokenId>(gsession->SampleGreedy());
+      } else {
         const auto lg = gsession->Logits();
-        float mx = -1e30F;
-        std::size_t mi = 0;
-        std::vector<float> host(lg.size());
-        hipMemcpy(host.data(), lg.data(), lg.size() * sizeof(float),
-                  hipMemcpyDeviceToHost);
-        for (std::size_t i = 0; i < host.size(); ++i) {
-          if (host[i] > mx) {
-            mx = host[i];
-            mi = i;
+        if (host_logits.size() != lg.size()) host_logits.resize(lg.size());
+        (void)hipMemcpy(host_logits.data(), lg.data(),
+                        lg.size() * sizeof(float), hipMemcpyDeviceToHost);
+        token = gsampler.Sample(host_logits);
+        if (trace_tokens) {
+          float mx = -1e30F;
+          std::size_t mi = 0;
+          for (std::size_t i = 0; i < host_logits.size(); ++i) {
+            if (host_logits[i] > mx) {
+              mx = host_logits[i];
+              mi = i;
+            }
           }
+          std::fprintf(stderr, "[gemma4] argmax=%zu val=%f sampled=%u\n", mi,
+                       mx, (unsigned)token);
         }
-        std::fprintf(stderr, "[gemma4] argmax=%zu val=%f sampled=%u\n", mi,
-                     mx, (unsigned)token);
       }
       std::cout << gmodel->TokenText(static_cast<std::int32_t>(token))
                 << std::flush;
