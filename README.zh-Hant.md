@@ -2,7 +2,7 @@
 
 專為 AMD Strix Halo 打造的 [gufo](https://github.com/gufo-org/gufo) 分支，定位
 為**高併發混合批次多模型推論引擎**：**混合批次排程**、**低位元 KV 快取**，以及
-開發中的**多模型 router**——同一個 port 服務多顆模型。
+**多模型 router**——同一個 port 服務多顆模型。
 
 > [English version](README.md)
 
@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | **混合批次排程** | decode 列與 prefill chunk 共用同一個 `ForwardBatch` 與同一個注意力核心；批次封裝放大到 32 session / 1024 列。 | 負載下 ITL 穩定、服務公平：串流中的 token 只等一步而不是兩步（5 列批次每 token 121 ms → 57 ms）；16 路併發 GPU 使用率 99%，16 路 15.3 秒對 17.0 秒。 |
 | **低位元 KV 快取** | 上游 blocked Q8 路徑泛化成「格式＋編解碼器」抽象，K、V 兩軸可各自壓成 4-bit 18-byte 區塊。 | 262144 token 的 session 從 6.44 GB 降到 3.42 GB，K4V4 為 1.81 GB——代價是量出來的，不是假設的。 |
-| **多模型 router** *（開發中）* | 單一 HTTP port 掛多顆 GGUF 模型，依請求的 `model` 欄位路由；`POST /admin/load` 與 `/admin/eject` 在執行期增減模型，附免費記憶體閘門與 LRU 卸載。 | 高併發混合批次的**多模型**引擎：不重啟就能換模型、預設模型常駐、記憶體吃緊時踢掉最久未用的。 |
+| **多模型 router** | 單一 HTTP port 掛多顆 GGUF 模型，依請求的 `model` 欄位路由；`POST /admin/load` 與 `/admin/eject` 在執行期增減模型，附免費記憶體閘門與 LRU 卸載。 | 高併發混合批次的**多模型**引擎：不重啟就能換模型、預設模型常駐、記憶體吃緊時踢掉最久未用的。 |
 
 混合批次預設開啟；KV 快取預設 `f16`，`q8` 是一個參數就能開。兩者都不改變模型
 語意。
@@ -99,7 +99,7 @@ function tools、結構化輸出與串流；詳見[API 契約](docs/SERVER.md)�
 `text runner request-state claim exceeds state capacity` 拒載。量測條件為
 UD-Q4_K_XL ＋ MTP Q8_0 sidecar ＋ BF16 mmproj，舊的 32K 上限已不成立。
 
-## 多模型 router *（開發中）*
+## 多模型 router
 
 一個 port、多顆模型。`serve llm --multi-model` 把伺服器變成模型 registry：啟動
 模型成為**預設**，每個請求依 `model` 欄位路由到對應模型。模型可在執行期增減

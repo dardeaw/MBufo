@@ -2,8 +2,8 @@
 
 A [gufo](https://github.com/gufo-org/gufo) fork for AMD Strix Halo, built as a
 **high-concurrency mixed-batch multi-model inference engine**: **mixed-batch
-scheduling**, a **low-bit KV cache**, and — in development — a **multi-model
-router** that serves many models on one port.
+scheduling**, a **low-bit KV cache**, and a **multi-model router** that serves
+many models on one port.
 
 > [繁體中文版本](README.zh-Hant.md)
 
@@ -17,7 +17,7 @@ upstream's; thanks to gufo-org and all contributors.
 | --- | --- | --- |
 | **Mixed-batch scheduling** | Decode rows and prefill chunks share one `ForwardBatch` and one attention kernel; the batch envelope grows to 32 sessions / 1024 rows. | Steady ITL and fair service under load: a streaming token waits one step instead of two (121 ms → 57 ms per token on a 5-row batch), 16 concurrent requests at 99% GPU, 15.3 s vs 17.0 s at 16-way. |
 | **Low-bit KV cache** | The blocked Q8 path becomes a format + codec abstraction, with 4-bit 18-byte blocks on the K and V axes independently. | 3.42 GB instead of 6.44 GB for a 262144-token session, 1.81 GB at K4V4 — quality cost measured, not assumed. |
-| **Multi-model router** *(in development)* | One HTTP port hosts many GGUF models, routed per request by its `model` field; `POST /admin/load` and `/admin/eject` add and drop models at runtime with a free-memory gate and LRU eviction. | A high-concurrency mixed-batch **multi-model** engine: swap models without restarting the server, keep the default resident, evict cold ones under memory pressure. |
+| **Multi-model router** | One HTTP port hosts many GGUF models, routed per request by its `model` field; `POST /admin/load` and `/admin/eject` add and drop models at runtime with a free-memory gate and LRU eviction. | A high-concurrency mixed-batch **multi-model** engine: swap models without restarting the server, keep the default resident, evict cold ones under memory pressure. |
 
 Mixed batching is on by default. The KV cache defaults to `f16`; `q8` is a
 one-flag opt-in. Neither changes model semantics.
@@ -111,7 +111,7 @@ with 16 GB of headroom, while `-c 98304` at sixteen streams is refused with
 UD-Q4_K_XL plus the MTP Q8_0 sidecar and BF16 mmproj, so the old 32K cap no
 longer applies.
 
-## Multi-model router *(in development)*
+## Multi-model router
 
 One port, many models. `serve llm --multi-model` turns the server into a
 registry: the startup model becomes the **default**, and every request routes
