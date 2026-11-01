@@ -328,6 +328,33 @@ std::size_t Qwen35PieceEnd(std::string_view text, std::size_t offset) {
 
 }  // namespace
 
+// Gemma 4 uses sentencepiece-style BPE: the vocabulary is raw UTF-8 (no
+// GPT-2 byte-escape round-trip), spaces become the U+2581 word symbol, and
+// merges run over whole newline-delimited chunks without word splitting.
+bool IsGemma4Vocabulary(std::string_view architecture) {
+  return architecture == "gemma4";
+}
+
+std::string Gemma4NormalizeSpaces(std::string_view text) {
+  // Sentencepiece word-start rule: every maximal space run carries one
+  // leading U+2581 marker (the word boundary), plus one per remaining space.
+  static constexpr std::string_view kWordMarker = "\xe2\x96\x81";
+  std::string out;
+  out.reserve(text.size() + text.size() / 8 + 3);
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == ' ') {
+      std::size_t run = 1;
+      while (i + run < text.size() && text[i + run] == ' ') ++run;
+      out += kWordMarker;
+      out.append(run - 1, ' ');
+      i += run - 1;
+      continue;
+    }
+    out.push_back(text[i]);
+  }
+  return out;
+}
+
 std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
     const core::GgufReader& reader, std::string* error_msg) {
   const auto token_views =
@@ -353,7 +380,27 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
     merges.emplace_back(mv);
   }
 
+  const auto architecture =
+      reader.GetMetadataString("general.architecture").value_or("");
+  const bool gemma4_vocab = IsGemma4Vocabulary(architecture);
   std::unordered_map<std::string, TokenId> special_tokens;
+  if (gemma4_vocab) {
+    // Gemma 4 specials are the exact vocabulary strings; the generic "<|"
+    // scan below would never match them.
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+      const auto& t = tokens[i];
+      if (t == "<pad>" || t == "<eos>" || t == "<bos>" || t == "<unk>" ||
+          t == "<mask>" || t == "<turn|>" || t == "<|turn>" ||
+          t == "<|tool_response>" || t == "<tool_response|>" ||
+          t == "<|tool_response" ||
+          t == "<|tool_call>" || t == "<tool_call|>" || t == "<|tool>" ||
+          t == "<tool|>" || t == "<|think|>" || t == "<|channel>" ||
+          t == "<channel|>" || t == "<|image|>" || t == "<|audio|>" ||
+          t == "<|video|>" || t == "<|channel>") {
+        special_tokens[t] = static_cast<TokenId>(i);
+      }
+    }
+  }
   // Dynamic lookup of special tokens from GGUF vocabulary table
   for (std::size_t i = 0; i < tokens.size(); ++i) {
     const auto& t = tokens[i];
@@ -364,15 +411,32 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
         t == "<tts_text_bos_single>" || t == kObjectRefStart ||
         t == kObjectRefEnd || t == kVisionStart || t == kVisionEnd ||
         t == kImagePad || t == kVideoPad || t == kQuadStart || t == kQuadEnd ||
-        (t.size() >= 4 && t.starts_with("<|") && t.ends_with("|>"))) {
+        (!gemma4_vocab && t.size() >= 4 && t.starts_with("<|") &&
+         t.ends_with("|>"))) {
       special_tokens[t] = static_cast<TokenId>(i);
     }
   }
 
-  auto tokenizer =
-      CreateFromVocabulary(tokens, merges, special_tokens, error_msg);
+  VocabularyLoadOptions load_options;
+  if (IsGemma4Vocabulary(architecture)) load_options.eager_decoded_tokens = false;
+  auto tokenizer = CreateFromVocabulary(tokens, merges, special_tokens,
+                                        error_msg, load_options);
   if (tokenizer == nullptr) {
     return nullptr;
+  }
+  if (gemma4_vocab) {
+    tokenizer->pre_tokenizer_ = PreTokenizer::kGemma4;
+    tokenizer->bos_token_id_ =
+        reader.GetMetadataUint32("tokenizer.ggml.bos_token_id")
+            .value_or(kInvalidTokenId);
+    const auto eos =
+        reader.GetMetadataUint32("tokenizer.ggml.eos_token_id");
+    if (eos.has_value())
+      tokenizer->eos_token_id_ = static_cast<TokenId>(*eos);
+    tokenizer->endoftext_token_id_ = tokenizer->eos_token_id_;
+    tokenizer->pad_token_id_ =
+        reader.GetMetadataUint32("tokenizer.ggml.padding_token_id")
+            .value_or(kInvalidTokenId);
   }
   if (reader.GetMetadataString("tokenizer.ggml.pre") ==
       std::optional<std::string_view>{"qwen35"}) {
@@ -496,6 +560,18 @@ void QwenTokenizer::InitializeByteTokens(bool eager_decoded_tokens) {
         id_to_decoded_token_[i] = UnescapeGpt2Bytes(tok);
       }
     }
+  }
+
+  if (pre_tokenizer_ == PreTokenizer::kGemma4) {
+    // Sentencepiece vocabularies carry raw UTF-8 single bytes; the GPT-2
+    // byte-escape map would miss every one of them.
+    for (std::size_t b = 0; b < 256; ++b) {
+      const std::string direct_char(1, static_cast<char>(b));
+      const auto it = token_to_id_.find(direct_char);
+      byte_tokens_[b] = it != token_to_id_.end() ? it->second
+                                                 : kInvalidTokenId;
+    }
+    return;
   }
 
   for (std::size_t b = 0; b < 256; ++b) {
@@ -625,6 +701,26 @@ std::vector<TokenId> QwenTokenizer::BpeMergeChunk(
 }
 
 std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
+  if (pre_tokenizer_ == PreTokenizer::kGemma4) {
+    // Sentencepiece-style BPE: normalize spaces to U+2581, then merge whole
+    // newline-delimited chunks without word splitting (newline-only chunks
+    // resolve through the vocabulary directly).
+    const std::string normalized = Gemma4NormalizeSpaces(text);
+    std::vector<TokenId> tokens;
+    std::size_t offset = 0;
+    while (offset < normalized.size()) {
+      const unsigned char c = static_cast<unsigned char>(normalized[offset]);
+      const std::size_t run_len =
+          c == '\n'
+              ? normalized.find_first_not_of('\n', offset) - offset
+              : normalized.find('\n', offset) - offset;
+      const auto piece = normalized.substr(offset, run_len);
+      auto piece_tokens = BpeMergeChunk(piece);
+      tokens.insert(tokens.end(), piece_tokens.begin(), piece_tokens.end());
+      offset += run_len;
+    }
+    return tokens;
+  }
   if (pre_tokenizer_ != PreTokenizer::kQwen35) {
     return BpeMergeChunk(text);
   }
@@ -784,6 +880,18 @@ std::string QwenTokenizer::DecodeTokenCopy(TokenId token_id) const {
   }
   if (is_special_token_.contains(token_id)) {
     return id_to_token_[token_id];
+  }
+  if (pre_tokenizer_ == PreTokenizer::kGemma4) {
+    // Raw sentencepiece entry: the leading U+2581 word marker becomes a
+    // space (detokenize contract), interior markers stay (they encode
+    // intra-word underscores), and the GPT-2 byte map does not apply.
+    const std::string& token = id_to_token_[token_id];
+    if (token.size() >= 3 && static_cast<unsigned char>(token[0]) == 0xE2 &&
+        static_cast<unsigned char>(token[1]) == 0x96 &&
+        static_cast<unsigned char>(token[2]) == 0x81) {
+      return std::string(" ") + token.substr(3);
+    }
+    return token;
   }
   const std::string& token = id_to_token_[token_id];
   if (token.size() == 6 && token.starts_with("<0x") && token.ends_with('>')) {
