@@ -15,10 +15,12 @@
 #include <vector>
 
 #include "src/cli/serve/generation_metrics.hpp"
+#include "src/cli/serve/model_registry.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 
 namespace gufo::server {
 
+class ModelAdminService;
 class VideoJobService;
 class TtsService;
 class AsrService;
@@ -107,13 +109,19 @@ bool IsListenAddress(const std::string& host);
 /// Minimal bounded HTTP/1.1 server for trusted-LAN model serving.
 class HttpServer {
 public:
+  /// `registry` (multi-model mode) routes each request to the model named by
+  /// its `model` field; when null the single `backend` serves everything and
+  /// behavior is unchanged. `admin` (with a registry) serves the /admin/* load
+  /// and eject API. backend_ is seeded from the registry default in that mode.
   HttpServer(std::string host, int port,
              std::shared_ptr<TextGenerationBackend> backend,
              std::shared_ptr<VideoJobService> video_jobs = nullptr,
              std::shared_ptr<TtsService> tts = nullptr,
              std::shared_ptr<AsrService> asr = nullptr,
              HttpServerOptions options = {},
-             std::shared_ptr<ImageService> images = nullptr);
+             std::shared_ptr<ImageService> images = nullptr,
+             std::shared_ptr<ModelRegistry> registry = nullptr,
+             std::shared_ptr<ModelAdminService> admin = nullptr);
   ~HttpServer();
 
   HttpServer(const HttpServer&) = delete;
@@ -146,6 +154,8 @@ private:
   std::string host_;
   int port_;
   std::shared_ptr<TextGenerationBackend> backend_;
+  std::shared_ptr<ModelRegistry> registry_;
+  std::shared_ptr<ModelAdminService> admin_;
   std::shared_ptr<VideoJobService> video_jobs_;
   std::shared_ptr<TtsService> tts_;
   std::shared_ptr<AsrService> asr_;

@@ -40,6 +40,7 @@
 #include "src/cli/serve/audio_websocket.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/model_admin_api.hpp"
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
@@ -850,6 +851,73 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     model["owned_by"] = "operator-supplied-qwen";
     model["capability"] = "image";
     data.push_back(std::move(model));
+  }
+  resp["data"] = std::move(data);
+  return Ok(resp);
+}
+
+/// Extracts the requested model name for routing: the JSON body `model` field
+/// for POST inference routes, else the `model` query param, else "" (default).
+/// Cheap best-effort parse; the handler parses the body again for real.
+std::string RequestedModelName(const HttpRequest& req) {
+  if (const auto q = req.query_param("model"); !q.empty()) return q;
+  if (req.method != "POST" || req.body.empty()) return {};
+  try {
+    const auto parsed = json::parse(req.body);
+    if (parsed.is_object()) return parsed.member_str("model");
+  } catch (const std::exception&) {
+    // Malformed bodies fall through to the default model; the handler reports
+    // the parse error with the correct status.
+  }
+  return {};
+}
+
+/// /v1/models for a multi-model registry: one entry per loaded model id.
+HttpResponse RegistryModels(const ModelRegistry& registry,
+                            const VideoJobService* video_jobs,
+                            const TtsService* tts, const AsrService* asr,
+                            const ImageService* images) {
+  json::Value resp = json::Value::object();
+  resp["object"] = "list";
+  json::Value data = json::Value::array();
+  for (const auto& info : registry.List()) {
+    json::Value model = json::Value::object();
+    model["id"] = info.id;
+    model["object"] = "model";
+    model["created"] = Now();
+    model["owned_by"] = "gufo";
+    if (info.max_context > 0)
+      model["context_length"] = static_cast<std::size_t>(info.max_context);
+    json::Value input_modalities = json::Value::array();
+    input_modalities.push_back("text");
+    json::Value architecture = json::Value::object();
+    architecture["input_modalities"] = std::move(input_modalities);
+    model["architecture"] = std::move(architecture);
+    data.push_back(std::move(model));
+  }
+  if (video_jobs != nullptr && video_jobs->ready()) {
+    json::Value m = json::Value::object();
+    m["id"] = "minimax-h3"; m["object"] = "model"; m["created"] = Now();
+    m["owned_by"] = "operator-supplied-minimax"; m["capability"] = "video";
+    data.push_back(std::move(m));
+  }
+  if (tts != nullptr && tts->ready()) {
+    json::Value m = json::Value::object();
+    m["id"] = tts->model_id(); m["object"] = "model"; m["created"] = Now();
+    m["owned_by"] = "operator-supplied-qwen"; m["capability"] = "audio_tts";
+    data.push_back(std::move(m));
+  }
+  if (asr != nullptr && asr->ready()) {
+    json::Value m = json::Value::object();
+    m["id"] = asr->model_id(); m["object"] = "model"; m["created"] = Now();
+    m["owned_by"] = "operator-supplied-qwen"; m["capability"] = "audio_asr";
+    data.push_back(std::move(m));
+  }
+  if (images != nullptr) {
+    json::Value m = json::Value::object();
+    m["id"] = images->model_id(); m["object"] = "model"; m["created"] = Now();
+    m["owned_by"] = "operator-supplied-qwen"; m["capability"] = "image";
+    data.push_back(std::move(m));
   }
   resp["data"] = std::move(data);
   return Ok(resp);
@@ -1783,10 +1851,14 @@ HttpServer::HttpServer(std::string host, int port,
                        std::shared_ptr<TtsService> tts,
                        std::shared_ptr<AsrService> asr,
                        HttpServerOptions options,
-                       std::shared_ptr<ImageService> images)
+                       std::shared_ptr<ImageService> images,
+                       std::shared_ptr<ModelRegistry> registry,
+                       std::shared_ptr<ModelAdminService> admin)
     : host_(std::move(host)),
       port_(port),
       backend_(std::move(backend)),
+      registry_(std::move(registry)),
+      admin_(std::move(admin)),
       video_jobs_(std::move(video_jobs)),
       tts_(std::move(tts)),
       asr_(std::move(asr)),
@@ -1798,6 +1870,9 @@ HttpServer::HttpServer(std::string host, int port,
   if (!options_.api_key.empty()) {
     api_key_hash_ = CredentialHash(options_.api_key);
   }
+  // Multi-model mode: seed backend_ from the registry default so health probes
+  // and register_routes() behave exactly as in single-model mode.
+  if (registry_ != nullptr && backend_ == nullptr) backend_ = registry_->Default();
   register_routes();
 }
 
@@ -2047,6 +2122,9 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     response.headers.emplace_back("WWW-Authenticate", "Bearer");
     return response;
   }
+  if (admin_ != nullptr && req.path.rfind("/admin/", 0) == 0) {
+    return admin_->Handle(req);
+  }
   // `/health` and `/ready` are the native spelling and match llama-server's
   // `/health`. `/healthz` and `/readyz` are aliases so Kubernetes-style probe
   // configuration works unmodified.
@@ -2088,6 +2166,9 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   }
   if (req.method == "GET" &&
       (req.path == "/v1/models" || req.path == "/models")) {
+    if (registry_ != nullptr)
+      return RegistryModels(*registry_, video_jobs_.get(), tts_.get(),
+                            asr_.get(), images_.get());
     return ListModels(backend_.get(), video_jobs_.get(), tts_.get(), asr_.get(),
                       images_.get());
   }
@@ -2137,6 +2218,20 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     if (entry.first.first == req.method && entry.first.second == req.path) {
       if (req.method == "POST" && device_lost())
         return DeviceLost();
+      if (registry_ != nullptr) {
+        const std::string requested = RequestedModelName(req);
+        auto target = registry_->Resolve(requested);
+        if (target == nullptr) {
+          if (requested.empty())
+            return Err(503, "Service Unavailable", "no model is loaded",
+                       "server_error", "no_model_loaded");
+          return Err(404, "Not Found",
+                     ("model '" + requested +
+                      "' is not served by this process").c_str(),
+                     "invalid_request_error", "model_not_found");
+        }
+        return entry.second(req, *target);
+      }
       return entry.second(req, *backend_);
     }
   }

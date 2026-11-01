@@ -30,6 +30,8 @@
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/http_server.hpp"
+#include "src/cli/serve/model_admin_api.hpp"
+#include "src/cli/serve/model_registry.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
@@ -948,6 +950,8 @@ int RunServe(std::span<const char* const> args) {
   std::string parse_err;
 
   std::shared_ptr<server::InferenceBackend> backend;
+  std::shared_ptr<server::ModelRegistry> registry;
+  std::shared_ptr<server::ModelAdminService> admin;
   std::shared_ptr<server::VideoJobService> video_jobs;
   std::shared_ptr<server::TtsService> tts;
   std::shared_ptr<server::AsrService> asr;
@@ -1177,6 +1181,7 @@ int RunServe(std::span<const char* const> args) {
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
     bool enable_yarn = false;
+    bool multi_model = false;
     std::string trace_path;
 
     gufo::cli::ArgParser llm_parser(
@@ -1212,6 +1217,12 @@ int RunServe(std::span<const char* const> args) {
                        "Flash-Next: static YaRN, required for --context above "
                        "the native 262144; it applies to every request",
                        "Model", &enable_yarn);
+    llm_parser.AddFlag(
+        "", "--multi-model",
+        "Enable the model registry + admin API on this port: the startup "
+        "model is the default, and POST /admin/load|eject add/remove more "
+        "models at runtime. Requests route by their `model` field.",
+        "Model", &multi_model);
     llm_parser.AddOption(
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
@@ -1558,6 +1569,77 @@ int RunServe(std::span<const char* const> args) {
         " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
         " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled") +
         served_names);
+
+    if (multi_model) {
+      registry = std::make_shared<server::ModelRegistry>();
+      std::string reg_err;
+      const auto ids = backend->model_ids();
+      const std::string primary = ids.empty() ? backend->model_id() : ids.front();
+      std::vector<std::string> aliases(ids.begin() + (ids.empty() ? 0 : 1),
+                                       ids.end());
+      if (!registry->Add(primary, std::move(aliases), backend, &reg_err)) {
+        std::cerr << "Error: registry add failed: " << reg_err << "\n";
+        return 1;
+      }
+      const auto loader =
+          [prefill_chunk_tokens, max_pending_requests,
+           max_pending_requests_per_client, max_output_bytes,
+           max_buffered_output_bytes, max_buffered_output_bytes_total,
+           request_timeout_ms, stall_timeout_ms, log_progress,
+           speculative_config, cache_disk_directory, cache_disk_bytes,
+           cache_disk_staging_bytes, cache_ram_bytes, max_tokens,
+           sampling_config,
+           build_artifact = std::string(GUFO_RELEASE_VERSION " (" GUFO_REVISION ")")](
+              const server::AdminLoadRequest& spec,
+              std::string* error)
+              -> std::shared_ptr<server::TextGenerationBackend> {
+        auto fresh = std::make_shared<server::InferenceBackend>();
+        if (!fresh->load(
+                spec.path, error, spec.max_context, spec.session_count,
+                server::TextPrefillPolicy{
+                    .decode_active_tokens = prefill_chunk_tokens},
+                server::TextSchedulerPolicy{
+                    .max_pending_requests = max_pending_requests,
+                    .max_pending_requests_per_client =
+                        max_pending_requests_per_client,
+                    .max_output_bytes_per_request = max_output_bytes,
+                    .max_buffered_output_bytes_per_request =
+                        max_buffered_output_bytes,
+                    .max_buffered_output_bytes_total =
+                        max_buffered_output_bytes_total,
+                    .request_timeout = std::chrono::milliseconds{
+                        static_cast<std::chrono::milliseconds::rep>(
+                            request_timeout_ms)},
+                    .stall_timeout = std::chrono::milliseconds{
+                        static_cast<std::chrono::milliseconds::rep>(
+                            stall_timeout_ms)},
+                    .log_progress = log_progress},
+                speculative_config,
+                server::TextDiskCacheConfig{
+                    .directory = cache_disk_directory,
+                    .capacity_bytes = cache_disk_bytes,
+                    .staging_capacity_bytes = cache_disk_staging_bytes,
+                    .model_artifact_fingerprint = {}},
+                spec.vision_model_path,
+                server::TextRunnerRamCacheOptions{
+                    .capacity_bytes = cache_ram_bytes},
+                spec.kv_cache_quant, spec.enable_yarn)) {
+          return nullptr;
+        }
+        // Advertise the registry id so the handler's serves_model() check
+        // accepts requests that name this model by its admin-assigned id.
+        fresh->set_model_ids({spec.id});
+        fresh->set_served_artifact(spec.path, build_artifact);
+        fresh->set_sampling_defaults(
+            max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
+            sampling_config);
+        return fresh;
+      };
+      admin = std::make_shared<server::ModelAdminService>(registry, loader);
+      server::Logger::Info(
+          "server", "event=multi_model primary=" + primary +
+                        " admin=/admin/models,/admin/load,/admin/eject");
+    }
   }
 
   // run() joins every request thread, so no hook call outlives it.
@@ -1574,7 +1656,7 @@ int RunServe(std::span<const char* const> args) {
                 ShutdownAfterDeviceLoss();
               },
       },
-      images);
+      images, registry, admin);
   std::string err;
   if (!server.start(&err)) {
     std::cerr << "Error starting HTTP server: " << err << "\n";

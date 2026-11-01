@@ -822,9 +822,10 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   }
   output->model = body.member_str("model");
   if (output->model.empty()) {
-    return Error(400, "Bad Request", "'model' is required", "missing_model");
-  }
-  if (!backend.serves_model(output->model)) {
+    // No explicit selection: use the backend the router dispatched to (the
+    // default model). Adopt its primary id so responses report it.
+    output->model = backend.model_id();
+  } else if (!backend.serves_model(output->model)) {
     return Error(404, "Not Found",
                  "model '" + output->model + "' is not served by this process",
                  "model_not_found");
