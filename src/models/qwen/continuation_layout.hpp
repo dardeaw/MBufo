@@ -16,6 +16,8 @@ enum class ContinuationPart {
   kFrontier,
   kKey,
   kValue,
+  kBlockedKey,
+  kBlockedValue,
   kConvolution,
   kRecurrent,
   kDraftMetadata,

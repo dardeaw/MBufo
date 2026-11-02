@@ -67,6 +67,15 @@ ContinuationLayout::ContinuationLayout(const core::ModelConfig& c,
           policy.UsesFp16AttentionKv() ? 1 : 2);
       add(ContinuationPart::kValue, kv_row, 0, layer,
           policy.UsesFp16AttentionKv() ? 1 : 2);
+      if (policy.UsesBlockedAttentionKv()) {
+        // Blocked-Q8 sidecar rows: same positions as the canonical F16
+        // rows, row_bytes = kv_heads * ceil(head_dim/32) * 34. Captured
+        // and restored by the generic row machinery, bit-exact.
+        const auto blocked_row = Product({c.num_key_value_heads,
+                                          (c.head_dim + 31) / 32, 34});
+        add(ContinuationPart::kBlockedKey, blocked_row, 0, layer);
+        add(ContinuationPart::kBlockedValue, blocked_row, 0, layer);
+      }
     } else {
       add(ContinuationPart::kConvolution, 0, conv, layer);
       add(ContinuationPart::kRecurrent, 0, recurrent, layer,
