@@ -1296,8 +1296,13 @@ int RunPrompt(std::span<const char* const> args) {
                    "(mtp/dflash2/dspark); pass --speculative off\n";
       return 1;
     }
+    std::uint32_t qwen_ctx = 4096;
+    if (const char* ctx_env = std::getenv("QWEN_CTX")) {
+      const long ctx_val = std::strtol(ctx_env, nullptr, 10);
+      if (ctx_val >= 1024) qwen_ctx = static_cast<std::uint32_t>(ctx_val);
+    }
     auto gpu_exec = gufo::hip::QwenGpuExecutor::CreateFromGguf(
-        reader, &err, 4096, qwen_policy);
+        reader, &err, qwen_ctx, qwen_policy);
     if (gpu_exec) {
       PrintModelLoadTime(model_load_start);
       auto prompt_tokens = encode_prompt(gpu_exec->GetTokenizer());
