@@ -327,9 +327,14 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
     throw std::invalid_argument(
         "Qwen DFlash disk cache requires a draft artifact fingerprint");
   }
-  const std::string_view state_abi =
-      QwenStateAbi(speculative, execution_policy.UsesFp16AttentionKv(),
-                   execution_policy.UsesBf16RecurrentState());
+  std::string state_abi =
+      std::string(QwenStateAbi(speculative, execution_policy.UsesFp16AttentionKv(),
+                               execution_policy.UsesBf16RecurrentState()));
+  if (execution_policy.UsesBlockedAttentionKv()) {
+    // Blocked-Q8 decode reads quantized sidecars: same weights, different
+    // numerics and a different state layout. Never share entries with f16.
+    state_abi += "-blocked-q8";
+  }
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=qwen3.8\n"
@@ -353,6 +358,9 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << hip::detail::kSplitKDecodeAttentionMaxSplits << '\n'
            << "kv_storage="
            << (execution_policy.UsesFp16AttentionKv() ? "fp16" : "fp32") << '\n'
+           << "kv_blocked_q8="
+           << (execution_policy.UsesBlockedAttentionKv() ? "true" : "false")
+           << '\n'
            << "recurrent_storage="
            << (execution_policy.UsesBf16RecurrentState() ? "bf16" : "fp32")
            << '\n'
@@ -4043,10 +4051,11 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
   std::cerr << "[qwen] kv_cache_quant="
             << (qwen_policy.blocked_q8_attention ? "q8" : "f16") << '\n';
   if (qwen_policy.blocked_q8_attention &&
-      speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+      speculative_config.backend != TextSpeculativeBackend::kDFlash) {
     SetError(error,
-             "QWEN_KV_QUANT=q8 does not support speculative decoding "
-             "(dflash2); pass --speculative off");
+             "QWEN_KV_QUANT=q8 supports only --speculative dflash2 "
+             "(MTP has no blocked-KV path); pass --speculative dflash2 or off");
     return false;
   }
 

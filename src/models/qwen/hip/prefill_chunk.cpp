@@ -776,14 +776,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
     std::span<const tokenization::TokenId> candidate_tokens,
     std::uint32_t start_pos, bool capture_logits) {
-  // Speculative verification under q8 is explicitly unsupported: the batched
-  // verify path maintains only the F16 plane, so accepting drafts would leave
-  // the blocked caches stale. Refuse loudly instead of decoding wrong.
-  if (policy_.UsesBlockedAttentionKv()) {
-    throw std::logic_error(
-        "blocked-Q8 attention does not support speculative verification; "
-        "use QWEN_KV_QUANT=f16 with --speculative");
-  }
+  // Blocked-Q8 verification is maintained by the batched decode-equivalent
+  // path (F16 plane plus blocked sidecars), matching q8 AR decode exactly.
   return ForwardDecodeEquivalentVerificationChunk(candidate_tokens, start_pos,
                                                   capture_logits);
 }

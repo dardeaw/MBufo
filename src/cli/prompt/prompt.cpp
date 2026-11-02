@@ -1291,9 +1291,11 @@ int RunPrompt(std::span<const char* const> args) {
     }
     std::cerr << "[qwen] kv_cache_quant="
               << (qwen_policy.blocked_q8_attention ? "q8" : "f16") << '\n';
-    if (qwen_policy.blocked_q8_attention && !opt.speculative_backend.empty()) {
-      std::cerr << "QWEN_KV_QUANT=q8 does not support speculative decoding "
-                   "(mtp/dflash2/dspark); pass --speculative off\n";
+    if (qwen_policy.blocked_q8_attention && !opt.speculative_backend.empty() &&
+        opt.speculative_backend != "dflash2") {
+      std::cerr << "QWEN_KV_QUANT=q8 supports only --speculative dflash2 "
+                   "(MTP has no blocked-KV path); pass --speculative dflash2 "
+                   "or off\n";
       return 1;
     }
     std::uint32_t qwen_ctx = 4096;
@@ -1502,9 +1504,11 @@ int RunChat(std::span<const char* const> args) {
     }
     std::cerr << "[qwen] kv_cache_quant="
               << (qwen_policy.blocked_q8_attention ? "q8" : "f16") << '\n';
-    if (qwen_policy.blocked_q8_attention && !opt.speculative_backend.empty()) {
-      std::cerr << "QWEN_KV_QUANT=q8 does not support speculative decoding "
-                   "(mtp/dflash2/dspark); pass --speculative off\n";
+    if (qwen_policy.blocked_q8_attention && !opt.speculative_backend.empty() &&
+        opt.speculative_backend != "dflash2") {
+      std::cerr << "QWEN_KV_QUANT=q8 supports only --speculative dflash2 "
+                   "(MTP has no blocked-KV path); pass --speculative dflash2 "
+                   "or off\n";
       return 1;
     }
     gpu_executor = hip::QwenGpuExecutor::CreateFromGguf(reader, &err, 4096,

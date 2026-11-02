@@ -9,6 +9,7 @@
 
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/hip/hip_utils.hpp"
+#include "src/models/qwen/hip/blocked_q8.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -501,14 +502,11 @@ QwenGpuExecutor::ForwardVerificationBatch(
   auto& arena_ = coordinator.arena_;
   const auto& weights_ = coordinator.weights_;
   const auto& config = weights_.config;
-  // Speculative verification under q8 is explicitly unsupported (the verify
-  // path maintains only the F16 plane, so accepting drafts would leave the
-  // blocked caches stale). Refuse loudly instead of decoding wrong.
-  if (coordinator.policy_.UsesBlockedAttentionKv()) {
-    throw std::logic_error(
-        "blocked-Q8 attention does not support speculative verification; "
-        "use QWEN_KV_QUANT=f16 with --speculative");
-  }
+  // Blocked-Q8 verification: the fused write below keeps the F16 plane
+  // canonical; the same final rows are appended to the layer blocked cache
+  // and the read goes through the shared blocked direct-read kernel, exactly
+  // like the single-row decode path. Positional writes need no rollback.
+  const bool use_blocked_kv = coordinator.policy_.UsesBlockedAttentionKv();
   const bool capture_prompt_hidden_ = coordinator.capture_prompt_hidden_;
   const auto policy = coordinator.policy_.Fingerprint();
   constexpr std::size_t kMaxRows = kMaxDecodeBatch * kMaxDecodeBatch;
@@ -708,31 +706,65 @@ QwenGpuExecutor::ForwardVerificationBatch(
               config.num_key_value_heads, config.head_dim, config.rotary_dim,
               config.rope_theta, 1e-6F, arena_.stream,
               item.executor->vision_input_.rope());
-          // Exact verification projections do not use weight dequantization
-          // scratch. Reuse it for independent split-K rows without allocating
-          // another buffer or changing the scalar decode workspace.
-          auto attention_scratch = scratch.attention.split_k;
-          if (scratch.decode.weight_bf16.size_bytes() >=
-              sequence_size * attention_scratch.size_bytes()) {
-            attention_scratch = {
-                reinterpret_cast<float*>(scratch.decode.weight_bf16.data()),
-                sequence_size * attention_scratch.size()};
+          if (use_blocked_kv) {
+            // Mirror ExecuteDecodeStep: append the same final rows to the
+            // blocked sidecar, then read through the blocked direct-read
+            // kernel so verification matches q8 AR decode exactly. Rows of
+            // one item are contiguous, so the row-position word at this
+            // item offset is the scalar base both kernels dereference.
+            const std::uint32_t* d_item_pos =
+                scratch.decode.prompt_tokens.data() + offsets[index];
+            const std::size_t blocked_layer_bytes =
+                state_arena.BlockedKvLayerBytes();
+            std::uint8_t* blocked_k = state_arena.d_attention_kv_blocked_k +
+                static_cast<std::size_t>(attention_layer) * blocked_layer_bytes;
+            std::uint8_t* blocked_v = state_arena.d_attention_kv_blocked_v +
+                static_cast<std::size_t>(attention_layer) * blocked_layer_bytes;
+            WriteQwenBlockedKv(
+                scratch.attention.k.data() + offset * kv_size,
+                scratch.attention.v.data() + offset * kv_size, blocked_k,
+                blocked_v, static_cast<std::uint32_t>(sequence_size),
+                config.num_key_value_heads, config.head_dim, d_item_pos,
+                arena_.stream);
+            ReadQwenBlockedAttention(
+                scratch.attention.q.data() + offset * attention_size, blocked_k,
+                blocked_v, scratch.ssm.gate.data() + offset * attention_size,
+                scratch.ssm.out.data() + offset * attention_size,
+                static_cast<std::uint32_t>(sequence_size), d_item_pos,
+                config.num_attention_heads, config.num_key_value_heads,
+                config.head_dim, arena_.stream);
+          } else {
+            // Exact verification projections do not use weight dequantization
+            // scratch. Reuse it for independent split-K rows without allocating
+            // another buffer or changing the scalar decode workspace.
+            auto attention_scratch = scratch.attention.split_k;
+            if (scratch.decode.weight_bf16.size_bytes() >=
+                sequence_size * attention_scratch.size_bytes()) {
+              attention_scratch = {
+                  reinterpret_cast<float*>(scratch.decode.weight_bf16.data()),
+                  sequence_size * attention_scratch.size()};
+            }
+            LaunchCausalDecodeAttention(
+                (scratch.attention.q.data() + offset * attention_size),
+                (scratch.ssm.gate.data() + offset * attention_size),
+                state_arena.d_kv_cache,
+                OffsetIfPresent(state_arena.d_kv_cache, total_k),
+                state_arena.d_attention_kv_f16,
+                OffsetIfPresent(
+                    static_cast<std::uint16_t*>(state_arena.d_attention_kv_f16),
+                    total_k),
+                (scratch.ssm.out.data() + offset * attention_size),
+                attention_layer, start_pos, sequence_size,
+                state_arena.GetMaxContext(), config.num_attention_heads,
+                config.num_key_value_heads, config.head_dim, arena_.stream,
+                attention_scratch);
           }
-          LaunchCausalDecodeAttention(
-              (scratch.attention.q.data() + offset * attention_size),
-              (scratch.ssm.gate.data() + offset * attention_size),
-              state_arena.d_kv_cache,
-              OffsetIfPresent(state_arena.d_kv_cache, total_k),
-              state_arena.d_attention_kv_f16,
-              OffsetIfPresent(
-                  static_cast<std::uint16_t*>(state_arena.d_attention_kv_f16),
-                  total_k),
-              (scratch.ssm.out.data() + offset * attention_size),
-              attention_layer, start_pos, sequence_size,
-              state_arena.GetMaxContext(), config.num_attention_heads,
-              config.num_key_value_heads, config.head_dim, arena_.stream,
-              attention_scratch);
         } else {
+          if (use_blocked_kv) {
+            throw std::logic_error(
+                "blocked-Q8 verification requires the fused QK-norm/RoPE/KV "
+                "write path");
+          }
           for (std::size_t row = 0; row < sequence_size; ++row) {
             float* const query =
                 (scratch.attention.q.data() + offset * attention_size) +
