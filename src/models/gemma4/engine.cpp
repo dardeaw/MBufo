@@ -2,6 +2,7 @@
 #include <chrono>
 #include "src/models/gemma4/engine.hpp"
 #include "src/models/gemma4/mtp.hpp"
+#include "src/models/gemma4/draft_backend.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -1989,30 +1990,44 @@ bool Session::EnableMtp(const std::string& drafts_path, std::string* error_msg) 
 
 bool Session::MtpEnabled() const noexcept { return impl_->mtp != nullptr; }
 
-bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
-                               std::vector<std::int32_t>* out,
-                               std::string* error_msg) {
-  (void)last_token;
-  if (!impl_->mtp || out == nullptr) {
-    return false;
-  }
+std::int32_t Session::ResolveDraftAnchor() const {
   const auto& w = *model_->weights_;
-  const auto& c = w.config;
-  const std::uint32_t hidden = c.hidden_size;
-  const std::uint32_t vocab = c.vocab_size;
+  const std::uint32_t hidden = w.config.hidden_size;
   hipStream_t stream = 0;
-  if (impl_->length == 0) {
-    if (error_msg != nullptr) *error_msg = "speculative round needs a prompt";
+  if (impl_->has_pending_cur) {
+    return impl_->pending_cur;
+  }
+  const std::int32_t cur = SampleGreedy();
+  (void)hipMemcpyAsync(
+      impl_->d_pending_h,
+      impl_->normed +
+          static_cast<std::size_t>(impl_->last_fwd_n - 1u) * hidden,
+      static_cast<std::size_t>(hidden) * sizeof(float),
+      hipMemcpyDeviceToDevice, stream);
+  return cur;
+}
+
+bool GemmaMtpDraftBackend::ProposeDrafts(std::int32_t cur, std::uint32_t n_draft,
+                                         std::uint32_t old_length,
+                                         std::vector<std::int32_t>* draft,
+                                         std::string* error_msg,
+                                         MtpRoundTimes* times) {
+  Session& session = *session_;
+  if (session.impl_->mtp == nullptr || draft == nullptr) {
     return false;
   }
   if (n_draft > 7u) n_draft = 7u;
+  const auto& w = session.model_->weights();
+  const auto& c = w.config;
+  const std::uint32_t hidden = c.hidden_size;
+  hipStream_t stream = 0;
 
   // Cross-attention sources: full-length KV of the last sliding layer and of
   // the last full-attention layer (llama.cpp gemma4-assistant.cpp parity).
   int swa_l = -1;
   int full_l = -1;
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
-    if (!c.LayerHasKv(il) || impl_->kv_k[il] == nullptr) continue;
+    if (!c.LayerHasKv(il) || session.impl_->kv_k[il] == nullptr) continue;
     if (c.LayerIsSwa(il)) {
       swa_l = static_cast<int>(il);
     } else {
@@ -2024,26 +2039,6 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
     return false;
   }
 
-  const std::uint32_t old_length = impl_->length;
-  std::int32_t cur = 0;
-  if (impl_->has_pending_cur) {
-    cur = impl_->pending_cur;
-  } else {
-    cur = SampleGreedy();
-    (void)hipMemcpyAsync(
-        impl_->d_pending_h,
-        impl_->normed +
-            static_cast<std::size_t>(impl_->last_fwd_n - 1u) * hidden,
-        static_cast<std::size_t>(hidden) * sizeof(float),
-        hipMemcpyDeviceToDevice, stream);
-  }
-
-  if (n_draft == 0 || getenv("GEMMA4_MTP_NOVERIFY") != nullptr) {
-    out->assign(1, cur);
-    if (!Forward({&cur, 1}, old_length, error_msg)) return false;
-    return true;
-  }
-
   const float emb_scale = std::sqrt(static_cast<float>(hidden));
   const float* full_rope_freqs =
       !w.layers[static_cast<std::uint32_t>(full_l)].rope_freqs.empty()
@@ -2053,68 +2048,164 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
   const std::uint32_t swa_kvh = c.KvHeads(static_cast<std::uint32_t>(swa_l));
   const std::uint32_t full_kvh = c.KvHeads(static_cast<std::uint32_t>(full_l));
 
-  const bool mtp_timing = getenv("GEMMA4_MTP_TIMING") != nullptr;
-  const auto t_round_start = std::chrono::steady_clock::now();
+  if (times != nullptr) {
+    times->t_start = std::chrono::steady_clock::now();
+  }
 
   // Draft n_draft tokens asynchronously at kv_len = old_length, rope_pos = old_length.
   for (std::uint32_t i = 0; i < n_draft; ++i) {
     if (i == 0u) {
       kernels::EmbedScale(w.token_embd.device, w.token_embd.type, &cur,
-                          impl_->d_tgt_emb, 1u, hidden, emb_scale, stream);
+                          session.impl_->d_tgt_emb, 1u, hidden, emb_scale,
+                          stream);
     } else {
       kernels::EmbedScaleDevice(w.token_embd.device, w.token_embd.type,
-                                impl_->d_draft_tok + (i - 1u), impl_->d_tgt_emb,
+                                session.impl_->d_draft_tok + (i - 1u),
+                                session.impl_->d_tgt_emb,
                                 1u, hidden, emb_scale, stream);
     }
     const float* feed_hidden =
-        (i == 0u) ? impl_->d_pending_h : impl_->d_draft_fb;
-    float* next_fb = (i + 1u < n_draft) ? impl_->d_draft_fb : nullptr;
-    if (!impl_->mtp->Step(
-            impl_->d_tgt_emb, feed_hidden, impl_->kv_k[swa_l],
-            impl_->kv_v[swa_l], impl_->kv_stride[swa_l], swa_kvh,
-            impl_->kv_k[full_l], impl_->kv_v[full_l], impl_->kv_stride[full_l],
+        (i == 0u) ? session.impl_->d_pending_h : session.impl_->d_draft_fb;
+    float* next_fb = (i + 1u < n_draft) ? session.impl_->d_draft_fb : nullptr;
+    if (!session.impl_->mtp->Step(
+            session.impl_->d_tgt_emb, feed_hidden, session.impl_->kv_k[swa_l],
+            session.impl_->kv_v[swa_l], session.impl_->kv_stride[swa_l], swa_kvh,
+            session.impl_->kv_k[full_l], session.impl_->kv_v[full_l],
+            session.impl_->kv_stride[full_l],
             full_kvh, old_length, old_length, c.sliding_window,
             c.rope_theta_swa, c.rope_theta_full, full_rope_freqs,
-            next_fb, impl_->d_draft_tok + i, error_msg)) {
+            next_fb, session.impl_->d_draft_tok + i, error_msg)) {
       return false;
     }
   }
 
-  std::vector<std::int32_t> draft(n_draft, 0);
-  (void)hipMemcpy(draft.data(), impl_->d_draft_tok,
+  draft->assign(n_draft, 0);
+  (void)hipMemcpy(draft->data(), session.impl_->d_draft_tok,
                   n_draft * sizeof(std::int32_t), hipMemcpyDeviceToHost);
-  const auto t_after_draft = std::chrono::steady_clock::now();
+  if (times != nullptr) {
+    times->t_after_draft = std::chrono::steady_clock::now();
+  }
+  return true;
+}
 
-  // Verify [cur, draft[0..n_draft-1]] in ONE single target Forward at start_pos = old_length.
-  const std::uint32_t verify_n = 1u + n_draft;
-  std::vector<std::int32_t> vtoks(verify_n);
-  vtoks[0] = cur;
-  for (std::uint32_t i = 0; i < n_draft; ++i) vtoks[1u + i] = draft[i];
-
-  if (!Forward(vtoks, old_length, error_msg, /*all_logits=*/true)) {
+bool GemmaTargetVerify::Verify(std::int32_t cur,
+                               const std::vector<std::int32_t>& draft,
+                               std::uint32_t old_length, std::int32_t* vbest,
+                               std::vector<std::int32_t>* vtoks,
+                               std::string* error_msg,
+                               const MtpRoundTimes* times) {
+  Session& session = *session_;
+  if (vbest == nullptr || vtoks == nullptr) {
+    return false;
+  }
+  const auto& w = session.model_->weights();
+  const std::uint32_t vocab = w.config.vocab_size;
+  hipStream_t stream = 0;
+  const std::uint32_t n_draft = static_cast<std::uint32_t>(draft.size());
+  if (n_draft > 7u) {
+    if (error_msg != nullptr) *error_msg = "speculative draft overflow";
     return false;
   }
 
-  fn::Argmax(impl_->logits, impl_->d_argmax_scratch, impl_->d_argmax_out,
-             verify_n, vocab, stream);
-  std::int32_t vbest[8] = {0};
-  (void)hipMemcpy(vbest, impl_->d_argmax_out,
+  // Verify [cur, draft[0..n_draft-1]] in ONE single target Forward at start_pos = old_length.
+  const std::uint32_t verify_n = 1u + n_draft;
+  vtoks->resize(verify_n);
+  (*vtoks)[0] = cur;
+  for (std::uint32_t i = 0; i < n_draft; ++i) (*vtoks)[1u + i] = draft[i];
+
+  if (!session.Forward(*vtoks, old_length, error_msg, /*all_logits=*/true)) {
+    return false;
+  }
+
+  fn::Argmax(session.impl_->logits, session.impl_->d_argmax_scratch,
+             session.impl_->d_argmax_out, verify_n, vocab, stream);
+  (void)hipMemcpy(vbest, session.impl_->d_argmax_out,
                   verify_n * sizeof(std::int32_t), hipMemcpyDeviceToHost);
-  if (mtp_timing) {
+  if (getenv("GEMMA4_MTP_TIMING") != nullptr && times != nullptr) {
     static int t_cnt = 0;
     if (t_cnt < 10) {
       const double d_ms =
-          std::chrono::duration<double, std::milli>(t_after_draft -
-                                                    t_round_start)
+          std::chrono::duration<double, std::milli>(times->t_after_draft -
+                                                    times->t_start)
               .count();
       const double v_ms =
           std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - t_after_draft)
+              std::chrono::steady_clock::now() - times->t_after_draft)
               .count();
       std::fprintf(stderr, "[mtp-timing] round=%d draft=%.2fms verify=%.2fms\n",
                    t_cnt, d_ms, v_ms);
       ++t_cnt;
     }
+  }
+  return true;
+}
+
+bool Session::CommitMtpRound(const std::vector<std::int32_t>& vtoks,
+                             const std::int32_t* vbest, std::uint32_t accepted,
+                             std::uint32_t old_length,
+                             std::vector<std::int32_t>* out) {
+  if (vbest == nullptr || out == nullptr) {
+    return false;
+  }
+  const auto& w = *model_->weights_;
+  const std::uint32_t hidden = w.config.hidden_size;
+  hipStream_t stream = 0;
+  out->assign(vtoks.begin(), vtoks.begin() + 1u + accepted);
+
+  // KV slots [old_length .. old_length + accepted] already hold valid K/V for
+  // [cur, draft[0..accepted-1]] — even when accepted == 0, slot old_length
+  // holds cur, so no fallback Forward is ever needed.
+  impl_->length = old_length + 1u + accepted;
+  impl_->pending_cur = vbest[accepted];
+  (void)hipMemcpyAsync(
+      impl_->d_pending_h,
+      impl_->normed + static_cast<std::size_t>(accepted) * hidden,
+      static_cast<std::size_t>(hidden) * sizeof(float), hipMemcpyDeviceToDevice,
+      stream);
+  impl_->has_pending_cur = true;
+  impl_->last_chunk_n = accepted + 1u;
+  return true;
+}
+
+bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
+                               std::vector<std::int32_t>* out,
+                               std::string* error_msg) {
+  (void)last_token;
+  if (!impl_->mtp || out == nullptr) {
+    return false;
+  }
+  if (impl_->length == 0) {
+    if (error_msg != nullptr) *error_msg = "speculative round needs a prompt";
+    return false;
+  }
+  if (n_draft > 7u) n_draft = 7u;
+
+  const std::uint32_t old_length = impl_->length;
+  const std::int32_t cur = ResolveDraftAnchor();
+
+  if (n_draft == 0 || getenv("GEMMA4_MTP_NOVERIFY") != nullptr) {
+    out->assign(1, cur);
+    if (!Forward({&cur, 1}, old_length, error_msg)) return false;
+    return true;
+  }
+
+  // Unified draft interface: propose through the session-bound backend,
+  // verify through the thin target wrapper. The greedy accept comparison
+  // stays model-side.
+  GemmaMtpDraftBackend draft_backend(*this, n_draft);
+  GemmaTargetVerify target(*this);
+  MtpRoundTimes times;
+  std::vector<std::int32_t> draft;
+  if (!draft_backend.ProposeDrafts(cur, n_draft, old_length, &draft, error_msg,
+                                   &times)) {
+    return false;
+  }
+
+  std::int32_t vbest[8] = {0};
+  std::vector<std::int32_t> vtoks;
+  if (!target.Verify(cur, draft, old_length, vbest, &vtoks, error_msg,
+                     &times)) {
+    return false;
   }
 
   std::uint32_t accepted = 0;
@@ -2137,20 +2228,10 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
     }
   }
 
-  out->assign(vtoks.begin(), vtoks.begin() + 1u + accepted);
-
-  // KV slots [old_length .. old_length + accepted] already hold valid K/V for
-  // [cur, draft[0..accepted-1]] — even when accepted == 0, slot old_length
-  // holds cur, so no fallback Forward is ever needed.
-  impl_->length = old_length + 1u + accepted;
-  impl_->pending_cur = vbest[accepted];
-  (void)hipMemcpyAsync(
-      impl_->d_pending_h,
-      impl_->normed + static_cast<std::size_t>(accepted) * hidden,
-      static_cast<std::size_t>(hidden) * sizeof(float), hipMemcpyDeviceToDevice,
-      stream);
-  impl_->has_pending_cur = true;
-  impl_->last_chunk_n = accepted + 1u;
+  if (!CommitMtpRound(vtoks, vbest, accepted, old_length, out)) {
+    return false;
+  }
+  draft_backend.RecordRound(draft.size(), accepted);
   return true;
 }
 
