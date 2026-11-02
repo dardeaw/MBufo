@@ -1033,12 +1033,14 @@ public:
       std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model = nullptr,
       speculative::SpeculativeOptions speculative_options = {},
       std::string artifact_fingerprint = {},
-      std::string draft_artifact_fingerprint = {})
+      std::string draft_artifact_fingerprint = {},
+      hip::QwenExecutionPolicy execution_policy =
+          hip::QwenExecutionPolicy::Production())
       : model_(std::move(model)),
         dflash_model_(std::move(dflash_model)),
         max_context_(max_context),
         speculative_options_(speculative_options),
-        execution_policy_(hip::QwenExecutionPolicy::Production()) {
+        execution_policy_(execution_policy) {
     if (!artifact_fingerprint.empty()) {
       const bool speculative = dflash_model_ != nullptr;
       persistence_ = TextRunnerPersistenceDescriptor{
@@ -3375,6 +3377,29 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
              "--draft-tokens");
     return false;
   }
+  // Blocked-Q8 attention KV for Qwen3.8-27B-class models, mirrored from
+  // `gufo prompt` (QWEN_KV_QUANT). The --kv-quant flag only feeds
+  // Flash-Next/DeepSeek, so the Qwen fallthrough reads the prompt env switch.
+  // QwenGpuModel::CreateFromGguf needs no policy parameter: the policy
+  // applies at executor/adapter level, not weight loading.
+  auto qwen_policy = hip::QwenExecutionPolicy::Production();
+  if (const char* kv_quant = std::getenv("QWEN_KV_QUANT")) {
+    const std::string value = kv_quant;
+    if (value != "f16" && value != "q8") {
+      SetError(error, "QWEN_KV_QUANT must be f16 or q8");
+      return false;
+    }
+    qwen_policy.blocked_q8_attention = (value == "q8");
+  }
+  std::cerr << "[qwen] kv_cache_quant="
+            << (qwen_policy.blocked_q8_attention ? "q8" : "f16") << '\n';
+  if (qwen_policy.blocked_q8_attention &&
+      speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    SetError(error,
+             "QWEN_KV_QUANT=q8 does not support speculative decoding "
+             "(dflash2); pass --speculative off");
+    return false;
+  }
 
   try {
     std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model;
@@ -3438,7 +3463,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     auto runner = std::make_shared<QwenTextRunner>(
         std::move(model), max_context, std::move(dflash_model),
         speculative_options, disk_cache_config.model_artifact_fingerprint,
-        disk_cache_config.draft_model_artifact_fingerprint);
+        disk_cache_config.draft_model_artifact_fingerprint, qwen_policy);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
