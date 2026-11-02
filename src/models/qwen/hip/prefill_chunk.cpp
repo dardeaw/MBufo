@@ -9,6 +9,18 @@
 #include "src/models/qwen/hip/blocked_q8.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/models/qwen/hip/ops/prefill_fp16.hpp"
 
@@ -688,6 +700,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                arena_.stream);
     }
 
+
     if (capture_prompt_hidden_) {
       if (const auto tap_index = arena_.GetTargetLayerCaptureIndex(l);
           tap_index.has_value()) {
@@ -814,6 +827,866 @@ void QwenGpuExecutor::CommitVerificationChunk(
   capture_prompt_hidden_ = capture_hidden;
   write.Commit(start_pos + static_cast<std::uint32_t>(committed_tokens.size()),
                false);
+}
+
+// ---- Cross-session prefill batch (unified mixed-batch attention) ----
+// New in mixed-batch-unified: layer-synchronous prefill over independent
+// sessions. Single-session ForwardPromptChunk above is untouched; the
+// per-session phases below duplicate its call sequence against the same
+// Launch* primitives, with one unified attention launch per attention
+// layer covering every session's rows.
+
+namespace {
+
+bool ReadsQ8ActivationForPrefill(core::GgmlType type, bool half_prefill) {
+  return !half_prefill && (type == core::GgmlType::kQ8_0 ||
+                           detail::IsNativeWmmaQuant(type));
+}
+
+}  // namespace
+
+void QwenGpuExecutor::PrefillGemmWeight(
+    const models::QwenTensorRef& w, const void* bf16_input,
+    const float* fp32_input, float* output, std::size_t batch, std::size_t m,
+    std::size_t k, const void* q8_act, bool half_prefill) {
+  if (half_prefill) {
+    LaunchBatchedQuantGEMMFp16(w.type, w.data, bf16_input, output, batch, m,
+                               k, arena_.stream);
+    return;
+  }
+  const auto resolution = models::qwen::ResolveQwenGemmRoute(
+      {.type = w.type,
+       .batch_size = batch,
+       .m = m,
+       .k = k,
+       .mode = models::qwen::QwenGemmMode::kHipPrefill});
+  if (!resolution.accepted()) {
+    std::abort();
+  }
+  switch (resolution.route) {
+    case models::qwen::QwenGemmRoute::kHipPrefillBf16Fp32:
+      LaunchExactBf16GEMMFp32SmallBatch(w.data, fp32_input, output, batch, m,
+                                        k, arena_.stream);
+      return;
+    case models::qwen::QwenGemmRoute::kHipPrefillF32Blas:
+      LaunchHipblasGEMM(arena_.hipblas_handle, w.data, false, fp32_input,
+                        output, batch, m, k, arena_.d_scratch_bf16,
+                        arena_.stream);
+      return;
+    case models::qwen::QwenGemmRoute::kHipPrefillQuantDirect: {
+      if (w.type == core::GgmlType::kQ8_0 ||
+          detail::IsNativeWmmaQuant(w.type)) {
+        if (q8_act != nullptr) {
+          LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, q8_act, output,
+                                             batch, m, k, arena_.stream);
+        } else {
+          LaunchBatchedQuantGEMM(w.type, w.data, bf16_input, output, batch, m,
+                                 k, arena_.stream);
+        }
+      } else if (batch > 1) {
+        LaunchDequantizeToBf16(w.type, w.data, arena_.d_weights_bf16, m * k,
+                               arena_.stream);
+        if (arena_.hipblaslt_gemm != nullptr && m >= 1024 && k >= 1024 &&
+            arena_.hipblaslt_gemm->RunBf16(arena_.d_weights_bf16, bf16_input,
+                                           output, batch, m, k, arena_.stream)) {
+        } else {
+          LaunchHipblasGEMMBF16(arena_.hipblas_handle, arena_.d_weights_bf16,
+                                bf16_input, output, batch, m, k,
+                                arena_.stream);
+        }
+      } else {
+        LaunchBatchedQuantGEMM(w.type, w.data, bf16_input, output, batch, m,
+                               k, arena_.stream);
+      }
+      return;
+    }
+    default:
+      std::abort();
+  }
+}
+
+void QwenGpuExecutor::PrefillLayerNorm(const PrefillChunkCtx& ctx,
+                                         std::uint32_t l) {
+  const auto& config = weights_.config;
+  const std::size_t hidden_size = config.hidden_size;
+  const std::size_t batch_size = ctx.batch_size;
+  const float eps = 1e-6F;
+  const auto& layer = weights_.layers[l];
+  const bool half_prefill = ctx.half_prefill;
+
+  // Pre-layer RMSNorm (generates BF16 into d_scratch_bf16 directly).
+  // Shared by the attention and SSM paths: single runs it for every layer
+  // before branching.
+  if (half_prefill) {
+    LaunchBatchedRMSNormFp16(arena_.d_hidden, nullptr,
+                             static_cast<const float*>(layer.attn_norm.data),
+                             nullptr, arena_.d_scratch_bf16, batch_size,
+                             hidden_size, eps, arena_.stream);
+  } else if (ctx.norm_feeds_q8_only) {
+    LaunchBatchedFusedRMSNormQuantizeQ8_1(
+        arena_.d_hidden, /*residual=*/nullptr,
+        static_cast<const float*>(layer.attn_norm.data), /*sum_out=*/nullptr,
+        arena_.d_scratch_q8_act, batch_size, hidden_size, eps, arena_.stream);
+  } else {
+    LaunchBatchedRMSNorm(arena_.d_hidden,
+                         static_cast<const float*>(layer.attn_norm.data),
+                         arena_.d_normed, arena_.d_scratch_bf16, batch_size,
+                         hidden_size, eps, arena_.stream);
+  }
+}
+
+void QwenGpuExecutor::PrefillAttentionPre(const PrefillChunkCtx& ctx,
+                                           std::uint32_t l) {
+  const auto& config = weights_.config;
+  const std::size_t hidden_size = config.hidden_size;
+  const std::size_t batch_size = ctx.batch_size;
+  const std::size_t attention_size = config.AttentionSize();
+  const std::size_t kv_size =
+      static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+  const std::size_t q_projection_size = 2 * attention_size;
+  const float eps = 1e-6F;
+  const auto& layer = weights_.layers[l];
+  const bool half_prefill = ctx.half_prefill;
+
+  PrefillLayerNorm(ctx, l);
+
+  if (!ctx.norm_feeds_q8_only &&
+      (ReadsQ8ActivationForPrefill(layer.attn_q.type, half_prefill) ||
+       ReadsQ8ActivationForPrefill(layer.attn_k.type, half_prefill) ||
+       ReadsQ8ActivationForPrefill(layer.attn_v.type, half_prefill))) {
+    LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                 arena_.d_scratch_q8_act, batch_size,
+                                 hidden_size, arena_.stream);
+  }
+  PrefillGemmWeight(layer.attn_q, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_ssm_qkv, batch_size, q_projection_size, hidden_size,
+                    arena_.d_scratch_q8_act, half_prefill);
+  PrefillGemmWeight(layer.attn_k, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_k, batch_size, kv_size, hidden_size, arena_.d_scratch_q8_act,
+                    half_prefill);
+  PrefillGemmWeight(layer.attn_v, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_v, batch_size, kv_size, hidden_size, arena_.d_scratch_q8_act,
+                    half_prefill);
+
+  LaunchBatchedUnpackQG(arena_.d_ssm_qkv, arena_.d_q, arena_.d_ssm_gate,
+                        batch_size, config.num_attention_heads,
+                        config.head_dim, arena_.stream);
+
+  const std::size_t total_k = arena_.GetAttentionKvPlaneElements();
+  const std::uint32_t attn_layer_idx = l / config.full_attention_interval;
+  if (ctx.fuse_qknorm_rope_kv &&
+      detail::IsFusedQkNormSupported(config.head_dim)) {
+    LaunchBatchedFusedQKNormRoPEKvWrite(
+        arena_.d_q, arena_.d_k, arena_.d_v,
+        static_cast<const float*>(layer.attn_q_norm.data),
+        static_cast<const float*>(layer.attn_k_norm.data), arena_.d_q,
+        arena_.d_k, arena_.d_kv_cache,
+        OffsetIfPresent(arena_.d_kv_cache, total_k),
+        arena_.d_attention_kv_f16,
+        OffsetIfPresent(
+            static_cast<std::uint16_t*>(arena_.d_attention_kv_f16), total_k),
+        attn_layer_idx, ctx.start_pos, batch_size, arena_.GetMaxContext(),
+        config.num_attention_heads, config.num_key_value_heads,
+        config.head_dim, config.rotary_dim, config.rope_theta, eps,
+        arena_.stream, vision_input_.rope());
+  } else {
+    if (!layer.attn_q_norm.empty()) {
+      LaunchBatchedPerHeadRMSNorm(
+          arena_.d_q, static_cast<const float*>(layer.attn_q_norm.data),
+          arena_.d_q, batch_size, config.num_attention_heads,
+          config.head_dim, eps, arena_.stream);
+    }
+    if (!layer.attn_k_norm.empty()) {
+      LaunchBatchedPerHeadRMSNorm(
+          arena_.d_k, static_cast<const float*>(layer.attn_k_norm.data),
+          arena_.d_k, batch_size, config.num_key_value_heads,
+          config.head_dim, eps, arena_.stream);
+    }
+    LaunchBatchedRoPE(
+        arena_.d_q, arena_.d_k, batch_size, config.num_attention_heads,
+        config.num_key_value_heads, config.head_dim, config.rotary_dim,
+        ctx.start_pos, config.rope_theta, arena_.stream, vision_input_.rope());
+  }
+}
+
+void QwenGpuExecutor::PrefillAttentionPost(const PrefillChunkCtx& ctx,
+                                            std::uint32_t l, bool run_legacy) {
+  const auto& config = weights_.config;
+  const std::size_t hidden_size = config.hidden_size;
+  const std::size_t batch_size = ctx.batch_size;
+  const std::size_t attention_size = config.AttentionSize();
+  const bool half_prefill = ctx.half_prefill;
+  const auto& layer = weights_.layers[l];
+
+  if (run_legacy) {
+    const std::size_t total_k = arena_.GetAttentionKvPlaneElements();
+    const std::uint32_t attn_layer_idx = l / config.full_attention_interval;
+    const std::size_t visible_context =
+        static_cast<std::size_t>(ctx.start_pos) + batch_size;
+    const bool kv_already_written = ctx.fuse_qknorm_rope_kv;
+    const bool wmma_attention = LaunchQwenWmmaAttention(
+        arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+        arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
+        arena_.d_attention_kv_f16,
+        OffsetIfPresent(
+            static_cast<std::uint16_t*>(arena_.d_attention_kv_f16), total_k),
+        arena_.d_ssm_out, attn_layer_idx, ctx.start_pos, batch_size,
+        arena_.GetMaxContext(), config.num_attention_heads,
+        config.num_key_value_heads, config.head_dim, arena_.stream,
+        /*lse_out=*/nullptr, /*key_begin=*/0,
+        /*skip_kv_write=*/kv_already_written, ctx.ws_gate, ctx.ws_up,
+        ctx.output_first_row);
+    if (wmma_attention) {
+      detail::EmitAttentionDispatch("prefill_wmma", "");
+    }
+    if (!wmma_attention) {
+      bool tiled_attention = false;
+      detail::DispatchPrefillAttention(
+          visible_context,
+          [&] {
+            tiled_attention = LaunchBatchedAttentionTile(
+                arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                arena_.d_kv_cache,
+                OffsetIfPresent(arena_.d_kv_cache, total_k),
+                arena_.d_attention_kv_f16,
+                OffsetIfPresent(
+                    static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                    total_k),
+                arena_.d_ssm_out, attn_layer_idx, ctx.start_pos, batch_size,
+                arena_.GetMaxContext(), config.num_attention_heads,
+                config.num_key_value_heads, config.head_dim, arena_.stream);
+            return tiled_attention;
+          },
+          [&] {
+            LaunchBatchedAttention(
+                arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                arena_.d_kv_cache,
+                OffsetIfPresent(arena_.d_kv_cache, total_k),
+                arena_.d_attention_kv_f16,
+                OffsetIfPresent(
+                    static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                    total_k),
+                arena_.d_ssm_out, attn_layer_idx, ctx.start_pos, batch_size,
+                arena_.GetMaxContext(), config.num_attention_heads,
+                config.num_key_value_heads, config.head_dim, arena_.stream,
+                ctx.fuse_qknorm_rope_kv);
+          });
+      if (tiled_attention) {
+        detail::EmitAttentionDispatch("prefill_tiled", "");
+      } else if (!detail::BatchedAttentionScoresFitLds(visible_context)) {
+        detail::EmitAttentionDispatch(
+            arena_.d_kv_cache != nullptr ? "prefill_online_fp32"
+                                         : "prefill_online_fp16",
+            "prefill_baseline: score_rows_exceed_lds");
+      } else {
+        detail::EmitAttentionDispatch(
+            "prefill_baseline",
+            detail::ShouldAttemptOptimizedAttention(visible_context)
+                ? "prefill_tiled: rejected"
+                : "prefill_tiled: below_threshold");
+      }
+    }
+  }
+
+  if (half_prefill) {
+    LaunchFloatToFp16(arena_.d_ssm_out + ctx.output_first_row * attention_size,
+                      arena_.d_scratch_bf16, ctx.output_rows * attention_size,
+                      arena_.stream);
+  } else if (ReadsQ8ActivationForPrefill(layer.attn_output.type,
+                                         half_prefill)) {
+    LaunchQuantizeActivationQ8_1FromFp32(
+        arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
+        attention_size, arena_.stream);
+  } else {
+    LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                          batch_size * attention_size, arena_.stream);
+    LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                 arena_.d_scratch_q8_act, batch_size,
+                                 attention_size, arena_.stream);
+  }
+  if (half_prefill) {
+    LaunchBatchedQuantGEMMResidualFp16(
+        layer.attn_output.type, layer.attn_output.data,
+        arena_.d_scratch_bf16, arena_.d_hidden + ctx.output_first_row * hidden_size,
+        ctx.output_rows, hidden_size, attention_size, arena_.stream);
+  } else {
+    PrefillGemmWeight(layer.attn_output, arena_.d_scratch_bf16, arena_.d_ssm_out,
+                      arena_.d_attn_out, batch_size, hidden_size, attention_size,
+                      arena_.d_scratch_q8_act, half_prefill);
+  }
+}
+
+void QwenGpuExecutor::PrefillSsmLayer(const PrefillChunkCtx& ctx,
+                                       std::uint32_t l,
+                                       QwenRecurrentStateIo recurrent_state) {
+  const auto& config = weights_.config;
+  const std::size_t hidden_size = config.hidden_size;
+  const std::size_t batch_size = ctx.batch_size;
+  const std::size_t ssm_qkv_size = config.SsmQkvSize();
+  const std::size_t ssm_inner_size = config.ssm_inner_size;
+  const std::size_t time_step_rank = config.ssm_time_step_rank;
+  const auto& layer = weights_.layers[l];
+  const bool half_prefill = ctx.half_prefill;
+
+  PrefillLayerNorm(ctx, l);
+
+  if (!half_prefill && !ctx.norm_feeds_q8_only) {
+    LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                 arena_.d_scratch_q8_act, batch_size,
+                                 hidden_size, arena_.stream);
+  }
+  PrefillGemmWeight(layer.attn_qkv, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_ssm_qkv, batch_size, ssm_qkv_size, hidden_size,
+                    arena_.d_scratch_q8_act, half_prefill);
+  PrefillGemmWeight(layer.attn_gate, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_ssm_gate, batch_size, ssm_inner_size, hidden_size,
+                    arena_.d_scratch_q8_act, half_prefill);
+  PrefillGemmWeight(layer.ssm_alpha, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_alpha_buf, batch_size, time_step_rank, hidden_size,
+                    arena_.d_scratch_q8_act, half_prefill);
+  PrefillGemmWeight(layer.ssm_beta, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_beta_buf, batch_size, time_step_rank, hidden_size,
+                    arena_.d_scratch_q8_act, half_prefill);
+  if (arena_.IsSsmReplayCaptureActive()) {
+    LaunchCaptureBatchedSsmReplay(
+        arena_.d_ssm_qkv, arena_.d_alpha_buf, arena_.d_beta_buf,
+        arena_.GetSsmReplayCapture(), config.SsmLayerIndex(l), ctx.start_pos,
+        batch_size, ssm_qkv_size, time_step_rank, arena_.stream);
+  }
+
+  const bool ssm_epilogue_q8 =
+      ReadsQ8ActivationForPrefill(layer.ssm_out.type, half_prefill) &&
+      IsFusedSSMEpilogueQuantizeQ8_1Supported(config.SsmValueSize(),
+                                              ssm_inner_size);
+  const bool ssm_row_split = detail::ShouldUseSsmRowSplitRecurrence(
+      IsDeltaNetRowSplitSupported(config.ssm_state_size,
+                                  config.SsmValueSize()),
+      arena_.d_ssm_kq_scales != nullptr && arena_.d_ssm_alpha_beta != nullptr);
+  if (ssm_row_split) {
+    LaunchBatchedSSMConvRecurrenceRowSplit(
+        arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
+        recurrent_state, arena_.d_conv_out, arena_.d_alpha_buf,
+        arena_.d_beta_buf, static_cast<const float*>(layer.ssm_a.data),
+        static_cast<const float*>(layer.ssm_dt.data),
+        static_cast<const float*>(layer.ssm_norm.data), arena_.d_ssm_gate,
+        arena_.d_ssm_out,
+        ssm_epilogue_q8 ? arena_.d_scratch_q8_act : nullptr,
+        arena_.d_ssm_kq_scales, arena_.d_ssm_alpha_beta,
+        config.SsmLayerIndex(l), batch_size, ssm_qkv_size,
+        config.ssm_group_count, config.ssm_time_step_rank,
+        config.ssm_state_size, config.SsmValueSize(), arena_.stream,
+        arena_.GetRecurrentStateStorage(),
+        half_prefill ? arena_.d_scratch_bf16 : nullptr);
+  } else {
+    LaunchBatchedSSMConvRecurrence(
+        arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
+        recurrent_state, arena_.d_conv_out, arena_.d_alpha_buf,
+        arena_.d_beta_buf, static_cast<const float*>(layer.ssm_a.data),
+        static_cast<const float*>(layer.ssm_dt.data),
+        static_cast<const float*>(layer.ssm_norm.data), arena_.d_ssm_gate,
+        arena_.d_ssm_out, config.SsmLayerIndex(l), batch_size, ssm_qkv_size,
+        config.ssm_group_count, config.ssm_time_step_rank,
+        config.ssm_state_size, config.SsmValueSize(), arena_.stream,
+        arena_.GetRecurrentStateStorage());
+  }
+
+  if (half_prefill) {
+    if (!ssm_row_split) {
+      LaunchFloatToFp16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                        batch_size * ssm_inner_size, arena_.stream);
+    }
+  } else if (ssm_row_split && ssm_epilogue_q8) {
+  } else if (ReadsQ8ActivationForPrefill(layer.ssm_out.type, half_prefill)) {
+    LaunchQuantizeActivationQ8_1FromFp32(
+        arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
+        ssm_inner_size, arena_.stream);
+  } else {
+    LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                          batch_size * ssm_inner_size, arena_.stream);
+    LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                 arena_.d_scratch_q8_act, batch_size,
+                                 ssm_inner_size, arena_.stream);
+  }
+  if (half_prefill) {
+    LaunchBatchedQuantGEMMResidualFp16(
+        layer.ssm_out.type, layer.ssm_out.data, arena_.d_scratch_bf16,
+        arena_.d_hidden, batch_size, hidden_size, ssm_inner_size,
+        arena_.stream);
+  } else {
+    PrefillGemmWeight(layer.ssm_out, arena_.d_scratch_bf16, arena_.d_ssm_out,
+                      arena_.d_attn_out, batch_size, hidden_size, ssm_inner_size,
+                      arena_.d_scratch_q8_act, half_prefill);
+  }
+}
+
+void QwenGpuExecutor::PrefillFfnTail(const PrefillChunkCtx& ctx,
+                                      std::uint32_t l) {
+  const auto& config = weights_.config;
+  const std::size_t hidden_size = config.hidden_size;
+  const std::size_t intermediate_size = config.intermediate_size;
+  const std::size_t batch_size = ctx.batch_size;
+  const float eps = 1e-6F;
+  const auto& layer = weights_.layers[l];
+  const bool half_prefill = ctx.half_prefill;
+
+  float* output_hidden =
+      arena_.d_hidden + ctx.output_first_row * hidden_size;
+
+  if (half_prefill) {
+    LaunchBatchedRMSNormFp16(output_hidden, nullptr,
+                             static_cast<const float*>(layer.ffn_norm.data),
+                             nullptr, arena_.d_scratch_bf16, ctx.output_rows,
+                             hidden_size, eps, arena_.stream);
+  } else if (ctx.ffn_feeds_q8_only) {
+    LaunchBatchedFusedRMSNormQuantizeQ8_1(
+        arena_.d_hidden, arena_.d_attn_out,
+        static_cast<const float*>(layer.ffn_norm.data), arena_.d_hidden,
+        arena_.d_scratch_q8_act, batch_size, hidden_size, eps, arena_.stream);
+  } else {
+    LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_attn_out,
+                             arena_.d_hidden, batch_size, hidden_size,
+                             arena_.stream);
+    LaunchBatchedRMSNorm(arena_.d_hidden,
+                         static_cast<const float*>(layer.ffn_norm.data),
+                         arena_.d_normed, arena_.d_scratch_bf16, batch_size,
+                         hidden_size, eps, arena_.stream);
+  }
+
+  const void* ffn_down_q8_act = arena_.d_scratch_q8_act;
+  const void* ffn_down_input = arena_.d_scratch_bf16;
+
+  {
+    if (!half_prefill && !ctx.ffn_feeds_q8_only) {
+      LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                   arena_.d_scratch_q8_act, batch_size,
+                                   hidden_size, arena_.stream);
+    }
+    const bool fused_dual_swiglu =
+        ReadsQ8ActivationForPrefill(layer.ffn_gate.type, half_prefill) &&
+        ReadsQ8ActivationForPrefill(layer.ffn_up.type, half_prefill) &&
+        layer.ffn_gate.type == layer.ffn_up.type &&
+        ReadsQ8ActivationForPrefill(layer.ffn_down.type, half_prefill) &&
+        IsFusedSwiGluGemmEpilogueSupported(
+            layer.ffn_gate.type, batch_size, intermediate_size,
+            batch_size * intermediate_size * sizeof(float));
+    if (half_prefill) {
+      const bool paired = TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
+          layer.ffn_gate.type, layer.ffn_up.type, layer.ffn_gate.data,
+          layer.ffn_up.data, arena_.d_scratch_bf16, arena_.d_ffn_up,
+          ctx.output_rows, intermediate_size, hidden_size, arena_.stream);
+      if (!paired) {
+        LaunchBatchedQuantGEMMFp16(layer.ffn_gate.type, layer.ffn_gate.data,
+                                   arena_.d_scratch_bf16, arena_.d_ffn_gate,
+                                   ctx.output_rows, intermediate_size,
+                                   hidden_size, arena_.stream);
+        LaunchBatchedQuantGEMMSwiGLUFp16(
+            layer.ffn_up.type, layer.ffn_up.data, arena_.d_scratch_bf16,
+            arena_.d_ffn_gate, arena_.d_ffn_up, ctx.output_rows,
+            intermediate_size, hidden_size, arena_.stream);
+      }
+      ffn_down_input = arena_.d_ffn_up;
+    } else if (fused_dual_swiglu) {
+      LaunchBatchedDualQuantGEMMSwiGLUQuantizeQ8_1(
+          layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
+          arena_.d_scratch_q8_act, arena_.d_ffn_gate, arena_.d_ffn_up,
+          batch_size, intermediate_size, hidden_size, arena_.stream);
+      ffn_down_q8_act = arena_.d_ffn_up;
+    } else if (ReadsQ8ActivationForPrefill(layer.ffn_gate.type, half_prefill) &&
+               ReadsQ8ActivationForPrefill(layer.ffn_up.type, half_prefill) &&
+               layer.ffn_gate.type == layer.ffn_up.type) {
+      LaunchBatchedDualQuantGEMMPreQuantized(
+          layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
+          arena_.d_scratch_q8_act, arena_.d_ffn_gate, arena_.d_ffn_up,
+          batch_size, intermediate_size, hidden_size, arena_.stream);
+    } else {
+      PrefillGemmWeight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
+                        arena_.d_ffn_gate, batch_size, intermediate_size, hidden_size,
+                        arena_.d_scratch_q8_act, half_prefill);
+      PrefillGemmWeight(layer.ffn_up, arena_.d_scratch_bf16, arena_.d_normed,
+                        arena_.d_ffn_up, batch_size, intermediate_size, hidden_size,
+                        arena_.d_scratch_q8_act, half_prefill);
+    }
+
+    if (half_prefill || fused_dual_swiglu) {
+    } else if (ReadsQ8ActivationForPrefill(layer.ffn_down.type, half_prefill)) {
+      LaunchBatchedFusedSwiGLUQuantizeQ8_1(
+          arena_.d_ffn_gate, arena_.d_ffn_up, arena_.d_scratch_q8_act,
+          batch_size, intermediate_size, arena_.stream);
+    } else {
+      LaunchBatchedSwiGLUActivation(arena_.d_ffn_gate, arena_.d_ffn_up,
+                                    arena_.d_ffn_act, arena_.d_scratch_bf16,
+                                    batch_size * intermediate_size,
+                                    arena_.stream);
+      LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                   arena_.d_scratch_q8_act, batch_size,
+                                   intermediate_size, arena_.stream);
+    }
+  }
+
+  if (half_prefill) {
+    LaunchBatchedQuantGEMMResidualFp16(
+        layer.ffn_down.type, layer.ffn_down.data, ffn_down_input,
+        output_hidden, ctx.output_rows, hidden_size, intermediate_size,
+        arena_.stream);
+  } else {
+    PrefillGemmWeight(layer.ffn_down, ffn_down_input, arena_.d_ffn_act,
+                      arena_.d_ffn_out, batch_size, hidden_size, intermediate_size,
+                      ffn_down_q8_act, half_prefill);
+    LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out,
+                             arena_.d_hidden, batch_size, hidden_size,
+                             arena_.stream);
+  }
+
+  if (capture_prompt_hidden_) {
+    if (const auto tap_index = arena_.GetTargetLayerCaptureIndex(l);
+        tap_index.has_value()) {
+      float* destination = h_prompt_hidden_.Data() + ctx.prompt_capture_offset +
+                           (*tap_index * hidden_size);
+      HIP_CHECK(hipMemcpy2DAsync(
+          destination, ctx.target_layer_count * hidden_size * sizeof(float),
+          ctx.decode_hidden, hidden_size * sizeof(float),
+          hidden_size * sizeof(float), batch_size, hipMemcpyDeviceToHost,
+          arena_.stream));
+      if (cancellation_check_) {
+        HIP_CHECK(hipStreamSynchronize(arena_.stream));
+      }
+    }
+  }
+}
+
+std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardPromptBatchMulti(
+    std::span<const QwenPromptBatchItem> items) {
+  namespace mb = ::gufo::core::compute::mixed_batch;
+  constexpr std::size_t kMaxPromptBatchMulti = 8;
+  // Opt-out valve (default on): GUFO_27B_UNIFIED_BATCH=0 keeps the legacy
+  // per-session attention dispatch inside the batch envelope.
+  const bool use_unified = [] {
+    const char* e = std::getenv("GUFO_27B_UNIFIED_BATCH");
+    return e == nullptr || e[0] != '0';
+  }();
+  if (items.size() < 2 || items.size() > kMaxPromptBatchMulti) {
+    throw std::invalid_argument(
+        "Qwen prompt batch needs two to eight sessions");
+  }
+  QwenGpuExecutor* coordinator = items.front().executor;
+  if (coordinator == nullptr) {
+    throw std::invalid_argument("Qwen prompt batch contains a null session");
+  }
+  // Blocked-Q8 prefill keeps the F16 plane canonical for the legacy single
+  // path; the unified batch reads the half plane, so refuse it loudly like
+  // the decode batch does (batched decode under q8 is unsupported there).
+  if (coordinator->policy_.UsesBlockedAttentionKv()) {
+    throw std::logic_error(
+        "blocked-Q8 attention does not support batched prefill; use "
+        "QWEN_KV_QUANT=f16");
+  }
+  if (!coordinator->policy_.UsesFp16AttentionKv()) {
+    throw std::logic_error(
+        "batched prefill needs the F16 attention KV plane; use "
+        "QWEN_KV_QUANT=f16");
+  }
+  const auto* shared_model = coordinator->model_.get();
+  const std::uint64_t shared_policy = coordinator->policy_.Fingerprint();
+  std::size_t total_rows = 0;
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    QwenGpuExecutor* executor = items[index].executor;
+    if (executor == nullptr || executor->model_.get() != shared_model ||
+        executor->policy_.Fingerprint() != shared_policy) {
+      throw std::invalid_argument(
+          "Qwen prompt batch sessions are not execution-compatible");
+    }
+    if (items[index].tokens.empty() ||
+        items[index].tokens.size() > executor->arena_.GetMaxBatch()) {
+      throw std::length_error("Qwen prompt batch chunk exceeds GPU batch");
+    }
+    if (static_cast<std::size_t>(items[index].start_pos) +
+            items[index].tokens.size() >
+        executor->arena_.GetMaxContext()) {
+      throw std::length_error("prompt exceeds the GPU context length");
+    }
+    for (std::size_t previous = 0; previous < index; ++previous) {
+      if (items[previous].executor == executor) {
+        throw std::invalid_argument(
+            "Qwen prompt batch contains a duplicate session");
+      }
+    }
+    total_rows += items[index].tokens.size();
+  }
+  if (total_rows > coordinator->arena_.GetMaxBatch()) {
+    throw std::length_error(
+        "Qwen prompt batch width exceeds the coordinator arena capacity");
+  }
+  const auto& config = coordinator->weights_.config;
+  const std::size_t hidden_size = config.hidden_size;
+  const float eps = 1e-6F;
+
+  struct SessionBatchState {
+    QwenGpuExecutor* executor;
+    std::span<const tokenization::TokenId> tokens;
+    std::uint32_t start_pos;
+    bool compute_logits;
+    QwenGpuExecutor::PrefillChunkCtx ctx;
+    QwenRecurrentStateIo recurrent;
+    // Owns the host token staging until the batch drains: the prompt H2D is
+    // queued async on the session stream (single keeps its host_tokens alive
+    // to end-of-function the same way).
+    std::vector<std::uint32_t> host_tokens;
+  };
+  std::vector<SessionBatchState> states;
+  states.reserve(items.size());
+  std::array<models::qwen::ContinuationWrite, kMaxPromptBatchMulti> writes;
+  for (const auto& item : items) {
+    QwenGpuExecutor* executor = item.executor;
+    executor->CheckReset();
+    executor->CheckPrefillCancellation();
+    executor->replaying_ssm_state_ = false;
+    executor->arena_.DisableSsmReplayCapture();
+    const std::size_t batch_size = item.tokens.size();
+    if (executor->capture_prompt_hidden_) {
+      const std::size_t captured_layers = std::max<std::size_t>(
+          executor->arena_.GetTargetLayerCapture().size(), 1U);
+      const std::size_t row = captured_layers * hidden_size;
+      executor->h_prompt_hidden_.Reserve(
+          executor->h_prompt_hidden_.Size() + batch_size * row,
+          std::size_t{executor->GetMaxPromptBatch()} * row);
+    }
+    writes[states.size()].Begin(executor->continuation_hooks_, item.start_pos,
+                                item.start_pos +
+                                    static_cast<std::uint32_t>(batch_size));
+    auto scratch = executor->arena_.GetScratchView(batch_size);
+    SessionBatchState st;
+    st.executor = executor;
+    st.tokens = item.tokens;
+    st.start_pos = item.start_pos;
+    st.compute_logits = item.compute_logits;
+    st.host_tokens.assign(item.tokens.begin(), item.tokens.end());
+    HIP_CHECK(hipMemcpyAsync(scratch.decode.prompt_tokens.data(),
+                             st.host_tokens.data(),
+                             batch_size * sizeof(std::uint32_t),
+                             hipMemcpyHostToDevice, executor->arena_.stream));
+    LaunchBatchedEmbeddingLookup(
+        executor->weights_.token_embd.data, executor->weights_.token_embd.type,
+        scratch.decode.prompt_tokens.data(), scratch.decode.hidden.data(),
+        batch_size, hidden_size, executor->arena_.stream);
+    executor->vision_input_.Inject(scratch.decode.hidden.data(),
+                                   item.start_pos, batch_size, hidden_size, 1,
+                                   executor->arena_.stream);
+
+    QwenGpuExecutor::PrefillChunkCtx ctx;
+    ctx.batch_size = batch_size;
+    ctx.start_pos = item.start_pos;
+    ctx.half_prefill =
+        UseQwen27bFp16Prefill(executor->weights_, batch_size);
+    const auto attention_workspace =
+        executor->arena_.GetScratchView(executor->arena_.GetMaxBatch()).ffn;
+    ctx.ws_gate = attention_workspace.gate;
+    ctx.ws_up = attention_workspace.up;
+    ctx.prompt_capture_offset = executor->h_prompt_hidden_.Size();
+    ctx.target_layer_count =
+        executor->arena_.GetTargetLayerCapture().size();
+    ctx.decode_hidden = scratch.decode.hidden.data();
+    st.ctx = ctx;
+    st.recurrent = executor->arena_.BeginRecurrentWrite();
+    states.push_back(std::move(st));
+    if (executor->capture_prompt_hidden_ &&
+        ctx.target_layer_count > 0) {
+      executor->h_prompt_hidden_.Resize(
+          ctx.prompt_capture_offset + batch_size * ctx.target_layer_count *
+                                         hidden_size);
+    }
+  }
+
+  // Coordinator takes stream ownership after the other sessions' queued work
+  // finishes (mirrors ForwardTokenBatch).
+  for (const auto& st : states) {
+    if (st.executor != coordinator) {
+      HIP_CHECK(hipStreamSynchronize(st.executor->arena_.stream));
+    }
+  }
+  // Unified F16 scratch: device descriptor table only (no split-K partials
+  // on the prefill path). Freed below after the final synchronize.
+  void* mixed_scratch = nullptr;
+  {
+    const std::size_t need =
+        mb::MixedBatchF16ScratchBytes(states.size());
+    if (hipMalloc(&mixed_scratch, need) != hipSuccess) {
+      throw std::runtime_error("Qwen prompt batch scratch allocation failed");
+    }
+  }
+  mb::MixedBlk ublks[kMaxPromptBatchMulti];
+
+  for (std::uint32_t l = 0; l < config.num_layers; ++l) {
+    for (auto& st : states) {
+      st.executor->PrefillLayerCheckpoint(l);
+    }
+    const auto& layer = coordinator->weights_.layers[l];
+    const auto route_resolution = ResolveQwenLayerRouteWithReasons(
+        coordinator->policy_, QwenExecutionMode::kPrefill,
+        layer.is_full_attention);
+    for (auto& st : states) {
+      QwenGpuExecutor* executor = st.executor;
+      // Per-session GEMM/quantization route flags (batch-size dependent, so
+      // each session keeps the route its single run would take).
+      const auto is_q8 = [&](const models::QwenTensorRef& w) {
+        return ReadsQ8ActivationForPrefill(w.type, st.ctx.half_prefill);
+      };
+      st.ctx.norm_feeds_q8_only =
+          IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
+          (layer.is_full_attention
+               ? (is_q8(layer.attn_q) && is_q8(layer.attn_k) &&
+                  is_q8(layer.attn_v))
+               : (is_q8(layer.attn_qkv) && is_q8(layer.attn_gate) &&
+                  is_q8(layer.ssm_alpha) && is_q8(layer.ssm_beta)));
+      st.ctx.ffn_feeds_q8_only =
+          IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
+          is_q8(layer.ffn_gate) && is_q8(layer.ffn_up);
+      st.ctx.output_first_row =
+          (st.ctx.half_prefill && l + 1 == config.num_layers) ? 0 : 0;
+      st.ctx.output_rows = st.ctx.batch_size;
+      st.ctx.fuse_qknorm_rope_kv =
+          route_resolution.plan.fuse_qk_norm_rope_kv &&
+          detail::IsFusedQkNormSupported(config.head_dim);
+      if (layer.is_full_attention) {
+        executor->PrefillAttentionPre(st.ctx, l);
+      }
+    }
+    // Unified attention needs the KV cache already written by Pre: only
+    // the fused QK-norm/RoPE/KV-write path maintains the plane before the
+    // attention step. Unfused sessions keep the legacy dispatch (which packs
+    // KV itself), exactly like their single runs.
+    bool all_fused = true;
+    for (const auto& st : states) {
+      if (!st.ctx.fuse_qknorm_rope_kv) all_fused = false;
+    }
+    if (use_unified && layer.is_full_attention && all_fused) {
+      // One unified launch over every session's rows (varlen: decode rows
+      // and prefill chunks side by side).
+      for (std::size_t i = 0; i < states.size(); ++i) {
+        const auto& st = states[i];
+        QwenGpuExecutor* executor = st.executor;
+        const std::size_t st_total_k =
+            executor->arena_.GetAttentionKvPlaneElements();
+        const std::uint32_t st_maxctx = executor->arena_.GetMaxContext();
+        const std::uint32_t attn_layer_idx =
+            l / config.full_attention_interval;
+        const std::size_t layer_el =
+            static_cast<std::size_t>(config.num_key_value_heads) * st_maxctx *
+            config.head_dim;
+        const auto* f16_base =
+            static_cast<const __half*>(executor->arena_.d_attention_kv_f16);
+        mb::MixedBlk& b = ublks[i];
+        b.q = executor->arena_.d_q;
+        b.k = f16_base +
+              static_cast<std::size_t>(attn_layer_idx) * layer_el;
+        b.v = f16_base + st_total_k +
+              static_cast<std::size_t>(attn_layer_idx) * layer_el;
+        b.gate = executor->arena_.d_ssm_gate;
+        b.out = executor->arena_.d_ssm_out;
+        b.kv_len = st.start_pos + static_cast<std::uint32_t>(st.ctx.batch_size);
+        b.q_pos_base = st.start_pos;
+        b.n_rows = static_cast<std::uint32_t>(st.ctx.batch_size);
+        b.k_codec = mb::MixedKvCodec::kF16;
+        b.v_codec = mb::MixedKvCodec::kF16;
+        b.head_dim = config.head_dim;
+        b.heads = config.num_attention_heads;
+        b.kv_heads = config.num_key_value_heads;
+        b.score_scale = 0.0F;
+        b.q_stride = 0;
+        b.k_stride = config.head_dim;
+        b.v_stride = config.head_dim;
+        b.k_head_stride = st_maxctx * config.head_dim;
+        b.v_head_stride = st_maxctx * config.head_dim;
+        b.gate_stride = 0;
+        b.out_stride = 0;
+        b.window = 0;
+        b.key_block_bytes = 34;
+        b.value_block_bytes = 34;
+      }
+      // Pre-phase kernels ran on each session's stream; drain them before
+      // the coordinator-stream unified launch (two host syncs per layer,
+      // mirroring the decode batch's ownership transfer).
+      for (const auto& st : states) {
+        if (st.executor != coordinator) {
+          HIP_CHECK(hipStreamSynchronize(st.executor->arena_.stream));
+        }
+      }
+      const bool unified_ok = mb::LaunchMixedBatchAttention(
+          ublks, states.size(), mixed_scratch,
+          mb::MixedBatchF16ScratchBytes(states.size()),
+          coordinator->arena_.stream);
+      HIP_CHECK(hipStreamSynchronize(coordinator->arena_.stream));
+      for (auto& st : states) {
+        st.executor->PrefillAttentionPost(st.ctx, l,
+                                          /*run_legacy=*/!unified_ok);
+      }
+    } else if (layer.is_full_attention) {
+      for (auto& st : states) {
+        st.executor->PrefillAttentionPost(st.ctx, l,
+                                          /*run_legacy=*/true);
+      }
+    } else {
+      for (auto& st : states) {
+        st.executor->PrefillSsmLayer(st.ctx, l, st.recurrent);
+      }
+    }
+    for (auto& st : states) {
+      st.executor->PrefillFfnTail(st.ctx, l);
+    }
+  }
+
+  std::vector<tokenization::TokenId> next_tokens;
+  next_tokens.reserve(states.size());
+  for (std::size_t si = 0; si < states.size(); ++si) {
+    auto& st = states[si];
+    QwenGpuExecutor* executor = st.executor;
+    const std::size_t batch_size = st.ctx.batch_size;
+    executor->last_hidden_offset_ = (batch_size - 1) * hidden_size;
+    if (executor->capture_prompt_hidden_) {
+      if (st.ctx.target_layer_count == 0) {
+        const std::size_t old_size = executor->h_prompt_hidden_.Size();
+        const std::size_t chunk_elements = batch_size * hidden_size;
+        executor->h_prompt_hidden_.Resize(old_size + chunk_elements);
+        HIP_CHECK(hipMemcpyAsync(executor->h_prompt_hidden_.Data() + old_size,
+                                st.ctx.decode_hidden,
+                                chunk_elements * sizeof(float),
+                                hipMemcpyDeviceToHost, executor->arena_.stream));
+      }
+      HIP_CHECK(hipStreamSynchronize(executor->arena_.stream));
+    }
+    if (!st.compute_logits) {
+      writes[si].Commit(
+          st.start_pos + static_cast<std::uint32_t>(batch_size), false);
+      next_tokens.push_back(0);
+      continue;
+    }
+    auto scratch = executor->arena_.GetScratchView(batch_size);
+    const float* final_hidden =
+        scratch.decode.hidden.data() + ((batch_size - 1) * hidden_size);
+    LaunchRMSNorm(final_hidden,
+                  static_cast<const float*>(
+                      executor->weights_.output_norm.data),
+                  scratch.decode.normed.data(), hidden_size, eps,
+                  executor->arena_.stream);
+    LaunchGEMV(executor->weights_.output.data,
+               executor->weights_.output.type, scratch.decode.normed.data(),
+               scratch.decode.logits.data(), config.vocab_size, hidden_size,
+               executor->arena_.stream);
+    auto* d_out_token = scratch.decode.sampled_token.data();
+    LaunchGPUArgmax(scratch.decode.logits.data(), d_out_token,
+                    config.vocab_size, executor->arena_.stream);
+    std::uint32_t next_token_id = 0;
+    HIP_CHECK(hipMemcpyAsync(&next_token_id, d_out_token, sizeof(std::uint32_t),
+                             hipMemcpyDeviceToHost, executor->arena_.stream));
+    HIP_CHECK(hipStreamSynchronize(executor->arena_.stream));
+    const auto result =
+        CheckedSampleToken(next_token_id, config.vocab_size);
+    writes[si].Commit(st.start_pos + static_cast<std::uint32_t>(batch_size),
+                      true);
+    next_tokens.push_back(result);
+  }
+  HIP_CHECK(hipStreamSynchronize(coordinator->arena_.stream));
+  (void)hipFree(mixed_scratch);
+  return next_tokens;
 }
 
 }  // namespace gufo::hip

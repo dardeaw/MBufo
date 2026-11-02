@@ -48,6 +48,15 @@ inline constexpr std::uint32_t kBlockedSplitKMinKv = 1024;
 /// Maximum KV splits (matches the F16 Split-K cap).
 inline constexpr std::uint32_t kBlockedSplitKMaxSplits = 64;
 
+/// Device scratch for the split-K partials: MaxTokens x 16 heads x
+/// 64 splits x (d+2) floats. The launcher takes it from the caller arena
+/// (§4.2 Slot-concurrency iron rule: no `static` buffers inside operators);
+/// null or short scratch refuses cleanly so the caller falls back.
+[[nodiscard]] inline constexpr std::size_t
+AttentionBlockedSplitKScratchBytes() noexcept {
+  return 8ull * 16ull * 64ull * (256ull + 2ull) * sizeof(float);
+}
+
 /// Split-K decode over blocked Q8 caches (SWA geometry only). `k_cache` /
 /// `v_cache` and `start_pos` must already carry the SWA window
 /// pointer-shift/rebase (identical to the AttentionBlocked call: keys are
@@ -57,9 +66,11 @@ inline constexpr std::uint32_t kBlockedSplitKMaxSplits = 64;
 /// multiplies the QK scores (gemma4 passes 1.0, its f_attention_scale).
 /// `key_block_bytes` / `value_block_bytes` select each side's block layout
 /// (34 = 8-bit codes, 18 = packed 4-bit codes for the GUFO_KV_Q4/V4 grids).
-/// First version instantiates <KvCodecQ8, 256>; other shapes return false so
-/// the caller falls back to the scalar direct read. Never launches an empty
-/// grid. The merge folds chunks in fixed order, so reruns are deterministic.
+/// `partials` is caller-owned device scratch of at least
+/// AttentionBlockedSplitKScratchBytes() (§4.2). First version instantiates
+/// <KvCodecQ8, 256>; other shapes return false so the caller falls back to
+/// the scalar direct read. Never launches an empty grid. The merge folds
+/// chunks in fixed order, so reruns are deterministic.
 template <typename Codec, std::uint32_t kHeadDim>
 bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
                             const std::uint8_t* v_cache, float* out,
@@ -67,9 +78,10 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
                             const std::uint32_t* start_pos,
                             std::uint32_t kv_len, std::uint32_t heads,
                             std::uint32_t kv_heads, std::uint32_t d,
-                            hipStream_t stream, float score_scale = 1.0F,
-                            std::uint32_t key_block_bytes = 34,
-                            std::uint32_t value_block_bytes = 34);
+                            hipStream_t stream, float score_scale,
+                            std::uint32_t key_block_bytes,
+                            std::uint32_t value_block_bytes, float* partials,
+                            std::size_t partials_bytes);
 
 }  // namespace gufo::core::compute::blocked_splitk
 

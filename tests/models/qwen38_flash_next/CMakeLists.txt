@@ -89,3 +89,12 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(qwen38_flash_next_gpu_probe PRIVATE
     gufo_qwen38_flash_next_reference)
 endif()
+
+# Engine-level mixed-batch check (P2): EvaluateBatchWithChunk vs legacy twins.
+# Explicit-only (needs weights + GPU); not in the default or CI check sets.
+if (ENGINE_ENABLE_HIP)
+  add_executable(qwen38_flash_next_engine_mixed_test EXCLUDE_FROM_ALL
+    engine_mixed_test.cpp)
+  target_link_libraries(qwen38_flash_next_engine_mixed_test PRIVATE
+    gufo_qwen38_flash_next)
+endif()
