@@ -6,6 +6,7 @@
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/gemm_route.hpp"
+#include "src/models/qwen/hip/blocked_q8.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops.hpp"
@@ -97,6 +98,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       continuation_hooks_, start_pos,
       start_pos + static_cast<std::uint32_t>(batch_size));
   auto scratch = arena_.GetScratchView(batch_size);
+  // Blocked-Q8 sidecar (q8 policy only): device copy of the chunk base
+  // position for the blocked write kernel. Prefill is eager, so one H2D
+  // per chunk on the arena stream is safe (no graph capture here).
+  if (policy_.UsesBlockedAttentionKv()) {
+    HIP_CHECK(hipMemcpyAsync(arena_.d_blocked_pos, &start_pos,
+                             sizeof(start_pos), hipMemcpyHostToDevice,
+                             arena_.stream));
+  }
   const auto attention_workspace =
       arena_.GetScratchView(arena_.GetMaxBatch()).ffn;
   const std::size_t target_layer_count = arena_.GetTargetLayerCapture().size();
@@ -333,6 +342,24 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             arena_.d_q, arena_.d_k, batch_size, config.num_attention_heads,
             config.num_key_value_heads, config.head_dim, config.rotary_dim,
             start_pos, config.rope_theta, arena_.stream, vision_input_.rope());
+      }
+
+      // Blocked-Q8 sidecar (q8 policy only): the fused/unfused write above
+      // keeps the F16 plane canonical for the legacy prefill read below, and
+      // the same final rows are appended to the layer's blocked cache here
+      // for later blocked decode reads. Both branches leave the final rows
+      // in arena_.d_k/d_v.
+      if (policy_.UsesBlockedAttentionKv()) {
+        const std::size_t blocked_layer_bytes = arena_.BlockedKvLayerBytes();
+        WriteQwenBlockedKv(
+            arena_.d_k, arena_.d_v,
+            arena_.d_attention_kv_blocked_k +
+                static_cast<std::size_t>(attn_layer_idx) * blocked_layer_bytes,
+            arena_.d_attention_kv_blocked_v +
+                static_cast<std::size_t>(attn_layer_idx) * blocked_layer_bytes,
+            static_cast<std::uint32_t>(batch_size),
+            config.num_key_value_heads, config.head_dim, arena_.d_blocked_pos,
+            arena_.stream);
       }
 
       const std::size_t visible_context =
@@ -730,6 +757,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
     std::span<const tokenization::TokenId> candidate_tokens,
     std::uint32_t start_pos, bool capture_logits) {
+  // Speculative verification under q8 is explicitly unsupported: the batched
+  // verify path maintains only the F16 plane, so accepting drafts would leave
+  // the blocked caches stale. Refuse loudly instead of decoding wrong.
+  if (policy_.UsesBlockedAttentionKv()) {
+    throw std::logic_error(
+        "blocked-Q8 attention does not support speculative verification; "
+        "use QWEN_KV_QUANT=f16 with --speculative");
+  }
   return ForwardDecodeEquivalentVerificationChunk(candidate_tokens, start_pos,
                                                   capture_logits);
 }

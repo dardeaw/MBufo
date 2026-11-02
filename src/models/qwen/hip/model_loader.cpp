@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "src/models/qwen/chat_template.hpp"
+#include "src/models/qwen/hip/blocked_q8.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 
@@ -267,6 +268,18 @@ std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
       *error_msg = "Requested GPU context exceeds the model context length";
     }
     return nullptr;
+  }
+
+  // The blocked-Q8 path fails loudly here (never silently) when the model
+  // cannot use the shared d == 256-only direct-read kernel.
+  if (policy.UsesBlockedAttentionKv()) {
+    std::string blocked_error;
+    if (!ValidateQwenBlockedQ8Config(config, &blocked_error)) {
+      if (error_msg != nullptr) {
+        *error_msg = "blocked-Q8 attention rejected: " + blocked_error;
+      }
+      return nullptr;
+    }
   }
 
   return std::make_unique<QwenGpuExecutor>(std::move(model), max_context,

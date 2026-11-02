@@ -3,6 +3,7 @@
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
+#include "src/models/qwen/hip/blocked_q8.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops.hpp"
@@ -148,8 +149,38 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
                    config.rope_theta, arena.stream, rope);
       }
 
+      // Blocked-Q8 sidecar (q8 policy only): the fused/unfused write above
+      // keeps the F16 plane canonical, and the same final rows are appended
+      // to the layer's blocked cache here. Both branches leave the final
+      // rows in attention_scratch.k/v.
+      if (policy.UsesBlockedAttentionKv()) {
+        const std::size_t blocked_layer_bytes = arena.BlockedKvLayerBytes();
+        WriteQwenBlockedKv(
+            attention_scratch.k.data(), attention_scratch.v.data(),
+            arena.d_attention_kv_blocked_k +
+                static_cast<std::size_t>(attn_layer_idx) * blocked_layer_bytes,
+            arena.d_attention_kv_blocked_v +
+                static_cast<std::size_t>(attn_layer_idx) * blocked_layer_bytes,
+            1, config.num_key_value_heads, config.head_dim, d_in_pos,
+            arena.stream);
+      }
+
       // Softmax Attention + Gating
-      if (use_split_k_decode) {
+      if (policy.UsesBlockedAttentionKv()) {
+        // Blocked direct-read (fused dequant, 1/sqrt(d) scale, no F16
+        // staging) plus the SiLU gate; single-split, so no merge pass.
+        // Split-K stays on the F16 path only.
+        const std::size_t blocked_layer_bytes = arena.BlockedKvLayerBytes();
+        ReadQwenBlockedAttention(
+            attention_scratch.q.data(),
+            arena.d_attention_kv_blocked_k +
+                static_cast<std::size_t>(attn_layer_idx) * blocked_layer_bytes,
+            arena.d_attention_kv_blocked_v +
+                static_cast<std::size_t>(attn_layer_idx) * blocked_layer_bytes,
+            ssm_scratch.gate.data(), ssm_scratch.out.data(), 1, d_in_pos,
+            config.num_attention_heads, config.num_key_value_heads,
+            config.head_dim, arena.stream);
+      } else if (use_split_k_decode) {
         LaunchAttention(
             attention_scratch.q.data(), attention_scratch.k.data(),
             attention_scratch.v.data(), ssm_scratch.gate.data(),

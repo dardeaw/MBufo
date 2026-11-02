@@ -27,11 +27,14 @@ if (ENGINE_ENABLE_HIP)
   find_package(OpenSSL REQUIRED COMPONENTS Crypto)
   target_link_libraries(gufo_core PRIVATE OpenSSL::Crypto)
   target_link_libraries(gufo_core PRIVATE gufo_cache_hip)
+  target_link_libraries(gufo_core PRIVATE gufo_core_blocked_kv)
   target_sources(gufo_core PRIVATE
     ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_adapter.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/encoder.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/device_input.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/attention.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/blocked_q8.cpp
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/blocked_gate.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/batched_ssm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_embed.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_gemm.hip
