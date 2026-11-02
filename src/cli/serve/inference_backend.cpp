@@ -3333,11 +3333,16 @@ std::string Gemma4RenderPrompt(
 
 class Gemma4TextRunnerState final : public TextRunnerState {
  public:
-  explicit Gemma4TextRunnerState(const std::shared_ptr<Gemma4Model>& model) {
+  explicit Gemma4TextRunnerState(const std::shared_ptr<Gemma4Model>& model,
+                                const std::string& mtp_model_path = {}) {
     std::string error;
     session_ = model->CreateSession(&error);
     if (session_ == nullptr) {
       throw std::runtime_error("Failed to create Gemma4 session: " + error);
+    }
+    if (!mtp_model_path.empty() &&
+        !session_->EnableMtp(mtp_model_path, &error)) {
+      throw std::runtime_error("Failed to enable Gemma4 MTP: " + error);
     }
   }
 
@@ -3379,8 +3384,19 @@ class Gemma4TextRunner final : public HipTextModelRunner {
     return sampling::JsonConstraint::ToolFormat::kGemma;
   }
   Gemma4TextRunner(std::shared_ptr<Gemma4Model> model,
-                   std::uint32_t max_context)
-      : model_(std::move(model)), max_context_(max_context) {}
+                   std::uint32_t max_context,
+                   std::string mtp_model_path = {},
+                   std::uint32_t max_draft_tokens = 0)
+      : model_(std::move(model)),
+        max_context_(max_context),
+        mtp_model_path_(std::move(mtp_model_path)),
+        max_draft_tokens_(max_draft_tokens) {}
+
+  // MTP sidecar decoding is on when a draft model path and a positive draft
+  // limit were both supplied (mirrors --speculative mtp --mtp-model).
+  [[nodiscard]] bool use_mtp() const noexcept {
+    return !mtp_model_path_.empty() && max_draft_tokens_ > 0;
+  }
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
     return {
@@ -3394,7 +3410,7 @@ class Gemma4TextRunner final : public HipTextModelRunner {
                 .fork = false,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
-                .multi_token_decode = false,
+                .multi_token_decode = use_mtp(),
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0,
                 .prefix_reuse = false,
@@ -3485,7 +3501,7 @@ class Gemma4TextRunner final : public HipTextModelRunner {
   }
 
   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    return std::make_unique<Gemma4TextRunnerState>(model_);
+    return std::make_unique<Gemma4TextRunnerState>(model_, mtp_model_path_);
   }
 
   // Gemma4 Sync reprocesses the prompt from position 0 (no prefix reuse in
@@ -3569,6 +3585,64 @@ class Gemma4TextRunner final : public HipTextModelRunner {
     gemma.set_position(gemma.position() + 1);
   }
 
+  // Serial speculative path: one engine SpeculativeRound per scheduler step.
+  // Served only for pure-greedy requests (temperature 0, no penalties,
+  // constraints, forced tokens or reasoning budgets — the sampler would
+  // otherwise disagree with the engine-side argmax verify). Anything else
+  // falls back to the single-token base path. The pool Accepts published
+  // selections into the sampler itself, so this override advances only the
+  // engine and the state position.
+  [[nodiscard]] TextDecodeStep DecodeStep(
+      TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const override {
+    if (!use_mtp() || sampler.ForcedToken().has_value() ||
+        !sampler.config().can_use_unmodified_argmax() ||
+        sampler.NeedsConstraintMask()) {
+      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    }
+    if (max_tokens == 0) {
+      throw std::invalid_argument(
+          "text runner decode step budget must be at least one token");
+    }
+    auto& gemma = RequireGemma4State(state);
+    if (gemma.position() >= max_context_) {
+      return {.stop = true};
+    }
+    // Block size never exceeds the scheduler budget (the first selection
+    // replays the already-published preview token).
+    const std::uint32_t n_draft = static_cast<std::uint32_t>(
+        std::min<std::size_t>(max_draft_tokens_, max_tokens - 1));
+    std::vector<std::int32_t> block;
+    std::string error;
+    if (!gemma.session().SpeculativeRound(0, n_draft, &block, &error) ||
+        block.empty()) {
+      throw std::runtime_error("Gemma4 speculative decode failed: " + error);
+    }
+    TextDecodeStep step;
+    step.draft_rounds = 1;
+    step.draft_tokens = n_draft;
+    step.draft_accepted_tokens = block.size() - 1;
+    bool stop = false;
+    step.selections.reserve(block.size());
+    for (const std::int32_t tok : block) {
+      // A stop token ends the sequence without being published, matching the
+      // single-token path (the engine has still consumed it, so the state
+      // position advances past it below).
+      if (gemma.stop_at_eos() && model_->IsStopToken(tok)) {
+        stop = true;
+        break;
+      }
+      step.selections.push_back(TextDecodeSelection{
+          .stop = false,
+          .token = static_cast<TextRunnerToken>(tok),
+          .piece = model_->TokenText(tok),
+      });
+    }
+    gemma.set_position(gemma.position() + block.size());
+    step.stop = stop;
+    return step;
+  }
+
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     return SelectNext(state, sampler);
@@ -3582,6 +3656,8 @@ class Gemma4TextRunner final : public HipTextModelRunner {
  private:
   std::shared_ptr<Gemma4Model> model_;
   std::uint32_t max_context_;
+  std::string mtp_model_path_;
+  std::uint32_t max_draft_tokens_;
 };
 #endif
 
@@ -3895,10 +3971,24 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error, "Gemma4 HTTP models do not support --mmproj");
       return false;
     }
-    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+        speculative_config.backend != TextSpeculativeBackend::kMtp) {
       SetError(error,
-               "Gemma4 HTTP models run without speculative decoding (draft "
-               "sidecars are not served)");
+               "Gemma4 HTTP models support only MTP speculative decoding "
+               "(--speculative mtp --mtp-model)");
+      return false;
+    }
+    if (speculative_config.backend == TextSpeculativeBackend::kMtp &&
+        speculative_config.draft_model_path.empty()) {
+      SetError(error, "Gemma4 MTP HTTP decoding requires --mtp-model");
+      return false;
+    }
+    if (speculative_config.backend == TextSpeculativeBackend::kMtp &&
+        (speculative_config.max_draft_tokens == 0 ||
+         speculative_config.max_draft_tokens > 16)) {
+      SetError(error,
+               "Gemma4 MTP requires a draft limit in [1, 16] "
+               "(--draft-tokens)");
       return false;
     }
     auto model = models::gemma4::Model::Load(
@@ -4338,11 +4428,25 @@ bool InferenceBackend::load(
     SetError(error, "HTTP context exceeds the loaded Gemma4 model context");
     return false;
   }
-  if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+  if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+      speculative_config.backend != TextSpeculativeBackend::kMtp) {
     SetError(error,
-             "Gemma4 HTTP models run without speculative decoding (draft "
-             "sidecars are not served)");
+             "Gemma4 HTTP models support only MTP speculative decoding "
+             "(--speculative mtp --mtp-model)");
     return false;
+  }
+  if (speculative_config.backend == TextSpeculativeBackend::kMtp) {
+    if (speculative_config.draft_model_path.empty()) {
+      SetError(error, "Gemma4 MTP HTTP decoding requires --mtp-model");
+      return false;
+    }
+    if (speculative_config.max_draft_tokens == 0 ||
+        speculative_config.max_draft_tokens > 16) {
+      SetError(error,
+               "Gemma4 MTP requires a draft limit in [1, 16] "
+               "(--draft-tokens)");
+      return false;
+    }
   }
   // No continuation snapshots exist for Gemma4 sessions, so the disk cache
   // has no identity to key on; the RAM pool owns every execution slot.
@@ -4357,8 +4461,12 @@ bool InferenceBackend::load(
         sampling::TextModelPreset::kUnspecified;
     new_state->sampling_defaults.supplied = {};
     new_state->supports_images = false;
-    auto runner = std::make_shared<Gemma4TextRunner>(std::move(model),
-                                                     max_context);
+    const bool use_mtp =
+        speculative_config.backend == TextSpeculativeBackend::kMtp;
+    auto runner = std::make_shared<Gemma4TextRunner>(
+        std::move(model), max_context,
+        use_mtp ? speculative_config.draft_model_path : std::string{},
+        use_mtp ? speculative_config.max_draft_tokens : 0u);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     auto runner_pool = std::make_shared<TextRunnerPool>(
