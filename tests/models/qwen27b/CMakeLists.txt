@@ -71,3 +71,11 @@ if (ENGINE_ENABLE_HIP)
     SKIP_RETURN_CODE 77)
 
 endif()
+
+# Cross-session prefill batch vs serial twins (mixed-batch-unified).
+# Explicit-only (needs weights + GPU); not in the default or CI check sets.
+if (ENGINE_ENABLE_HIP)
+  add_executable(qwen27b_mixed_batch_test EXCLUDE_FROM_ALL
+    mixed_batch_test.cpp)
+  target_link_libraries(qwen27b_mixed_batch_test PRIVATE gufo_core hip::host)
+endif()

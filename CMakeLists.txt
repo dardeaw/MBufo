@@ -125,11 +125,13 @@ if (ENGINE_ENABLE_HIP)
   add_library(gufo_core_blocked_kv STATIC
     src/core/compute/attention/blocked_kv.hip.cpp
     src/core/compute/attention/blocked_wmma.hip.cpp
-    src/core/compute/attention/blocked_splitk.hip.cpp)
+    src/core/compute/attention/blocked_splitk.hip.cpp
+    src/core/compute/attention/mixed_batch_attn.hip.cpp)
   set_source_files_properties(
     src/core/compute/attention/blocked_kv.hip.cpp
     src/core/compute/attention/blocked_wmma.hip.cpp
-    src/core/compute/attention/blocked_splitk.hip.cpp PROPERTIES LANGUAGE HIP)
+    src/core/compute/attention/blocked_splitk.hip.cpp
+    src/core/compute/attention/mixed_batch_attn.hip.cpp PROPERTIES LANGUAGE HIP)
   set_target_properties(gufo_core_blocked_kv PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
@@ -387,6 +389,7 @@ if (BUILD_TESTING)
 
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
+  add_subdirectory(tests/models/gemma4)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
 

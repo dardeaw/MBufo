@@ -1,5 +1,6 @@
 #include <thread>
 #include <chrono>
+#include <algorithm>
 #include "src/models/gemma4/engine.hpp"
 #include "src/models/gemma4/mtp.hpp"
 
@@ -13,6 +14,7 @@
 #include "src/models/gemma4/kernels/kernels.hpp"
 #include "src/core/compute/attention/blocked_wmma.hpp"
 #include "src/core/compute/attention/blocked_splitk.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 #include "src/models/gemma4/weights.hpp"
@@ -393,7 +395,10 @@ struct DeviceBuffers {
 
 struct Model::Impl {};
 
-Model::~Model() = default;
+Model::~Model() {
+  // Caller-owned mixed-batch arena (§4.2), freed here.
+  if (mixed_scratch_ != nullptr) (void)hipFree(mixed_scratch_);
+}
 
 namespace {
 // llama.cpp Gemma4 conversion synthesises rope_freqs for the proportional
@@ -626,6 +631,12 @@ struct Session::Impl {
   float* d_pending_h{nullptr};
   bool has_pending_cur{false};
   std::int32_t pending_cur{0};
+  // Tokens covered by the incremental Sync fast path (Sync establishes,
+  // SpeculativeRound clears). Lets append-only growth forward only the delta.
+  std::vector<std::int32_t> synced_;
+  // Caller-owned arena for the shared blocked Split-K decode kernel (§4.2:
+  // no statics inside operators). Sized by AttentionBlockedSplitKScratchBytes.
+  float* splitk_partials{nullptr};
   __half* w_slab{nullptr};     // dequant staging (largest matrix)
   __half* w_slab2{nullptr};    // second staging (up projection)
   __half* x_slab{nullptr};     // F16 activation staging
@@ -760,13 +771,19 @@ struct Session::Impl {
         buffers.Alloc<fn::ArgmaxCandidate>(16 * fn::kArgmaxParts, error);
     d_argmax_out = buffers.Alloc<std::int32_t>(16, error);
     d_pending_h = buffers.Alloc<float>(hidden, error);
+    // §4.2 arena for the shared blocked Split-K kernel (no statics).
+    splitk_partials = buffers.Alloc<float>(
+        ::gufo::core::compute::blocked_splitk::
+            AttentionBlockedSplitKScratchBytes() / sizeof(float),
+        error);
     if (this->hidden == nullptr || normed == nullptr || qbuf == nullptr ||
         kbuf == nullptr || vbuf == nullptr || attn_out == nullptr ||
         router_tmp == nullptr || router_logits == nullptr ||
         expert_ids == nullptr || expert_weights == nullptr ||
         expert_counts == nullptr || expert_out == nullptr ||
         mlp_out == nullptr || moe_out == nullptr || logits == nullptr ||
-        w_slab == nullptr || w_slab2 == nullptr || x_slab == nullptr) {
+        w_slab == nullptr || w_slab2 == nullptr || x_slab == nullptr ||
+        splitk_partials == nullptr) {
       if (error != nullptr && error->empty())
         *error = "gemma4 session allocation failed";
       return false;
@@ -976,41 +993,13 @@ constexpr std::uint32_t kBlockedWmmaMinTokens = 32;
 
 }  // namespace
 
-bool Session::Forward(std::span<const std::int32_t> tokens,
-                      std::uint32_t start_pos, std::string* error_msg,
-                      bool all_logits) {
-  const auto& w = *model_->weights_;
+void Session::ForwardLayerPre(Session& s, std::uint32_t il,
+                               std::uint32_t n, std::uint32_t start_pos,
+                               hipStream_t stream) {
+  auto& w = *s.model_->weights_;
   const auto& c = w.config;
   const std::uint32_t hidden = c.hidden_size;
-  const std::uint32_t n = static_cast<std::uint32_t>(tokens.size());
-  hipStream_t stream = 0;
-  impl_->has_pending_cur = false;
-  // Device-side position scalar for the shared blocked kernels (blocked
-  // writes and direct reads index the cache with *start_pos on-device).
-  if (model_->options_.kv_cache_quant == "q8") {
-    (void)hipMemcpyAsync(impl_->d_pos, &start_pos, sizeof(start_pos),
-                         hipMemcpyHostToDevice, stream);
-  }
-  std::vector<std::int32_t> host_tokens(tokens.begin(), tokens.end());
-  if (getenv("GEMMA4_DEBUG_EMBED"))
-    std::fprintf(stderr, "[gemma4] fwd n=%u pos=%u tok0=%d\n", n, start_pos,
-                 host_tokens[0]);
-
-  // Embedding lookup from the device mirror (Q4_0 table), fused with the
-  // sqrt(hidden) scale so the chunk entry is a single kernel launch.
-  kernels::EmbedScale(w.token_embd.device, w.token_embd.type,
-                      host_tokens.data(), impl_->hidden, n, hidden,
-                      std::sqrt(static_cast<float>(hidden)), stream);
-
-  // Gemma 4 scales token embeddings by sqrt(hidden) (llama.cpp parity).
-  // NOTE: llama.cpp scales token embeddings by sqrt(n_embd); Gemma 4's
-  // trained embedding table already carries that scale (llama.cpp's own
-  // table is F32 ~O(1)). Q4_0 quantisation of the pre-scaled table keeps
-  // it pre-scaled, so NO extra sqrt(hidden) here.
-
-  std::uint32_t pos = start_pos;
-
-  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+  (void)hidden;
     const auto& l = w.layers[il];
     const std::uint32_t kv_layer = c.KvProducingLayer(il);
     const std::uint32_t head_dim = c.HeadDim(il);
@@ -1021,7 +1010,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     // self-produced KV). Full layers (d == 512, proportional rope) stay F16;
     // see the allocation fallback above.
     const bool use_blocked =
-        model_->options_.kv_cache_quant == "q8" && l.has_kv && kv_heads > 0 &&
+        s.model_->options_.kv_cache_quant == "q8" && l.has_kv && kv_heads > 0 &&
         head_dim == 256 && kv_layer == il;
 
     // Attention block.
@@ -1029,9 +1018,9 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     const bool allow_fused_decode =
         !debug_embed && getenv("GEMMA4_NO_FUSED_DECODE") == nullptr;
 
-    kernels::RmsNorm(impl_->hidden,
+    kernels::RmsNorm(s.impl_->hidden,
                      static_cast<const float*>(l.attn_norm.device),
-                     impl_->normed, n, hidden, c.rms_eps, stream);
+                     s.impl_->normed, n, hidden, c.rms_eps, stream);
 
     const bool use_fused_qkv_gemv =
         allow_fused_decode && n <= 8 &&
@@ -1048,19 +1037,19 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           q_dev, static_cast<int>(l.wq.type), l.wq.RowBytes(), qdim, k_dev,
           static_cast<int>(l.wk.type), l.wk.RowBytes(), v_dev,
           l.has_v_proj ? static_cast<int>(l.wv.type) : 0,
-          l.has_v_proj ? l.wv.RowBytes() : 0, kvdim, hidden, impl_->normed,
-          impl_->qbuf, impl_->kbuf, impl_->vbuf, n, stream);
+          l.has_v_proj ? l.wv.RowBytes() : 0, kvdim, hidden, s.impl_->normed,
+          s.impl_->qbuf, s.impl_->kbuf, s.impl_->vbuf, n, stream);
     } else {
       const bool can_reuse_qkv_x = (n > 8u && qdim >= 256u && kvdim >= 256u);
-      StagedGemm(l.wq, qdim, impl_->normed, impl_->qbuf, n, impl_->w_slab,
-                 impl_->x_slab, stream, 0.0F, impl_->x_q8_slab, false);
+      StagedGemm(l.wq, qdim, s.impl_->normed, s.impl_->qbuf, n, s.impl_->w_slab,
+                 s.impl_->x_slab, stream, 0.0F, s.impl_->x_q8_slab, false);
       if (l.has_kv && kv_heads > 0) {
-        StagedGemm(l.wk, kvdim, impl_->normed, impl_->kbuf, n, impl_->w_slab,
-                   impl_->x_slab, stream, 0.0F, impl_->x_q8_slab,
+        StagedGemm(l.wk, kvdim, s.impl_->normed, s.impl_->kbuf, n, s.impl_->w_slab,
+                   s.impl_->x_slab, stream, 0.0F, s.impl_->x_q8_slab,
                    can_reuse_qkv_x);
         if (l.has_v_proj) {
-          StagedGemm(l.wv, kvdim, impl_->normed, impl_->vbuf, n, impl_->w_slab,
-                     impl_->x_slab, stream, 0.0F, impl_->x_q8_slab,
+          StagedGemm(l.wv, kvdim, s.impl_->normed, s.impl_->vbuf, n, s.impl_->w_slab,
+                     s.impl_->x_slab, stream, 0.0F, s.impl_->x_q8_slab,
                      can_reuse_qkv_x);
         }
       }
@@ -1077,8 +1066,8 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         return ss;
       };
       std::fprintf(stderr, "[gemma4] L0 n=%u norm0=%.6f qbuf0=%.6f\n", n,
-                   hsum(impl_->normed, hidden),
-                   hsum(impl_->qbuf, static_cast<std::size_t>(qdim)));
+                   hsum(s.impl_->normed, hidden),
+                   hsum(s.impl_->qbuf, static_cast<std::size_t>(qdim)));
     }
 
     const std::uint32_t rot_dim = c.RotaryDim(il);
@@ -1090,19 +1079,19 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         rot_dim <= head_dim) {
       const bool write_kv = (l.has_kv && kv_heads > 0);
       kernels::PrepAttnQkv(
-          impl_->qbuf, impl_->kbuf, impl_->vbuf,
+          s.impl_->qbuf, s.impl_->kbuf, s.impl_->vbuf,
           static_cast<const float*>(l.attn_q_norm.device),
           write_kv ? static_cast<const float*>(l.attn_k_norm.device) : nullptr,
           write_kv ? static_cast<const float*>(l.attn_v_norm.device) : nullptr,
-          write_kv ? impl_->kv_k[kv_layer] : nullptr,
-          write_kv ? impl_->kv_v[kv_layer] : nullptr, n, c.num_heads, kv_heads,
+          write_kv ? s.impl_->kv_k[kv_layer] : nullptr,
+          write_kv ? s.impl_->kv_v[kv_layer] : nullptr, n, c.num_heads, kv_heads,
           write_kv, l.has_v_proj, head_dim, rot_dim, start_pos, c.RopeTheta(il),
           rope_ff, c.rms_eps, stream);
     } else {
       // QK norm (per-head gamma over head_dim).
-      kernels::RmsNorm(impl_->qbuf,
+      kernels::RmsNorm(s.impl_->qbuf,
                        static_cast<const float*>(l.attn_q_norm.device),
-                       impl_->qbuf, n * c.num_heads, head_dim, c.rms_eps,
+                       s.impl_->qbuf, n * c.num_heads, head_dim, c.rms_eps,
                        stream);
       if (rope_ff != nullptr) {
         if (debug_embed) {
@@ -1115,37 +1104,37 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                        il, ff[0], ff[63], ff[64], ff[127], ff[128], ff[255],
                        c.RopeTheta(il), start_pos);
         }
-        kernels::RopeFrequenciesMulti(impl_->qbuf, n, c.num_heads, head_dim,
+        kernels::RopeFrequenciesMulti(s.impl_->qbuf, n, c.num_heads, head_dim,
                                       rot_dim, start_pos, c.RopeTheta(il),
                                       rope_ff, stream);
       } else {
-        kernels::Rope(impl_->qbuf, n, c.num_heads, head_dim, rot_dim, start_pos,
+        kernels::Rope(s.impl_->qbuf, n, c.num_heads, head_dim, rot_dim, start_pos,
                       c.RopeTheta(il), stream);
       }
 
       if (l.has_kv && kv_heads > 0) {
-        kernels::RmsNorm(impl_->kbuf,
+        kernels::RmsNorm(s.impl_->kbuf,
                          static_cast<const float*>(l.attn_k_norm.device),
-                         impl_->kbuf, n * kv_heads, head_dim, c.rms_eps, stream);
+                         s.impl_->kbuf, n * kv_heads, head_dim, c.rms_eps, stream);
         // No v_proj on this layer (llama: Vcur=Kcur pre-rope). Capture BEFORE k rope.
         if (!l.has_v_proj) {
-          (void)hipMemcpyAsync(impl_->vbuf, impl_->kbuf,
+          (void)hipMemcpyAsync(s.impl_->vbuf, s.impl_->kbuf,
                                static_cast<std::size_t>(n) * kvdim *
                                    sizeof(float),
                                hipMemcpyDeviceToDevice, stream);
         }
         if (rope_ff != nullptr) {
-          kernels::RopeFrequenciesMulti(impl_->kbuf, n, kv_heads, head_dim,
+          kernels::RopeFrequenciesMulti(s.impl_->kbuf, n, kv_heads, head_dim,
                                         rot_dim, start_pos, c.RopeTheta(il),
                                         rope_ff, stream);
         } else {
-          kernels::Rope(impl_->kbuf, n, kv_heads, head_dim, rot_dim, start_pos,
+          kernels::Rope(s.impl_->kbuf, n, kv_heads, head_dim, rot_dim, start_pos,
                         c.RopeTheta(il), stream);
         }
         // V RMSNorm (Gemma 4 normalizes values too).
-        kernels::RmsNorm(impl_->vbuf,
+        kernels::RmsNorm(s.impl_->vbuf,
                          static_cast<const float*>(l.attn_v_norm.device),
-                         impl_->vbuf, n * kv_heads, head_dim, c.rms_eps,
+                         s.impl_->vbuf, n * kv_heads, head_dim, c.rms_eps,
                          stream);
         // Store KV at positions [pos, pos+n).
         if (use_blocked) {
@@ -1153,21 +1142,65 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           // only writer: the final (post-norm, post-RoPE) rows quantize
           // straight into the shared blocked layout (per-32-block scale).
           // Keys and values may use different grids (GUFO_KV_Q4/V4).
-          const std::uint32_t k_block_bytes = KvKey4Bit(model_->options_) ? 18 : 34;
-          const std::uint32_t v_block_bytes = KvValue4Bit(model_->options_) ? 18 : 34;
-          kernels::StoreBlockedKv(impl_->kbuf, impl_->vbuf,
-                                  impl_->kv_bk[kv_layer],
-                                  impl_->kv_bv[kv_layer], n, kv_heads, head_dim,
-                                  impl_->d_pos, stream, k_block_bytes,
+          const std::uint32_t k_block_bytes = KvKey4Bit(s.model_->options_) ? 18 : 34;
+          const std::uint32_t v_block_bytes = KvValue4Bit(s.model_->options_) ? 18 : 34;
+          kernels::StoreBlockedKv(s.impl_->kbuf, s.impl_->vbuf,
+                                  s.impl_->kv_bk[kv_layer],
+                                  s.impl_->kv_bv[kv_layer], n, kv_heads, head_dim,
+                                  s.impl_->d_pos, stream, k_block_bytes,
                                   v_block_bytes);
         } else {
-          kernels::StoreKv(impl_->kbuf, impl_->kv_k[kv_layer], n, kvdim,
+          kernels::StoreKv(s.impl_->kbuf, s.impl_->kv_k[kv_layer], n, kvdim,
                            start_pos, stream);
-          kernels::StoreKv(impl_->vbuf, impl_->kv_v[kv_layer], n, kvdim,
+          kernels::StoreKv(s.impl_->vbuf, s.impl_->kv_v[kv_layer], n, kvdim,
                            start_pos, stream);
         }
       }
     }
+}
+
+void Session::SwaShiftedKV(Session& s, std::uint32_t kv_layer,
+                             std::uint32_t window, std::uint32_t start_pos,
+                             hipStream_t stream, const std::uint8_t*& k2,
+                             const std::uint8_t*& v2, const std::uint32_t*& sp,
+                             std::uint32_t& rebased) {
+  (void)stream;
+  // Blocked direct read (fused dequant, score scale 1.0, no F16
+  // staging). Same sliding-window pointer shift as Attention: keys at or
+  // below start_pos - window fall out of the window, so advance the
+  // cache base and rebase the position, keeping dense-causal semantics.
+  k2 = s.impl_->kv_bk[kv_layer];
+  v2 = s.impl_->kv_bv[kv_layer];
+  sp = s.impl_->d_pos;
+  rebased = start_pos;
+  if (window != 0 && start_pos + 1 > window) {
+    const std::uint32_t lo = (start_pos + 1 - window) & ~3u;
+    if (lo != 0 && lo <= start_pos) {
+      rebased = start_pos - lo;
+      if (hipMemcpy(s.impl_->d_pos_win, &rebased, sizeof(rebased),
+                    hipMemcpyHostToDevice) == hipSuccess) {
+        k2 += static_cast<std::size_t>(lo) *
+              s.impl_->kv_row_bytes_k[kv_layer];
+        v2 += static_cast<std::size_t>(lo) *
+              s.impl_->kv_row_bytes_v[kv_layer];
+        sp = s.impl_->d_pos_win;
+      }
+    }
+  }
+}
+
+void Session::ForwardLayerAttn(Session& s, std::uint32_t il,
+                                std::uint32_t n, std::uint32_t start_pos,
+                                hipStream_t stream) {
+  auto& w = *s.model_->weights_;
+  const auto& c = w.config;
+  const auto& l = w.layers[il];
+  const std::uint32_t kv_layer = c.KvProducingLayer(il);
+  const std::uint32_t head_dim = c.HeadDim(il);
+  const std::uint32_t kv_heads = c.KvHeads(kv_layer);
+  const bool use_blocked =
+      s.model_->options_.kv_cache_quant == "q8" && l.has_kv && kv_heads > 0 &&
+      head_dim == 256 && kv_layer == il;
     if (use_blocked) {
       // Three-way: long q8 prefill runs the shared blocked WMMA kernel
       // (SWA shift handled inside, score scale 1.0 like the F16 kernels);
@@ -1177,38 +1210,22 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       // existing Attention path (WMMA inside) untouched. Each side carries
       // its own block width (GUFO_KV_Q4/V4 select the 18-byte 4-bit grids).
       const std::uint32_t window = c.LayerIsSwa(il) ? c.sliding_window : 0;
-      const std::uint32_t k_block_bytes = KvKey4Bit(model_->options_) ? 18 : 34;
-      const std::uint32_t v_block_bytes = KvValue4Bit(model_->options_) ? 18 : 34;
+      const std::uint32_t k_block_bytes = KvKey4Bit(s.model_->options_) ? 18 : 34;
+      const std::uint32_t v_block_bytes = KvValue4Bit(s.model_->options_) ? 18 : 34;
       const bool ran_blocked_wmma =
           n >= kBlockedWmmaMinTokens &&
           ::gufo::core::compute::blocked_wmma::AttentionBlockedWmma<
               ::gufo::core::compute::blocked_wmma::KvCodecQ8, 256>(
-              impl_->qbuf, impl_->kv_bk[kv_layer], impl_->kv_bv[kv_layer],
-              impl_->attn_out, n, start_pos, c.num_heads, kv_heads, window,
+              s.impl_->qbuf, s.impl_->kv_bk[kv_layer], s.impl_->kv_bv[kv_layer],
+              s.impl_->attn_out, n, start_pos, c.num_heads, kv_heads, window,
               stream, 1.0F, k_block_bytes, v_block_bytes);
       if (!ran_blocked_wmma) {
-        // Blocked direct read (fused dequant, score scale 1.0, no F16
-        // staging). Same sliding-window pointer shift as Attention: keys at or
-        // below start_pos - window fall out of the window, so advance the
-        // cache base and rebase the position, keeping dense-causal semantics.
-        const std::uint8_t* k2 = impl_->kv_bk[kv_layer];
-        const std::uint8_t* v2 = impl_->kv_bv[kv_layer];
-        const std::uint32_t* sp = impl_->d_pos;
+        const std::uint8_t* k2 = nullptr;
+        const std::uint8_t* v2 = nullptr;
+        const std::uint32_t* sp = nullptr;
         std::uint32_t shifted = 0;
-        if (window != 0 && start_pos + 1 > window) {
-          const std::uint32_t lo = (start_pos + 1 - window) & ~3u;
-          if (lo != 0 && lo <= start_pos) {
-            shifted = start_pos - lo;
-            if (hipMemcpy(impl_->d_pos_win, &shifted, sizeof(shifted),
-                          hipMemcpyHostToDevice) == hipSuccess) {
-              k2 += static_cast<std::size_t>(lo) *
-                    impl_->kv_row_bytes_k[kv_layer];
-              v2 += static_cast<std::size_t>(lo) *
-                    impl_->kv_row_bytes_v[kv_layer];
-              sp = impl_->d_pos_win;
-            }
-          }
-        }
+        SwaShiftedKV(s, kv_layer, window, start_pos, stream, k2, v2, sp,
+                     shifted);
         // Split-K decode for long contexts: same shifted inputs as the
         // scalar path (identical SWA semantics by construction), parallel
         // chunks instead of one sweeping block. Short contexts and
@@ -1218,45 +1235,60 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                      kBlockedSplitKMaxTokens &&
             getenv("GEMMA4_NO_BLOCKED_SPLITK") == nullptr) {
           const std::uint32_t base =
-              (sp == impl_->d_pos_win) ? shifted : start_pos;
+              (sp == s.impl_->d_pos_win) ? shifted : start_pos;
           ran_blocked_splitk =
               ::gufo::core::compute::blocked_splitk::AttentionBlockedSplitK<
                   ::gufo::core::compute::blocked_splitk::KvCodecQ8, 256>(
-                  impl_->qbuf, k2, v2, impl_->attn_out, n, sp, base + n,
+                  s.impl_->qbuf, k2, v2, s.impl_->attn_out, n, sp, base + n,
                   c.num_heads, kv_heads, head_dim, stream, 1.0F,
-                  k_block_bytes, v_block_bytes);
+                  k_block_bytes, v_block_bytes, s.impl_->splitk_partials,
+                  ::gufo::core::compute::blocked_splitk::
+                      AttentionBlockedSplitKScratchBytes());
         }
         if (!ran_blocked_splitk) {
-          kernels::AttentionBlocked(impl_->qbuf, k2, v2, impl_->attn_out, n,
+          kernels::AttentionBlocked(s.impl_->qbuf, k2, v2, s.impl_->attn_out, n,
                                     sp, c.num_heads, kv_heads, head_dim,
                                     stream, k_block_bytes, v_block_bytes);
         }
       }
     } else {
-      kernels::Attention(impl_->qbuf, impl_->kv_k[kv_layer],
-                         impl_->kv_v[kv_layer], impl_->attn_out, n, start_pos,
+      kernels::Attention(s.impl_->qbuf, s.impl_->kv_k[kv_layer],
+                         s.impl_->kv_v[kv_layer], s.impl_->attn_out, n, start_pos,
                          c.num_heads, kv_heads, head_dim,
-                         impl_->kv_stride[kv_layer],
+                         s.impl_->kv_stride[kv_layer],
                          c.LayerIsSwa(il) ? c.sliding_window : 0, stream);
     }
+}
 
-    // wo projection (write into idle mlp_out to avoid x == y staging copy).
-    if (debug_embed && il == 0 && n <= 4) {
+void Session::ForwardLayerPost(Session& s, std::uint32_t il,
+                               std::uint32_t n, std::uint32_t start_pos,
+                               hipStream_t stream) {
+  auto& w = *s.model_->weights_;
+  const auto& c = w.config;
+  const std::uint32_t hidden = c.hidden_size;
+  const auto& l = w.layers[il];
+  const bool debug_embed = getenv("GEMMA4_DEBUG_EMBED") != nullptr;
+  const bool allow_fused_decode =
+      !debug_embed && getenv("GEMMA4_NO_FUSED_DECODE") == nullptr;
+  (void)allow_fused_decode;
+  (void)start_pos;
+  // wo projection (write into idle mlp_out to avoid x == y staging copy).
+  if (debug_embed && il == 0 && n <= 4) {
       hipDeviceSynchronize();
       std::vector<float> ah(hidden);
-      (void)hipMemcpy(ah.data(), impl_->attn_out, hidden * sizeof(float),
+      (void)hipMemcpy(ah.data(), s.impl_->attn_out, hidden * sizeof(float),
                       hipMemcpyDeviceToHost);
       double asum = 0;
       for (float v : ah) asum += (double)v;
       std::fprintf(stderr, "[gemma4] L0 n=%u attn_raw0=%.6f\n", n, asum);
     }
-    StagedGemm(l.wo, hidden, impl_->attn_out, impl_->mlp_out, n,
-               impl_->w_slab, impl_->x_slab, stream, 0.0F, impl_->x_q8_slab,
+    StagedGemm(l.wo, hidden, s.impl_->attn_out, s.impl_->mlp_out, n,
+               s.impl_->w_slab, s.impl_->x_slab, stream, 0.0F, s.impl_->x_q8_slab,
                false);
     if (debug_embed && il == 0 && n == 1) {
       hipDeviceSynchronize();
       std::vector<float> ah2(static_cast<std::size_t>(n) * hidden);
-      (void)hipMemcpy(ah2.data(), impl_->mlp_out, ah2.size() * sizeof(float),
+      (void)hipMemcpy(ah2.data(), s.impl_->mlp_out, ah2.size() * sizeof(float),
                       hipMemcpyDeviceToHost);
       double asum2 = 0;
       for (float v : ah2) asum2 += (double)v;
@@ -1265,7 +1297,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
 
     if (debug_embed && il < 3) {
       std::vector<float> probe(static_cast<std::size_t>(n) * hidden);
-      (void)hipMemcpy(probe.data(), impl_->mlp_out, probe.size() * sizeof(float),
+      (void)hipMemcpy(probe.data(), s.impl_->mlp_out, probe.size() * sizeof(float),
                       hipMemcpyDeviceToHost);
       double sum = 0.0, mx = 0.0;
       for (std::size_t i = 0; i < probe.size(); ++i) {
@@ -1277,15 +1309,15 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       std::fprintf(stderr, "[gemma4] L%u wo_out sync sum=%f maxabs=%f\n", il,
                    sum, mx);
     }
-    kernels::RmsNormAdd(impl_->mlp_out,
+    kernels::RmsNormAdd(s.impl_->mlp_out,
                         static_cast<const float*>(l.attn_post_norm.device),
-                        impl_->hidden, n, hidden, c.rms_eps, 1.0F, stream);
+                        s.impl_->hidden, n, hidden, c.rms_eps, 1.0F, stream);
 
     // FFN block (llama.cpp gemma4.cpp parity).
     if (!l.IsMoe()) {
-      kernels::RmsNorm(impl_->hidden,
+      kernels::RmsNorm(s.impl_->hidden,
                        static_cast<const float*>(l.ffn_norm.device),
-                       impl_->normed, n, hidden, c.rms_eps, stream);
+                       s.impl_->normed, n, hidden, c.rms_eps, stream);
       if (n <= 8 && l.ffn_gate.type == l.ffn_up.type &&
           l.ffn_gate.f16 == nullptr && l.ffn_up.f16 == nullptr &&
           getenv("GEMMA4_NO_FUSED_GEMV") == nullptr &&
@@ -1296,25 +1328,25 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
             l.ffn_up.device != nullptr ? l.ffn_up.device : l.ffn_up.data;
         kernels::GemvGateUpSwiglu(g_dev, u_dev,
                                   static_cast<int>(l.ffn_gate.type),
-                                  l.ffn_gate.RowBytes(), hidden, impl_->normed,
-                                  impl_->mlp_out, n, c.shared_ff, stream);
+                                  l.ffn_gate.RowBytes(), hidden, s.impl_->normed,
+                                  s.impl_->mlp_out, n, c.shared_ff, stream);
       } else {
-        F32Gemm(l.ffn_gate, impl_->normed, impl_->mlp_out, n, c.shared_ff,
-                hidden, stream, impl_->w_slab, impl_->x_slab, 0.0F,
-                impl_->x_q8_slab, false);
-        F32Gemm(l.ffn_up, impl_->normed, impl_->expert_out, n, c.shared_ff,
-                hidden, stream, impl_->w_slab2, impl_->x_slab, 0.0F,
-                impl_->x_q8_slab, (n > 8u && c.shared_ff >= 256u));
-        kernels::GeluTanhSwiglu(impl_->mlp_out, impl_->expert_out,
+        F32Gemm(l.ffn_gate, s.impl_->normed, s.impl_->mlp_out, n, c.shared_ff,
+                hidden, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
+                s.impl_->x_q8_slab, false);
+        F32Gemm(l.ffn_up, s.impl_->normed, s.impl_->expert_out, n, c.shared_ff,
+                hidden, stream, s.impl_->w_slab2, s.impl_->x_slab, 0.0F,
+                s.impl_->x_q8_slab, (n > 8u && c.shared_ff >= 256u));
+        kernels::GeluTanhSwiglu(s.impl_->mlp_out, s.impl_->expert_out,
                                 static_cast<std::size_t>(n) * c.shared_ff,
                                 stream);
       }
-      F32Gemm(l.ffn_down, impl_->mlp_out, impl_->moe_out, n, hidden,
-              c.shared_ff, stream, impl_->w_slab, impl_->x_slab, 0.0F,
-              impl_->x_q8_slab, false);
+      F32Gemm(l.ffn_down, s.impl_->mlp_out, s.impl_->moe_out, n, hidden,
+              c.shared_ff, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
+              s.impl_->x_q8_slab, false);
       kernels::RmsNormAdd(
-          impl_->moe_out, static_cast<const float*>(l.ffn_post_norm.device),
-          impl_->hidden, n, hidden, c.rms_eps,
+          s.impl_->moe_out, static_cast<const float*>(l.ffn_post_norm.device),
+          s.impl_->hidden, n, hidden, c.rms_eps,
           l.has_out_scale ? l.out_scale_val : 1.0F, stream);
     } else {
       const bool decode_vec_moe =
@@ -1323,7 +1355,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
            getenv("GEMMA4_NO_DECODE_VEC") == nullptr);
       const bool fast_q4d_prefill =
           (!decode_vec_moe && n > 1 && allow_fused_decode &&
-           impl_->rows_token != nullptr && impl_->d_moe_meta != nullptr &&
+           s.impl_->rows_token != nullptr && s.impl_->d_moe_meta != nullptr &&
            getenv("GEMMA4_NO_COMPACT") == nullptr &&
            getenv("GEMMA4_NO_Q4DIRECT") == nullptr &&
            getenv("GEMMA4_NO_FAST_Q4D") == nullptr &&
@@ -1336,15 +1368,15 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
 
       if (fused_moe_norms) {
         kernels::FfnTripleNorm(
-            impl_->hidden, static_cast<const float*>(l.ffn_norm.device),
+            s.impl_->hidden, static_cast<const float*>(l.ffn_norm.device),
             static_cast<const float*>(l.ffn_pre_norm_2.device),
-            static_cast<const float*>(l.router_scale.device), impl_->normed,
-            impl_->expert_down, impl_->router_tmp, n, hidden, c.rms_eps,
+            static_cast<const float*>(l.router_scale.device), s.impl_->normed,
+            s.impl_->expert_down, s.impl_->router_tmp, n, hidden, c.rms_eps,
             stream);
       } else {
-        kernels::RmsNorm(impl_->hidden,
+        kernels::RmsNorm(s.impl_->hidden,
                          static_cast<const float*>(l.ffn_norm.device),
-                         impl_->normed, n, hidden, c.rms_eps, stream);
+                         s.impl_->normed, n, hidden, c.rms_eps, stream);
       }
 
       if (n <= 8 && l.ffn_gate.type == l.ffn_up.type &&
@@ -1357,49 +1389,49 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
             l.ffn_up.device != nullptr ? l.ffn_up.device : l.ffn_up.data;
         kernels::GemvGateUpSwiglu(g_dev, u_dev,
                                   static_cast<int>(l.ffn_gate.type),
-                                  l.ffn_gate.RowBytes(), hidden, impl_->normed,
-                                  impl_->mlp_out, n, c.shared_ff, stream);
+                                  l.ffn_gate.RowBytes(), hidden, s.impl_->normed,
+                                  s.impl_->mlp_out, n, c.shared_ff, stream);
       } else {
-        F32Gemm(l.ffn_gate, impl_->normed, impl_->mlp_out, n, c.shared_ff,
-                hidden, stream, impl_->w_slab, impl_->x_slab, 0.0F,
-                impl_->x_q8_slab, false);
-        F32Gemm(l.ffn_up, impl_->normed, impl_->expert_out, n, c.shared_ff,
-                hidden, stream, impl_->w_slab2, impl_->x_slab, 0.0F,
-                impl_->x_q8_slab, (n > 8u && c.shared_ff >= 256u));
-        kernels::GeluTanhSwiglu(impl_->mlp_out, impl_->expert_out,
+        F32Gemm(l.ffn_gate, s.impl_->normed, s.impl_->mlp_out, n, c.shared_ff,
+                hidden, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
+                s.impl_->x_q8_slab, false);
+        F32Gemm(l.ffn_up, s.impl_->normed, s.impl_->expert_out, n, c.shared_ff,
+                hidden, stream, s.impl_->w_slab2, s.impl_->x_slab, 0.0F,
+                s.impl_->x_q8_slab, (n > 8u && c.shared_ff >= 256u));
+        kernels::GeluTanhSwiglu(s.impl_->mlp_out, s.impl_->expert_out,
                                 static_cast<std::size_t>(n) * c.shared_ff,
                                 stream);
       }
-      F32Gemm(l.ffn_down, impl_->mlp_out, impl_->expert_out, n, hidden,
-              c.shared_ff, stream, impl_->w_slab, impl_->x_slab, 0.0F,
-              impl_->x_q8_slab, false);
+      F32Gemm(l.ffn_down, s.impl_->mlp_out, s.impl_->expert_out, n, hidden,
+              c.shared_ff, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
+              s.impl_->x_q8_slab, false);
 
       if (!fused_moe_norms) {
-        kernels::RmsNorm(impl_->expert_out,
+        kernels::RmsNorm(s.impl_->expert_out,
                          static_cast<const float*>(l.ffn_post_norm_1.device),
-                         impl_->moe_out, n, hidden, c.rms_eps, stream);
+                         s.impl_->moe_out, n, hidden, c.rms_eps, stream);
         // moe_out holds the shared-expert contribution; mlp_out is reused.
-        kernels::RmsNorm(impl_->hidden,
+        kernels::RmsNorm(s.impl_->hidden,
                          static_cast<const float*>(l.ffn_pre_norm_2.device),
-                         impl_->normed, n, hidden, c.rms_eps, stream);
+                         s.impl_->normed, n, hidden, c.rms_eps, stream);
         // Router: tmp = rmsnorm(hidden) * (1/sqrt(hidden)) * router_scale.
-        kernels::RouterInput(impl_->hidden,
+        kernels::RouterInput(s.impl_->hidden,
                              static_cast<const float*>(l.router_scale.device),
-                             impl_->router_tmp, n, hidden, c.rms_eps, stream);
+                             s.impl_->router_tmp, n, hidden, c.rms_eps, stream);
       }
-      StagedGemm(l.router, c.num_experts, impl_->router_tmp,
-                 impl_->router_logits, n, impl_->w_slab, impl_->x_slab,
+      StagedGemm(l.router, c.num_experts, s.impl_->router_tmp,
+                 s.impl_->router_logits, n, s.impl_->w_slab, s.impl_->x_slab,
                  stream);
-      fn::RouterTopK(impl_->router_logits, c.num_experts, impl_->expert_ids,
-                     impl_->expert_weights, n, c.num_experts, c.experts_used,
+      fn::RouterTopK(s.impl_->router_logits, c.num_experts, s.impl_->expert_ids,
+                     s.impl_->expert_weights, n, c.num_experts, c.experts_used,
                      stream);
       if (debug_embed && il == 0 && n <= 4) {
         hipDeviceSynchronize();
         std::vector<std::int32_t> eids(static_cast<std::size_t>(n) * c.experts_used);
         std::vector<float> ewts(static_cast<std::size_t>(n) * c.experts_used);
-        (void)hipMemcpy(eids.data(), impl_->expert_ids,
+        (void)hipMemcpy(eids.data(), s.impl_->expert_ids,
                         eids.size() * sizeof(std::int32_t), hipMemcpyDeviceToHost);
-        (void)hipMemcpy(ewts.data(), impl_->expert_weights,
+        (void)hipMemcpy(ewts.data(), s.impl_->expert_weights,
                         ewts.size() * sizeof(float), hipMemcpyDeviceToHost);
         std::fprintf(stderr, "[gemma4] L0 n=%u experts0=", n);
         for (std::uint32_t k = 0; k < c.experts_used; ++k)
@@ -1409,7 +1441,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       if (debug_embed && il == 0) {
         hipDeviceSynchronize();
         std::vector<float> rl(static_cast<std::size_t>(n) * c.num_experts);
-        (void)hipMemcpy(rl.data(), impl_->router_logits,
+        (void)hipMemcpy(rl.data(), s.impl_->router_logits,
                         rl.size() * sizeof(float), hipMemcpyDeviceToHost);
         double rs = 0; float rm = 0;
         for (float v : rl) {
@@ -1437,33 +1469,33 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         const std::uint64_t dn_stride =
             static_cast<std::uint64_t>(hidden) * l.down_exps.RowBytes();
         const float* moe_x =
-            fused_moe_norms ? impl_->expert_down : impl_->normed;
+            fused_moe_norms ? s.impl_->expert_down : s.impl_->normed;
         kernels::MoeVecGateUpSwiglu(gu_dev, l.gate_up_exps.RowBytes(),
-                                    gu_stride, moe_x, impl_->expert_ids,
-                                    impl_->moe_vec_gate, slots, used, ff,
+                                    gu_stride, moe_x, s.impl_->expert_ids,
+                                    s.impl_->moe_vec_gate, slots, used, ff,
                                     hidden, stream);
         kernels::GemvQSlot(dn_dev, l.down_exps.RowBytes(), dn_stride,
-                           impl_->moe_vec_gate, impl_->expert_ids,
-                           impl_->moe_vec_down, slots, hidden, ff, stream);
+                           s.impl_->moe_vec_gate, s.impl_->expert_ids,
+                           s.impl_->moe_vec_down, slots, hidden, ff, stream);
         if (fused_moe_norms) {
           kernels::MoeCombinePostNormResidual(
-              impl_->moe_vec_down, impl_->expert_ids, impl_->expert_weights,
+              s.impl_->moe_vec_down, s.impl_->expert_ids, s.impl_->expert_weights,
               l.down_exps_scale.empty()
                   ? nullptr
                   : static_cast<const float*>(l.down_exps_scale.device),
-              impl_->expert_out,
+              s.impl_->expert_out,
               static_cast<const float*>(l.ffn_post_norm_1.device),
               static_cast<const float*>(l.ffn_post_norm_2.device),
-              static_cast<const float*>(l.ffn_post_norm.device), impl_->hidden,
+              static_cast<const float*>(l.ffn_post_norm.device), s.impl_->hidden,
               n, used, hidden, c.rms_eps,
               l.has_out_scale ? l.out_scale_val : 1.0F, stream);
         } else {
           kernels::MoeSlotEpilogueOverwrite(
-              impl_->moe_vec_down, impl_->expert_ids, impl_->expert_weights,
+              s.impl_->moe_vec_down, s.impl_->expert_ids, s.impl_->expert_weights,
               l.down_exps_scale.empty()
                   ? nullptr
                   : static_cast<const float*>(l.down_exps_scale.device),
-              impl_->attn_out, n, used, hidden, stream);
+              s.impl_->attn_out, n, used, hidden, stream);
         }
       } else if (fast_q4d_prefill) {
         namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
@@ -1475,100 +1507,100 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           if (v == 16ul || v == 48ul || v == 64ul)
             tile_rows = static_cast<std::uint32_t>(v);
         }
-        q38::ExpertCounts(impl_->expert_ids, impl_->expert_counts, n,
+        q38::ExpertCounts(s.impl_->expert_ids, s.impl_->expert_counts, n,
                           c.num_experts, used, stream);
-        q38::RoutedCompact(impl_->expert_ids, impl_->expert_counts,
-                           impl_->routed_bounds, impl_->routed_cursors,
-                           impl_->rows_token, impl_->rows_slot, n, used,
+        q38::RoutedCompact(s.impl_->expert_ids, s.impl_->expert_counts,
+                           s.impl_->routed_bounds, s.impl_->routed_cursors,
+                           s.impl_->rows_token, s.impl_->rows_slot, n, used,
                            c.num_experts, stream);
-        kernels::BuildRoutedTiles(impl_->routed_bounds, impl_->q4_tiles,
-                                  impl_->d_moe_meta, c.num_experts, tile_rows,
+        kernels::BuildRoutedTiles(s.impl_->routed_bounds, s.impl_->q4_tiles,
+                                  s.impl_->d_moe_meta, c.num_experts, tile_rows,
                                   stream);
         std::uint32_t h_meta[2] = {0u, 0u};
-        (void)hipMemcpy(h_meta, impl_->d_moe_meta, sizeof(h_meta),
+        (void)hipMemcpy(h_meta, s.impl_->d_moe_meta, sizeof(h_meta),
                         hipMemcpyDeviceToHost);
         const std::uint32_t n_tiles = h_meta[0];
         const std::uint32_t q4_rows = h_meta[1];
         if (n_tiles > 0u && q4_rows > 0u) {
-          kernels::F32ToF16(impl_->expert_down, impl_->x_half,
+          kernels::F32ToF16(s.impl_->expert_down, s.impl_->x_half,
                             static_cast<std::size_t>(n) * hidden, stream);
           q38::RoutedF16Gemm(l.gate_up_exps.device, q38::WeightType::kQ4_0,
-                             impl_->x_half, impl_->q4_tiles, n_tiles, tile_rows,
-                             impl_->routed_bounds, impl_->rows_token,
-                             impl_->q4_identity, nullptr, impl_->q4_gateup,
+                             s.impl_->x_half, s.impl_->q4_tiles, n_tiles, tile_rows,
+                             s.impl_->routed_bounds, s.impl_->rows_token,
+                             s.impl_->q4_identity, nullptr, s.impl_->q4_gateup,
                              nullptr, 2 * ff, hidden, stream);
-          kernels::SwigluSplitF16(impl_->q4_gateup, impl_->q4_act, q4_rows, ff,
+          kernels::SwigluSplitF16(s.impl_->q4_gateup, s.impl_->q4_act, q4_rows, ff,
                                   stream);
           q38::RoutedF16Gemm(l.down_exps.device, q38::WeightType::kQ4_0,
-                             impl_->q4_act, impl_->q4_tiles, n_tiles, tile_rows,
-                             impl_->routed_bounds, impl_->q4_identity,
-                             impl_->rows_slot, nullptr, impl_->moe_vec_down,
+                             s.impl_->q4_act, s.impl_->q4_tiles, n_tiles, tile_rows,
+                             s.impl_->routed_bounds, s.impl_->q4_identity,
+                             s.impl_->rows_slot, nullptr, s.impl_->moe_vec_down,
                              nullptr, hidden, ff, stream);
         } else {
-          (void)hipMemsetAsync(impl_->moe_vec_down, 0,
+          (void)hipMemsetAsync(s.impl_->moe_vec_down, 0,
                                static_cast<std::size_t>(n) * used * hidden *
                                    sizeof(float),
                                stream);
         }
         kernels::MoeCombinePostNormResidual(
-            impl_->moe_vec_down, impl_->expert_ids, impl_->expert_weights,
+            s.impl_->moe_vec_down, s.impl_->expert_ids, s.impl_->expert_weights,
             l.down_exps_scale.empty()
                 ? nullptr
                 : static_cast<const float*>(l.down_exps_scale.device),
-            impl_->expert_out,
+            s.impl_->expert_out,
             static_cast<const float*>(l.ffn_post_norm_1.device),
             static_cast<const float*>(l.ffn_post_norm_2.device),
-            static_cast<const float*>(l.ffn_post_norm.device), impl_->hidden, n,
+            static_cast<const float*>(l.ffn_post_norm.device), s.impl_->hidden, n,
             used, hidden, c.rms_eps, l.has_out_scale ? l.out_scale_val : 1.0F,
             stream);
       } else {
       std::vector<std::int32_t> ids(static_cast<std::size_t>(n) *
                                     c.experts_used);
-      hipMemcpy(ids.data(), impl_->expert_ids,
+      hipMemcpy(ids.data(), s.impl_->expert_ids,
                 ids.size() * sizeof(std::int32_t), hipMemcpyDeviceToHost);
       std::vector<float> wts(static_cast<std::size_t>(n) * c.experts_used);
-      hipMemcpy(wts.data(), impl_->expert_weights,
+      hipMemcpy(wts.data(), s.impl_->expert_weights,
                 wts.size() * sizeof(float), hipMemcpyDeviceToHost);
-      hipMemsetAsync(impl_->attn_out, 0,
+      hipMemsetAsync(s.impl_->attn_out, 0,
                      static_cast<std::size_t>(n) * hidden * sizeof(float),
                      stream);
       bool compact_ok = false;
       std::vector<std::int32_t> bounds_host;
       if (getenv("GEMMA4_NO_COMPACT") == nullptr && n > 1 &&
-          impl_->rows_token != nullptr) {
+          s.impl_->rows_token != nullptr) {
         namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
-        q38::ExpertCounts(impl_->expert_ids, impl_->expert_counts, n,
+        q38::ExpertCounts(s.impl_->expert_ids, s.impl_->expert_counts, n,
                           c.num_experts, c.experts_used, stream);
-        q38::RoutedCompact(impl_->expert_ids, impl_->expert_counts,
-                           impl_->routed_bounds, impl_->routed_cursors,
-                           impl_->rows_token, impl_->rows_slot, n,
+        q38::RoutedCompact(s.impl_->expert_ids, s.impl_->expert_counts,
+                           s.impl_->routed_bounds, s.impl_->routed_cursors,
+                           s.impl_->rows_token, s.impl_->rows_slot, n,
                            c.experts_used, c.num_experts, stream);
         // RoutedPadBoundsKernel only clears padding rows; rows beyond the
         // last expert's bucket keep stale assignments from earlier (larger)
         // chunks. Clear the tail so scatter never reads a stale token index.
         {
           std::int32_t last_bound = 0;
-          hipMemcpy(&last_bound, impl_->routed_bounds + c.num_experts,
+          hipMemcpy(&last_bound, s.impl_->routed_bounds + c.num_experts,
                     sizeof(std::int32_t), hipMemcpyDeviceToHost);
           const std::size_t cap =
               ::gufo::models::qwen38_flash_next::rocm::RoutedCompactRows(
                   static_cast<std::size_t>(n) * c.experts_used, c.num_experts);
           if (static_cast<std::size_t>(last_bound) < cap) {
-            hipMemsetAsync(impl_->rows_token + last_bound, 0xFF,
+            hipMemsetAsync(s.impl_->rows_token + last_bound, 0xFF,
                            (cap - last_bound) * sizeof(std::int32_t), stream);
-            hipMemsetAsync(impl_->rows_slot + last_bound, 0xFF,
+            hipMemsetAsync(s.impl_->rows_slot + last_bound, 0xFF,
                            (cap - last_bound) * sizeof(std::int32_t), stream);
           }
         }
         bounds_host.assign(c.num_experts + 1, 0);
-        hipMemcpy(bounds_host.data(), impl_->routed_bounds,
+        hipMemcpy(bounds_host.data(), s.impl_->routed_bounds,
                   (c.num_experts + 1) * sizeof(std::int32_t),
                   hipMemcpyDeviceToHost);
         // The compact scatter indexes routing weights by rows_slot, a
         // chunk-local slot index. expert_weights is a per-layer buffer that
         // later layers overwrite, so the compact view keeps its own copy for
         // the lifetime of this chunk's expert loop.
-        hipMemcpyAsync(impl_->compact_wts, impl_->expert_weights,
+        hipMemcpyAsync(s.impl_->compact_wts, s.impl_->expert_weights,
                        static_cast<std::size_t>(n) * c.experts_used *
                            sizeof(float),
                        hipMemcpyDeviceToDevice, stream);
@@ -1593,20 +1625,20 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
         // Full-token F16 activations; the grouped kernel gathers rows itself
         // through rows_token, so CompactGatherF16 is skipped below.
-        kernels::F32ToF16(impl_->normed, impl_->x_half,
+        kernels::F32ToF16(s.impl_->normed, s.impl_->x_half,
                           static_cast<std::size_t>(n) * hidden, stream);
-        if (!impl_->q4_identity_ready) {
-          std::vector<std::int32_t> ident(impl_->compact_cap);
+        if (!s.impl_->q4_identity_ready) {
+          std::vector<std::int32_t> ident(s.impl_->compact_cap);
           for (std::size_t i = 0; i < ident.size(); ++i)
             ident[i] = static_cast<std::int32_t>(i);
-          hipMemcpyAsync(impl_->q4_identity, ident.data(),
+          hipMemcpyAsync(s.impl_->q4_identity, ident.data(),
                          ident.size() * sizeof(std::int32_t),
                          hipMemcpyHostToDevice, stream);
-          impl_->q4_identity_ready = true;
+          s.impl_->q4_identity_ready = true;
         }
         // One (expert | tile<<16) entry per 16-row bucket tile.
         std::vector<std::int32_t> tiles;
-        tiles.reserve(impl_->compact_cap);
+        tiles.reserve(s.impl_->compact_cap);
         for (std::uint32_t e = 0; e < c.num_experts; ++e) {
           const std::uint32_t rows_e = static_cast<std::uint32_t>(
               bounds_host[e + 1] - bounds_host[e]);
@@ -1616,23 +1648,23 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         const std::uint32_t q4_rows =
             static_cast<std::uint32_t>(bounds_host[c.num_experts]);
         if (!tiles.empty()) {
-          hipMemcpyAsync(impl_->q4_tiles, tiles.data(),
+          hipMemcpyAsync(s.impl_->q4_tiles, tiles.data(),
                          tiles.size() * sizeof(std::int32_t),
                          hipMemcpyHostToDevice, stream);
           const std::uint32_t ff = c.expert_ff;
           q38::RoutedF16Gemm(l.gate_up_exps.device, q38::WeightType::kQ4_0,
-                             impl_->x_half, impl_->q4_tiles,
+                             s.impl_->x_half, s.impl_->q4_tiles,
                              static_cast<std::uint32_t>(tiles.size()), 16,
-                             impl_->routed_bounds, impl_->rows_token,
-                             impl_->q4_identity, nullptr, impl_->q4_gateup,
+                             s.impl_->routed_bounds, s.impl_->rows_token,
+                             s.impl_->q4_identity, nullptr, s.impl_->q4_gateup,
                              nullptr, 2 * ff, hidden, stream);
-          kernels::SwigluSplitF16(impl_->q4_gateup, impl_->q4_act, q4_rows,
+          kernels::SwigluSplitF16(s.impl_->q4_gateup, s.impl_->q4_act, q4_rows,
                                   ff, stream);
           q38::RoutedF16Gemm(l.down_exps.device, q38::WeightType::kQ4_0,
-                             impl_->q4_act, impl_->q4_tiles,
+                             s.impl_->q4_act, s.impl_->q4_tiles,
                              static_cast<std::uint32_t>(tiles.size()), 16,
-                             impl_->routed_bounds, impl_->q4_identity,
-                             impl_->q4_identity, nullptr, impl_->compact_down,
+                             s.impl_->routed_bounds, s.impl_->q4_identity,
+                             s.impl_->q4_identity, nullptr, s.impl_->compact_down,
                              nullptr, hidden, ff, stream);
         }
       }
@@ -1675,8 +1707,8 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           rows_end = static_cast<std::uint32_t>(bounds_host[e + 1]);
           if (rows_end <= rows_begin) continue;
           if (!q4d)
-            kernels::CompactGatherF16(impl_->normed, impl_->compact_xhalf,
-                                      impl_->rows_token, rows_begin, rows_end,
+            kernels::CompactGatherF16(s.impl_->normed, s.impl_->compact_xhalf,
+                                      s.impl_->rows_token, rows_begin, rows_end,
                                       hidden, stream);
         }
         const std::uint32_t batch = compact_ok ? (rows_end - rows_begin) : n;
@@ -1684,16 +1716,16 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         const bool f16wd =
             compact_ok && getenv("GEMMA4_F16WD") != nullptr;
         const __half* xin_f16 = compact_ok
-                                    ? static_cast<const __half*>(impl_->compact_xhalf)
+                                    ? static_cast<const __half*>(s.impl_->compact_xhalf)
                                     : nullptr;
-        float* xin = compact_ok ? impl_->normed_compact : impl_->normed;
-        float* gout = impl_->mlp_out;
-        float* uout = impl_->expert_out;
-        float* dout = impl_->expert_down;
+        float* xin = compact_ok ? s.impl_->normed_compact : s.impl_->normed;
+        float* gout = s.impl_->mlp_out;
+        float* uout = s.impl_->expert_out;
+        float* dout = s.impl_->expert_down;
         if (compact_ok) {
-          gout = impl_->compact_gate;
-          uout = impl_->compact_up;
-          dout = impl_->compact_down;
+          gout = s.impl_->compact_gate;
+          uout = s.impl_->compact_up;
+          dout = s.impl_->compact_down;
         }
         // Expert-local views: the compact buffers are indexed by the GLOBAL
         // compact row, so every per-expert kernel works on the [begin,end)
@@ -1702,7 +1734,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         const __half* xg = nullptr;
         float *gg = nullptr, *gu = nullptr, *gd = nullptr;
         if (compact_ok) {
-          xg = static_cast<const __half*>(impl_->compact_xhalf) +
+          xg = static_cast<const __half*>(s.impl_->compact_xhalf) +
                static_cast<std::size_t>(rows_begin) * hidden;
           gg = gout + static_cast<std::size_t>(rows_begin) * c.expert_ff;
           gu = uout + static_cast<std::size_t>(rows_begin) * c.expert_ff;
@@ -1716,9 +1748,9 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                                   static_cast<std::size_t>(batch) * hidden,
                                   stream);
           }
-          kernels::MoeScatterAdd(gd, impl_->rows_token, impl_->rows_slot,
-                                 impl_->compact_wts, rows_begin, rows_end,
-                                 impl_->attn_out, hidden, stream);
+          kernels::MoeScatterAdd(gd, s.impl_->rows_token, s.impl_->rows_slot,
+                                 s.impl_->compact_wts, rows_begin, rows_end,
+                                 s.impl_->attn_out, hidden, stream);
           continue;
         }
         if (!l.gate_up_exps.empty()) {
@@ -1747,33 +1779,33 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
               // F16 rows (half the Q8_0 slab traffic) and feed the raw-F16
               // GEMM variant.
               namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
-              kernels::DequantSlabF16(gate_ref, c.expert_ff, impl_->w_slab,
+              kernels::DequantSlabF16(gate_ref, c.expert_ff, s.impl_->w_slab,
                                       stream);
-              q38::UnquantizedF16Gemm(impl_->w_slab, xg, gg, batch,
+              q38::UnquantizedF16Gemm(s.impl_->w_slab, xg, gg, batch,
                                       c.expert_ff, hidden, stream);
-              kernels::DequantSlabF16(up_ref, c.expert_ff, impl_->w_slab,
+              kernels::DequantSlabF16(up_ref, c.expert_ff, s.impl_->w_slab,
                                       stream);
-              q38::UnquantizedF16Gemm(impl_->w_slab, xg, gu, batch,
+              q38::UnquantizedF16Gemm(s.impl_->w_slab, xg, gu, batch,
                                       c.expert_ff, hidden, stream);
             } else if (compact_ok) {
               // WMMA path with padded batch (multiple of 16): the small-batch
               // hipBLAS fallback faults on odd batches below 96 rows.
               namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               kernels::DequantSlabQ8(gate_ref, c.expert_ff,
-                                     reinterpret_cast<std::uint8_t*>(impl_->w_slab),
+                                     reinterpret_cast<std::uint8_t*>(s.impl_->w_slab),
                                      stream);
-              q38::DenseF16Gemm(impl_->w_slab, xg, gg, batch,
+              q38::DenseF16Gemm(s.impl_->w_slab, xg, gg, batch,
                                 c.expert_ff, hidden, stream);
               kernels::DequantSlabQ8(up_ref, c.expert_ff,
-                                     reinterpret_cast<std::uint8_t*>(impl_->w_slab),
+                                     reinterpret_cast<std::uint8_t*>(s.impl_->w_slab),
                                      stream);
-              q38::DenseF16Gemm(impl_->w_slab, xg, gu, batch,
+              q38::DenseF16Gemm(s.impl_->w_slab, xg, gu, batch,
                                 c.expert_ff, hidden, stream);
             } else {
               F32Gemm(gate_ref, xin, gout, batch, c.expert_ff,
-                      hidden, stream, impl_->w_slab, impl_->x_slab);
+                      hidden, stream, s.impl_->w_slab, s.impl_->x_slab);
               F32Gemm(up_ref, xin, uout, batch, c.expert_ff,
-                      hidden, stream, impl_->w_slab2, impl_->x_slab);
+                      hidden, stream, s.impl_->w_slab2, s.impl_->x_slab);
             }
         } else {
           TensorRef gate_ref = l.gate_exps;
@@ -1785,9 +1817,9 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           up_ref.device = up_ref.data;
           up_ref.experts = 1;
           F32Gemm(gate_ref, xin, gout, batch, c.expert_ff,
-                  hidden, stream, impl_->w_slab, impl_->x_slab);
+                  hidden, stream, s.impl_->w_slab, s.impl_->x_slab);
           F32Gemm(up_ref, xin, uout, batch, c.expert_ff,
-                  hidden, stream, impl_->w_slab2, impl_->x_slab);
+                  hidden, stream, s.impl_->w_slab2, s.impl_->x_slab);
         }
         if (compact_ok) {
           {
@@ -1795,21 +1827,21 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
               namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               // Fused epilogue: act_half = f16(silu(gate)*up) in one pass
               // (replaces the GeluTanhSwiglu + F32ToF16 pair, bit-identical).
-              kernels::SwigluF16(gg, gu, impl_->x_half,
+              kernels::SwigluF16(gg, gu, s.impl_->x_half,
                                  static_cast<std::size_t>(batch) * c.expert_ff,
                                  stream);
               q38::UnquantizedF16Gemm(
                   static_cast<const __half*>(l.down_f16) +
                       static_cast<std::size_t>(e) * hidden * c.expert_ff,
-                  impl_->x_half, gd, batch, hidden, c.expert_ff, stream);
+                  s.impl_->x_half, gd, batch, hidden, c.expert_ff, stream);
             } else if (f16wd) {
               namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
-              kernels::DequantSlabF16(down_ref, hidden, impl_->w_slab,
+              kernels::DequantSlabF16(down_ref, hidden, s.impl_->w_slab,
                                       stream);
-              kernels::SwigluF16(gg, gu, impl_->x_half,
+              kernels::SwigluF16(gg, gu, s.impl_->x_half,
                                  static_cast<std::size_t>(batch) * c.expert_ff,
                                  stream);
-              q38::UnquantizedF16Gemm(impl_->w_slab, impl_->x_half, gd,
+              q38::UnquantizedF16Gemm(s.impl_->w_slab, s.impl_->x_half, gd,
                                       batch, hidden, c.expert_ff, stream);
             } else if (getenv("GEMMA4_COMPACT_DOWN_WMMA") != nullptr) {
               // WMMA path for the down GEMM too (m=2816>=256, batch is a
@@ -1817,12 +1849,12 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
               // batch here.
               namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               kernels::DequantSlabQ8(down_ref, hidden,
-                                     reinterpret_cast<std::uint8_t*>(impl_->w_slab),
+                                     reinterpret_cast<std::uint8_t*>(s.impl_->w_slab),
                                      stream);
-              kernels::SwigluF16(gg, gu, impl_->x_half,
+              kernels::SwigluF16(gg, gu, s.impl_->x_half,
                                  static_cast<std::size_t>(batch) * c.expert_ff,
                                  stream);
-              q38::DenseF16Gemm(impl_->w_slab, impl_->x_half, dout, batch,
+              q38::DenseF16Gemm(s.impl_->w_slab, s.impl_->x_half, dout, batch,
                                 hidden, c.expert_ff, stream);
             } else {
               // Compact fallback was missing the SwiGLU activation: gg held the
@@ -1833,7 +1865,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                   gg, gu, static_cast<std::size_t>(batch) * c.expert_ff,
                   stream);
               F32Gemm(down_ref, gg, gd, batch, hidden,
-                      c.expert_ff, stream, impl_->w_slab, impl_->x_slab);
+                      c.expert_ff, stream, s.impl_->w_slab, s.impl_->x_slab);
             }
             if (down_scale != 1.0F) {
               kernels::ScaleInplace(gd, down_scale,
@@ -1841,36 +1873,36 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                                     stream);
             }
           }
-          kernels::MoeScatterAdd(gd, impl_->rows_token, impl_->rows_slot,
-                                   impl_->compact_wts, rows_begin, rows_end,
-                                   impl_->attn_out, hidden, stream);
+          kernels::MoeScatterAdd(gd, s.impl_->rows_token, s.impl_->rows_slot,
+                                   s.impl_->compact_wts, rows_begin, rows_end,
+                                   s.impl_->attn_out, hidden, stream);
         } else {
-          kernels::GeluTanhSwiglu(impl_->mlp_out, impl_->expert_out,
+          kernels::GeluTanhSwiglu(s.impl_->mlp_out, s.impl_->expert_out,
                                   static_cast<std::size_t>(n) * c.expert_ff,
                                   stream);
-          F32Gemm(down_ref, impl_->mlp_out, impl_->expert_down, n, hidden,
-                  c.expert_ff, stream, impl_->w_slab, impl_->x_slab);
+          F32Gemm(down_ref, s.impl_->mlp_out, s.impl_->expert_down, n, hidden,
+                  c.expert_ff, stream, s.impl_->w_slab, s.impl_->x_slab);
           if (down_scale != 1.0F) {
-            kernels::ScaleInplace(impl_->expert_down, down_scale,
+            kernels::ScaleInplace(s.impl_->expert_down, down_scale,
                                   static_cast<std::size_t>(n) * hidden, stream);
           }
-          kernels::MoeRoutedAdd(impl_->expert_down, impl_->expert_ids,
-                                impl_->expert_weights, e, impl_->attn_out, n,
+          kernels::MoeRoutedAdd(s.impl_->expert_down, s.impl_->expert_ids,
+                                s.impl_->expert_weights, e, s.impl_->attn_out, n,
                                 c.experts_used, hidden, stream);
         }
       }
       }
 
       if (!fused_moe_norms) {
-        SyncSum(impl_->attn_out, "moe_accum", n, hidden, il);
-        kernels::RmsNormAdd(impl_->attn_out,
+        SyncSum(s.impl_->attn_out, "moe_accum", n, hidden, il);
+        kernels::RmsNormAdd(s.impl_->attn_out,
                             static_cast<const float*>(l.ffn_post_norm_2.device),
-                            impl_->moe_out, n, hidden, c.rms_eps, 1.0F, stream);
-        SyncSum(impl_->moe_out, "combined", n, hidden, il);
+                            s.impl_->moe_out, n, hidden, c.rms_eps, 1.0F, stream);
+        SyncSum(s.impl_->moe_out, "combined", n, hidden, il);
         if (debug_embed && il == 0) {
           hipDeviceSynchronize();
           std::vector<float> mr(hidden);
-          (void)hipMemcpy(mr.data(), impl_->moe_out, hidden * sizeof(float),
+          (void)hipMemcpy(mr.data(), s.impl_->moe_out, hidden * sizeof(float),
                           hipMemcpyDeviceToHost);
           double ms = 0;
           for (float v : mr) ms += (double)v;
@@ -1879,7 +1911,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         if (debug_embed) {
           hipDeviceSynchronize();
           std::vector<float> hb(static_cast<std::size_t>(n) * hidden);
-          (void)hipMemcpy(hb.data(), impl_->hidden, hb.size() * sizeof(float),
+          (void)hipMemcpy(hb.data(), s.impl_->hidden, hb.size() * sizeof(float),
                           hipMemcpyDeviceToHost);
           double hs = 0;
           float hm = 0;
@@ -1892,23 +1924,73 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                        hs, hm);
         }
         kernels::RmsNormAdd(
-            impl_->moe_out, static_cast<const float*>(l.ffn_post_norm.device),
-            impl_->hidden, n, hidden, c.rms_eps,
+            s.impl_->moe_out, static_cast<const float*>(l.ffn_post_norm.device),
+            s.impl_->hidden, n, hidden, c.rms_eps,
             l.has_out_scale ? l.out_scale_val : 1.0F, stream);
       }
     }
+}
 
+bool Session::Forward(std::span<const std::int32_t> tokens,
+                      std::uint32_t start_pos, std::string* error_msg,
+                      bool all_logits) {
+  const auto& w = *model_->weights_;
+  const auto& c = w.config;
+  const std::uint32_t hidden = c.hidden_size;
+  const std::uint32_t n = static_cast<std::uint32_t>(tokens.size());
+  hipStream_t stream = 0;
+  impl_->has_pending_cur = false;
+  // Device-side position scalar for the shared blocked kernels (blocked
+  // writes and direct reads index the cache with *start_pos on-device).
+  if (model_->options_.kv_cache_quant == "q8") {
+    (void)hipMemcpyAsync(impl_->d_pos, &start_pos, sizeof(start_pos),
+                         hipMemcpyHostToDevice, stream);
+  }
+  std::vector<std::int32_t> host_tokens(tokens.begin(), tokens.end());
+  if (getenv("GEMMA4_DEBUG_EMBED"))
+    std::fprintf(stderr, "[gemma4] fwd n=%u pos=%u tok0=%d\n", n, start_pos,
+                 host_tokens[0]);
+
+  // Embedding lookup from the device mirror (Q4_0 table), fused with the
+  // sqrt(hidden) scale so the chunk entry is a single kernel launch.
+  kernels::EmbedScale(w.token_embd.device, w.token_embd.type,
+                      host_tokens.data(), impl_->hidden, n, hidden,
+                      std::sqrt(static_cast<float>(hidden)), stream);
+
+  // Gemma 4 scales token embeddings by sqrt(hidden) (llama.cpp parity).
+  // NOTE: llama.cpp scales token embeddings by sqrt(n_embd); Gemma 4's
+  // trained embedding table already carries that scale (llama.cpp's own
+  // table is F32 ~O(1)). Q4_0 quantisation of the pre-scaled table keeps
+  // it pre-scaled, so NO extra sqrt(hidden) here.
+
+  std::uint32_t pos = start_pos;
+
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    ForwardLayerPre(*this, il, n, start_pos, stream);
+    ForwardLayerAttn(*this, il, n, start_pos, stream);
+    ForwardLayerPost(*this, il, n, start_pos, stream);
     pos += n;
   }
 
   // Output norm + LM head.
-  kernels::RmsNorm(impl_->hidden,
+  ForwardFinish(*this, n, start_pos, all_logits, stream);
+  return true;
+}
+
+void Session::ForwardFinish(Session& s, std::uint32_t n,
+                            std::uint32_t start_pos, bool all_logits,
+                            hipStream_t stream) {
+  auto& w = *s.model_->weights_;
+  const auto& c = w.config;
+  const std::uint32_t hidden = c.hidden_size;
+  // Output norm + LM head.
+  kernels::RmsNorm(s.impl_->hidden,
                    static_cast<const float*>(w.output_norm.device),
-                   impl_->normed, n, hidden, c.rms_eps, stream);
+                   s.impl_->normed, n, hidden, c.rms_eps, stream);
   if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && n <= 4) {
     hipDeviceSynchronize();
     std::vector<float> fh(hidden);
-    (void)hipMemcpy(fh.data(), impl_->normed, hidden * sizeof(float),
+    (void)hipMemcpy(fh.data(), s.impl_->normed, hidden * sizeof(float),
                     hipMemcpyDeviceToHost);
     double fs = 0;
     for (float v : fh) fs += (double)v;
@@ -1917,22 +1999,21 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
 
   const bool force_all = getenv("GEMMA4_FORCE_ALLLOGITS") != nullptr;
   const std::uint32_t logit_rows =
-      (all_logits || force_all) ? std::min(n, impl_->logit_cap) : 1u;
+      (all_logits || force_all) ? std::min(n, s.impl_->logit_cap) : 1u;
   if (getenv("GEMMA4_DEBUG_EMBED") != nullptr && n <= 16) {
     std::fprintf(stderr, "[gemma4] head n=%u all_logits=%d logit_rows=%u\n", n,
                  (int)all_logits, logit_rows);
   }
   const float* last_row =
       (all_logits || force_all)
-          ? (impl_->normed + static_cast<std::size_t>(n - logit_rows) * hidden)
-          : (impl_->normed + static_cast<std::size_t>(n - 1) * hidden);
-  StagedGemm(w.output, c.vocab_size, last_row, impl_->logits, logit_rows,
-             impl_->w_slab, impl_->x_slab, stream, c.final_logit_softcapping);
+          ? (s.impl_->normed + static_cast<std::size_t>(n - logit_rows) * hidden)
+          : (s.impl_->normed + static_cast<std::size_t>(n - 1) * hidden);
+  StagedGemm(w.output, c.vocab_size, last_row, s.impl_->logits, logit_rows,
+             s.impl_->w_slab, s.impl_->x_slab, stream, c.final_logit_softcapping);
 
-  impl_->last_fwd_n = n;
-  impl_->last_chunk_n = logit_rows;
-  impl_->length = start_pos + n;
-  return true;
+  s.impl_->last_fwd_n = n;
+  s.impl_->last_chunk_n = logit_rows;
+  s.impl_->length = start_pos + n;
 }
 
 bool Session::Sync(std::span<const std::int32_t> prompt,
@@ -1944,25 +2025,178 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
                    std::to_string(impl_->capacity) + ")";
     return false;
   }
-  impl_->length = 0;
   impl_->has_pending_cur = false;
+  // Incremental prefix: when the new prompt extends the previously synced
+  // prefix, KV rows [0, synced) are intact (Evaluate only appends past them,
+  // SpeculativeRound clears the marker) and only the delta is forwarded.
+  // Anything else falls back to a full resync from 0. This turns append-only
+  // multi-turn growth from O(n^2) replays into O(n) prefix + delta.
+  std::size_t start = 0;
+  const auto& prev = impl_->synced_;
+  if (!prev.empty() && prompt.size() >= prev.size() &&
+      impl_->length >= prev.size() &&
+      std::equal(prev.begin(), prev.end(), prompt.begin())) {
+    start = prev.size();
+  } else {
+    impl_->length = 0;
+  }
   std::size_t chunk = Session::Impl::kMaxChunk;
   if (const char* e = getenv("GEMMA4_CHUNK")) {
     const long v = std::strtol(e, nullptr, 10);
     if (v >= 1 && v <= (long)Session::Impl::kMaxChunk) chunk = (std::size_t)v;
   }
-  for (std::size_t off = 0; off < prompt.size(); off += chunk) {
+  for (std::size_t off = start; off < prompt.size(); off += chunk) {
     const std::size_t len = std::min<std::size_t>(chunk, prompt.size() - off);
     if (!Forward(prompt.subspan(off, len), static_cast<std::uint32_t>(off),
                  error_msg))
       return false;
   }
+  impl_->synced_.assign(prompt.begin(), prompt.end());
   (void)hipStreamSynchronize(0);
   return true;
 }
 
 bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
   return Forward({&token, 1}, impl_->length, error_msg);
+}
+
+bool Session::DecodeBatch(std::span<Session*> sessions,
+                          std::span<const std::int32_t> tokens,
+                          std::string* error_msg) {
+  namespace mb = ::gufo::core::compute::mixed_batch;
+  const auto fail = [&](const std::string& m) {
+    if (error_msg != nullptr && error_msg->empty()) *error_msg = m;
+    return false;
+  };
+  if (sessions.empty() || sessions.size() != tokens.size())
+    return fail("gemma4 DecodeBatch needs one token per session");
+  if (sessions.size() > mb::kMaxMixedBlks)
+    return fail("gemma4 DecodeBatch exceeds the mixed-batch session cap");
+  Model* model = (sessions[0] != nullptr) ? sessions[0]->model_.get() : nullptr;
+  if (model == nullptr) return fail("gemma4 DecodeBatch has a null session");
+  const auto& w = *model->weights_;
+  const auto& c = w.config;
+  const std::uint32_t hidden = c.hidden_size;
+  hipStream_t stream = 0;
+  for (Session* s : sessions) {
+    if (s == nullptr || s->model_.get() != model)
+      return fail("gemma4 DecodeBatch sessions must share one model");
+    if (s->MtpEnabled())
+      return fail("gemma4 DecodeBatch refuses MTP sessions (use Evaluate)");
+    if (s->impl_->length + 1 > s->impl_->capacity)
+      return fail("gemma4 DecodeBatch token exceeds KV capacity");
+  }
+  // One token embedded per session; the device position scalar each blocked
+  // layer reads is uploaded per session, exactly like Forward.
+  const bool q8 = model->options_.kv_cache_quant == "q8";
+  for (std::size_t i = 0; i < sessions.size(); ++i) {
+    Session* s = sessions[i];
+    s->impl_->has_pending_cur = false;
+    const std::uint32_t pos = s->impl_->length;
+    if (q8) {
+      (void)hipMemcpyAsync(s->impl_->d_pos, &pos, sizeof(pos),
+                           hipMemcpyHostToDevice, stream);
+    }
+    kernels::EmbedScale(w.token_embd.device, w.token_embd.type, &tokens[i],
+                        s->impl_->hidden, 1, hidden,
+                        std::sqrt(static_cast<float>(hidden)), stream);
+  }
+  // Caller-owned arena (§4.2): one buffer shared by every layer launch,
+  // regrown when a wider batch needs more. Opt-out valve (default on):
+  // GUFO_GEMMA4_UNIFIED_BATCH=0 keeps the legacy single-session attention
+  // cores inside the batch envelope.
+  const bool use_unified = [] {
+    const char* e = std::getenv("GUFO_GEMMA4_UNIFIED_BATCH");
+    return e == nullptr || e[0] != '0';
+  };
+  const std::size_t need = mb::MixedBatchScratchBytes(sessions.size());
+  if (model->mixed_scratch_ == nullptr ||
+      model->mixed_scratch_bytes_ < need) {
+    if (model->mixed_scratch_ != nullptr) (void)hipFree(model->mixed_scratch_);
+    void* p = nullptr;
+    if (hipMalloc(&p, need) != hipSuccess)
+      return fail("gemma4 DecodeBatch scratch allocation failed");
+    model->mixed_scratch_ = p;
+    model->mixed_scratch_bytes_ = need;
+  }
+  mb::MixedBlk blks[mb::kMaxMixedBlks];
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    const std::uint32_t kv_layer = c.KvProducingLayer(il);
+    const std::uint32_t head_dim = c.HeadDim(il);
+    const std::uint32_t kv_heads = c.KvHeads(kv_layer);
+    for (Session* s : sessions)
+      ForwardLayerPre(*s, il, 1, s->impl_->length, stream);
+    const bool use_blocked = q8 && w.layers[il].has_kv && kv_heads > 0 &&
+                             head_dim == 256 && kv_layer == il;
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+      Session* s = sessions[i];
+      const std::uint32_t pos = s->impl_->length;
+      mb::MixedBlk& b = blks[i];
+      b.q = s->impl_->qbuf;
+      b.gate = nullptr;  // gemma4 attention has no output gate
+      b.out = s->impl_->attn_out;
+      b.kv_len = pos + 1;
+      b.q_pos_base = pos;
+      b.n_rows = 1;
+      b.head_dim = head_dim;
+      b.heads = c.num_heads;
+      b.kv_heads = kv_heads;
+      b.score_scale = 1.0F;  // gemma4 f_attention_scale, like the F16 kernels
+      b.q_stride = 0;
+      b.k_stride = 0;
+      b.v_stride = 0;
+      b.gate_stride = 0;
+      b.out_stride = 0;
+      if (!use_blocked) {
+        // Full d=512 layers stay F16; window handled inside the kernel.
+        b.k = s->impl_->kv_k[kv_layer];
+        b.v = s->impl_->kv_v[kv_layer];
+        b.k_codec = mb::MixedKvCodec::kF16;
+        b.v_codec = mb::MixedKvCodec::kF16;
+        b.k_stride = s->impl_->kv_stride[kv_layer];
+        b.v_stride = s->impl_->kv_stride[kv_layer];
+        b.window = c.LayerIsSwa(il) ? c.sliding_window : 0;
+        b.key_block_bytes = 34;
+        b.value_block_bytes = 34;
+      } else {
+        // Blocked SWA layers: pointers pre-shifted, dense-causal from here
+        // (same convention as the scalar AttentionBlocked call).
+        const std::uint8_t* k2 = nullptr;
+        const std::uint8_t* v2 = nullptr;
+        const std::uint32_t* sp = nullptr;
+        std::uint32_t rebased = 0;
+        SwaShiftedKV(*s, kv_layer, c.sliding_window, pos, stream, k2, v2, sp,
+                     rebased);
+        (void)sp;
+        const bool k4 = KvKey4Bit(model->options_);
+        const bool v4 = KvValue4Bit(model->options_);
+        b.k = k2;
+        b.v = v2;
+        b.k_codec = k4 ? mb::MixedKvCodec::kQ4 : mb::MixedKvCodec::kQ8;
+        b.v_codec = v4 ? mb::MixedKvCodec::kQ4 : mb::MixedKvCodec::kQ8;
+        b.window = 0;
+        b.key_block_bytes = k4 ? 18 : 34;
+        b.value_block_bytes = v4 ? 18 : 34;
+        b.q_pos_base = rebased;
+        b.kv_len = rebased + 1;
+      }
+    }
+    if (!use_unified ||
+        !mb::LaunchMixedBatchAttention(blks, sessions.size(),
+                                       model->mixed_scratch_,
+                                       model->mixed_scratch_bytes_, stream)) {
+      // Unified refusal (e.g. short-context q8): legacy single-session
+      // cores, numerically identical to serial Evaluate.
+      for (Session* s : sessions)
+        ForwardLayerAttn(*s, il, 1, s->impl_->length, stream);
+    }
+    for (Session* s : sessions)
+      ForwardLayerPost(*s, il, 1, s->impl_->length, stream);
+  }
+  for (Session* s : sessions)
+    ForwardFinish(*s, 1, s->impl_->length, /*all_logits=*/false, stream);
+  (void)hipStreamSynchronize(0);
+  return true;
 }
 
 bool Session::EnableMtp(const std::string& drafts_path, std::string* error_msg) {
@@ -2025,6 +2259,9 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
   }
 
   const std::uint32_t old_length = impl_->length;
+  // The speculative verify below performs KV surgery past old_length; drop
+  // the incremental-Sync marker conservatively (next Sync fully resyncs).
+  impl_->synced_.clear();
   std::int32_t cur = 0;
   if (impl_->has_pending_cur) {
     cur = impl_->pending_cur;
