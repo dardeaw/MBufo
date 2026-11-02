@@ -682,8 +682,9 @@ void PrintServeHelp(std::string_view program_name,
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
     parser.AddOption("", "--mtp-model", "PATH",
-                     "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
-                     "mtp-...-shared-*.gguf sidecar)",
+                     "Path to the MTP draft GGUF (Qwen3.8-Flash-Next: the "
+                     "mtp-...-shared-*.gguf sidecar; Gemma 4: the "
+                     "mtp-gemma-... sidecar)",
                      "Speculative", &mtp_model_path);
     parser.AddOption(
         "-d", "--draft-tokens", "N",
@@ -1260,8 +1261,8 @@ int RunServe(std::span<const char* const> args) {
                          "Speculative", &dspark_model_path);
     llm_parser.AddOption(
         "", "--mtp-model", "PATH",
-        "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
-        "mtp-...-shared-*.gguf sidecar)",
+        "Path to the MTP draft GGUF (Qwen3.8-Flash-Next: the "
+        "mtp-...-shared-*.gguf sidecar; Gemma 4: the mtp-gemma-... sidecar)",
         "Speculative", &mtp_model_path);
     llm_parser.AddOption(
         "-d", "--draft-tokens", "N",
