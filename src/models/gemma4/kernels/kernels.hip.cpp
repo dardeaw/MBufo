@@ -2195,36 +2195,48 @@ void StoreBlockedKv(const float* k_rows, const float* v_rows,
                       std::uint8_t* k_cache, std::uint8_t* v_cache,
                       std::uint32_t n_tokens, std::uint32_t kv_heads,
                       std::uint32_t d, const std::uint32_t* start_pos,
-                      hipStream_t stream) {
+                      hipStream_t stream, std::uint32_t key_block_bytes,
+                      std::uint32_t value_block_bytes) {
   // SWA-only writer (d == 256): returns without writing otherwise, so a
   // misconfigured full (d == 512) layer can never silently corrupt its F16
-  // cache through this entry point.
+  // cache through this entry point. Only the shared 34/18-byte grids are
+  // accepted; anything else leaves the caches untouched (loud fallback is
+  // the engine's job).
   if (d != 256 || kv_heads == 0 || n_tokens == 0 || k_rows == nullptr ||
       v_rows == nullptr || k_cache == nullptr || v_cache == nullptr ||
-      start_pos == nullptr)
+      start_pos == nullptr ||
+      (key_block_bytes != 34 && key_block_bytes != 18) ||
+      (value_block_bytes != 34 && value_block_bytes != 18))
     return;
   namespace blocked = gufo::core::compute::blocked_kv;
   const std::uint32_t kv_width = kv_heads * d;
   // k_rows/v_rows hold the final K/V rows (post RMS-norm, post-RoPE), the
   // same values StoreKv would write as F16. Quantize keeps the post-RoPE K
-  // per-32-block scale the shared layout requires. V stays 8-bit (K8V8);
-  // the 4-bit value grid is not enabled yet.
+  // per-32-block scale the shared layout requires. The 4-bit grids use the
+  // narrower range 7 study hook (same convention as flash-next GUFO_KV_Q4 /
+  // GUFO_KV_V4); the 8-bit grid keeps range 127.
   blocked::QuantizeKvRows(k_rows, kv_width, d, k_cache, kv_width, kv_heads, d,
-                          n_tokens, blocked::KvCodec::kQ8, 127.0F, 34,
-                          start_pos, stream);
+                          n_tokens, blocked::KvCodec::kQ8,
+                          key_block_bytes == 34 ? 127.0F : 7.0F,
+                          key_block_bytes, start_pos, stream);
   blocked::QuantizeKvRows(v_rows, kv_width, d, v_cache, kv_width, kv_heads, d,
-                          n_tokens, blocked::KvCodec::kQ8, 127.0F, 34,
-                          start_pos, stream);
+                          n_tokens, blocked::KvCodec::kQ8,
+                          value_block_bytes == 34 ? 127.0F : 7.0F,
+                          value_block_bytes, start_pos, stream);
 }
 
 void AttentionBlocked(const float* q, const std::uint8_t* k_cache,
                       const std::uint8_t* v_cache, float* out,
                       std::uint32_t n_tokens, const std::uint32_t* start_pos,
                       std::uint32_t heads, std::uint32_t kv_heads,
-                      std::uint32_t d, hipStream_t stream) {
+                      std::uint32_t d, hipStream_t stream,
+                      std::uint32_t key_block_bytes,
+                      std::uint32_t value_block_bytes) {
   // SWA-only reader (d == 256): silent no-op otherwise, mirroring the
   // shared kernel's own d != 256 guard.
-  if (d != 256 || kv_heads == 0 || n_tokens == 0 || start_pos == nullptr)
+  if (d != 256 || kv_heads == 0 || n_tokens == 0 || start_pos == nullptr ||
+      (key_block_bytes != 34 && key_block_bytes != 18) ||
+      (value_block_bytes != 34 && value_block_bytes != 18))
     return;
   namespace blocked = gufo::core::compute::blocked_kv;
   // Gemma 4 sets f_attention_scale = 1.0 (no 1/sqrt(d) in the WMMA, split-K
@@ -2232,7 +2244,8 @@ void AttentionBlocked(const float* q, const std::uint8_t* k_cache,
   // scale is passed explicitly. Direct read: fused dequant on the blocked
   // rows, no F16 staging. ratio = 1 (no compressor tail), splits = 1.
   blocked::AttentionKv(q, k_cache, v_cache, nullptr, 0, out, nullptr, 1,
-                       n_tokens, start_pos, heads, kv_heads, d, 1, 34, 34,
+                       n_tokens, start_pos, heads, kv_heads, d, 1,
+                       key_block_bytes, value_block_bytes,
                        blocked::KvCodec::kQ8, stream, 1.0F);
 }
 

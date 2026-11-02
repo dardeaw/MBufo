@@ -95,11 +95,23 @@ constexpr std::array<std::string_view, 7> kToolMarkers{
 };
 using ToolMarkerSet = std::span<const std::string_view>;
 
+// Gemma 4 native tool-call framing from its canonical chat template: the
+// model emits <|tool_call>call:NAME{args}<tool_call|> where args use
+// unquoted keys and <|"|>-quoted strings.
+struct GemmaToolSyntax {
+  static constexpr std::string_view kCallOpen = "<|tool_call>";
+  static constexpr std::string_view kCallPrefix = "call:";
+  static constexpr std::string_view kCallClose = "<tool_call|>";
+  static constexpr std::string_view kQuote = "<|\"|>";
+};
+
 ToolMarkerSet ToolMarkers(
     std::optional<sampling::JsonConstraint::ToolFormat> format) {
   using Format = sampling::JsonConstraint::ToolFormat;
   static constexpr std::array<std::string_view, 1> qwen{
       tokenization::QwenToolSyntax::kCallOpen};
+  static constexpr std::array<std::string_view, 1> gemma{
+      GemmaToolSyntax::kCallOpen};
   // The template writes "\n\n" before the call block. As in llama.cpp
   // common/parsers/deepseek.cpp (TC_SEPARATOR + FC_START), that separator is
   // framing: returning it as content would double it when history is replayed.
@@ -113,8 +125,11 @@ ToolMarkerSet ToolMarkers(
     return kToolMarkers;
   // Match the canonical opener selected by JsonConstraint::WithTools. Other
   // dialects are ordinary prose under that grammar, not additional calls.
-  return *format == Format::kDeepSeek ? ToolMarkerSet(deepseek)
-                                      : ToolMarkerSet(qwen);
+  if (*format == Format::kDeepSeek)
+    return ToolMarkerSet(deepseek);
+  if (*format == Format::kGemma)
+    return ToolMarkerSet(gemma);
+  return ToolMarkerSet(qwen);
 }
 
 // A native function header, rather than a bare marker mentioned in prose,
@@ -133,6 +148,8 @@ ToolMarkerSet ReasoningToolMarkers(ToolMarkerSet markers) {
       markers.back() ==
           models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen)
     return deepseek;
+  // Gemma never emits a reasoning envelope: no thought tags means no
+  // implicit reasoning boundary to detect, constrained or not.
   return {};
 }
 
@@ -143,6 +160,11 @@ constexpr std::array<std::string_view, 4> kQwenClosers{
     tokenization::QwenToolSyntax::kFunctionClose,
     tokenization::QwenToolSyntax::kCallClose,
     // The client's envelope, whose block rules already strip it whole.
+    "</invoke>",
+};
+// Gemma 4 native closers: the call closer plus the same client envelope.
+constexpr std::array<std::string_view, 2> kGemmaClosers{
+    GemmaToolSyntax::kCallClose,
     "</invoke>",
 };
 constexpr std::array<std::string_view, 9> kToolClosers{
@@ -176,6 +198,8 @@ ToolCloserSet ToolClosers(
   // and another dialect's closing tags are ordinary prose like its openers —
   // the client's envelope excepted, which no dialect admits and every one of
   // them parses.
+  if (*format == Format::kGemma)
+    return kGemmaClosers;
   return kQwenClosers;
 }
 
@@ -1752,6 +1776,262 @@ void ParseDsmlCalls(
     break;
   }
 }
+
+// Scans one <|tool_call>call:NAME{...}<tool_call|> envelope at the start of
+// `text`. The argument payload keeps its outer braces; quote-aware brace
+// matching skips <|"|> and "..." strings so values may nest objects or carry
+// braces in text.
+struct GemmaCallScan {
+  bool matched{false};
+  std::string name;
+  std::string args_text;
+  // Bytes consumed before scanning resumes when the envelope is rejected;
+  // bytes through the closer on success.
+  std::size_t progress{0};
+  std::size_t end{0};
+};
+
+GemmaCallScan ScanGemmaToolCall(std::string_view text) {
+  GemmaCallScan scan;
+  using Syntax = GemmaToolSyntax;
+  if (!text.starts_with(Syntax::kCallOpen))
+    return scan;
+  std::size_t cursor = Syntax::kCallOpen.size();
+  if (!text.substr(cursor).starts_with(Syntax::kCallPrefix)) {
+    scan.progress = cursor;
+    return scan;
+  }
+  cursor += Syntax::kCallPrefix.size();
+  const std::size_t name_begin = cursor;
+  while (cursor < text.size() &&
+         ((text[cursor] >= 'a' && text[cursor] <= 'z') ||
+          (text[cursor] >= 'A' && text[cursor] <= 'Z') ||
+          (text[cursor] >= '0' && text[cursor] <= '9') ||
+          text[cursor] == '_' || text[cursor] == '-' ||
+          text[cursor] == '.')) {
+    ++cursor;
+  }
+  if (cursor == name_begin || cursor >= text.size() || text[cursor] != '{') {
+    scan.progress = cursor > 0 ? cursor : Syntax::kCallOpen.size();
+    return scan;
+  }
+  scan.name = std::string(text.substr(name_begin, cursor - name_begin));
+  std::size_t depth = 0;
+  std::size_t i = cursor;
+  bool template_quote = false;
+  bool in_string = false;
+  for (; i < text.size();) {
+    if (template_quote) {
+      if (text.substr(i).starts_with(Syntax::kQuote)) {
+        template_quote = false;
+        i += Syntax::kQuote.size();
+        continue;
+      }
+      ++i;
+      continue;
+    }
+    if (in_string) {
+      if (text[i] == '\\' && i + 1 < text.size()) {
+        i += 2;
+        continue;
+      }
+      if (text[i] == '"')
+        in_string = false;
+      ++i;
+      continue;
+    }
+    if (text.substr(i).starts_with(Syntax::kQuote)) {
+      template_quote = true;
+      i += Syntax::kQuote.size();
+      continue;
+    }
+    if (text[i] == '"') {
+      in_string = true;
+      ++i;
+      continue;
+    }
+    if (text[i] == '{') {
+      ++depth;
+      ++i;
+      continue;
+    }
+    if (text[i] == '}') {
+      --depth;
+      ++i;
+      if (depth == 0)
+        break;
+      continue;
+    }
+    ++i;
+  }
+  if (depth != 0) {
+    scan.progress = i;
+    return scan;
+  }
+  scan.args_text = std::string(text.substr(cursor, i - cursor));
+  if (!text.substr(i).starts_with(Syntax::kCallClose)) {
+    scan.progress = i;
+    return scan;
+  }
+  scan.end = i + Syntax::kCallClose.size();
+  scan.matched = true;
+  return scan;
+}
+
+// Splits on top-level `separator`, respecting "..." strings (with backslash
+// escapes) and nested [] {}.
+std::vector<std::string_view> GemmaSplitTopLevel(std::string_view text,
+                                                 char separator) {
+  std::vector<std::string_view> parts;
+  std::size_t depth = 0;
+  bool in_string = false;
+  std::size_t begin = 0;
+  for (std::size_t i = 0; i < text.size();) {
+    const char c = text[i];
+    if (in_string) {
+      if (c == '\\' && i + 1 < text.size()) {
+        i += 2;
+        continue;
+      }
+      if (c == '"')
+        in_string = false;
+      ++i;
+      continue;
+    }
+    if (c == '"') {
+      in_string = true;
+      ++i;
+      continue;
+    }
+    if (c == '{' || c == '[') {
+      ++depth;
+      ++i;
+      continue;
+    }
+    if (c == '}' || c == ']') {
+      if (depth > 0)
+        --depth;
+      ++i;
+      continue;
+    }
+    if (c == separator && depth == 0) {
+      parts.push_back(text.substr(begin, i - begin));
+      begin = i + 1;
+    }
+    ++i;
+  }
+  parts.push_back(text.substr(begin));
+  return parts;
+}
+
+// Converts the raw {...} payload to shared API arguments. Template quotes
+// become JSON quotes first; keys may be bare or quoted, values follow the
+// JSON kinds with lenient bare-word strings (a model that skips quotes).
+bool ParseGemmaArgs(
+    std::string_view args_text,
+    std::vector<tokenization::ChatMessage::ToolArgument>* arguments) {
+  std::string normalized;
+  normalized.reserve(args_text.size());
+  for (std::size_t i = 0; i < args_text.size();) {
+    if (args_text.substr(i).starts_with(GemmaToolSyntax::kQuote)) {
+      normalized += '"';
+      i += GemmaToolSyntax::kQuote.size();
+    } else {
+      normalized += args_text[i];
+      ++i;
+    }
+  }
+  const std::string_view body = normalized;
+  if (body.size() < 2 || body.front() != '{' || body.back() != '}')
+    return false;
+  const std::string_view inner = body.substr(1, body.size() - 2);
+  if (Trim(inner).empty())
+    return true;
+  for (const auto entry : GemmaSplitTopLevel(inner, ',')) {
+    const auto fields = GemmaSplitTopLevel(entry, ':');
+    if (fields.empty())
+      return false;
+    // A value may itself contain top-level colons (nested objects); only
+    // the first colon separates the key.
+    std::string_view key = fields.front();
+    std::string_view value;
+    if (fields.size() == 1) {
+      value = {};
+    } else {
+      const auto value_begin =
+          static_cast<std::size_t>(fields[1].data() - entry.data());
+      value = entry.substr(value_begin);
+    }
+    key = Trim(key);
+    value = Trim(value);
+    if (key.size() >= 2 && key.front() == '"' && key.back() == '"')
+      key = Trim(key.substr(1, key.size() - 2));
+    if (key.empty())
+      return false;
+    tokenization::ChatMessage::ToolArgument argument;
+    argument.name = std::string(key);
+    if (value.empty()) {
+      argument.value = {};
+      argument.is_string = true;
+    } else if (const auto parsed = TryParseJson(value)) {
+      if (parsed->is_string()) {
+        argument.value = parsed->get_str();
+        argument.is_string = true;
+      } else {
+        argument.value = std::string(value);
+        argument.is_string = false;
+      }
+    } else {
+      argument.value = std::string(value);
+      argument.is_string = true;
+    }
+    const auto duplicate = std::ranges::find_if(
+        *arguments,
+        [&](const auto& existing) { return existing.name == argument.name; });
+    if (duplicate == arguments->end())
+      arguments->push_back(std::move(argument));
+  }
+  return true;
+}
+
+void ParseGemmaCalls(
+    std::string_view text, std::span<const tokenization::ChatTool> tools,
+    std::vector<ParsedToolCall>* calls,
+    std::vector<std::pair<std::size_t, std::size_t>>* spans = nullptr) {
+  QuoteTracker call_quotes;
+  call_quotes.Reset(text);
+  std::size_t cursor = 0;
+  while ((cursor = text.find(GemmaToolSyntax::kCallOpen, cursor)) !=
+         std::string_view::npos) {
+    if (call_quotes.QuotedAt(cursor)) {
+      cursor += GemmaToolSyntax::kCallOpen.size();
+      continue;
+    }
+    const auto marker_begin = cursor;
+    const auto scan = ScanGemmaToolCall(text.substr(marker_begin));
+    if (!scan.matched) {
+      cursor = marker_begin +
+               (scan.progress > 0 ? scan.progress
+                                  : GemmaToolSyntax::kCallOpen.size());
+      continue;
+    }
+    cursor = marker_begin + scan.end;
+    ParsedToolCall call;
+    call.name = scan.name;
+    const bool known =
+        tools.empty() ||
+        std::ranges::any_of(tools, [&](const auto& tool) {
+          return tool.name == call.name;
+        });
+    if (known && ParseGemmaArgs(scan.args_text, &call.arguments)) {
+      call.id = RandomId("call_");
+      calls->push_back(std::move(call));
+      call_quotes.Reset(text, cursor);
+      if (spans)
+        spans->emplace_back(marker_begin, cursor);
+    }
+  }
+}
 ParsedGeneration ParseGeneration(
     std::string_view raw,
     TextGenerationBackend::InitialOutputState initial_output_state,
@@ -1862,6 +2142,10 @@ ParsedGeneration ParseGeneration(
     if (text_from_tools.starts_with(tokenization::QwenToolSyntax::kCallOpen))
       ParseQwenCalls(parsed.text, tools, &parsed.tool_calls, nullptr,
                      unfinished_reasoning_quote, partial);
+    else if (markers.size() == 1 &&
+             markers.front() == GemmaToolSyntax::kCallOpen &&
+             text_from_tools.starts_with(GemmaToolSyntax::kCallOpen))
+      ParseGemmaCalls(parsed.text, tools, &parsed.tool_calls, nullptr);
     else
       ParseDsmlCalls(
           text_from_tools, markers, tools, &parsed.tool_calls, &spans,
@@ -1997,8 +2281,14 @@ ParsedGeneration ParseStructuredGeneration(
        ToolMarkerPrefix(content, markers))) {
     ParsedGeneration call;
     std::vector<std::pair<std::size_t, std::size_t>> spans;
-    ParseQwenCalls(content, tools, &call.tool_calls,
-                   tool_only ? &spans : nullptr, false, partial);
+    const bool gemma = markers.size() == 1 &&
+                       markers.front() == GemmaToolSyntax::kCallOpen;
+    if (gemma)
+      ParseGemmaCalls(content, tools, &call.tool_calls,
+                       tool_only ? &spans : nullptr);
+    else
+      ParseQwenCalls(content, tools, &call.tool_calls,
+                      tool_only ? &spans : nullptr, false, partial);
     if (tool_only) {
       std::size_t cursor = 0;
       for (const auto& [begin, end] : spans) {

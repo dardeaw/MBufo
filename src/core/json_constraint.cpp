@@ -1778,6 +1778,15 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
+  // Gemma constrains only the call envelope (see WithTools); per-tool
+  // argument grammars are unused, so any valid grammar object suffices.
+  if (format == ToolFormat::kGemma) {
+    auto object = Object();
+    const std::lock_guard lock(mutex);
+    if (cache.size() >= 16)
+      cache.erase(cache.begin());
+    return cache.emplace(key, std::move(object)).first->second;
+  }
   const auto* properties = schema.find("properties");
   const auto* additional = schema.find("additionalProperties");
   const bool untyped = !strict && (!properties || properties->empty()) &&
@@ -1863,7 +1872,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
     ToolFormat format) {
-  if (format == ToolFormat::kJson)
+  if (format == ToolFormat::kJson || format == ToolFormat::kGemma)
     return Object();
   static const auto qwen = [] {
     const auto schema = json::Value::object();
@@ -1997,45 +2006,53 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     return id;
   };
   const bool deepseek = format == ToolFormat::kDeepSeek;
+  const bool gemma = format == ToolFormat::kGemma;
   const std::string_view marker =
-      deepseek ? "<｜DSML｜tool_calls>" : "<tool_call>";
+      gemma ? "<|tool_call>"
+            : deepseek ? "<｜DSML｜tool_calls>" : "<tool_call>";
   const auto end = literal(format == ToolFormat::kJson ? "}</tool_call>"
-                           : deepseek                  ? "</｜DSML｜invoke>"
-                                      : "</function>\n</tool_call>");
+                            : gemma ? "}<tool_call|>"
+                            : deepseek ? "</｜DSML｜invoke>"
+                                       : "</function>\n</tool_call>");
   const auto calls = static_cast<std::uint32_t>(grammar->rules_.size());
   grammar->rules_.push_back({});
   // In tool-only mode ordinary text remains unconstrained until a canonical
   // call marker. The small prefix automaton is carried by the request grammar,
   // including across tokens, speculative rollback and sampler copies.
-  auto text = [&](std::uint32_t target) {
-    check_capacity(marker.size(), marker.size() * 256, 0);
+  // Gemma reuses the same automaton shape for its free-form argument span:
+  // `text_until` matches an arbitrary closer instead of the call opener.
+  auto text_until = [&](std::string_view mark, std::uint32_t target) {
+    check_capacity(mark.size(), mark.size() * 256, 0);
     const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
-    grammar->rules_.resize(base + marker.size());
-    for (std::size_t prefix = 0; prefix < marker.size(); ++prefix) {
+    grammar->rules_.resize(base + mark.size());
+    for (std::size_t prefix = 0; prefix < mark.size(); ++prefix) {
       grammar->rules_[base + prefix].push_back({});
-      std::vector<std::bitset<256>> transitions(marker.size() + 1);
+      std::vector<std::bitset<256>> transitions(mark.size() + 1);
       for (unsigned byte = 0; byte < 256; ++byte) {
-        std::string candidate(marker.substr(0, prefix));
+        std::string candidate(mark.substr(0, prefix));
         candidate += static_cast<char>(byte);
-        auto matched = std::min(candidate.size(), marker.size());
-        while (matched && !candidate.ends_with(marker.substr(0, matched)))
+        auto matched = std::min(candidate.size(), mark.size());
+        while (matched && !candidate.ends_with(mark.substr(0, matched)))
           --matched;
         transitions[matched].set(byte);
       }
-      for (std::size_t matched = 0; matched <= marker.size(); ++matched) {
+      for (std::size_t matched = 0; matched <= mark.size(); ++matched) {
         if (transitions[matched].none() ||
-            (matched == marker.size() && target == UINT32_MAX))
+            (matched == mark.size() && target == UINT32_MAX))
           continue;
         const auto terminal = kTerminal | grammar->classes_.size();
         grammar->classes_.push_back(transitions[matched]);
         grammar->rules_[base + prefix].push_back(
             {static_cast<std::uint32_t>(terminal),
-             matched == marker.size()
+             matched == mark.size()
                  ? target
                  : base + static_cast<std::uint32_t>(matched)});
       }
     }
     return base;
+  };
+  auto text = [&](std::uint32_t target) {
+    return text_until(marker, target);
   };
   const auto prose = plain_answer ? text(calls) : UINT32_MAX;
   // As in llama.cpp's DeepSeek V4 and Qwen3-Coder parsers, calls end the
@@ -2043,7 +2060,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   // each other, and no text may follow them. Text after a call is where
   // echoed framing used to leak into content (#383, #438).
   const bool qwen = format == ToolFormat::kQwen;
-  const bool ends_output = deepseek || qwen || !plain_answer;
+  const bool ends_output = deepseek || qwen || gemma || !plain_answer;
   auto after = ends_output ? static_cast<std::uint32_t>(grammar->rules_.size())
                : parallel  ? prose
                            : text(UINT32_MAX);
@@ -2076,7 +2093,10 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
       grammar->rules_[after] = {{space}};
       if (parallel)
         grammar->rules_[after].push_back({space, literal(marker), calls});
-    } else if (parallel && !deepseek) {
+    } else if (parallel && !deepseek && !gemma) {
+      // Gemma's template interleaves a tool_response between calls, so
+      // consecutive parallel calls are off-distribution; the envelope
+      // always ends the turn after one call.
       const auto begin = literal(marker);
       grammar->rules_[after].push_back({begin, calls});
     }
@@ -2092,19 +2112,30 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   std::map<const JsonConstraint*, std::uint32_t> imported;
   if (answer)
     imported.emplace(answer.get(), answer->root_);
-  if (format != ToolFormat::kJson) {
+  if (format == ToolFormat::kQwen || format == ToolFormat::kDeepSeek) {
     grammar->reasoning_tool_prefix_ =
         deepseek ? "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\""
                  : "<tool_call>\n<function=";
     grammar->reasoning_tool_root_ = grammar->rules_.size();
     grammar->rules_.push_back({});
   }
+  // Gemma arguments keep the model's native free-form object syntax
+  // (`key:<|"|>value<|"|>` with unquoted keys, not strict JSON), so the
+  // envelope constrains only the call framing and the parse-back validates
+  // arguments against the schema. One shared span automaton serves every tool.
+  const std::uint32_t gemma_args =
+      gemma ? text_until("}<tool_call|>", after) : UINT32_MAX;
   for (const auto& [name, arguments] : tools) {
     const auto begin = literal(
         format == ToolFormat::kJson
             ? "{\"name\":" + json::Value(name).dump() + ",\"arguments\":"
+        : gemma    ? "call:" + name + "{"
         : deepseek ? "\n<｜DSML｜invoke name=\"" + name + "\">\n"
                    : "\n<function=" + name + ">\n");
+    if (gemma) {
+      grammar->rules_[calls].push_back({begin, gemma_args, after});
+      continue;
+    }
     if (const auto found = imported.find(arguments.get());
         found != imported.end()) {
       grammar->rules_[calls].push_back({begin, found->second, end, after});

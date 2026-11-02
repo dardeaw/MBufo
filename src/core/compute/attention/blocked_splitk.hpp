@@ -55,6 +55,8 @@ inline constexpr std::uint32_t kBlockedSplitKMaxSplits = 64;
 /// (rebase position + n_tokens) used to size the split; the kernel clamps
 /// each chunk to its own device-side `*start_pos + t + 1`. `score_scale`
 /// multiplies the QK scores (gemma4 passes 1.0, its f_attention_scale).
+/// `key_block_bytes` / `value_block_bytes` select each side's block layout
+/// (34 = 8-bit codes, 18 = packed 4-bit codes for the GUFO_KV_Q4/V4 grids).
 /// First version instantiates <KvCodecQ8, 256>; other shapes return false so
 /// the caller falls back to the scalar direct read. Never launches an empty
 /// grid. The merge folds chunks in fixed order, so reruns are deterministic.
@@ -65,7 +67,9 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
                             const std::uint32_t* start_pos,
                             std::uint32_t kv_len, std::uint32_t heads,
                             std::uint32_t kv_heads, std::uint32_t d,
-                            hipStream_t stream, float score_scale = 1.0F);
+                            hipStream_t stream, float score_scale = 1.0F,
+                            std::uint32_t key_block_bytes = 34,
+                            std::uint32_t value_block_bytes = 34);
 
 }  // namespace gufo::core::compute::blocked_splitk
 
