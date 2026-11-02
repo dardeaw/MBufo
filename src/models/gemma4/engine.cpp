@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "src/models/gemma4/kernels/kernels.hpp"
+#include "src/core/compute/attention/blocked_wmma.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 #include "src/models/gemma4/weights.hpp"
@@ -921,6 +922,12 @@ static void SyncSum(const float* p, const char* tag, std::uint32_t n,
 }
 
 namespace {
+
+// Prefill length at or above which the q8 SWA path uses the blocked-Q8 WMMA
+// kernel; shorter prompts stay on the scalar direct read (faster to launch
+// than filling a 16-query tile grid).
+constexpr std::uint32_t kBlockedWmmaMinTokens = 32;
+
 }  // namespace
 
 bool Session::Forward(std::span<const std::int32_t> tokens,
@@ -1112,31 +1119,44 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       }
     }
     if (use_blocked) {
-      // Blocked direct read (fused dequant, score scale 1.0, no F16
-      // staging). Same sliding-window pointer shift as Attention: keys at or
-      // below start_pos - window fall out of the window, so advance the
-      // cache base and rebase the position, keeping dense-causal semantics.
-      const std::uint8_t* k2 = impl_->kv_bk[kv_layer];
-      const std::uint8_t* v2 = impl_->kv_bv[kv_layer];
-      const std::uint32_t* sp = impl_->d_pos;
+      // Three-way: long q8 prefill runs the shared blocked-Q8 WMMA kernel
+      // (SWA shift handled inside, score scale 1.0 like the F16 kernels);
+      // short q8 prompts stay on the scalar direct read; f16 keeps the
+      // existing Attention path (WMMA inside) untouched.
       const std::uint32_t window = c.LayerIsSwa(il) ? c.sliding_window : 0;
-      std::uint32_t shifted = 0;
-      if (window != 0 && start_pos + 1 > window) {
-        const std::uint32_t lo = (start_pos + 1 - window) & ~3u;
-        if (lo != 0 && lo <= start_pos) {
-          shifted = start_pos - lo;
-          if (hipMemcpy(impl_->d_pos_win, &shifted, sizeof(shifted),
-                        hipMemcpyHostToDevice) == hipSuccess) {
-            const std::size_t off =
-                static_cast<std::size_t>(lo) * impl_->kv_row_bytes[kv_layer];
-            k2 += off;
-            v2 += off;
-            sp = impl_->d_pos_win;
+      const bool ran_blocked_wmma =
+          n >= kBlockedWmmaMinTokens &&
+          ::gufo::core::compute::blocked_wmma::AttentionBlockedWmma<
+              ::gufo::core::compute::blocked_wmma::KvCodecQ8, 256>(
+              impl_->qbuf, impl_->kv_bk[kv_layer], impl_->kv_bv[kv_layer],
+              impl_->attn_out, n, start_pos, c.num_heads, kv_heads, window,
+              stream);
+      if (!ran_blocked_wmma) {
+        // Blocked direct read (fused dequant, score scale 1.0, no F16
+        // staging). Same sliding-window pointer shift as Attention: keys at or
+        // below start_pos - window fall out of the window, so advance the
+        // cache base and rebase the position, keeping dense-causal semantics.
+        const std::uint8_t* k2 = impl_->kv_bk[kv_layer];
+        const std::uint8_t* v2 = impl_->kv_bv[kv_layer];
+        const std::uint32_t* sp = impl_->d_pos;
+        std::uint32_t shifted = 0;
+        if (window != 0 && start_pos + 1 > window) {
+          const std::uint32_t lo = (start_pos + 1 - window) & ~3u;
+          if (lo != 0 && lo <= start_pos) {
+            shifted = start_pos - lo;
+            if (hipMemcpy(impl_->d_pos_win, &shifted, sizeof(shifted),
+                          hipMemcpyHostToDevice) == hipSuccess) {
+              const std::size_t off =
+                  static_cast<std::size_t>(lo) * impl_->kv_row_bytes[kv_layer];
+              k2 += off;
+              v2 += off;
+              sp = impl_->d_pos_win;
+            }
           }
         }
+        kernels::AttentionBlocked(impl_->qbuf, k2, v2, impl_->attn_out, n, sp,
+                                  c.num_heads, kv_heads, head_dim, stream);
       }
-      kernels::AttentionBlocked(impl_->qbuf, k2, v2, impl_->attn_out, n, sp,
-                                c.num_heads, kv_heads, head_dim, stream);
     } else {
       kernels::Attention(impl_->qbuf, impl_->kv_k[kv_layer],
                          impl_->kv_v[kv_layer], impl_->attn_out, n, start_pos,

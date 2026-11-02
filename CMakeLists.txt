@@ -123,9 +123,11 @@ if (ENGINE_ENABLE_HIP)
   # the flash-next ROCm backend. Same HIP dialect as the QFN kernels; the
   # wave32 shuffles mean no -mwavefrontsize64.
   add_library(gufo_core_blocked_kv STATIC
-    src/core/compute/attention/blocked_kv.hip.cpp)
+    src/core/compute/attention/blocked_kv.hip.cpp
+    src/core/compute/attention/blocked_wmma.hip.cpp)
   set_source_files_properties(
-    src/core/compute/attention/blocked_kv.hip.cpp PROPERTIES LANGUAGE HIP)
+    src/core/compute/attention/blocked_kv.hip.cpp
+    src/core/compute/attention/blocked_wmma.hip.cpp PROPERTIES LANGUAGE HIP)
   set_target_properties(gufo_core_blocked_kv PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
