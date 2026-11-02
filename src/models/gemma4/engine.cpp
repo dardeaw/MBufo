@@ -12,6 +12,7 @@
 
 #include "src/models/gemma4/kernels/kernels.hpp"
 #include "src/core/compute/attention/blocked_wmma.hpp"
+#include "src/core/compute/attention/blocked_splitk.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 #include "src/models/gemma4/weights.hpp"
@@ -1121,6 +1122,8 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     if (use_blocked) {
       // Three-way: long q8 prefill runs the shared blocked-Q8 WMMA kernel
       // (SWA shift handled inside, score scale 1.0 like the F16 kernels);
+      // long-context q8 decode runs the shared blocked-Q8 Split-K kernel
+      // (same shift/rebase as the scalar path below, score scale 1.0);
       // short q8 prompts stay on the scalar direct read; f16 keeps the
       // existing Attention path (WMMA inside) untouched.
       const std::uint32_t window = c.LayerIsSwa(il) ? c.sliding_window : 0;
@@ -1154,8 +1157,27 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
             }
           }
         }
-        kernels::AttentionBlocked(impl_->qbuf, k2, v2, impl_->attn_out, n, sp,
-                                  c.num_heads, kv_heads, head_dim, stream);
+        // Split-K decode for long contexts: same shifted inputs as the
+        // scalar path (identical SWA semantics by construction), parallel
+        // chunks instead of one sweeping block. Short contexts and
+        // unsupported shapes fall back to the scalar direct read below.
+        bool ran_blocked_splitk = false;
+        if (n <= ::gufo::core::compute::blocked_splitk::
+                     kBlockedSplitKMaxTokens &&
+            getenv("GEMMA4_NO_BLOCKED_SPLITK") == nullptr) {
+          const std::uint32_t base =
+              (sp == impl_->d_pos_win) ? shifted : start_pos;
+          ran_blocked_splitk =
+              ::gufo::core::compute::blocked_splitk::AttentionBlockedSplitK<
+                  ::gufo::core::compute::blocked_splitk::KvCodecQ8, 256>(
+                  impl_->qbuf, k2, v2, impl_->attn_out, n, sp, base + n,
+                  c.num_heads, kv_heads, head_dim, stream);
+        }
+        if (!ran_blocked_splitk) {
+          kernels::AttentionBlocked(impl_->qbuf, k2, v2, impl_->attn_out, n,
+                                    sp, c.num_heads, kv_heads, head_dim,
+                                    stream);
+        }
       }
     } else {
       kernels::Attention(impl_->qbuf, impl_->kv_k[kv_layer],
