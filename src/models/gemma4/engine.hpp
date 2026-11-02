@@ -16,6 +16,9 @@ namespace gufo::models::gemma4 {
 struct ModelOptions {
   std::uint32_t max_context = 8192;
   std::uint32_t decode_concurrency = 1;
+  // KV cache format: "f16" (default, legacy path) or "q8" (shared blocked
+  // INT8 layout on SWA d == 256 layers; full d == 512 layers stay F16).
+  std::string kv_cache_quant = "f16";
 };
 
 class Session;

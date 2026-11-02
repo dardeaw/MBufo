@@ -93,7 +93,9 @@ bool DequantizeKvRows(const std::uint8_t* src_k, __half* dst_k,
 
 /// Blocked twin of Attention: `codec` blocked caches, fused dequant on read.
 /// `key_block_bytes` / `value_block_bytes` select each side's layout
-/// (34 = 8-bit codes, 18 = packed 4-bit codes).
+/// (34 = 8-bit codes, 18 = packed 4-bit codes). `score_scale` multiplies the
+/// QK scores; 0 selects the legacy 1/sqrt(d) (flash-next behavior).
+/// Gemma 4 (f_attention_scale = 1.0) passes 1.0 explicitly.
 void AttentionKv(const float* q, const std::uint8_t* k_cache,
                  const std::uint8_t* v_cache, const std::uint32_t* mask,
                  std::uint32_t mask_words, float* out, float* partials,
@@ -101,7 +103,7 @@ void AttentionKv(const float* q, const std::uint8_t* k_cache,
                  const std::uint32_t* start_pos, std::uint32_t heads,
                  std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                  std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
-                 KvCodec codec, hipStream_t stream);
+                 KvCodec codec, hipStream_t stream, float score_scale = 0.0F);
 
 }  // namespace gufo::core::compute::blocked_kv
 

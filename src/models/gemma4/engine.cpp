@@ -406,6 +406,11 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       *error_msg = "Failed to bind gemma4 weights: " + load_error;
     return nullptr;
   }
+  if (options.kv_cache_quant != "f16" && options.kv_cache_quant != "q8") {
+    if (error_msg != nullptr)
+      *error_msg = "kv cache quant must be f16 or q8";
+    return nullptr;
+  }
   auto model_owner = std::shared_ptr<Model>(new Model());
   model_owner->options_ = options;
   model_owner->reader_ = std::shared_ptr<core::GgufReader>(
@@ -527,10 +532,17 @@ std::size_t Model::ResidentBytes() const noexcept {
 
 struct Session::Impl {
   DeviceBuffers buffers;
-  // KV caches: one F16 cache per KV-producing layer.
+  // KV caches: one cache per KV-producing layer. F16 layers use kv_k/kv_v
+  // (half rows, kv_stride elements per token row); blocked-Q8 SWA layers use
+  // kv_bk/kv_bv (34-byte blocks, kv_row_bytes bytes per token row).
   std::vector<__half*> kv_k;
   std::vector<__half*> kv_v;
   std::vector<std::uint32_t> kv_stride;  // elements per token row
+  std::vector<std::uint8_t*> kv_bk;      // blocked Q8 K (null on F16 layers)
+  std::vector<std::uint8_t*> kv_bv;      // blocked Q8 V (null on F16 layers)
+  std::vector<std::uint32_t> kv_row_bytes;  // blocked bytes per token row
+  std::uint32_t* d_pos{nullptr};         // device-side start_pos scalar
+  std::uint32_t* d_pos_win{nullptr};     // device-side window-shifted pos
   std::uint32_t capacity{0};
   std::uint32_t length{0};
 
@@ -599,6 +611,13 @@ struct Session::Impl {
   [[nodiscard]] bool Ensure(const ModelWeights& w, std::uint32_t capacity,
                             std::string* error) {
     this->capacity = capacity;
+    d_pos = buffers.Alloc<std::uint32_t>(1, error);
+    d_pos_win = buffers.Alloc<std::uint32_t>(1, error);
+    if (d_pos == nullptr || d_pos_win == nullptr) {
+      if (error != nullptr && error->empty())
+        *error = "blocked KV position scalar allocation failed";
+      return false;
+    }
     const std::uint32_t hidden = w.config.hidden_size;
     const std::uint32_t chunk = kMaxChunk;
     this->hidden = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * hidden,
@@ -751,6 +770,9 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
   impl.kv_k.assign(w.config.num_layers, nullptr);
   impl.kv_v.assign(w.config.num_layers, nullptr);
   impl.kv_stride.assign(w.config.num_layers, 0);
+  impl.kv_bk.assign(w.config.num_layers, nullptr);
+  impl.kv_bv.assign(w.config.num_layers, nullptr);
+  impl.kv_row_bytes.assign(w.config.num_layers, 0);
   for (std::uint32_t il = 0; il < w.config.num_layers; ++il) {
     if (!w.config.LayerHasKv(il))
       continue;
@@ -758,8 +780,55 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
     // share the preceding producer's cache).
     if (w.config.KvProducingLayer(il) != il) {
     }
-    const std::uint32_t dim = w.config.KvHeads(il) * w.config.HeadDim(il);
+    const std::uint32_t head_dim_il = w.config.HeadDim(il);
+    const std::uint32_t kv_heads_il = w.config.KvHeads(il);
+    const std::uint32_t dim = kv_heads_il * head_dim_il;
     impl.kv_stride[il] = dim;
+    // Shared blocked Q8 covers SWA layers only (d == 256, plain theta RoPE,
+    // self-produced KV). Full layers (d == 512, proportional rope_freqs)
+    // stay F16: the shared write kernel rejects d > 256 and the shared read
+    // kernel is d == 256-only. Anything else under q8 falls back loudly,
+    // never silently.
+    const bool layer_blocked = options_.kv_cache_quant == "q8" &&
+                               kv_heads_il > 0 && head_dim_il == 256 &&
+                               w.config.KvProducingLayer(il) == il;
+    if (options_.kv_cache_quant == "q8" && !layer_blocked &&
+        w.config.LayerHasKv(il)) {
+      std::fprintf(stderr,
+                   "[gemma4] kv_cache_quant=q8: layer %u not blocked "
+                   "(head_dim=%u kv_heads=%u producer=%u), staying F16\n",
+                   il, head_dim_il, kv_heads_il,
+                   w.config.KvProducingLayer(il));
+    }
+    if (layer_blocked) {
+      const std::size_t row_bytes =
+          (static_cast<std::size_t>(head_dim_il) + 31) / 32 * 34 * kv_heads_il;
+      impl.kv_row_bytes[il] = static_cast<std::uint32_t>(row_bytes);
+      const std::size_t kv_bytes =
+          static_cast<std::size_t>(options_.max_context) * row_bytes;
+      std::uint8_t* kvk8 = nullptr;
+      std::uint8_t* kvv8 = nullptr;
+      if (hipMalloc(&kvk8, kv_bytes) != hipSuccess ||
+          hipMalloc(&kvv8, kv_bytes) != hipSuccess) {
+        if (error_msg != nullptr)
+          *error_msg = "blocked KV cache allocation failed (layer " +
+                       std::to_string(il) + ")";
+        return nullptr;
+      }
+      hipMemset(kvk8, 0, kv_bytes);
+      hipMemset(kvv8, 0, kv_bytes);
+      impl.buffers.allocations.push_back(kvk8);
+      impl.buffers.allocations.push_back(kvv8);
+      impl.kv_bk[il] = kvk8;
+      impl.kv_bv[il] = kvv8;
+      if (impl.kv_bk[il] == nullptr || impl.kv_bv[il] == nullptr) {
+        if (error_msg != nullptr && error_msg->empty())
+          *error_msg = "blocked KV cache allocation failed (layer " +
+                       std::to_string(il) + ")";
+        return nullptr;
+      }
+      continue;
+    }
     const std::size_t kv_elems = static_cast<std::size_t>(options_.max_context) * dim;
     std::uint8_t* kvk8 = nullptr;
     std::uint8_t* kvv8 = nullptr;
@@ -863,6 +932,12 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   const std::uint32_t n = static_cast<std::uint32_t>(tokens.size());
   hipStream_t stream = 0;
   impl_->has_pending_cur = false;
+  // Device-side position scalar for the shared blocked kernels (blocked
+  // writes and direct reads index the cache with *start_pos on-device).
+  if (model_->options_.kv_cache_quant == "q8") {
+    (void)hipMemcpyAsync(impl_->d_pos, &start_pos, sizeof(start_pos),
+                         hipMemcpyHostToDevice, stream);
+  }
   std::vector<std::int32_t> host_tokens(tokens.begin(), tokens.end());
   if (getenv("GEMMA4_DEBUG_EMBED"))
     std::fprintf(stderr, "[gemma4] fwd n=%u pos=%u tok0=%d\n", n, start_pos,
@@ -889,6 +964,12 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     const std::uint32_t kv_heads = c.KvHeads(kv_layer);
     const std::uint32_t qdim = c.num_heads * head_dim;
     const std::uint32_t kvdim = kv_heads * head_dim;
+    // Shared blocked Q8 covers SWA layers only (d == 256, plain theta RoPE,
+    // self-produced KV). Full layers (d == 512, proportional rope) stay F16;
+    // see the allocation fallback above.
+    const bool use_blocked =
+        model_->options_.kv_cache_quant == "q8" && l.has_kv && kv_heads > 0 &&
+        head_dim == 256 && kv_layer == il;
 
     // Attention block.
     const bool debug_embed = getenv("GEMMA4_DEBUG_EMBED") != nullptr;
@@ -952,7 +1033,8 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
         (!c.LayerIsSwa(il) && !l.rope_freqs.empty())
             ? static_cast<const float*>(l.rope_freqs.device)
             : nullptr;
-    if (allow_fused_decode && head_dim <= 512 && rot_dim <= head_dim) {
+    if (!use_blocked && allow_fused_decode && head_dim <= 512 &&
+        rot_dim <= head_dim) {
       const bool write_kv = (l.has_kv && kv_heads > 0);
       kernels::PrepAttnQkv(
           impl_->qbuf, impl_->kbuf, impl_->vbuf,
@@ -1013,17 +1095,55 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
                          impl_->vbuf, n * kv_heads, head_dim, c.rms_eps,
                          stream);
         // Store KV at positions [pos, pos+n).
-        kernels::StoreKv(impl_->kbuf, impl_->kv_k[kv_layer], n, kvdim, start_pos,
-                         stream);
-        kernels::StoreKv(impl_->vbuf, impl_->kv_v[kv_layer], n, kvdim, start_pos,
-                         stream);
+        if (use_blocked) {
+          // The fused writer is disabled for blocked layers, so this is the
+          // only writer: the final (post-norm, post-RoPE) rows quantize
+          // straight into the shared blocked layout (per-32-block scale).
+          kernels::StoreBlockedKv(impl_->kbuf, impl_->vbuf,
+                                  impl_->kv_bk[kv_layer],
+                                  impl_->kv_bv[kv_layer], n, kv_heads, head_dim,
+                                  impl_->d_pos, stream);
+        } else {
+          kernels::StoreKv(impl_->kbuf, impl_->kv_k[kv_layer], n, kvdim,
+                           start_pos, stream);
+          kernels::StoreKv(impl_->vbuf, impl_->kv_v[kv_layer], n, kvdim,
+                           start_pos, stream);
+        }
       }
     }
-    kernels::Attention(impl_->qbuf, impl_->kv_k[kv_layer],
-                       impl_->kv_v[kv_layer], impl_->attn_out, n, start_pos,
-                       c.num_heads, kv_heads, head_dim,
-                       impl_->kv_stride[kv_layer],
-                       c.LayerIsSwa(il) ? c.sliding_window : 0, stream);
+    if (use_blocked) {
+      // Blocked direct read (fused dequant, score scale 1.0, no F16
+      // staging). Same sliding-window pointer shift as Attention: keys at or
+      // below start_pos - window fall out of the window, so advance the
+      // cache base and rebase the position, keeping dense-causal semantics.
+      const std::uint8_t* k2 = impl_->kv_bk[kv_layer];
+      const std::uint8_t* v2 = impl_->kv_bv[kv_layer];
+      const std::uint32_t* sp = impl_->d_pos;
+      const std::uint32_t window = c.LayerIsSwa(il) ? c.sliding_window : 0;
+      std::uint32_t shifted = 0;
+      if (window != 0 && start_pos + 1 > window) {
+        const std::uint32_t lo = (start_pos + 1 - window) & ~3u;
+        if (lo != 0 && lo <= start_pos) {
+          shifted = start_pos - lo;
+          if (hipMemcpy(impl_->d_pos_win, &shifted, sizeof(shifted),
+                        hipMemcpyHostToDevice) == hipSuccess) {
+            const std::size_t off =
+                static_cast<std::size_t>(lo) * impl_->kv_row_bytes[kv_layer];
+            k2 += off;
+            v2 += off;
+            sp = impl_->d_pos_win;
+          }
+        }
+      }
+      kernels::AttentionBlocked(impl_->qbuf, k2, v2, impl_->attn_out, n, sp,
+                                c.num_heads, kv_heads, head_dim, stream);
+    } else {
+      kernels::Attention(impl_->qbuf, impl_->kv_k[kv_layer],
+                         impl_->kv_v[kv_layer], impl_->attn_out, n, start_pos,
+                         c.num_heads, kv_heads, head_dim,
+                         impl_->kv_stride[kv_layer],
+                         c.LayerIsSwa(il) ? c.sliding_window : 0, stream);
+    }
 
     // wo projection (write into idle mlp_out to avoid x == y staging copy).
     if (debug_embed && il == 0 && n <= 4) {
@@ -1751,6 +1871,12 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
 }
 
 bool Session::EnableMtp(const std::string& drafts_path, std::string* error_msg) {
+  if (model_->options_.kv_cache_quant != "f16") {
+    if (error_msg != nullptr)
+      *error_msg =
+          "MTP requires f16 KV caches (blocked q8 has no draft-cache path)";
+    return false;
+  }
   const auto& w = *model_->weights_;
   auto drafter = MtpDrafter::Load(drafts_path, w.config.hidden_size, error_msg);
   if (drafter == nullptr)

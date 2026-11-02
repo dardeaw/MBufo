@@ -1075,6 +1075,10 @@ int RunPrompt(std::span<const char* const> args) {
     }();
     models::gemma4::ModelOptions gopt;
     gopt.max_context = 32768;
+    if (const char* e = getenv("GEMMA4_KV_QUANT"))
+      gopt.kv_cache_quant = e;
+    std::fprintf(stderr, "[gemma4] kv_cache_quant=%s\n",
+                 gopt.kv_cache_quant.c_str());
     if (const char* e = getenv("GEMMA4_CTX")) {
       const long v = std::strtol(e, nullptr, 10);
       if (v >= 1024) gopt.max_context = static_cast<std::uint32_t>(v);

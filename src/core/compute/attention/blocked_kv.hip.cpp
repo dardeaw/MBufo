@@ -484,7 +484,7 @@ __global__ void AttentionKernelKv(
     std::uint32_t mask_words, float* out, float* partials,
     const std::uint32_t* start_pos, std::uint32_t heads, std::uint32_t kv_heads,
     std::uint32_t d, std::uint32_t ratio, std::uint32_t k_block_bytes,
-    std::uint32_t v_block_bytes) {
+    std::uint32_t v_block_bytes, float score_scale) {
   constexpr std::uint32_t kTile = 256;
   constexpr std::uint32_t kWindow = 1024;  // blocks compacted per pass
   const std::uint32_t split = blockIdx.z;
@@ -509,7 +509,8 @@ __global__ void AttentionKernelKv(
   const std::uint32_t* words =
       mask == nullptr ? nullptr
                       : mask + static_cast<std::size_t>(t) * mask_words;
-  const float scale = rsqrtf(static_cast<float>(d));
+  const float scale =
+      score_scale > 0.0F ? score_scale : rsqrtf(static_cast<float>(d));
   const std::uint32_t i = threadIdx.x;
   const std::uint32_t lane = i & 31u;
   const std::uint32_t wave = i >> 5u;
@@ -1044,7 +1045,7 @@ void AttentionKv(const float* q, const std::uint8_t* k_cache,
                  const std::uint32_t* start_pos, std::uint32_t heads,
                  std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                  std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
-                 KvCodec codec, hipStream_t stream) {
+                 KvCodec codec, hipStream_t stream, float score_scale) {
   if (d != 256) {
     return;
   }
@@ -1054,7 +1055,7 @@ void AttentionKv(const float* q, const std::uint8_t* k_cache,
     hipLaunchKernelGGL((AttentionKernelKv<Codec>), dim3(heads, n_tokens, z),
                        dim3(kThreads), 0, stream, q, k_cache, v_cache, mask,
                        mask_words, out, partials, start_pos, heads, kv_heads, d,
-                       ratio, key_block_bytes, value_block_bytes);
+                       ratio, key_block_bytes, value_block_bytes, score_scale);
   });
   if (z > 1) {
     hipLaunchKernelGGL(AttentionMergeKernel, dim3(heads, n_tokens),
