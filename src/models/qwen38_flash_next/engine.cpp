@@ -1,4 +1,5 @@
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen38_flash_next/draft_backend.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1103,9 +1104,11 @@ bool Session::PrepareDecode(const DecodeRequest& request,
                           draft_vocab_.Fits(anchor, [&](std::int32_t token) {
                             return model_->InDraftSubset(token);
                           });
-  if (!defer_head && !DraftCatchUp(anchor, true, error_msg,
-                                   sampled ? &pending->candidates : nullptr,
-                                   pending->draft_subset)) {
+  FlashNextMtpDraftBackend draft_backend(*this);
+  if (!defer_head && !draft_backend.ProposeChain(
+                          anchor,
+                          sampled ? &pending->candidates : nullptr,
+                          pending->draft_subset, error_msg)) {
     return false;
   }
   pending->draft = draft_token_;
@@ -1273,9 +1276,9 @@ bool Session::FinishDecode(const DecodeRequest& request,
     }
     ++keep;
   }
-  if (!exec.Rollback(
-          *session_, keep, error_msg,
-          gpu_verification && !cpu_rows ? logits_.data() : nullptr)) {
+  FlashNextMtpDraftBackend draft_rollback(*this);
+  if (!draft_rollback.Rollback(keep, gpu_verification && !cpu_rows,
+                               error_msg)) {
     return false;
   }
   if (!gpu_verification || cpu_rows) {
