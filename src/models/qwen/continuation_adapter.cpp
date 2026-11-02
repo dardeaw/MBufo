@@ -797,6 +797,25 @@ std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
     throw std::invalid_argument("invalid Qwen borrowed range");
   // FP32 planes are head-major, so a token range is not contiguous. Its
   // canonical host representation still goes through TransferRows.
+  if (component.part == ContinuationPart::kBlockedKey ||
+      component.part == ContinuationPart::kBlockedValue) {
+    const auto& c = model_->GetConfig();
+    const auto row = component.descriptor.row_bytes;
+    if (!state.executor->arena_.UsesBlockedKv())
+      throw std::logic_error("blocked-KV view needs a blocked arena");
+    const auto& blocked_arena = state.executor->arena_;
+    const auto blocked_layer = component.layer / c.full_attention_interval;
+    if (row != blocked_arena.BlockedKvRowBytes())
+      throw std::logic_error("blocked-KV continuation row mismatch");
+    const std::uint8_t* blocked_base =
+        (component.part == ContinuationPart::kBlockedValue
+             ? blocked_arena.d_attention_kv_blocked_v
+             : blocked_arena.d_attention_kv_blocked_k) +
+        blocked_layer * blocked_arena.BlockedKvLayerBytes();
+    return {static_cast<const std::byte*>(static_cast<const void*>(blocked_base)) +
+                first * row,
+            (end - first) * row};
+  }
   if (!policy_.UsesFp16AttentionKv())
     return {};
   Check(hipStreamSynchronize(state.executor->arena_.stream));
@@ -817,6 +836,33 @@ cache::Completion ContinuationAdapter::TransferRows(
   const auto& c = model_->GetConfig();
   auto& arena = state.executor->arena_;
   const auto row = component.descriptor.row_bytes;
+  if (component.part == ContinuationPart::kBlockedKey ||
+      component.part == ContinuationPart::kBlockedValue) {
+    // Blocked-Q8 sidecar rows are position-contiguous per attention layer,
+    // like the canonical F16 rows. Restore them exactly; a stale sidecar
+    // would silently misread after a component-cache hit.
+    if (!arena.UsesBlockedKv())
+      throw std::logic_error("blocked-KV restore needs a blocked arena");
+    const std::size_t blocked_layer = component.layer / c.full_attention_interval;
+    if (row != arena.BlockedKvRowBytes())
+      throw std::logic_error("blocked-KV continuation row mismatch");
+    std::uint8_t* blocked_base =
+        (component.part == ContinuationPart::kBlockedValue
+             ? arena.d_attention_kv_blocked_v
+             : arena.d_attention_kv_blocked_k) +
+        blocked_layer * arena.BlockedKvLayerBytes();
+    return Transfer(state, load, stream, [&](hip::TransferStream& transfer) {
+      if (first == end)
+        return;
+      auto* device =
+          static_cast<std::byte*>(static_cast<void*>(blocked_base)) +
+          first * row;
+      Check(load ? hip::CopySnapshotToDevice(device, bytes, (end - first) * row,
+                                               transfer.Native())
+                   : hip::CopySnapshotToHost(bytes, device, (end - first) * row,
+                                             transfer.Native()));
+    });
+  }
   const std::size_t layer = component.layer / c.full_attention_interval;
   const std::size_t plane = component.part == ContinuationPart::kValue
                                 ? c.FullAttentionLayerCount()
