@@ -1075,6 +1075,10 @@ int RunPrompt(std::span<const char* const> args) {
     }();
     models::gemma4::ModelOptions gopt;
     gopt.max_context = 32768;
+    if (const char* e = getenv("GEMMA4_KV_QUANT"))
+      gopt.kv_cache_quant = e;
+    std::fprintf(stderr, "[gemma4] kv_cache_quant=%s\n",
+                 gopt.kv_cache_quant.c_str());
     if (const char* e = getenv("GEMMA4_CTX")) {
       const long v = std::strtol(e, nullptr, 10);
       if (v >= 1024) gopt.max_context = static_cast<std::uint32_t>(v);
@@ -1276,7 +1280,29 @@ int RunPrompt(std::span<const char* const> args) {
   int dev_count = 0;
   if (!opt.force_cpu && hipGetDeviceCount(&dev_count) == hipSuccess &&
       dev_count > 0) {
-    auto gpu_exec = gufo::hip::QwenGpuExecutor::CreateFromGguf(reader, &err);
+    auto qwen_policy = gufo::hip::QwenExecutionPolicy::Production();
+    if (const char* kv_quant = std::getenv("QWEN_KV_QUANT")) {
+      const std::string value = kv_quant;
+      if (value != "f16" && value != "q8") {
+        std::cerr << "QWEN_KV_QUANT must be f16 or q8\n";
+        return 1;
+      }
+      qwen_policy.blocked_q8_attention = (value == "q8");
+    }
+    std::cerr << "[qwen] kv_cache_quant="
+              << (qwen_policy.blocked_q8_attention ? "q8" : "f16") << '\n';
+    if (qwen_policy.blocked_q8_attention && !opt.speculative_backend.empty()) {
+      std::cerr << "QWEN_KV_QUANT=q8 does not support speculative decoding "
+                   "(mtp/dflash2/dspark); pass --speculative off\n";
+      return 1;
+    }
+    std::uint32_t qwen_ctx = 4096;
+    if (const char* ctx_env = std::getenv("QWEN_CTX")) {
+      const long ctx_val = std::strtol(ctx_env, nullptr, 10);
+      if (ctx_val >= 1024) qwen_ctx = static_cast<std::uint32_t>(ctx_val);
+    }
+    auto gpu_exec = gufo::hip::QwenGpuExecutor::CreateFromGguf(
+        reader, &err, qwen_ctx, qwen_policy);
     if (gpu_exec) {
       PrintModelLoadTime(model_load_start);
       auto prompt_tokens = encode_prompt(gpu_exec->GetTokenizer());
@@ -1465,7 +1491,24 @@ int RunChat(std::span<const char* const> args) {
   int device_count = 0;
   if (tokenizer == nullptr && !opt.force_cpu &&
       hipGetDeviceCount(&device_count) == hipSuccess && device_count > 0) {
-    gpu_executor = hip::QwenGpuExecutor::CreateFromGguf(reader, &err);
+    auto qwen_policy = gufo::hip::QwenExecutionPolicy::Production();
+    if (const char* kv_quant = std::getenv("QWEN_KV_QUANT")) {
+      const std::string value = kv_quant;
+      if (value != "f16" && value != "q8") {
+        std::cerr << "QWEN_KV_QUANT must be f16 or q8\n";
+        return 1;
+      }
+      qwen_policy.blocked_q8_attention = (value == "q8");
+    }
+    std::cerr << "[qwen] kv_cache_quant="
+              << (qwen_policy.blocked_q8_attention ? "q8" : "f16") << '\n';
+    if (qwen_policy.blocked_q8_attention && !opt.speculative_backend.empty()) {
+      std::cerr << "QWEN_KV_QUANT=q8 does not support speculative decoding "
+                   "(mtp/dflash2/dspark); pass --speculative off\n";
+      return 1;
+    }
+    gpu_executor = hip::QwenGpuExecutor::CreateFromGguf(reader, &err, 4096,
+                                                        qwen_policy);
     if (!gpu_executor) {
       std::cerr << "Error creating Qwen GPU executor: " << err << '\n';
       PrintModelLoadTime(model_load_start, false);

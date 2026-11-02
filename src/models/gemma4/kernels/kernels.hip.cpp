@@ -1,4 +1,5 @@
 #include "src/models/gemma4/kernels/kernels.hpp"
+#include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/models/gemma4/weights.hpp"
 
 #include <cmath>
@@ -2188,6 +2189,51 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                      dim3(kThreads), 0, stream, q, k_cache, v_cache, out,
                      start_pos, heads, kv_heads, d, kv_stride, window,
                      kv_len);
+}
+
+void StoreBlockedKv(const float* k_rows, const float* v_rows,
+                      std::uint8_t* k_cache, std::uint8_t* v_cache,
+                      std::uint32_t n_tokens, std::uint32_t kv_heads,
+                      std::uint32_t d, const std::uint32_t* start_pos,
+                      hipStream_t stream) {
+  // SWA-only writer (d == 256): returns without writing otherwise, so a
+  // misconfigured full (d == 512) layer can never silently corrupt its F16
+  // cache through this entry point.
+  if (d != 256 || kv_heads == 0 || n_tokens == 0 || k_rows == nullptr ||
+      v_rows == nullptr || k_cache == nullptr || v_cache == nullptr ||
+      start_pos == nullptr)
+    return;
+  namespace blocked = gufo::core::compute::blocked_kv;
+  const std::uint32_t kv_width = kv_heads * d;
+  // k_rows/v_rows hold the final K/V rows (post RMS-norm, post-RoPE), the
+  // same values StoreKv would write as F16. Quantize keeps the post-RoPE K
+  // per-32-block scale the shared layout requires. V stays 8-bit (K8V8);
+  // the 4-bit value grid is not enabled yet.
+  blocked::QuantizeKvRows(k_rows, kv_width, d, k_cache, kv_width, kv_heads, d,
+                          n_tokens, blocked::KvCodec::kQ8, 127.0F, 34,
+                          start_pos, stream);
+  blocked::QuantizeKvRows(v_rows, kv_width, d, v_cache, kv_width, kv_heads, d,
+                          n_tokens, blocked::KvCodec::kQ8, 127.0F, 34,
+                          start_pos, stream);
+}
+
+void AttentionBlocked(const float* q, const std::uint8_t* k_cache,
+                      const std::uint8_t* v_cache, float* out,
+                      std::uint32_t n_tokens, const std::uint32_t* start_pos,
+                      std::uint32_t heads, std::uint32_t kv_heads,
+                      std::uint32_t d, hipStream_t stream) {
+  // SWA-only reader (d == 256): silent no-op otherwise, mirroring the
+  // shared kernel's own d != 256 guard.
+  if (d != 256 || kv_heads == 0 || n_tokens == 0 || start_pos == nullptr)
+    return;
+  namespace blocked = gufo::core::compute::blocked_kv;
+  // Gemma 4 sets f_attention_scale = 1.0 (no 1/sqrt(d) in the WMMA, split-K
+  // or scalar kernels); the shared kernel defaults to 1/sqrt(d), so the
+  // scale is passed explicitly. Direct read: fused dequant on the blocked
+  // rows, no F16 staging. ratio = 1 (no compressor tail), splits = 1.
+  blocked::AttentionKv(q, k_cache, v_cache, nullptr, 0, out, nullptr, 1,
+                       n_tokens, start_pos, heads, kv_heads, d, 1, 34, 34,
+                       blocked::KvCodec::kQ8, stream, 1.0F);
 }
 
 void RouterInput(const float* attn_out, const float* router_scale, float* tmp,

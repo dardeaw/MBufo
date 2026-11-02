@@ -314,6 +314,16 @@ public:
   float* d_logits{nullptr};
   void* d_attention_kv_f16{nullptr};
   float* d_kv_cache{nullptr};
+  // Shared blocked-Q8 attention KV (blocked_q8_attention policy only, null in
+  // f16): per attention layer, max_context rows of
+  // num_key_value_heads * ((head_dim + 31) / 32) * 34 bytes. Prefill keeps
+  // the F16 plane canonical and appends the same rows here; decode reads
+  // here through the shared blocked direct-read kernel.
+  std::uint8_t* d_attention_kv_blocked_k{nullptr};
+  std::uint8_t* d_attention_kv_blocked_v{nullptr};
+  // Device-side prefill chunk base position for the blocked write kernel.
+  // Decode reuses the existing device position scalar instead.
+  std::uint32_t* d_blocked_pos{nullptr};
   // Mirrors of the live recurrent buffers (see BeginRecurrentWrite); reassigned
   // whenever the live buffer changes, so snapshots and resets read and write
   // the current state without knowing about the rollback pair.
@@ -340,6 +350,21 @@ public:
     // Qwen27B reaches 2^32 elements per plane at context 262144.
     return static_cast<std::size_t>(config_.FullAttentionLayerCount()) *
            config_.num_key_value_heads * max_context_ * config_.head_dim;
+  }
+  [[nodiscard]] bool UsesBlockedKv() const noexcept {
+    return policy_.UsesBlockedAttentionKv();
+  }
+  // Bytes of one blocked-Q8 token row: one 34-byte block (32 int8 codes +
+  // f16 scale) per 32-element group of every KV head. Matches the shared
+  // blocked_kv layout, so the shared write/read kernels index it directly.
+  [[nodiscard]] std::size_t BlockedKvRowBytes() const noexcept {
+    const std::size_t head_blocks =
+        (static_cast<std::size_t>(config_.head_dim) + 31) / 32;
+    return static_cast<std::size_t>(config_.num_key_value_heads) *
+           head_blocks * 34;
+  }
+  [[nodiscard]] std::size_t BlockedKvLayerBytes() const noexcept {
+    return static_cast<std::size_t>(max_context_) * BlockedKvRowBytes();
   }
   [[nodiscard]] QwenRecurrentStateStorage GetRecurrentStateStorage()
       const noexcept {

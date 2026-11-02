@@ -118,6 +118,33 @@ if (ENGINE_ENABLE_HIP)
   endif()
 endif()
 
+if (ENGINE_ENABLE_HIP)
+  # Shared blocked-KV codecs and attention kernels, extracted verbatim from
+  # the flash-next ROCm backend. Same HIP dialect as the QFN kernels; the
+  # wave32 shuffles mean no -mwavefrontsize64.
+  add_library(gufo_core_blocked_kv STATIC
+    src/core/compute/attention/blocked_kv.hip.cpp
+    src/core/compute/attention/blocked_wmma.hip.cpp
+    src/core/compute/attention/blocked_splitk.hip.cpp)
+  set_source_files_properties(
+    src/core/compute/attention/blocked_kv.hip.cpp
+    src/core/compute/attention/blocked_wmma.hip.cpp
+    src/core/compute/attention/blocked_splitk.hip.cpp PROPERTIES LANGUAGE HIP)
+  set_target_properties(gufo_core_blocked_kv PROPERTIES
+    HIP_STANDARD 17
+    HIP_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+  target_compile_definitions(gufo_core_blocked_kv PRIVATE ENGINE_ENABLE_HIP=1)
+  target_compile_options(gufo_core_blocked_kv PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+  target_include_directories(gufo_core_blocked_kv PUBLIC ${PROJECT_SOURCE_DIR})
+  target_include_directories(gufo_core_blocked_kv SYSTEM PUBLIC
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR}
+    ${ROCWMMA_INCLUDE_DIR})
+  target_link_libraries(gufo_core_blocked_kv PUBLIC hip::host)
+endif()
+
 add_library(gufo_diagnostics STATIC
   src/core/diagnostics/gpu_queues.cpp
   src/core/diagnostics/linux_sysfs.cpp

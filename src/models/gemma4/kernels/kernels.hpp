@@ -142,6 +142,27 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                std::uint32_t kv_stride, std::uint32_t window,
                hipStream_t stream);
 
+/// Blocked-Q8 direct-read attention for SWA (d == 256) layers: the shared
+/// blocked KV caches are read in place (fused dequant, score scale 1.0 to
+/// match the gemma4 F16 kernels), no F16 staging. The engine applies the
+/// sliding-window pointer shift before calling. Full (d == 512) layers stay
+/// on the F16 Attention path. `start_pos` is a device scalar.
+void AttentionBlocked(const float* q, const std::uint8_t* k_cache,
+                      const std::uint8_t* v_cache, float* out,
+                      std::uint32_t n_tokens, const std::uint32_t* start_pos,
+                      std::uint32_t heads, std::uint32_t kv_heads,
+                      std::uint32_t d, hipStream_t stream);
+
+/// Blocked-Q8 KV store: symmetric per-32-block INT8 quantize of the final
+/// (post-norm, post-RoPE) K/V rows into the shared 34-byte block layout.
+/// d must be 256 (SWA layers); other layers stay on StoreKv. `start_pos` is
+/// a device scalar.
+void StoreBlockedKv(const float* k_rows, const float* v_rows,
+                    std::uint8_t* k_cache, std::uint8_t* v_cache,
+                    std::uint32_t n_tokens, std::uint32_t kv_heads,
+                    std::uint32_t d, const std::uint32_t* start_pos,
+                    hipStream_t stream);
+
 /// Cross/decode attention with explicit query position base (`query_pos + t`)
 /// and explicit valid KV cache length (`kv_len`). Uses Split-K Flash-Decoding
 /// GQA across all CUs for narrow batches (decode, MTP verify, MTP draft).

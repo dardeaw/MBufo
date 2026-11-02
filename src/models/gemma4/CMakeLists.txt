@@ -24,5 +24,6 @@ if (ENGINE_ENABLE_HIP)
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
   target_link_libraries(gufo_gemma4 PUBLIC
     gufo_qwen38_flash_next
+    gufo_core_blocked_kv
     hip::host roc::hipblas)
 endif()

@@ -34,6 +34,12 @@ struct QwenExecutionPolicy {
   QwenKvCacheStorage kv_cache_storage{QwenKvCacheStorage::kFp16};
   QwenRecurrentStateStorage recurrent_state_storage{
       QwenRecurrentStateStorage::kFp32};
+  // Opt-in shared blocked-Q8 attention KV (27B-class models): attention
+  // layers additionally maintain the 34-byte blocked INT8 caches from
+  // core/compute/attention. Prefill keeps reading the dual-maintained F16
+  // plane with the untouched legacy kernels; decode reads blocked direct.
+  // Off by default, so the f16 path is bit-identical when off.
+  bool blocked_q8_attention{false};
 
   [[nodiscard]] static constexpr QwenExecutionPolicy Production() noexcept {
     return {};
@@ -41,6 +47,10 @@ struct QwenExecutionPolicy {
 
   [[nodiscard]] constexpr bool UsesFp16AttentionKv() const noexcept {
     return kv_cache_storage == QwenKvCacheStorage::kFp16;
+  }
+
+  [[nodiscard]] constexpr bool UsesBlockedAttentionKv() const noexcept {
+    return blocked_q8_attention;
   }
 
   [[nodiscard]] constexpr bool UsesBf16RecurrentState() const noexcept {
@@ -51,7 +61,8 @@ struct QwenExecutionPolicy {
   [[nodiscard]] constexpr std::uint64_t Fingerprint() const noexcept {
     return (static_cast<std::uint64_t>(fuse_qk_norm_rope_kv) << 0U) |
            (static_cast<std::uint64_t>(UsesFp16AttentionKv()) << 8U) |
-           (static_cast<std::uint64_t>(UsesBf16RecurrentState()) << 9U);
+           (static_cast<std::uint64_t>(UsesBf16RecurrentState()) << 9U) |
+           (static_cast<std::uint64_t>(UsesBlockedAttentionKv()) << 10U);
   }
 };
 

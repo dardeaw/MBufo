@@ -417,6 +417,21 @@ QwenGpuMemoryUsage QwenGpuArena::EstimateMemoryUsage(
       policy.UsesFp16AttentionKv() ? sizeof(std::uint16_t) : sizeof(float),
       &state);
 
+  // Blocked-Q8 sidecar (q8 policy only): K+V planes of one 34-byte blocked
+  // row per token per attention layer, plus the device position scalar.
+  if (policy.UsesBlockedAttentionKv()) {
+    const std::size_t head_blocks =
+        (static_cast<std::size_t>(config.head_dim) + 31) / 32;
+    const std::size_t row_bytes =
+        CheckedMultiply(config.num_key_value_heads, head_blocks * 34);
+    AddAllocation(
+        CheckedMultiply(CheckedMultiply(config.FullAttentionLayerCount(),
+                                        context),
+                        row_bytes * 2),
+        1, &state);
+    AddAllocation(1, sizeof(std::uint32_t), &state);
+  }
+
   CheckedAdd(RecurrentStateBytes(config, policy), &state);
   return usage;
 }
@@ -797,6 +812,20 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
       HIP_CHECK(hipMalloc(&d_kv_cache, total_kv * sizeof(float) * 2));
     }
 
+    // Blocked-Q8 sidecar (q8 policy only; Validated at executor creation:
+    // head_dim == 256 and at least one attention layer, so the shared
+    // blocked kernels accept every layer). The F16 plane above stays
+    // canonical, which keeps prefill, snapshots and continuations on the
+    // untouched legacy path.
+    if (policy_.UsesBlockedAttentionKv()) {
+      const std::size_t blocked_layer_bytes =
+          CheckedMultiply(config_.FullAttentionLayerCount(), BlockedKvLayerBytes());
+      HIP_CHECK(hipMalloc(&d_attention_kv_blocked_k, blocked_layer_bytes));
+      HIP_CHECK(hipMalloc(&d_attention_kv_blocked_v, blocked_layer_bytes));
+      HIP_CHECK(hipMalloc(&d_blocked_pos, sizeof(std::uint32_t)));
+      HIP_CHECK(hipMemset(d_blocked_pos, 0, sizeof(std::uint32_t)));
+    }
+
     const std::size_t total_conv =
         num_layers * ssm_qkv_size * config_.ssm_conv_kernel;
     HIP_CHECK(hipMalloc(&d_ssm_conv_buffers_[0], total_conv * sizeof(float)));
@@ -937,6 +966,9 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   d_logits = other.d_logits;
   d_attention_kv_f16 = other.d_attention_kv_f16;
   d_kv_cache = other.d_kv_cache;
+  d_attention_kv_blocked_k = other.d_attention_kv_blocked_k;
+  d_attention_kv_blocked_v = other.d_attention_kv_blocked_v;
+  d_blocked_pos = other.d_blocked_pos;
   d_ssm_conv_state = other.d_ssm_conv_state;
   d_ssm_deltanet_state = other.d_ssm_deltanet_state;
   d_prompt_tokens = other.d_prompt_tokens;
@@ -984,6 +1016,9 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   other.d_logits = nullptr;
   other.d_attention_kv_f16 = nullptr;
   other.d_kv_cache = nullptr;
+  other.d_attention_kv_blocked_k = nullptr;
+  other.d_attention_kv_blocked_v = nullptr;
+  other.d_blocked_pos = nullptr;
   other.d_ssm_conv_state = nullptr;
   other.d_ssm_deltanet_state = nullptr;
   other.d_prompt_tokens = nullptr;
@@ -1197,6 +1232,12 @@ void QwenGpuArena::FreeAll() noexcept {
   }
   if (d_kv_cache != nullptr)
     LogCleanupError(hipFree(d_kv_cache));
+  if (d_attention_kv_blocked_k != nullptr)
+    LogCleanupError(hipFree(d_attention_kv_blocked_k));
+  if (d_attention_kv_blocked_v != nullptr)
+    LogCleanupError(hipFree(d_attention_kv_blocked_v));
+  if (d_blocked_pos != nullptr)
+    LogCleanupError(hipFree(d_blocked_pos));
   for (float* buffer : d_ssm_conv_buffers_)
     if (buffer != nullptr)
       LogCleanupError(hipFree(buffer));
@@ -1248,6 +1289,9 @@ void QwenGpuArena::FreeAll() noexcept {
   d_logits = nullptr;
   d_attention_kv_f16 = nullptr;
   d_kv_cache = nullptr;
+  d_attention_kv_blocked_k = nullptr;
+  d_attention_kv_blocked_v = nullptr;
+  d_blocked_pos = nullptr;
   d_ssm_conv_state = nullptr;
   d_ssm_deltanet_state = nullptr;
   d_prompt_tokens = nullptr;

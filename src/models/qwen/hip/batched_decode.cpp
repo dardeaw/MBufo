@@ -153,6 +153,13 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
     throw std::invalid_argument(
         "Qwen GPU decode batch contains a null session");
   }
+  // Batched draft/speculative decode under q8 is explicitly unsupported (the
+  // verify path maintains only the F16 plane). Refuse loudly.
+  if (coordinator->policy_.UsesBlockedAttentionKv()) {
+    throw std::logic_error(
+        "blocked-Q8 attention does not support batched decode; use "
+        "QWEN_KV_QUANT=f16");
+  }
   const auto* shared_model = coordinator->model_.get();
   const std::uint64_t shared_policy = coordinator->policy_.Fingerprint();
   for (std::size_t index = 0; index < items.size(); ++index) {
@@ -453,6 +460,14 @@ QwenGpuExecutor::ForwardVerificationBatch(
   auto& arena_ = coordinator.arena_;
   const auto& weights_ = coordinator.weights_;
   const auto& config = weights_.config;
+  // Speculative verification under q8 is explicitly unsupported (the verify
+  // path maintains only the F16 plane, so accepting drafts would leave the
+  // blocked caches stale). Refuse loudly instead of decoding wrong.
+  if (coordinator.policy_.UsesBlockedAttentionKv()) {
+    throw std::logic_error(
+        "blocked-Q8 attention does not support speculative verification; "
+        "use QWEN_KV_QUANT=f16 with --speculative");
+  }
   const bool capture_prompt_hidden_ = coordinator.capture_prompt_hidden_;
   const auto policy = coordinator.policy_.Fingerprint();
   constexpr std::size_t kMaxRows = kMaxDecodeBatch * kMaxDecodeBatch;
