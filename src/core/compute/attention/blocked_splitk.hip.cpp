@@ -89,7 +89,8 @@ __global__ void AttentionBlockedSplitKKernel(
     const typename Codec::Elem* __restrict__ v_cache,
     float* __restrict__ partials, const std::uint32_t* __restrict__ start_pos,
     std::uint32_t heads, std::uint32_t kv_heads, float score_scale,
-    std::uint32_t splits, std::uint32_t chunk) {
+    std::uint32_t splits, std::uint32_t chunk, std::uint32_t key_block_bytes,
+    std::uint32_t value_block_bytes) {
   const std::uint32_t h = blockIdx.x;
   const std::uint32_t t = blockIdx.y;
   const std::uint32_t s = blockIdx.z;
@@ -108,14 +109,20 @@ __global__ void AttentionBlockedSplitKKernel(
   float m = -INFINITY;
   float l = 0.0f;
   float acc = 0.0f;
-  // Blocked rows: (kv_heads*d/32) blocks; 34-byte 8-bit layout on both sides.
-  constexpr std::uint32_t kBlockBytes = Codec::kBlockBytes;
-  const std::size_t kv_stride =
-      static_cast<std::size_t>(kv_heads) * kHeadDim / 32 * kBlockBytes;
-  const std::size_t head_off =
-      static_cast<std::size_t>(kvh) * (kHeadDim / 32) * kBlockBytes;
+  // Blocked rows: (kv_heads*d/32) blocks. Key rows use `key_block_bytes`
+  // and value rows `value_block_bytes` (34 = 8-bit codes, 18 = packed
+  // 4-bit nibbles for the GUFO_KV_Q4/V4 grids).
+  const std::size_t k_stride =
+      static_cast<std::size_t>(kv_heads) * kHeadDim / 32 * key_block_bytes;
+  const std::size_t v_stride =
+      static_cast<std::size_t>(kv_heads) * kHeadDim / 32 * value_block_bytes;
+  const std::size_t k_head_off =
+      static_cast<std::size_t>(kvh) * (kHeadDim / 32) * key_block_bytes;
+  const std::size_t v_head_off =
+      static_cast<std::size_t>(kvh) * (kHeadDim / 32) * value_block_bytes;
   // Dim i lives in 32-elem block i/32 at byte offset i%32; the f16 scale
-  // trails the 32 codes (same for every lane of the block: broadcast read).
+  // trails the block (+32 for 8-bit codes, +16 for packed nibbles) and is
+  // broadcast-read the same for every lane of the block.
   const std::uint32_t lane_block = i / 32;
   const std::uint32_t lane_off = i % 32;
   const std::uint32_t k_beg = s * chunk;
@@ -131,18 +138,44 @@ __global__ void AttentionBlockedSplitKKernel(
       float kval = 0.0f;
       float vval = 0.0f;
       if (j < k_end) {
-        const typename Codec::Elem* kblk =
-            k_cache + static_cast<std::size_t>(j) * kv_stride + head_off +
-            static_cast<std::size_t>(lane_block) * kBlockBytes;
-        const float sk = __half2float(
-            *reinterpret_cast<const __half*>(kblk + kBlockBytes - 2));
-        kval = CodecTraits<Codec>::Decode(kblk[lane_off]) * sk;
-        const typename Codec::Elem* vblk =
-            v_cache + static_cast<std::size_t>(j) * kv_stride + head_off +
-            static_cast<std::size_t>(lane_block) * kBlockBytes;
-        const float sv = __half2float(
-            *reinterpret_cast<const __half*>(vblk + kBlockBytes - 2));
-        vval = CodecTraits<Codec>::Decode(vblk[lane_off]) * sv;
+        if (key_block_bytes == 34) {
+          const typename Codec::Elem* kblk =
+              k_cache + static_cast<std::size_t>(j) * k_stride + k_head_off +
+              static_cast<std::size_t>(lane_block) * key_block_bytes;
+          const float sk = __half2float(
+              *reinterpret_cast<const __half*>(kblk + key_block_bytes - 2));
+          kval = CodecTraits<Codec>::Decode(kblk[lane_off]) * sk;
+        } else {
+          // 18-byte 4-bit keys: element 2e in the low nibble, 2e+1 in the
+          // high; sign-extended exactly like the scalar unpack path.
+          const std::uint8_t* kblk =
+              reinterpret_cast<const std::uint8_t*>(k_cache) +
+              static_cast<std::size_t>(j) * k_stride + k_head_off +
+              static_cast<std::size_t>(lane_block) * key_block_bytes;
+          const float sk = __half2float(
+              *reinterpret_cast<const __half*>(kblk + key_block_bytes - 2));
+          const std::uint8_t byte = kblk[lane_off / 2];
+          const int q = (lane_off % 2 == 0) ? (byte & 0xFu) : (byte >> 4);
+          kval = static_cast<float>(q - (q & 8 ? 16 : 0)) * sk;
+        }
+        if (value_block_bytes == 34) {
+          const typename Codec::Elem* vblk =
+              v_cache + static_cast<std::size_t>(j) * v_stride + v_head_off +
+              static_cast<std::size_t>(lane_block) * value_block_bytes;
+          const float sv = __half2float(
+              *reinterpret_cast<const __half*>(vblk + value_block_bytes - 2));
+          vval = CodecTraits<Codec>::Decode(vblk[lane_off]) * sv;
+        } else {
+          const std::uint8_t* vblk =
+              reinterpret_cast<const std::uint8_t*>(v_cache) +
+              static_cast<std::size_t>(j) * v_stride + v_head_off +
+              static_cast<std::size_t>(lane_block) * value_block_bytes;
+          const float sv = __half2float(
+              *reinterpret_cast<const __half*>(vblk + value_block_bytes - 2));
+          const std::uint8_t byte = vblk[lane_off / 2];
+          const int q = (lane_off % 2 == 0) ? (byte & 0xFu) : (byte >> 4);
+          vval = static_cast<float>(q - (q & 8 ? 16 : 0)) * sv;
+        }
       }
       vv[b] = vval;
       // One wave holds 32 consecutive dims; WaveSum needs no barrier, and
@@ -225,13 +258,17 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
                             const std::uint32_t* start_pos,
                             std::uint32_t kv_len, std::uint32_t heads,
                             std::uint32_t kv_heads, std::uint32_t d,
-                            hipStream_t stream, float score_scale) {
+                            hipStream_t stream, float score_scale,
+                            std::uint32_t key_block_bytes,
+                            std::uint32_t value_block_bytes) {
   static_assert(kHeadDim == 256, "blocked Split-K decode is d=256 (SWA) only");
   if (kHeadDim != 256 || d != kHeadDim || heads == 0 || kv_heads == 0 ||
       heads > 16 || heads % kv_heads != 0 || n_tokens == 0 ||
       n_tokens > kBlockedSplitKMaxTokens || q == nullptr ||
       k_cache == nullptr || v_cache == nullptr || out == nullptr ||
-      start_pos == nullptr || kv_len < kBlockedSplitKMinKv) {
+      start_pos == nullptr || kv_len < kBlockedSplitKMinKv ||
+      (key_block_bytes != 34 && key_block_bytes != 18) ||
+      (value_block_bytes != 34 && value_block_bytes != 18)) {
     return false;
   }
   // Same split sizing as the F16 narrow-batch path: ~128 keys per chunk at
@@ -259,7 +296,8 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
   hipLaunchKernelGGL((AttentionBlockedSplitKKernel<Codec, kHeadDim>),
                      dim3(heads, n_tokens, splits), dim3(kThreads), 0, stream,
                      q, k_cache, v_cache, s_partial, start_pos, heads, kv_heads,
-                     score_scale, splits, chunk);
+                     score_scale, splits, chunk, key_block_bytes,
+                     value_block_bytes);
   hipLaunchKernelGGL((AttentionBlockedSplitKMergeKernel<kHeadDim>),
                      dim3(heads, n_tokens), dim3(kThreads), 0, stream,
                      s_partial, out, heads, splits);
@@ -269,7 +307,8 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
 template bool AttentionBlockedSplitK<KvCodecQ8, 256>(
     const float*, const std::uint8_t*, const std::uint8_t*, float*,
     std::uint32_t, const std::uint32_t*, std::uint32_t, std::uint32_t,
-    std::uint32_t, std::uint32_t, hipStream_t, float);
+    std::uint32_t, std::uint32_t, hipStream_t, float, std::uint32_t,
+    std::uint32_t);
 
 }  // namespace gufo::core::compute::blocked_splitk
 #endif  // ENGINE_ENABLE_HIP

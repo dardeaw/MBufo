@@ -151,17 +151,22 @@ void AttentionBlocked(const float* q, const std::uint8_t* k_cache,
                       const std::uint8_t* v_cache, float* out,
                       std::uint32_t n_tokens, const std::uint32_t* start_pos,
                       std::uint32_t heads, std::uint32_t kv_heads,
-                      std::uint32_t d, hipStream_t stream);
+                      std::uint32_t d, hipStream_t stream,
+                      std::uint32_t key_block_bytes = 34,
+                      std::uint32_t value_block_bytes = 34);
 
-/// Blocked-Q8 KV store: symmetric per-32-block INT8 quantize of the final
-/// (post-norm, post-RoPE) K/V rows into the shared 34-byte block layout.
-/// d must be 256 (SWA layers); other layers stay on StoreKv. `start_pos` is
-/// a device scalar.
+/// Blocked KV store: symmetric per-32-block quantize of the final
+/// (post-norm, post-RoPE) K/V rows into the shared blocked layout.
+/// `key_block_bytes` / `value_block_bytes` select each side's grid (34 =
+/// 8-bit codes with range 127, 18 = packed 4-bit nibbles with range 7 for
+/// the GUFO_KV_Q4/V4 grids). d must be 256 (SWA layers); other layers stay
+/// on StoreKv. `start_pos` is a device scalar.
 void StoreBlockedKv(const float* k_rows, const float* v_rows,
                     std::uint8_t* k_cache, std::uint8_t* v_cache,
                     std::uint32_t n_tokens, std::uint32_t kv_heads,
                     std::uint32_t d, const std::uint32_t* start_pos,
-                    hipStream_t stream);
+                    hipStream_t stream, std::uint32_t key_block_bytes = 34,
+                    std::uint32_t value_block_bytes = 34);
 
 /// Cross/decode attention with explicit query position base (`query_pos + t`)
 /// and explicit valid KV cache length (`kv_len`). Uses Split-K Flash-Decoding

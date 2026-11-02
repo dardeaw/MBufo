@@ -23,6 +23,26 @@ namespace {
 
 namespace fn = ::gufo::models::qwen38_flash_next::rocm;
 
+/// 4-bit key grid (GUFO_KV_Q4): keys quantize onto the packed 18-byte nibble
+/// blocks (range 7) instead of the 34-byte INT8 blocks. Same study hook as
+/// flash-next, off unless set, and meaningful only under kv_cache_quant=q8.
+[[nodiscard]] bool KvKey4Bit(const ModelOptions& options) noexcept {
+  if (options.kv_cache_quant != "q8")
+    return false;
+  const char* value = std::getenv("GUFO_KV_Q4");
+  return value != nullptr && *value != '\0' && *value != '0';
+}
+
+/// 4-bit value grid (GUFO_KV_V4): values pack onto the 18-byte nibble blocks
+/// (range 7), the production K8V4 combination. Gated identically to the key
+/// grid above.
+[[nodiscard]] bool KvValue4Bit(const ModelOptions& options) noexcept {
+  if (options.kv_cache_quant != "q8")
+    return false;
+  const char* value = std::getenv("GUFO_KV_V4");
+  return value != nullptr && *value != '\0' && *value != '0';
+}
+
 /// Maps a GGML type to the FN kernel WeightType enum.
 [[nodiscard]] fn::WeightType SmallType(core::GgmlType t) {
   switch (t) {
@@ -535,14 +555,16 @@ std::size_t Model::ResidentBytes() const noexcept {
 struct Session::Impl {
   DeviceBuffers buffers;
   // KV caches: one cache per KV-producing layer. F16 layers use kv_k/kv_v
-  // (half rows, kv_stride elements per token row); blocked-Q8 SWA layers use
-  // kv_bk/kv_bv (34-byte blocks, kv_row_bytes bytes per token row).
+  // (half rows, kv_stride elements per token row); blocked SWA layers use
+  // kv_bk/kv_bv (34-byte 8-bit or 18-byte packed 4-bit blocks, kv_row_bytes_k
+  // / kv_row_bytes_v bytes per token row per side).
   std::vector<__half*> kv_k;
   std::vector<__half*> kv_v;
   std::vector<std::uint32_t> kv_stride;  // elements per token row
-  std::vector<std::uint8_t*> kv_bk;      // blocked Q8 K (null on F16 layers)
-  std::vector<std::uint8_t*> kv_bv;      // blocked Q8 V (null on F16 layers)
-  std::vector<std::uint32_t> kv_row_bytes;  // blocked bytes per token row
+  std::vector<std::uint8_t*> kv_bk;      // blocked K (null on F16 layers)
+  std::vector<std::uint8_t*> kv_bv;      // blocked V (null on F16 layers)
+  std::vector<std::uint32_t> kv_row_bytes_k;  // blocked key bytes per token row
+  std::vector<std::uint32_t> kv_row_bytes_v;  // blocked value bytes per row
   std::uint32_t* d_pos{nullptr};         // device-side start_pos scalar
   std::uint32_t* d_pos_win{nullptr};     // device-side window-shifted pos
   std::uint32_t capacity{0};
@@ -774,7 +796,8 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
   impl.kv_stride.assign(w.config.num_layers, 0);
   impl.kv_bk.assign(w.config.num_layers, nullptr);
   impl.kv_bv.assign(w.config.num_layers, nullptr);
-  impl.kv_row_bytes.assign(w.config.num_layers, 0);
+  impl.kv_row_bytes_k.assign(w.config.num_layers, 0);
+  impl.kv_row_bytes_v.assign(w.config.num_layers, 0);
   for (std::uint32_t il = 0; il < w.config.num_layers; ++il) {
     if (!w.config.LayerHasKv(il))
       continue;
@@ -803,22 +826,34 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
                    w.config.KvProducingLayer(il));
     }
     if (layer_blocked) {
-      const std::size_t row_bytes =
-          (static_cast<std::size_t>(head_dim_il) + 31) / 32 * 34 * kv_heads_il;
-      impl.kv_row_bytes[il] = static_cast<std::uint32_t>(row_bytes);
-      const std::size_t kv_bytes =
-          static_cast<std::size_t>(options_.max_context) * row_bytes;
+      // Keys and values may use different grids (K8V4 production combo):
+      // 34 bytes per 32-elem block on the 8-bit grid, 18 on the packed
+      // 4-bit grid.
+      const std::uint32_t k_block_bytes = KvKey4Bit(options_) ? 18 : 34;
+      const std::uint32_t v_block_bytes = KvValue4Bit(options_) ? 18 : 34;
+      const std::size_t k_row_bytes =
+          (static_cast<std::size_t>(head_dim_il) + 31) / 32 *
+          k_block_bytes * kv_heads_il;
+      const std::size_t v_row_bytes =
+          (static_cast<std::size_t>(head_dim_il) + 31) / 32 *
+          v_block_bytes * kv_heads_il;
+      impl.kv_row_bytes_k[il] = static_cast<std::uint32_t>(k_row_bytes);
+      impl.kv_row_bytes_v[il] = static_cast<std::uint32_t>(v_row_bytes);
+      const std::size_t k_bytes =
+          static_cast<std::size_t>(options_.max_context) * k_row_bytes;
+      const std::size_t v_bytes =
+          static_cast<std::size_t>(options_.max_context) * v_row_bytes;
       std::uint8_t* kvk8 = nullptr;
       std::uint8_t* kvv8 = nullptr;
-      if (hipMalloc(&kvk8, kv_bytes) != hipSuccess ||
-          hipMalloc(&kvv8, kv_bytes) != hipSuccess) {
+      if (hipMalloc(&kvk8, k_bytes) != hipSuccess ||
+          hipMalloc(&kvv8, v_bytes) != hipSuccess) {
         if (error_msg != nullptr)
           *error_msg = "blocked KV cache allocation failed (layer " +
                        std::to_string(il) + ")";
         return nullptr;
       }
-      hipMemset(kvk8, 0, kv_bytes);
-      hipMemset(kvv8, 0, kv_bytes);
+      hipMemset(kvk8, 0, k_bytes);
+      hipMemset(kvv8, 0, v_bytes);
       impl.buffers.allocations.push_back(kvk8);
       impl.buffers.allocations.push_back(kvv8);
       impl.kv_bk[il] = kvk8;
@@ -853,6 +888,16 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
                      std::to_string(il) + ", dim " + std::to_string(dim) + ")";
       return nullptr;
     }
+  }
+  if (options_.kv_cache_quant == "q8" &&
+      (KvKey4Bit(options_) || KvValue4Bit(options_))) {
+    std::fprintf(stderr,
+                 "[gemma4] blocked KV grids: K%s/V%s (GUFO_KV_Q4=%s "
+                 "GUFO_KV_V4=%s)\n",
+                 KvKey4Bit(options_) ? "4" : "8",
+                 KvValue4Bit(options_) ? "4" : "8",
+                 KvKey4Bit(options_) ? "on" : "off",
+                 KvValue4Bit(options_) ? "on" : "off");
   }
   return session;
 }
@@ -1107,10 +1152,14 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
           // The fused writer is disabled for blocked layers, so this is the
           // only writer: the final (post-norm, post-RoPE) rows quantize
           // straight into the shared blocked layout (per-32-block scale).
+          // Keys and values may use different grids (GUFO_KV_Q4/V4).
+          const std::uint32_t k_block_bytes = KvKey4Bit(model_->options_) ? 18 : 34;
+          const std::uint32_t v_block_bytes = KvValue4Bit(model_->options_) ? 18 : 34;
           kernels::StoreBlockedKv(impl_->kbuf, impl_->vbuf,
                                   impl_->kv_bk[kv_layer],
                                   impl_->kv_bv[kv_layer], n, kv_heads, head_dim,
-                                  impl_->d_pos, stream);
+                                  impl_->d_pos, stream, k_block_bytes,
+                                  v_block_bytes);
         } else {
           kernels::StoreKv(impl_->kbuf, impl_->kv_k[kv_layer], n, kvdim,
                            start_pos, stream);
@@ -1120,20 +1169,23 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
       }
     }
     if (use_blocked) {
-      // Three-way: long q8 prefill runs the shared blocked-Q8 WMMA kernel
+      // Three-way: long q8 prefill runs the shared blocked WMMA kernel
       // (SWA shift handled inside, score scale 1.0 like the F16 kernels);
-      // long-context q8 decode runs the shared blocked-Q8 Split-K kernel
+      // long-context q8 decode runs the shared blocked Split-K kernel
       // (same shift/rebase as the scalar path below, score scale 1.0);
       // short q8 prompts stay on the scalar direct read; f16 keeps the
-      // existing Attention path (WMMA inside) untouched.
+      // existing Attention path (WMMA inside) untouched. Each side carries
+      // its own block width (GUFO_KV_Q4/V4 select the 18-byte 4-bit grids).
       const std::uint32_t window = c.LayerIsSwa(il) ? c.sliding_window : 0;
+      const std::uint32_t k_block_bytes = KvKey4Bit(model_->options_) ? 18 : 34;
+      const std::uint32_t v_block_bytes = KvValue4Bit(model_->options_) ? 18 : 34;
       const bool ran_blocked_wmma =
           n >= kBlockedWmmaMinTokens &&
           ::gufo::core::compute::blocked_wmma::AttentionBlockedWmma<
               ::gufo::core::compute::blocked_wmma::KvCodecQ8, 256>(
               impl_->qbuf, impl_->kv_bk[kv_layer], impl_->kv_bv[kv_layer],
               impl_->attn_out, n, start_pos, c.num_heads, kv_heads, window,
-              stream);
+              stream, 1.0F, k_block_bytes, v_block_bytes);
       if (!ran_blocked_wmma) {
         // Blocked direct read (fused dequant, score scale 1.0, no F16
         // staging). Same sliding-window pointer shift as Attention: keys at or
@@ -1149,10 +1201,10 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
             shifted = start_pos - lo;
             if (hipMemcpy(impl_->d_pos_win, &shifted, sizeof(shifted),
                           hipMemcpyHostToDevice) == hipSuccess) {
-              const std::size_t off =
-                  static_cast<std::size_t>(lo) * impl_->kv_row_bytes[kv_layer];
-              k2 += off;
-              v2 += off;
+              k2 += static_cast<std::size_t>(lo) *
+                    impl_->kv_row_bytes_k[kv_layer];
+              v2 += static_cast<std::size_t>(lo) *
+                    impl_->kv_row_bytes_v[kv_layer];
               sp = impl_->d_pos_win;
             }
           }
@@ -1171,12 +1223,13 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
               ::gufo::core::compute::blocked_splitk::AttentionBlockedSplitK<
                   ::gufo::core::compute::blocked_splitk::KvCodecQ8, 256>(
                   impl_->qbuf, k2, v2, impl_->attn_out, n, sp, base + n,
-                  c.num_heads, kv_heads, head_dim, stream);
+                  c.num_heads, kv_heads, head_dim, stream, 1.0F,
+                  k_block_bytes, v_block_bytes);
         }
         if (!ran_blocked_splitk) {
           kernels::AttentionBlocked(impl_->qbuf, k2, v2, impl_->attn_out, n,
                                     sp, c.num_heads, kv_heads, head_dim,
-                                    stream);
+                                    stream, k_block_bytes, v_block_bytes);
         }
       }
     } else {

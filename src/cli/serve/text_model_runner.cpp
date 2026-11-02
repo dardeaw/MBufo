@@ -61,6 +61,13 @@ std::optional<ChatRequest> ConstrainChatRequest(
           "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
           "tool_call>. "
           "Tool arguments must follow the chosen function's schema.";
+    if (format == sampling::JsonConstraint::ToolFormat::kGemma)
+      instruction +=
+          "\nIf a tool is needed, respond using the Gemma tool-call form "
+          "<|tool_call>call:function_name{arg1:<|\"|>value1<|\"|>,...}<tool_"
+          "call|>. "
+          "Tool arguments must follow the chosen function's schema; do not "
+          "wrap the call in anything else.";
     if (request.response_format)
       instruction += " The JSON response schema applies to the final answer.";
   }

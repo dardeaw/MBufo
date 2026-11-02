@@ -44,6 +44,7 @@
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/gemma4/engine.hpp"
 #include "src/models/qwen/continuation_adapter.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
@@ -2967,6 +2968,619 @@ private:
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
 };
+
+// ---------------------------------------------------------------------------
+// Gemma 4 HTTP backend: plain Sync/Evaluate sessions owned per request slot,
+// no MTP sidecar and no continuation snapshots in serve. Prompt framing
+// mirrors the GGUF canonical template with enable_thinking=false; tool calls
+// round-trip through the native <|tool_call>call:NAME{...}<tool_call|>
+// envelope (parsed back in openai_chat.cpp ParseGemmaCalls).
+// ---------------------------------------------------------------------------
+constexpr std::string_view kGemma4StateAbi = "gemma4-gfx1151-state-v1";
+
+using Gemma4Model = models::gemma4::Model;
+using Gemma4Session = models::gemma4::Session;
+
+std::vector<std::int32_t> Gemma4EngineTokens(
+    std::span<const TextRunnerToken> tokens) {
+  std::vector<std::int32_t> converted;
+  converted.reserve(tokens.size());
+  for (const TextRunnerToken token : tokens) {
+    if (token > static_cast<TextRunnerToken>(
+                    std::numeric_limits<std::int32_t>::max())) {
+      throw std::invalid_argument("Gemma4 token ID exceeds engine range");
+    }
+    converted.push_back(static_cast<std::int32_t>(token));
+  }
+  return converted;
+}
+
+std::string Gemma4Trim(std::string_view text) {
+  const auto begin = text.find_first_not_of(" \t\r\n");
+  if (begin == std::string_view::npos)
+    return {};
+  const auto end = text.find_last_not_of(" \t\r\n");
+  return std::string(text.substr(begin, end - begin + 1));
+}
+
+std::string Gemma4Quote(std::string_view value) {
+  std::string quoted("<|\"|>");
+  quoted += value;
+  quoted += "<|\"|>";
+  return quoted;
+}
+
+std::string Gemma4Upper(std::string value) {
+  for (char& c : value) {
+    if (c >= 'a' && c <= 'z')
+      c = static_cast<char>(c - 'a' + 'A');
+  }
+  return value;
+}
+
+// Mirror of the template's format_argument macro: strings use the <|"|>
+// quote token, mappings sort keys and leave them unquoted, sequences keep
+// order. Used for tool declarations and for re-rendering stored tool calls.
+std::string Gemma4FormatJson(const json::Value& value) {
+  if (value.is_string())
+    return Gemma4Quote(value.get_str());
+  if (value.is_bool())
+    return value.as_bool() ? "true" : "false";
+  if (value.is_null())
+    return "null";
+  if (value.is_number())
+    return value.dump();
+  if (value.is_array()) {
+    std::string out("[");
+    bool first = true;
+    for (const auto& item : value.items()) {
+      if (!first)
+        out += ",";
+      first = false;
+      out += Gemma4FormatJson(item);
+    }
+    out += "]";
+    return out;
+  }
+  if (value.is_object()) {
+    std::vector<const json::Value::Member*> members;
+    for (const auto& member : value.members())
+      members.push_back(&member);
+    std::sort(members.begin(), members.end(),
+              [](const json::Value::Member* a, const json::Value::Member* b) {
+                return a->first < b->first;
+              });
+    std::string out("{");
+    bool first = true;
+    for (const auto* member : members) {
+      if (!first)
+        out += ",";
+      first = false;
+      out += member->first;
+      out += ":";
+      out += Gemma4FormatJson(member->second);
+    }
+    out += "}";
+    return out;
+  }
+  return value.dump();
+}
+
+std::optional<json::Value> Gemma4TryParseJson(std::string_view text) {
+  try {
+    return json::parse(text);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+// Mirror of the template's format_parameters entry: description, enum, type
+// and nested object shapes. Array item shapes are summarized by their type
+// (the tool ladder only uses flat string/integer/enum properties).
+void Gemma4RenderProperty(const std::string& name, const json::Value& schema,
+                          std::string& out) {
+  out += name;
+  out += ":{";
+  bool first = true;
+  const auto comma = [&] {
+    if (!first)
+      out += ",";
+    first = false;
+  };
+  if (const auto* description = schema.find("description");
+      description != nullptr && description->is_string() &&
+      !description->get_str().empty()) {
+    comma();
+    out += "description:";
+    out += Gemma4Quote(description->get_str());
+  }
+  if (const auto* enumeration = schema.find("enum");
+      enumeration != nullptr && enumeration->is_array() &&
+      !enumeration->empty()) {
+    comma();
+    out += "enum:";
+    out += Gemma4FormatJson(*enumeration);
+  }
+  if (const auto* properties = schema.find("properties");
+      properties != nullptr && properties->is_object() &&
+      !properties->empty()) {
+    comma();
+    out += "properties:{";
+    std::vector<const json::Value::Member*> members;
+    for (const auto& member : properties->members())
+      members.push_back(&member);
+    std::sort(members.begin(), members.end(),
+              [](const json::Value::Member* a, const json::Value::Member* b) {
+                return a->first < b->first;
+              });
+    bool inner_first = true;
+    for (const auto* member : members) {
+      if (!inner_first)
+        out += ",";
+      inner_first = false;
+      Gemma4RenderProperty(member->first, member->second, out);
+    }
+    out += "}";
+  }
+  if (const auto* required = schema.find("required");
+      required != nullptr && required->is_array() && !required->empty()) {
+    comma();
+    out += "required:[";
+    bool required_first = true;
+    for (const auto& item : required->items()) {
+      if (!required_first)
+        out += ",";
+      required_first = false;
+      out += Gemma4Quote(item.is_string() ? item.get_str() : item.dump());
+    }
+    out += "]";
+  }
+  if (const auto* nullable = schema.find("nullable");
+      nullable != nullptr && nullable->is_bool() && nullable->as_bool()) {
+    comma();
+    out += "nullable:true";
+  }
+  if (const auto* type = schema.find("type");
+      type != nullptr && type->is_string() && !type->get_str().empty()) {
+    comma();
+    out += "type:";
+    out += Gemma4Quote(Gemma4Upper(type->get_str()));
+  }
+  out += "}";
+}
+
+// Mirror of the template's format_function_declaration macro (the response
+// declaration has no OpenAI counterpart and is omitted).
+std::string Gemma4RenderTool(const tokenization::ChatTool& tool) {
+  std::string out("<|tool>declaration:");
+  out += tool.name;
+  out += "{description:";
+  out += Gemma4Quote(tool.description);
+  const auto schema = Gemma4TryParseJson(tool.parameters_json);
+  if (schema && schema->is_object() && !schema->empty()) {
+    out += ",parameters:{";
+    bool first = true;
+    if (const auto* properties = schema->find("properties");
+        properties != nullptr && properties->is_object() &&
+        !properties->empty()) {
+      first = false;
+      out += "properties:{";
+      std::vector<const json::Value::Member*> members;
+      for (const auto& member : properties->members())
+        members.push_back(&member);
+      std::sort(members.begin(), members.end(),
+                [](const json::Value::Member* a, const json::Value::Member* b) {
+                  return a->first < b->first;
+                });
+      bool property_first = true;
+      for (const auto* member : members) {
+        if (!property_first)
+          out += ",";
+        property_first = false;
+        Gemma4RenderProperty(member->first, member->second, out);
+      }
+      out += "}";
+    }
+    if (const auto* required = schema->find("required");
+        required != nullptr && required->is_array() && !required->empty()) {
+      if (!first)
+        out += ",";
+      first = false;
+      out += "required:[";
+      bool required_first = true;
+      for (const auto& item : required->items()) {
+        if (!required_first)
+          out += ",";
+        required_first = false;
+        out += Gemma4Quote(item.is_string() ? item.get_str() : item.dump());
+      }
+      out += "]";
+    }
+    if (const auto* type = schema->find("type");
+        type != nullptr && type->is_string() && !type->get_str().empty()) {
+      if (!first)
+        out += ",";
+      out += "type:";
+      out += Gemma4Quote(Gemma4Upper(type->get_str()));
+    }
+    out += "}";
+  }
+  out += "}<tool|>";
+  return out;
+}
+
+// Mirror of the template's strip_thinking macro for replayed assistant text.
+std::string Gemma4StripThinking(std::string_view text) {
+  std::string out;
+  std::size_t cursor = 0;
+  while (cursor <= text.size()) {
+    const auto end = text.find("<channel|>", cursor);
+    const auto part = text.substr(
+        cursor, end == std::string_view::npos ? end : end - cursor);
+    const auto channel = part.find("<|channel>");
+    out += channel == std::string_view::npos ? part : part.substr(0, channel);
+    if (end == std::string_view::npos)
+      break;
+    cursor = end + sizeof("<channel|>") - 1;
+  }
+  return Gemma4Trim(out);
+}
+
+// Canonical Gemma 4 chat framing with enable_thinking=false: a system turn
+// carrying tool declarations, per-role turns, tool calls inline on the
+// assistant turn with forward-scanned tool responses (OpenAI Chat
+// Completions shape, as the template's tool_calls branch does), and the
+// empty-thought generation prompt.
+std::string Gemma4RenderPrompt(
+    std::span<const tokenization::ChatMessage> messages,
+    std::span<const tokenization::ChatTool> tools) {
+  std::string out;
+  std::size_t body_begin = 0;
+  std::string system_text;
+  if (!messages.empty() &&
+      (messages.front().role == tokenization::ChatRole::kSystem ||
+       messages.front().role == tokenization::ChatRole::kDeveloper)) {
+    system_text = Gemma4Trim(messages.front().content +
+                             messages.front().framing_suffix);
+    body_begin = 1;
+  }
+  if (!system_text.empty() || !tools.empty()) {
+    out += "<|turn>system\n";
+    out += system_text;
+    for (const auto& tool : tools)
+      out += Gemma4RenderTool(tool);
+    out += "<turn|>\n";
+  }
+  std::string previous_non_tool_role;
+  for (std::size_t i = body_begin; i < messages.size(); ++i) {
+    const auto& message = messages[i];
+    if (message.role == tokenization::ChatRole::kTool) {
+      // Standalone tool messages (no preceding assistant call) render
+      // nothing, matching the template's tool-only forward scan.
+      continue;
+    }
+    const std::string role =
+        std::string(tokenization::ToString(message.role));
+    const std::string turn_role = role == "assistant" ? "model" : role;
+    const bool continue_model_turn =
+        turn_role == "model" && previous_non_tool_role == "assistant";
+    if (!continue_model_turn) {
+      out += "<|turn>";
+      out += turn_role;
+      out += "\n";
+    }
+    if (message.role == tokenization::ChatRole::kAssistant) {
+      for (const auto& call : message.tool_calls) {
+        out += "<|tool_call>call:";
+        out += call.name;
+        out += "{";
+        bool first = true;
+        for (const auto& argument : call.arguments) {
+          if (!first)
+            out += ",";
+          first = false;
+          out += argument.name;
+          out += ":";
+          out += argument.is_string ? Gemma4Quote(argument.value)
+                                    : argument.value;
+        }
+        out += "}<tool_call|>";
+      }
+      bool saw_tool_response = false;
+      std::size_t next = i + 1;
+      for (; next < messages.size() &&
+             messages[next].role == tokenization::ChatRole::kTool;
+           ++next) {
+        const auto& follow = messages[next];
+        std::string tool_name = follow.name;
+        if (!follow.tool_call_id.empty()) {
+          for (const auto& call : message.tool_calls) {
+            if (call.id == follow.tool_call_id) {
+              tool_name = call.name;
+              break;
+            }
+          }
+        }
+        if (tool_name.empty())
+          tool_name = "unknown";
+        out += "<|tool_response>response:";
+        out += tool_name;
+        out += "{value:";
+        out += Gemma4Quote(Gemma4Trim(follow.content));
+        out += "}<tool_response|>";
+        saw_tool_response = true;
+      }
+      out += Gemma4StripThinking(message.content);
+      if (!message.tool_calls.empty() && !saw_tool_response) {
+        // History ends mid-call: the template opens the tool response the
+        // model would write next instead of closing the turn.
+        out += "<|tool_response>";
+      } else {
+        out += "<turn|>\n";
+      }
+      i = next - 1;
+    } else {
+      out += Gemma4Trim(message.content + message.framing_suffix);
+      out += "<turn|>\n";
+    }
+    previous_non_tool_role = role;
+  }
+  out += "<|turn>model\n<|channel>thought\n<channel|>";
+  return out;
+}
+
+class Gemma4TextRunnerState final : public TextRunnerState {
+ public:
+  explicit Gemma4TextRunnerState(const std::shared_ptr<Gemma4Model>& model) {
+    std::string error;
+    session_ = model->CreateSession(&error);
+    if (session_ == nullptr) {
+      throw std::runtime_error("Failed to create Gemma4 session: " + error);
+    }
+  }
+
+  void SetCancellationCheck(const CancellationCheck&) override {}
+  void Invalidate() noexcept override { position_ = 0; }
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
+      const noexcept override {
+    return {};
+  }
+
+  [[nodiscard]] Gemma4Session& session() const { return *session_; }
+  [[nodiscard]] std::size_t position() const noexcept { return position_; }
+  void set_position(std::size_t position) noexcept { position_ = position; }
+
+ private:
+  std::unique_ptr<Gemma4Session> session_;
+  std::size_t position_{0};
+};
+
+Gemma4TextRunnerState& RequireGemma4State(TextRunnerState& state) {
+  auto* gemma = dynamic_cast<Gemma4TextRunnerState*>(&state);
+  if (gemma == nullptr) {
+    throw std::logic_error("text runner state is not Gemma4");
+  }
+  return *gemma;
+}
+
+const Gemma4TextRunnerState& RequireGemma4State(const TextRunnerState& state) {
+  const auto* gemma = dynamic_cast<const Gemma4TextRunnerState*>(&state);
+  if (gemma == nullptr) {
+    throw std::logic_error("text runner state is not Gemma4");
+  }
+  return *gemma;
+}
+
+class Gemma4TextRunner final : public HipTextModelRunner {
+ public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kGemma;
+  }
+  Gemma4TextRunner(std::shared_ptr<Gemma4Model> model,
+                   std::uint32_t max_context)
+      : model_(std::move(model)), max_context_(max_context) {}
+
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    return {
+        .model_id = model_->ModelName(),
+        .state_abi = std::string(kGemma4StateAbi),
+        .max_context = max_context_,
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = false,
+                .fork = false,
+                .final_token_advance_required = false,
+                .incremental_text_is_exact = true,
+                .multi_token_decode = false,
+                .batched_multi_token_decode = false,
+                .batched_multi_token_decode_max_width = 0,
+                .prefix_reuse = false,
+            },
+        .persistence = std::nullopt,
+    };
+  }
+
+  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      capacity = free_bytes;
+    }
+    return {
+        .resident_weights_bytes = model_->ResidentBytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = std::nullopt,
+        .temporary_scratch_bytes = std::nullopt,
+        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .requires_device_runtime_lock = true,
+    };
+  }
+
+  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+    std::vector<TextExecutionPlan> plans{
+        {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    for (std::size_t width = 2; width <= 8; ++width) {
+      plans.push_back(
+          {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+    }
+    return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          return sampling::ConstraintVocabulary::Piece{
+              model_->TokenText(static_cast<std::int32_t>(id)),
+              model_->IsStopToken(static_cast<std::int32_t>(id))};
+        });
+  }
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return model_->VocabSize();
+  }
+
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"", "", {}};
+  }
+
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+      std::string_view text) const override {
+    std::vector<TextRunnerToken> tokens;
+    for (const std::int32_t id : model_->Tokenize(text)) {
+      if (id < 0) {
+        throw std::invalid_argument("Gemma4 tokenizer returned a token ID "
+                                    "outside the engine range");
+      }
+      tokens.push_back(static_cast<TextRunnerToken>(id));
+    }
+    return tokens;
+  }
+
+  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ChatRequest& request) const override {
+    const auto tools =
+        request.tool_choice == ChatRequest::ToolChoice::kNone
+            ? std::span<const tokenization::ChatTool>{}
+            : std::span<const tokenization::ChatTool>{request.tools};
+    const std::string prompt = Gemma4RenderPrompt(request.messages, tools);
+    if (prompt.empty())
+      return std::nullopt;
+    return Tokenize(prompt);
+  }
+
+  [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
+      const ChatRequest&) const override {
+    return TextGenerationBackend::InitialOutputState::kContent;
+  }
+
+  [[nodiscard]] std::string Decode(
+      std::span<const TextRunnerToken> tokens) const override {
+    const auto ids = Gemma4EngineTokens(tokens);
+    return model_->Decode(ids);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+    return std::make_unique<Gemma4TextRunnerState>(model_);
+  }
+
+  // Gemma4 Sync reprocesses the prompt from position 0 (no prefix reuse in
+  // the engine), so every prefill step replays the whole retained prefix.
+  [[nodiscard]] TextPrefillStep Prefill(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens) const override {
+    auto& gemma = RequireGemma4State(state);
+    if (offset != gemma.position()) {
+      throw std::logic_error(
+          "Gemma4 prefill offset does not match retained state");
+    }
+    if (offset >= prompt.size()) {
+      throw std::logic_error("Gemma4 prefill has no remaining input");
+    }
+    const std::size_t consumed =
+        std::min(max_input_tokens, prompt.size() - offset);
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_) {
+      throw std::runtime_error("Gemma4 prompt exceeds the served context");
+    }
+    const auto prefix = Gemma4EngineTokens(prompt.first(next_position));
+    std::string error;
+    if (!gemma.session().Sync(prefix, &error)) {
+      gemma.set_position(0);
+      throw std::runtime_error("Gemma4 prefill failed: " + error);
+    }
+    gemma.set_position(next_position);
+    return {
+        .consumed_tokens = consumed,
+        .decode_ready = next_position == prompt.size(),
+    };
+  }
+
+  [[nodiscard]] TextDecodeSelection SelectNext(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    auto& gemma = RequireGemma4State(state);
+    if (gemma.position() >= max_context_)
+      return {.stop = true, .piece = {}};
+    const auto logits = gemma.session().Logits();
+    if (logits.empty()) {
+      throw std::runtime_error("Gemma4 token selection has no logits");
+    }
+    // Logits live in device memory (unified APU address space); the host
+    // sampler must read a host copy, exactly like the prompt CLI does.
+    // Blocking D2H on the null stream serializes after the engine's work.
+    thread_local std::vector<float> host_logits;
+    if (host_logits.size() != logits.size())
+      host_logits.resize(logits.size());
+    if (hipMemcpy(host_logits.data(), logits.data(),
+                  logits.size() * sizeof(float),
+                  hipMemcpyDeviceToHost) != hipSuccess) {
+      throw std::runtime_error("Gemma4 logit download failed");
+    }
+    const auto token =
+        static_cast<std::int32_t>(sampler.Sample(host_logits));
+    if (gemma.stop_at_eos() && model_->IsStopToken(token)) {
+      return {
+          .stop = true,
+          .token = 0,
+          .piece = {},
+      };
+    }
+    return {
+        .stop = false,
+        .token = static_cast<TextRunnerToken>(token),
+        .piece = model_->TokenText(token),
+    };
+  }
+
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    if (token > static_cast<TextRunnerToken>(
+                    std::numeric_limits<std::int32_t>::max())) {
+      throw std::invalid_argument("Gemma4 token ID exceeds engine range");
+    }
+    auto& gemma = RequireGemma4State(state);
+    std::string error;
+    if (!gemma.session().Evaluate(static_cast<std::int32_t>(token), &error)) {
+      throw std::runtime_error("Gemma4 decode failed: " + error);
+    }
+    gemma.set_position(gemma.position() + 1);
+  }
+
+  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    return SelectNext(state, sampler);
+  }
+
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return RequireGemma4State(state).position();
+  }
+
+ private:
+  std::shared_ptr<Gemma4Model> model_;
+  std::uint32_t max_context_;
+};
 #endif
 
 }  // namespace
@@ -3268,6 +3882,41 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             "Qwen3.8-Flash-Next MTP", speculative_config.draft_model_path,
             &resolved_disk_cache_config.draft_model_artifact_fingerprint,
             error)) {
+      return false;
+    }
+    return load(std::move(model), error, max_context, session_count,
+                prefill_policy, scheduler_policy, speculative_config,
+                std::move(resolved_disk_cache_config), ram_cache_config);
+  }
+  if (reader->GetMetadataString("general.architecture") == "gemma4") {
+    if (!vision_model_path.empty()) {
+      SetError(error, "Gemma4 HTTP models do not support --mmproj");
+      return false;
+    }
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error,
+               "Gemma4 HTTP models run without speculative decoding (draft "
+               "sidecars are not served)");
+      return false;
+    }
+    auto model = models::gemma4::Model::Load(
+        model_path,
+        models::gemma4::ModelOptions{
+            .max_context = max_context,
+            .decode_concurrency = static_cast<std::uint32_t>(
+                std::clamp<std::size_t>(session_count, 1, 8)),
+            .kv_cache_quant = kv_cache_quant,
+        },
+        &load_error);
+    if (model == nullptr) {
+      SetError(error, "Failed to create Gemma4 model: " + load_error);
+      return false;
+    }
+    // Gemma4 sessions reprocess the prompt from position 0 and expose no
+    // continuation snapshots, so there is no persistent disk-cache identity.
+    if (DiskCacheEnabled(resolved_disk_cache_config)) {
+      SetError(error,
+               "Gemma4 HTTP models do not support the persistent disk cache");
       return false;
     }
     return load(std::move(model), error, max_context, session_count,
@@ -3629,6 +4278,66 @@ bool InferenceBackend::load(
     auto runner_pool = std::make_shared<TextRunnerPool>(
         std::move(runner), session_count, std::move(runner_disk_cache),
         ram_cache_config);
+    new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+        std::move(runner_pool), prefill_policy, scheduler_policy);
+    {
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
+}
+
+bool InferenceBackend::load(
+    std::shared_ptr<models::gemma4::Model> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config) {
+  if (model == nullptr) {
+    SetError(error, "Gemma4 model must not be null");
+    return false;
+  }
+  if (max_context == 0)
+    max_context = model->MaxContext();
+
+  if (session_count == 0) {
+    SetError(error, "HTTP session count must be at least one");
+    return false;
+  }
+  if (max_context == 0 || max_context > model->MaxContext()) {
+    SetError(error, "HTTP context exceeds the loaded Gemma4 model context");
+    return false;
+  }
+  if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    SetError(error,
+             "Gemma4 HTTP models run without speculative decoding (draft "
+             "sidecars are not served)");
+    return false;
+  }
+  // No continuation snapshots exist for Gemma4 sessions, so the disk cache
+  // has no identity to key on; the RAM pool owns every execution slot.
+  if (DiskCacheEnabled(disk_cache_config)) {
+    SetError(error,
+             "Gemma4 HTTP models do not support the persistent disk cache");
+    return false;
+  }
+  try {
+    auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextModelPreset::kUnspecified;
+    new_state->sampling_defaults.supplied = {};
+    new_state->supports_images = false;
+    auto runner = std::make_shared<Gemma4TextRunner>(std::move(model),
+                                                     max_context);
+    new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
+    auto runner_pool = std::make_shared<TextRunnerPool>(
+        std::move(runner), session_count, std::nullopt, ram_cache_config);
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {

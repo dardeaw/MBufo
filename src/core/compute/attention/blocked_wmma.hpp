@@ -35,6 +35,8 @@ struct KvCodecQ8 {
 /// <KvCodecQ8, 256>; full (d == 512) layers stay on the F16 path.
 /// `window` is the SWA window (0 = dense causal); the pointer shift is
 /// applied inside. `score_scale` multiplies the QK scores (default 1.0).
+/// `key_block_bytes` / `value_block_bytes` select each side's block layout
+/// (34 = 8-bit codes, 18 = packed 4-bit codes for the GUFO_KV_Q4/V4 grids).
 /// Returns false when the shape is unsupported (caller falls back to the
 /// scalar direct read); never launches with a zero grid.
 template <typename Codec, std::uint32_t kHeadDim>
@@ -43,7 +45,9 @@ bool AttentionBlockedWmma(const float* q, const std::uint8_t* k_cache,
                           std::uint32_t n_tokens, std::uint32_t start_pos,
                           std::uint32_t heads, std::uint32_t kv_heads,
                           std::uint32_t window, hipStream_t stream,
-                          float score_scale = 1.0F);
+                          float score_scale = 1.0F,
+                          std::uint32_t key_block_bytes = 34,
+                          std::uint32_t value_block_bytes = 34);
 
 }  // namespace gufo::core::compute::blocked_wmma
 

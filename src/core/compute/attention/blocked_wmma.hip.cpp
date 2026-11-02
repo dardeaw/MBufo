@@ -603,16 +603,18 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
 
   const auto load_v = [&](const Tile& tile, uint4* dst) {
     if constexpr (kBlockedKv) {
-      // Blocked Q8 rows (Codec::kBlockBytes == 34: 32 int8 codes, f16 scale
-      // at +32). Group starts are 8-aligned with (dim % 32) <= 24, so eight
-      // halves never cross a block boundary: one block + one scale each.
-      // Decodes in registers to halves; the WMMA S/PV path below is shared.
-      static_assert(Codec::kBlockBytes == 34,
-                    "blocked WMMA: Q8 34-byte blocks only");
+      // Blocked Q8 rows (34-byte blocks: 32 int8 codes, f16 scale at +32)
+      // or packed 4-bit values (18-byte blocks: 16 nibbles, f16 scale at
+      // +16, selected by GUFO_KV_V4). Group starts are 8-aligned with
+      // (dim % 32) <= 24, so eight halves never cross a block boundary:
+      // one block + one scale each. Decodes in registers to halves; the
+      // WMMA S/PV path below is shared.
+      if (v_block_bytes != 34 && v_block_bytes != 18)
+        return;
       const std::uint32_t key_position = tile_key(tile, v_key);
       const bool live = key_position < context_end;
       const std::size_t head_bytes =
-          (static_cast<std::size_t>(kHeadDim) / 32) * Codec::kBlockBytes;
+          (static_cast<std::size_t>(kHeadDim) / 32) * v_block_bytes;
       const std::size_t row_bytes = head_bytes * kWmmaKvHeads;
       const std::uint8_t* vrow =
           reinterpret_cast<const std::uint8_t*>(v_cache) +
@@ -623,13 +625,30 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
         uint4 reg = make_uint4(0u, 0u, 0u, 0u);
         if (live) {
           const std::uint32_t dim = v_slice + (j * 8);
-          const std::uint8_t* vent = vrow + ((dim / 32) * Codec::kBlockBytes);
-          const float sc =
-              __half2float(*reinterpret_cast<const __half*>(vent + 32));
+          const std::uint8_t* vent = vrow + ((dim / 32) * v_block_bytes);
           auto* hp = reinterpret_cast<__half*>(&reg);
+          if (v_block_bytes == 34) {
+            const float sc =
+                __half2float(*reinterpret_cast<const __half*>(vent + 32));
 #pragma unroll
-          for (std::uint32_t i = 0; i < 8; ++i) {
-            hp[i] = __float2half(CodecTraits<Codec>::Decode(vent[(dim % 32) + i]) * sc);
+            for (std::uint32_t i = 0; i < 8; ++i) {
+              hp[i] = __float2half(CodecTraits<Codec>::Decode(vent[(dim % 32) + i]) * sc);
+            }
+          } else {
+            // 18-byte 4-bit block: element 2e in the low nibble, 2e+1 in
+            // the high (same packing the blocked writer emits); values
+            // sign-extend from 4 bits, matching the scalar unpack path.
+            const float sc =
+                __half2float(*reinterpret_cast<const __half*>(vent + 16));
+            std::uint32_t packed = 0;
+            __builtin_memcpy(&packed, vent + ((dim % 32) / 2),
+                             sizeof(std::uint32_t));
+#pragma unroll
+            for (std::uint32_t i = 0; i < 8; ++i) {
+              const int q = static_cast<int>((packed >> (4 * i)) & 0xFu);
+              const int val = q - (q & 8 ? 16 : 0);
+              hp[i] = __float2half(static_cast<float>(val) * sc);
+            }
           }
         }
         dst[j] = reg;
@@ -697,10 +716,12 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
   const auto load_k = [&](const Tile& tile, uint4* dst, int kbank) {
     if constexpr (kBlockedKv) {
       // Blocked Q8 K rows decoded in registers to halves (same one-block
-      // argument as load_v: d8 is 8-aligned with (d8 % 32) <= 24).
+      // argument as load_v: d8 is 8-aligned with (d8 % 32) <= 24), or the
+      // packed 4-bit key grid (GUFO_KV_Q4) with the same nibble layout as
+      // the value path above.
       (void)kbank;
-      static_assert(Codec::kBlockBytes == 34,
-                    "blocked WMMA: Q8 34-byte blocks only");
+      if (k_block_bytes != 34 && k_block_bytes != 18)
+        return;
 #pragma unroll
       for (std::uint32_t n = 0; n < kKRegs; ++n) {
         const std::uint32_t idx = tid + (n * 256);
@@ -710,19 +731,33 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
         uint4 reg = make_uint4(0u, 0u, 0u, 0u);
         if (live) {
           const std::size_t head_bytes =
-              (static_cast<std::size_t>(kHeadDim) / 32) * Codec::kBlockBytes;
+              (static_cast<std::size_t>(kHeadDim) / 32) * k_block_bytes;
           const std::size_t row_bytes = head_bytes * kWmmaKvHeads;
           const std::uint8_t* kent =
               reinterpret_cast<const std::uint8_t*>(k_cache) +
               (static_cast<std::size_t>(key_position) * row_bytes) +
               (static_cast<std::size_t>(kv_head) * head_bytes) +
-              ((d8 / 32) * Codec::kBlockBytes);
-          const float sc =
-              __half2float(*reinterpret_cast<const __half*>(kent + 32));
+              ((d8 / 32) * k_block_bytes);
           auto* hp = reinterpret_cast<__half*>(&reg);
+          if (k_block_bytes == 34) {
+            const float sc =
+                __half2float(*reinterpret_cast<const __half*>(kent + 32));
 #pragma unroll
-          for (std::uint32_t i = 0; i < 8; ++i) {
-            hp[i] = __float2half(CodecTraits<Codec>::Decode(kent[(d8 % 32) + i]) * sc);
+            for (std::uint32_t i = 0; i < 8; ++i) {
+              hp[i] = __float2half(CodecTraits<Codec>::Decode(kent[(d8 % 32) + i]) * sc);
+            }
+          } else {
+            const float sc =
+                __half2float(*reinterpret_cast<const __half*>(kent + 16));
+            std::uint32_t packed = 0;
+            __builtin_memcpy(&packed, kent + ((d8 % 32) / 2),
+                             sizeof(std::uint32_t));
+#pragma unroll
+            for (std::uint32_t i = 0; i < 8; ++i) {
+              const int q = static_cast<int>((packed >> (4 * i)) & 0xFu);
+              const int val = q - (q & 8 ? 16 : 0);
+              hp[i] = __float2half(static_cast<float>(val) * sc);
+            }
           }
         }
         dst[n] = reg;
@@ -1224,19 +1259,24 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
 // Attention() path: keys at or below start_pos - window are cut by advancing
 // the cache base and rebasing the position, keeping dense-causal semantics.
 // `score_scale` multiplies the QK scores (gemma4 f_attention_scale = 1.0:
-// no 1/sqrt(d)). Returns false when the shape is unsupported so the caller
-// falls back to the scalar direct read.
+// no 1/sqrt(d)). `key_block_bytes` / `value_block_bytes` select each side's
+// block layout (34 = 8-bit codes, 18 = packed 4-bit codes for the GUFO_KV_Q4
+// / GUFO_KV_V4 grids). Returns false when the shape is unsupported so the
+// caller falls back to the scalar direct read.
 template <typename Codec, std::uint32_t kHeadDim>
 bool AttentionBlockedWmma(const float* q, const std::uint8_t* k_cache,
                           const std::uint8_t* v_cache, float* out,
                           std::uint32_t n_tokens, std::uint32_t start_pos,
                           std::uint32_t heads, std::uint32_t kv_heads,
                           std::uint32_t window, hipStream_t stream,
-                          float score_scale) {
+                          float score_scale, std::uint32_t key_block_bytes,
+                          std::uint32_t value_block_bytes) {
   static_assert(kHeadDim == 256, "blocked WMMA prefill is d=256 (SWA) only");
   if (kHeadDim != kWmmaHeadDim || heads != kWmmaQueryHeads ||
       kv_heads != kWmmaKvHeads || n_tokens == 0 || q == nullptr ||
-      k_cache == nullptr || v_cache == nullptr || out == nullptr) {
+      k_cache == nullptr || v_cache == nullptr || out == nullptr ||
+      (key_block_bytes != 34 && key_block_bytes != 18) ||
+      (value_block_bytes != 34 && value_block_bytes != 18)) {
     return false;
   }
   const std::uint8_t* k2 = k_cache;
@@ -1245,10 +1285,12 @@ bool AttentionBlockedWmma(const float* q, const std::uint8_t* k_cache,
   if (window != 0 && start_pos + 1 > window) {
     const std::uint32_t lo = (start_pos + 1 - window) & ~3u;
     if (lo != 0 && lo <= start_pos) {
-      const std::size_t row_bytes = static_cast<std::size_t>(kv_heads) *
-                                    (kHeadDim / 32) * Codec::kBlockBytes;
-      k2 += static_cast<std::size_t>(lo) * row_bytes;
-      v2 += static_cast<std::size_t>(lo) * row_bytes;
+      const std::size_t k_row_bytes = static_cast<std::size_t>(kv_heads) *
+                                      (kHeadDim / 32) * key_block_bytes;
+      const std::size_t v_row_bytes = static_cast<std::size_t>(kv_heads) *
+                                      (kHeadDim / 32) * value_block_bytes;
+      k2 += static_cast<std::size_t>(lo) * k_row_bytes;
+      v2 += static_cast<std::size_t>(lo) * v_row_bytes;
       sp -= lo;
     }
   }
@@ -1260,14 +1302,14 @@ bool AttentionBlockedWmma(const float* q, const std::uint8_t* k_cache,
       grid, dim3(256), 0, stream, q, nullptr,
       reinterpret_cast<const __half*>(k2),
       reinterpret_cast<const __half*>(v2), nullptr, 0u, out, sp, n_tokens,
-      0u, 34u, 34u, window, score_scale);
+      0u, key_block_bytes, value_block_bytes, window, score_scale);
   return true;
 }
 
 template bool AttentionBlockedWmma<KvCodecQ8, 256>(
     const float*, const std::uint8_t*, const std::uint8_t*, float*,
     std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
-    hipStream_t, float);
+    hipStream_t, float, std::uint32_t, std::uint32_t);
 
 }  // namespace gufo::core::compute::blocked_wmma
 #endif  // ENGINE_ENABLE_HIP
