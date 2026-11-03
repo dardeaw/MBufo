@@ -74,6 +74,7 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_qwen38_flash_next PUBLIC
     gufo_cache_hip
     gufo_core_blocked_kv
+    gufo_core_gemm
     gufo_qwen38_flash_next_mmq hip::host roc::hipblas roc::hipblaslt)
 
   if (GUFO_BUILD_TOOLS AND NOT BUILD_TESTING)

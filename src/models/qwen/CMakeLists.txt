@@ -28,6 +28,7 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_core PRIVATE OpenSSL::Crypto)
   target_link_libraries(gufo_core PRIVATE gufo_cache_hip)
   target_link_libraries(gufo_core PRIVATE gufo_core_blocked_kv)
+  target_link_libraries(gufo_core PRIVATE gufo_core_gemm)
   target_sources(gufo_core PRIVATE
     ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_adapter.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/encoder.hip

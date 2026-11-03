@@ -148,6 +148,32 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_core_blocked_kv PUBLIC hip::host)
 endif()
 
+if (ENGINE_ENABLE_HIP)
+  # Shared decode GEMV / fused-MoE kernels (Phase B): gemma4 Wave32 sdot4
+  # base, 27B block shapes, flash-next SmallGemm + MoE epilogue. Same HIP
+  # dialect as the blocked-KV lib; the wave32 shuffles mean no
+  # -mwavefrontsize64.
+  add_library(gufo_core_gemm STATIC
+    src/core/compute/gemm/gemv_wave32_sdot4.hip
+    src/core/compute/gemm/moe_fused.hip
+    src/core/compute/gemm/gemm.hpp
+    src/core/compute/gemm/gemm_device.cuh)
+  set_source_files_properties(
+    src/core/compute/gemm/gemv_wave32_sdot4.hip
+    src/core/compute/gemm/moe_fused.hip PROPERTIES LANGUAGE HIP)
+  set_target_properties(gufo_core_gemm PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+  target_compile_definitions(gufo_core_gemm PRIVATE ENGINE_ENABLE_HIP=1)
+  target_compile_options(gufo_core_gemm PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+  target_include_directories(gufo_core_gemm PUBLIC ${PROJECT_SOURCE_DIR})
+  target_include_directories(gufo_core_gemm SYSTEM PUBLIC
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR}
+    ${ROCWMMA_INCLUDE_DIR})
+  target_link_libraries(gufo_core_gemm PUBLIC hip::host)
+endif()
+
 add_library(gufo_diagnostics STATIC
   src/core/diagnostics/gpu_queues.cpp
   src/core/diagnostics/linux_sysfs.cpp
