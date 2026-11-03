@@ -13,6 +13,7 @@
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops.hpp"
+#include "src/core/compute/gemm/gemm.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -32,6 +33,19 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
                       float* output, std::size_t batch_size,
                       std::size_t output_size, std::size_t input_size,
                       hipStream_t stream) {
+  // preq-q81: Q8_0 narrow batch shapes run shared quantize -> narrow-GEMV;
+  // misses keep the exact shared / legacy paths below bit-identical.
+  if (weight.type == core::GgmlType::kQ8_0 && batch_size >= 1 &&
+      batch_size <= 8 &&
+      core::compute::gemm::DecideNarrowDecodePrequantRoute(
+          /*weight_q8_0=*/true, /*gated=*/false, batch_size, input_size,
+          output_size) ==
+          core::compute::gemm::NarrowDecodeRoute::kNarrowQ80Prequant &&
+      core::compute::gemm::LaunchNarrowQ80Prequant(
+          weight.data, input, output, input_size, output_size, batch_size,
+          stream)) {
+    return;
+  }
   if (SupportsExactSharedProjection(weight.type)) {
     LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
                                batch_size, output_size, input_size, stream);

@@ -185,9 +185,20 @@ void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
   // MTP verify shares this path; watch its acceptance rate as usual.
   (void)mode;
   switch (core::compute::gemm::DecideQwenDecodeRoute(a_type, M, K)) {
-    case core::compute::gemm::QwenDecodeRoute::kQ8KBlock:
+    case core::compute::gemm::QwenDecodeRoute::kQ8KBlock: {
+      // preq-q81: Q8_0 narrow shapes run the shared quantize -> narrow-GEMV
+      // path; misses fall through to the legacy Q8K block kernel bit-identical.
+      if (a_type == core::GgmlType::kQ8_0 &&
+          core::compute::gemm::DecideNarrowDecodePrequantRoute(
+              /*weight_q8_0=*/true, /*gated=*/false, /*n_tokens=*/1, K,
+              M) == core::compute::gemm::NarrowDecodeRoute::kNarrowQ80Prequant &&
+          core::compute::gemm::LaunchNarrowQ80Prequant(A, x, y, K, M, 1,
+                                                       stream)) {
+        return;
+      }
       core::compute::gemm::LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
       return;
+    }
     case core::compute::gemm::QwenDecodeRoute::kDenseLocal: {
       // Legacy dense triage (unchanged): F32 splits at K == 16384; BF16
       // takes the wave32 single row only for narrow K without remainder.

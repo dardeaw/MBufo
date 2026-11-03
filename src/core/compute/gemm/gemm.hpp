@@ -94,6 +94,26 @@ bool LaunchNarrowQ80Decode(const void* weights, const void* input,
                            std::size_t tokens, std::size_t input_stride_blocks,
                            hipStream_t stream);
 
+// ---- shared Q8_1 prequantize (from flash-next MMQ, model-agnostic) ----
+// Row-major F32 [n, k] -> canonical block_q8_1 rows with pad(k,512) width.
+// Byte size matches qfn_mmq_q8_1_bytes(n, k). Returns 0 on success.
+std::size_t PreqQ81RowPad(std::size_t k);
+std::size_t PreqQ81Bytes(std::size_t n, std::size_t k);
+int PrequantizeQ8_1(const float* x_f32, void* x_q8, std::size_t n,
+                    std::size_t k, hipStream_t stream);
+// Scratch + geometry helpers for the prequant -> narrow-GEMV path.
+void* NarrowQ80PrequantScratch(std::size_t bytes, hipStream_t stream);
+void WarmupNarrowQ80Prequant(std::size_t max_tokens, std::size_t max_k,
+                             hipStream_t stream);
+std::size_t NarrowQ80PrequantBytes(std::size_t tokens, std::size_t k);
+std::size_t NarrowQ80PrequantStrideBlocks(std::size_t k);
+// Shared quantize -> narrow-GEMV for F32 activations (27B / gemma4 decode).
+// Returns false for out-of-contract shapes or scratch failure; caller keeps
+// its legacy path.
+bool LaunchNarrowQ80Prequant(const void* weights, const float* x_f32,
+                             float* output, std::size_t k, std::size_t rows,
+                             std::size_t tokens, hipStream_t stream);
+
 // ---- flash-next decode SmallGemm (F32/F16/BF16 narrow projections) ----
 namespace fn_compat {
 // type: 0 = F32, 1 = F16, 30 = BF16.

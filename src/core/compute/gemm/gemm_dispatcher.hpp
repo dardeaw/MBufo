@@ -62,7 +62,7 @@ enum class PrefillRoute { kLegacy, kW8A8Varlen, kHipBlasLt };
 // order differs, so it is not covered even though the shape test would pass.
 // Gated (fused SwiGLU), HC/matrix geometries and N > 8 tiles stay legacy;
 // callers enforce those model-local exclusions before consulting this route.
-enum class NarrowDecodeRoute { kLegacy, kNarrowQ80 };
+enum class NarrowDecodeRoute { kLegacy, kNarrowQ80, kNarrowQ80Prequant };
 
 [[nodiscard]] inline NarrowDecodeRoute DecideNarrowDecodeRoute(
     bool weight_q8_0, bool act_preq_q8_1, bool gated, std::size_t n_tokens,
@@ -83,6 +83,39 @@ enum class NarrowDecodeRoute { kLegacy, kNarrowQ80 };
     return NarrowDecodeRoute::kLegacy;
   }
   return NarrowDecodeRoute::kNarrowQ80;
+}
+
+
+// Prequantized-activation branch (preq-q81): same geometry as
+// DecideNarrowDecodeRoute but for F32 activations that need the shared
+// quantize pass first. Q8_0 weights only; ungated; 1..8 tokens; K % 32 == 0;
+// rows > 0. The single-row latency specialization (rows <= 64, K % 5120 == 0)
+// and the HC 320x10240 geometry stay legacy (different accumulation order /
+// prefetch). Returns kNarrowQ80Prequant when the caller should run
+// PrequantizeQ8_1 -> LaunchNarrowQ80Decode; otherwise kLegacy and the caller
+// keeps its F32-activation path bit-identical.
+[[nodiscard]] inline NarrowDecodeRoute DecideNarrowDecodePrequantRoute(
+    bool weight_q8_0, bool gated, std::size_t n_tokens, std::size_t k,
+    std::size_t rows) {
+  if (!weight_q8_0 || gated) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (n_tokens < 1 || n_tokens > 8) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (k == 0 || k % 32 != 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (rows == 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (n_tokens == 1 && rows <= 64 && k % 5120 == 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (rows == 320 && k == 10240) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  return NarrowDecodeRoute::kNarrowQ80Prequant;
 }
 
 }  // namespace gufo::core::compute::gemm

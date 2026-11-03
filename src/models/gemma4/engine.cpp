@@ -90,8 +90,18 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
                            xr, y, n_tokens, m, softcap, stream);
     } else {
       const void* dev = w.device != nullptr ? w.device : w.data;
-      core::compute::gemm::GemvBatched(dev, static_cast<int>(w.type), w.RowBytes(), k, xr,
-                           y, n_tokens, m, softcap, stream);
+      // preq-q81: Q8_0 narrow shapes run shared quantize -> narrow-GEMV;
+      // misses (incl. softcap) keep GemvBatched bit-identical.
+      if (w.type == core::GgmlType::kQ8_0 && softcap == 0.0F &&
+          core::compute::gemm::DecideNarrowDecodePrequantRoute(
+              /*weight_q8_0=*/true, /*gated=*/false, n_tokens, k,
+              m) == core::compute::gemm::NarrowDecodeRoute::kNarrowQ80Prequant &&
+          core::compute::gemm::LaunchNarrowQ80Prequant(
+              dev, xr, y, k, m, n_tokens, stream)) {
+      } else {
+        core::compute::gemm::GemvBatched(dev, static_cast<int>(w.type), w.RowBytes(), k, xr,
+                             y, n_tokens, m, softcap, stream);
+      }
     }
     return;
   }

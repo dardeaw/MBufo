@@ -1,5 +1,6 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <sys/mman.h>
+#include "src/core/compute/gemm/gemm.hpp"
 
 #include <algorithm>
 #include <atomic>
