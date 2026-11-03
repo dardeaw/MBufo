@@ -452,7 +452,7 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                      &session.control_->mtp_position,
                      &session.control_->mtp_blocks, session.mtp_.position, pool,
                      session.max_context_, sparse, error, false, true, false, 0,
-                     session))
+                     session, false, true))
         return false;
     }
     // Attention retains every catch-up KV row. Only each final residual
@@ -1233,7 +1233,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                          &session.control_->position, &session.control_->blocks,
                          session.position_, pool, session.max_context_,
                          sparse[i], error, false, true, false, 0, session,
-                         use_mixed)) {
+                         use_mixed, item.speculative)) {
             return false;
           }
         }
@@ -1282,7 +1282,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                            &session.control_->position,
                            &session.control_->blocks, session.position_, pool,
                            session.max_context_, sparse[i], error, false, true,
-                           false, 0, session)) {
+                           false, 0, session, false, item.speculative)) {
               return false;
             }
           }
@@ -1378,7 +1378,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                              n, &session.control_->position,
                              &session.control_->blocks, session.position_, pool,
                              session.max_context_, sparse[i], error, false,
-                             true, false, 0, session)) {
+                             true, false, 0, session, false, item.speculative)) {
                 return false;
               }
             }

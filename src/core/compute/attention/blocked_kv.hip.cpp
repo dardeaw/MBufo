@@ -1046,7 +1046,11 @@ void AttentionKv(const float* q, const std::uint8_t* k_cache,
                  std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                  std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
                  KvCodec codec, hipStream_t stream, float score_scale) {
-  if (d != 256) {
+  // Scalar direct read serves d == 256 and d == 128 (Phase A <Q8,128> gap:
+  // the kernel below is d-generic up to 256 -- every out/partial write is
+  // guarded by `i < d` and block addressing only needs 32-elem blocks).
+  // Anything else refuses silently so the caller falls back.
+  if (d != 256 && d != 128) {
     return;
   }
   const std::uint32_t z = partials != nullptr ? std::max(splits, 1u) : 1u;

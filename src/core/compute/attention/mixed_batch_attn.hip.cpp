@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "src/core/compute/attention/attention_dispatcher.hpp"
+#include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/core/compute/attention/blocked_splitk.hpp"
 #include "src/core/compute/attention/blocked_wmma.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
@@ -258,25 +260,59 @@ bool LaunchMixedBatchAttention(const MixedBlk* blks, std::size_t n_blks,
       (scratch_bytes > MixedBatchF16ScratchBytes(n_blks))
           ? scratch_bytes - MixedBatchF16ScratchBytes(n_blks)
           : 0;
+  // Phase A policy: measured thresholds (prefill 32 / splitk 8+1024) with
+  // GUFO_ATTN_* env overrides; F16 batches never reach this path.
+  const auto attn_policy = ::gufo::core::compute::attention_dispatcher::
+      AttentionDispatchPolicy::WithEnvDefaults();
   for (std::size_t i = 0; i < n_blks; ++i) {
     const MixedBlk& b = blks[i];
     const float scale =
         (b.score_scale != 0.0F) ? b.score_scale : 1.0F;  // blocked kernels
                                                         // default to 1.0
+    // Phase A: route this block through the shared dispatcher. Only Q8/Q4
+    // reach here (other codecs refused above); window is always 0 here
+    // (blocked batches are pre-shifted dense-causal by the caller).
+    namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+    attn_disp::AttentionDispatchInput din;
+    din.q_len = b.n_rows;
+    din.kv_len = b.kv_len;
+    din.head_dim = b.head_dim;
+    din.heads = b.heads;
+    din.kv_heads = b.kv_heads;
+    din.k_codec = b.k_codec == MixedKvCodec::kQ4 ? attn_disp::DispatchCodec::kQ4
+                                                : attn_disp::DispatchCodec::kQ8;
+    din.v_codec = b.v_codec == MixedKvCodec::kQ4 ? attn_disp::DispatchCodec::kQ4
+                                                : attn_disp::DispatchCodec::kQ8;
+    din.window = 0;
+    const attn_disp::AttentionRoute route =
+        attn_disp::RouteAttention(din, attn_policy);
     bool ok = false;
-    if (b.n_rows <= blocked_splitk::kBlockedSplitKMaxTokens) {
+    if (route == attn_disp::AttentionRoute::kBlockedSplitK) {
       ok = blocked_splitk::AttentionBlockedSplitK<
           blocked_splitk::KvCodecQ8, 256>(
           b.q, static_cast<const std::uint8_t*>(b.k),
           static_cast<const std::uint8_t*>(b.v), b.out, b.n_rows, dev_pos + i,
           b.kv_len, b.heads, b.kv_heads, b.head_dim, stream, scale,
           b.key_block_bytes, b.value_block_bytes, partials, partials_avail);
-    } else {
+    } else if (route == attn_disp::AttentionRoute::kBlockedWmma) {
       ok = blocked_wmma::AttentionBlockedWmma<blocked_wmma::KvCodecQ8, 256>(
           b.q, static_cast<const std::uint8_t*>(b.k),
           static_cast<const std::uint8_t*>(b.v), b.out, b.n_rows,
           b.q_pos_base, b.heads, b.kv_heads, /*window=*/0, stream, scale,
           b.key_block_bytes, b.value_block_bytes);
+    } else if (route == attn_disp::AttentionRoute::kScalarBlocked) {
+      // Short/small blocked batches run the scalar direct read in-launch
+      // (same math as the caller's legacy fallback, fused across blocks).
+      // Q4 rows ride the 18-byte nibble path with the Q8 codec tag, exactly
+      // like the scalar fallback below.
+      blocked_kv::AttentionKv(
+          b.q, static_cast<const std::uint8_t*>(b.k),
+          static_cast<const std::uint8_t*>(b.v), /*mask=*/nullptr,
+          /*mask_words=*/0, b.out, /*partials=*/nullptr, /*splits=*/1,
+          b.n_rows, dev_pos + i, b.heads, b.kv_heads, b.head_dim,
+          /*ratio=*/1, b.key_block_bytes, b.value_block_bytes,
+          blocked_kv::KvCodec::kQ8, stream, scale);
+      ok = true;
     }
     if (!ok) {
       std::fprintf(stderr,

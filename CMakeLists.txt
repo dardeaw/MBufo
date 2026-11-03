@@ -126,7 +126,8 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/blocked_kv.hip.cpp
     src/core/compute/attention/blocked_wmma.hip.cpp
     src/core/compute/attention/blocked_splitk.hip.cpp
-    src/core/compute/attention/mixed_batch_attn.hip.cpp)
+    src/core/compute/attention/mixed_batch_attn.hip.cpp
+    src/core/compute/attention/attention_dispatcher.hpp)
   set_source_files_properties(
     src/core/compute/attention/blocked_kv.hip.cpp
     src/core/compute/attention/blocked_wmma.hip.cpp

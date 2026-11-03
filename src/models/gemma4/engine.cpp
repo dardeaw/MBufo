@@ -13,6 +13,7 @@
 #include <unordered_set>
 
 #include "src/models/gemma4/kernels/kernels.hpp"
+#include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/blocked_wmma.hpp"
 #include "src/core/compute/attention/blocked_splitk.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
@@ -1203,18 +1204,43 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il,
       s.model_->options_.kv_cache_quant == "q8" && l.has_kv && kv_heads > 0 &&
       head_dim == 256 && kv_layer == il;
     if (use_blocked) {
-      // Three-way: long q8 prefill runs the shared blocked WMMA kernel
-      // (SWA shift handled inside, score scale 1.0 like the F16 kernels);
+      // Routed three-way via the shared attention dispatcher (Phase A):
+      // long q8 prefill runs the shared blocked WMMA kernel (SWA shift
+      // handled inside, score scale 1.0 like the F16 kernels);
       // long-context q8 decode runs the shared blocked Split-K kernel
       // (same shift/rebase as the scalar path below, score scale 1.0);
       // short q8 prompts stay on the scalar direct read; f16 keeps the
       // existing Attention path (WMMA inside) untouched. Each side carries
       // its own block width (GUFO_KV_Q4/V4 select the 18-byte 4-bit grids).
+      // Thresholds live in the dispatcher policy: the measured prefill
+      // default stays kBlockedWmmaMinTokens, env-overridable via
+      // GUFO_ATTN_*. Single-session verify through this path keeps today's
+      // behavior by construction (n <= 8 never reaches WMMA; Split-K and
+      // scalar are the same kernels as before).
+      namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+      attn_disp::AttentionDispatchPolicy attn_policy;
+      attn_policy.wmma_min_tokens = kBlockedWmmaMinTokens;
+      attn_policy.ApplyEnvOverrides();
+      attn_disp::AttentionDispatchInput attn_in;
+      attn_in.q_len = n;
+      attn_in.kv_len = start_pos + n;
+      attn_in.head_dim = head_dim;
+      attn_in.heads = c.num_heads;
+      attn_in.kv_heads = kv_heads;
+      attn_in.k_codec = KvKey4Bit(s.model_->options_)
+                            ? attn_disp::DispatchCodec::kQ4
+                            : attn_disp::DispatchCodec::kQ8;
+      attn_in.v_codec = KvValue4Bit(s.model_->options_)
+                            ? attn_disp::DispatchCodec::kQ4
+                            : attn_disp::DispatchCodec::kQ8;
+      attn_in.window = c.LayerIsSwa(il) ? c.sliding_window : 0;
+      const attn_disp::AttentionRoute attn_route =
+          attn_disp::RouteAttention(attn_in, attn_policy);
       const std::uint32_t window = c.LayerIsSwa(il) ? c.sliding_window : 0;
       const std::uint32_t k_block_bytes = KvKey4Bit(s.model_->options_) ? 18 : 34;
       const std::uint32_t v_block_bytes = KvValue4Bit(s.model_->options_) ? 18 : 34;
       const bool ran_blocked_wmma =
-          n >= kBlockedWmmaMinTokens &&
+          attn_route == attn_disp::AttentionRoute::kBlockedWmma &&
           ::gufo::core::compute::blocked_wmma::AttentionBlockedWmma<
               ::gufo::core::compute::blocked_wmma::KvCodecQ8, 256>(
               s.impl_->qbuf, s.impl_->kv_bk[kv_layer], s.impl_->kv_bv[kv_layer],
@@ -1231,9 +1257,14 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il,
         // scalar path (identical SWA semantics by construction), parallel
         // chunks instead of one sweeping block. Short contexts and
         // unsupported shapes fall back to the scalar direct read below.
+        // Post-shift consult: dense-causal from here (window == 0).
+        attn_in.window = 0;
+        attn_in.kv_len =
+            ((sp == s.impl_->d_pos_win) ? shifted : start_pos) + n;
+        const attn_disp::AttentionRoute attn_route2 =
+            attn_disp::RouteAttention(attn_in, attn_policy);
         bool ran_blocked_splitk = false;
-        if (n <= ::gufo::core::compute::blocked_splitk::
-                     kBlockedSplitKMaxTokens &&
+        if (attn_route2 == attn_disp::AttentionRoute::kBlockedSplitK &&
             getenv("GEMMA4_NO_BLOCKED_SPLITK") == nullptr) {
           const std::uint32_t base =
               (sp == s.impl_->d_pos_win) ? shifted : start_pos;

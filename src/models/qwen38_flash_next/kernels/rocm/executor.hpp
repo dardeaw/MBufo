@@ -564,7 +564,7 @@ private:
                  std::uint32_t max_context, bool sparse, std::string* error_msg,
                  bool last_only, bool projections_ready, bool project_output,
                  std::uint32_t checkpoint_tokens, Session& session,
-                 bool defer_wmma = false) const;
+                 bool defer_wmma = false, bool is_verify = false) const;
   /// Provision and incrementally dequantize a session's persistent blocked
   /// staging up to `need` rows (shared by the staging path and mixed).
   [[nodiscard]] bool EnsureKvStaging(Session& session,

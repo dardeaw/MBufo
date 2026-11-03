@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "qfn_mmq.h"
+#include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
@@ -2669,7 +2670,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                          std::string* error_msg, bool last_only,
                          bool projections_ready, bool project_output,
                          std::uint32_t checkpoint_tokens, Session& session,
-                         bool defer_wmma) const {
+                         bool defer_wmma, bool is_verify) const {
   const Config& c = config();
   const std::uint32_t kv_row = c.AttentionKvDim();
   const std::uint32_t index_capacity =
@@ -2892,6 +2893,37 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // (wide, narrow and scalar paths) plus the output gate and projection.
   if (defer_wmma) {
     return true;
+  }
+  // Phase A: route blocked decode/prefill through the shared dispatcher.
+  // MTP verify, sparse and checkpoint callers keep the legacy selection
+  // below (iron rule); F16 inputs always consult kLegacy. Every blocked
+  // route lands on the kernel this function already selects (scalar
+  // AttentionKv -- the 24/2/256 geometry matches no WMMA/Split-K kernel),
+  // so the consult is the policy choke point, not a behavior change.
+  if (!is_verify && !sparse && checkpoint_tokens == 0 && mask == nullptr) {
+    namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+    attn_disp::AttentionDispatchInput attn_in;
+    attn_in.q_len = n_tokens;
+    attn_in.kv_len = start_pos + n_tokens;
+    attn_in.head_dim = c.head_dim;
+    attn_in.heads = c.num_heads;
+    attn_in.kv_heads = c.num_kv_heads;
+    if (options_.kv_format == KvFormat::kQ8) {
+      attn_in.k_codec = KvKeyIs4Bit(options_.kv_format)
+                            ? attn_disp::DispatchCodec::kQ4
+                            : attn_disp::DispatchCodec::kQ8;
+      attn_in.v_codec = KvValueIs4Bit(options_.kv_format)
+                            ? attn_disp::DispatchCodec::kQ4
+                            : attn_disp::DispatchCodec::kQ8;
+    } else if (options_.kv_format == KvFormat::kFp8) {
+      attn_in.k_codec = attn_disp::DispatchCodec::kFp8;
+      attn_in.v_codec = attn_disp::DispatchCodec::kFp8;
+    }
+    attn_in.window = 0;  // dense here (sparse excluded above)
+    const attn_disp::AttentionRoute attn_route =
+        attn_disp::RouteAttention(attn_in, attn_disp::AttentionDispatchPolicy::
+                                                    WithEnvDefaults());
+    (void)attn_route;  // current geometries fall through below unchanged.
   }
   // Wide batches run the fused WMMA kernel (never inside a graph: the kv
   // extent is a host value), output gate included, skipping the key tiles
@@ -3681,7 +3713,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                           &session.control_->blocks, start_pos, pool_grid,
                           session.max_context_, sparse, error_msg,
                           last_attention, false, true,
-                          checkpoint ? checkpoint->tokens : 0, session)) {
+                          checkpoint ? checkpoint->tokens : 0, session,
+                          false, speculative)) {
       return false;
     }
 
@@ -5029,7 +5062,7 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
                  &session.control_->mtp_position, &session.control_->mtp_blocks,
                  pos, pool_grid, session.max_context_,
                  pos + n > c.indexer_top_k, error_msg, last_only, true,
-                 skipped == 0, 0, session)) {
+                 skipped == 0, 0, session, false, true)) {
     return false;
   }
   struct RestoreScratch {

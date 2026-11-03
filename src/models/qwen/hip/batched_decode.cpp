@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
@@ -224,6 +225,10 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   const std::size_t ssm_inner_size = config.ssm_inner_size;
   const std::size_t time_step_rank = config.ssm_time_step_rank;
 
+  // Phase A: the shared attention-dispatcher policy for this decode batch
+  // (measured thresholds + GUFO_ATTN_* env overrides).
+  const auto attn_policy = ::gufo::core::compute::attention_dispatcher::
+      AttentionDispatchPolicy::WithEnvDefaults();
   std::array<std::uint32_t, kMaxDecodeBatch> host_tokens{};
   std::array<std::uint32_t, kMaxDecodeBatch> host_positions{};
   std::array<SsmSequenceState, kMaxDecodeBatch> ssm_sequences{};
@@ -312,6 +317,22 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                    config.num_key_value_heads, config.head_dim,
                    config.rotary_dim, position, config.rope_theta, arena.stream,
                    items[row].executor->vision_input_.rope());
+        // Phase A: route decode attention through the shared dispatcher.
+        // This batch is F16-only (blocked throws above), so the dispatcher
+        // returns kLegacy and the LaunchAttention path below runs unchanged;
+        // the consult is the single policy choke point (GUFO_ATTN_DISPATCH=0
+        // kill-switch included).
+        namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+        attn_disp::AttentionDispatchInput attn_in;
+        attn_in.q_len = 1;
+        attn_in.kv_len = position + 1;
+        attn_in.head_dim = config.head_dim;
+        attn_in.heads = config.num_attention_heads;
+        attn_in.kv_heads = config.num_key_value_heads;
+        attn_in.window = 0;  // decode rows are dense-causal here
+        const attn_disp::AttentionRoute attn_route =
+            attn_disp::RouteAttention(attn_in, attn_policy);
+        (void)attn_route;  // F16-only batch: always kLegacy today.
         const bool use_split_k = detail::IsSplitKDecodeAttentionSupported(
             static_cast<std::size_t>(position) + 1, config.num_attention_heads,
             config.num_key_value_heads, config.head_dim);
