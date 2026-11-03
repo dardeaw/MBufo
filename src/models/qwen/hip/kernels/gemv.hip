@@ -12,6 +12,7 @@
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/models/qwen/gemm_route.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/core/compute/gemm/gemm.hpp"
 
 namespace gufo::hip {
 
@@ -180,7 +181,7 @@ void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
       {.type = a_type, .batch_size = 1, .m = M, .k = K, .mode = mode});
   switch (resolution.route) {
     case models::qwen::QwenGemmRoute::kHipQuantDirect:
-      LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
+      core::compute::gemm::LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
       return;
     case models::qwen::QwenGemmRoute::kHipF32Baseline256:
     case models::qwen::QwenGemmRoute::kHipF32Baseline512:

@@ -6,6 +6,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/qwen/hip/ops/swiglu.hpp"
 #endif
 
@@ -44,7 +45,7 @@ void FfnForward(const HipModuleContext& ctx, const FfnLayerView& view,
   (void)gate_scratch;
   (void)up_scratch;
   const auto stream = static_cast<hipStream_t>(ctx.Stream());
-  ::gufo::hip::LaunchFusedSwiGLUGEMV(
+  ::gufo::core::compute::gemm::LaunchFusedSwiGLUGEMV(
       view.gate.data, view.gate.type, view.up.data, view.up.type, x.data(),
       act_scratch.data(), view.intermediate_size, view.hidden_size, stream);
   ::gufo::hip::LaunchGEMV(view.down.data, view.down.type, act_scratch.data(),

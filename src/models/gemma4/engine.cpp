@@ -13,6 +13,7 @@
 #include <unordered_set>
 
 #include "src/models/gemma4/kernels/kernels.hpp"
+#include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/blocked_wmma.hpp"
 #include "src/core/compute/attention/blocked_splitk.hpp"
@@ -104,12 +105,12 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
       xr = StageGemvInput(x, static_cast<std::size_t>(n_tokens) * k, stream);
     }
     if (w.f16 != nullptr) {
-      kernels::GemvBatched(w.f16, 1,
+      core::compute::gemm::GemvBatched(w.f16, 1,
                            static_cast<std::uint64_t>(k) * sizeof(__half), k,
                            xr, y, n_tokens, m, softcap, stream);
     } else {
       const void* dev = w.device != nullptr ? w.device : w.data;
-      kernels::GemvBatched(dev, static_cast<int>(w.type), w.RowBytes(), k, xr,
+      core::compute::gemm::GemvBatched(dev, static_cast<int>(w.type), w.RowBytes(), k, xr,
                            y, n_tokens, m, softcap, stream);
     }
     return;
@@ -1035,7 +1036,7 @@ void Session::ForwardLayerPre(Session& s, std::uint32_t il,
       const void* v_dev =
           l.has_v_proj ? (l.wv.device != nullptr ? l.wv.device : l.wv.data)
                        : nullptr;
-      kernels::GemvQkv(
+      core::compute::gemm::GemvQkv(
           q_dev, static_cast<int>(l.wq.type), l.wq.RowBytes(), qdim, k_dev,
           static_cast<int>(l.wk.type), l.wk.RowBytes(), v_dev,
           l.has_v_proj ? static_cast<int>(l.wv.type) : 0,
@@ -1358,7 +1359,7 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
             l.ffn_gate.device != nullptr ? l.ffn_gate.device : l.ffn_gate.data;
         const void* u_dev =
             l.ffn_up.device != nullptr ? l.ffn_up.device : l.ffn_up.data;
-        kernels::GemvGateUpSwiglu(g_dev, u_dev,
+        core::compute::gemm::GemvGateUpSwiglu(g_dev, u_dev,
                                   static_cast<int>(l.ffn_gate.type),
                                   l.ffn_gate.RowBytes(), hidden, s.impl_->normed,
                                   s.impl_->mlp_out, n, c.shared_ff, stream);
@@ -1419,7 +1420,7 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
             l.ffn_gate.device != nullptr ? l.ffn_gate.device : l.ffn_gate.data;
         const void* u_dev =
             l.ffn_up.device != nullptr ? l.ffn_up.device : l.ffn_up.data;
-        kernels::GemvGateUpSwiglu(g_dev, u_dev,
+        core::compute::gemm::GemvGateUpSwiglu(g_dev, u_dev,
                                   static_cast<int>(l.ffn_gate.type),
                                   l.ffn_gate.RowBytes(), hidden, s.impl_->normed,
                                   s.impl_->mlp_out, n, c.shared_ff, stream);
@@ -1502,11 +1503,11 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
             static_cast<std::uint64_t>(hidden) * l.down_exps.RowBytes();
         const float* moe_x =
             fused_moe_norms ? s.impl_->expert_down : s.impl_->normed;
-        kernels::MoeVecGateUpSwiglu(gu_dev, l.gate_up_exps.RowBytes(),
+        core::compute::gemm::MoeVecGateUpSwiglu(gu_dev, l.gate_up_exps.RowBytes(),
                                     gu_stride, moe_x, s.impl_->expert_ids,
                                     s.impl_->moe_vec_gate, slots, used, ff,
                                     hidden, stream);
-        kernels::GemvQSlot(dn_dev, l.down_exps.RowBytes(), dn_stride,
+        core::compute::gemm::GemvQSlot(dn_dev, l.down_exps.RowBytes(), dn_stride,
                            s.impl_->moe_vec_gate, s.impl_->expert_ids,
                            s.impl_->moe_vec_down, slots, hidden, ff, stream);
         if (fused_moe_norms) {
@@ -1522,7 +1523,7 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
               n, used, hidden, c.rms_eps,
               l.has_out_scale ? l.out_scale_val : 1.0F, stream);
         } else {
-          kernels::MoeSlotEpilogueOverwrite(
+          core::compute::gemm::MoeSlotEpilogueOverwrite(
               s.impl_->moe_vec_down, s.impl_->expert_ids, s.impl_->expert_weights,
               l.down_exps_scale.empty()
                   ? nullptr

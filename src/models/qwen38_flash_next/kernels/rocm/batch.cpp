@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "qfn_mmq.h"
+#include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
@@ -759,7 +760,7 @@ bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
   if (rows <= kDecodeRows)
     return Dense(w, x, out, rows, error);
   if (w.type != core::GgmlType::kQ8_0) {
-    SmallGemm(w.data, EmbeddingType(w.type), x, out, rows, w.rows, w.cols,
+    core::compute::gemm::fn_compat::SmallGemm(w.data, static_cast<int>(EmbeddingType(w.type)), x, out, rows, w.rows, w.cols,
               stream_);
     return true;
   }
@@ -887,7 +888,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
             base.gate_e, base.ids, base.down_e, c.hidden_size, c.expert_ff,
             rows * c.num_experts_used, c.num_experts, 1, stream_) != 0)
       return Fail(error, "batched routed vector projection failed");
-    MoeEpilogue(base.down_e, base.weights, base.shexp_out,
+    core::compute::gemm::fn_compat::MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
                 c.num_experts_used, c.hidden_size, stream_);
     return true;
@@ -917,7 +918,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
         return Fail(error, "batched routed vector projection failed");
       }
     }
-    MoeEpilogue(base.down_e, base.weights, base.shexp_out,
+    core::compute::gemm::fn_compat::MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
                 c.num_experts_used, c.hidden_size, stream_);
     return true;

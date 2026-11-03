@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "qfn_mmq.h"
+#include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
@@ -1861,7 +1862,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     return true;
   }
   if (!MatrixRows(n_tokens)) {
-    SmallGemm(w.data, SmallType(w.type), x, out, n_tokens, w.rows, w.cols,
+    core::compute::gemm::fn_compat::SmallGemm(w.data, static_cast<int>(SmallType(w.type)), x, out, n_tokens, w.rows, w.cols,
               stream_);
     return true;
   }
@@ -3335,7 +3336,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                     s_.router + c.num_experts, c.num_experts + 1, out, n_tokens,
                     used, c.hidden_size, stream_);
   } else {
-    MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
+    core::compute::gemm::fn_compat::MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
                 c.num_experts + 1, out, n_tokens, used, c.hidden_size, stream_);
   }
   return true;
