@@ -153,7 +153,7 @@ std::size_t MixedBatchScratchBytes(std::size_t n_blks) {
   // partials (shared across blocks; launches on one stream are serial).
   return n_blks * (sizeof(MixedBlk) + sizeof(std::uint32_t)) +
          blocked_splitk::kBlockedSplitKMaxTokens *
-             16ull * blocked_splitk::kBlockedSplitKMaxSplits * (256ull + 2ull) *
+             32ull * blocked_splitk::kBlockedSplitKMaxSplits * (256ull + 2ull) *
              sizeof(float);
 }
 
@@ -288,12 +288,24 @@ bool LaunchMixedBatchAttention(const MixedBlk* blks, std::size_t n_blks,
         attn_disp::RouteAttention(din, attn_policy);
     bool ok = false;
     if (route == attn_disp::AttentionRoute::kBlockedSplitK) {
-      ok = blocked_splitk::AttentionBlockedSplitK<
-          blocked_splitk::KvCodecQ8, 256>(
-          b.q, static_cast<const std::uint8_t*>(b.k),
-          static_cast<const std::uint8_t*>(b.v), b.out, b.n_rows, dev_pos + i,
-          b.kv_len, b.heads, b.kv_heads, b.head_dim, stream, scale,
-          b.key_block_bytes, b.value_block_bytes, partials, partials_avail);
+      // Head-dim dispatch: the dispatcher only routes d == 256/128 here.
+      if (b.head_dim == 128) {
+        ok = blocked_splitk::AttentionBlockedSplitK<
+            blocked_splitk::KvCodecQ8, 128>(
+            b.q, static_cast<const std::uint8_t*>(b.k),
+            static_cast<const std::uint8_t*>(b.v), b.out, b.n_rows,
+            dev_pos + i, b.kv_len, b.heads, b.kv_heads, b.head_dim, stream,
+            scale, b.key_block_bytes, b.value_block_bytes, partials,
+            partials_avail);
+      } else {
+        ok = blocked_splitk::AttentionBlockedSplitK<
+            blocked_splitk::KvCodecQ8, 256>(
+            b.q, static_cast<const std::uint8_t*>(b.k),
+            static_cast<const std::uint8_t*>(b.v), b.out, b.n_rows,
+            dev_pos + i, b.kv_len, b.heads, b.kv_heads, b.head_dim, stream,
+            scale, b.key_block_bytes, b.value_block_bytes, partials,
+            partials_avail);
+      }
     } else if (route == attn_disp::AttentionRoute::kBlockedWmma) {
       ok = blocked_wmma::AttentionBlockedWmma<blocked_wmma::KvCodecQ8, 256>(
           b.q, static_cast<const std::uint8_t*>(b.k),

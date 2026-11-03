@@ -1,4 +1,8 @@
-// Blocked-Q8 Split-K decode attention (SWA d == 256 layers).
+// Blocked-Q8 Split-K decode attention (d == 256 SWA / d == 128 dense).
+//
+// d == 128 reuses the same 256-thread block: lanes i >= kHeadDim are
+// predicated off (all 8 waves still participate in WaveSum so the shuffle
+// reductions stay uniform), and the merge kernel early-returns them.
 //
 // The scalar AttentionBlocked path sweeps the whole visible KV extent from a
 // single block per (head, token): 16 blocks each scanning up to the full
@@ -103,9 +107,11 @@ __global__ void AttentionBlockedSplitKKernel(
   constexpr std::uint32_t kBatch = 8;
   __shared__ float qs[kHeadDim];
   __shared__ float wsum[kBatch][8];
-  qs[i] = q[(static_cast<std::size_t>(t) * heads + h) * kHeadDim + i];
+  if (i < kHeadDim) {
+    qs[i] = q[(static_cast<std::size_t>(t) * heads + h) * kHeadDim + i];
+  }
   __syncthreads();
-  const float qi = qs[i];
+  const float qi = (i < kHeadDim) ? qs[i] : 0.0f;
   float m = -INFINITY;
   float l = 0.0f;
   float acc = 0.0f;
@@ -137,7 +143,7 @@ __global__ void AttentionBlockedSplitKKernel(
       const std::uint32_t j = j0 + b;
       float kval = 0.0f;
       float vval = 0.0f;
-      if (j < k_end) {
+      if (j < k_end && i < kHeadDim) {
         if (key_block_bytes == 34) {
           const typename Codec::Elem* kblk =
               k_cache + static_cast<std::size_t>(j) * k_stride + k_head_off +
@@ -216,7 +222,9 @@ __global__ void AttentionBlockedSplitKKernel(
     part[0] = m;
     part[1] = l;
   }
-  part[2 + i] = acc;
+  if (i < kHeadDim) {
+    part[2 + i] = acc;
+  }
 }
 
 /// Fold the split partials of one row in fixed chunk order (deterministic
@@ -228,6 +236,11 @@ __global__ void AttentionBlockedSplitKMergeKernel(
   const std::uint32_t h = blockIdx.x;
   const std::uint32_t t = blockIdx.y;
   const std::uint32_t i = threadIdx.x;
+  // No __syncthreads below: per-thread fold, safe to early-return the
+  // idle upper lanes of a d == 128 launch.
+  if (i >= kHeadDim) {
+    return;
+  }
   const float* base = partials + (static_cast<std::size_t>(t) * heads + h) *
                                      splits * (kHeadDim + 2);
   float m = -INFINITY;
@@ -248,7 +261,8 @@ __global__ void AttentionBlockedSplitKMergeKernel(
 
 }  // namespace
 
-// Split-K decode over blocked Q8 caches (SWA geometry only). The split
+// Split-K decode over blocked Q8 caches (d == 256 SWA, heads <= 16;
+// d == 128 dense, heads <= 32). The split
 // sizing copies the F16 Split-K heuristic (enough keys per chunk to amortize
 // the merge, 64-way cap); one chunk falls back to the scalar path.
 template <typename Codec, std::uint32_t kHeadDim>
@@ -262,9 +276,11 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
                             std::uint32_t key_block_bytes,
                             std::uint32_t value_block_bytes, float* partials,
                             std::size_t partials_bytes) {
-  static_assert(kHeadDim == 256, "blocked Split-K decode is d=256 (SWA) only");
-  if (kHeadDim != 256 || d != kHeadDim || heads == 0 || kv_heads == 0 ||
-      heads > 16 || heads % kv_heads != 0 || n_tokens == 0 ||
+  static_assert(kHeadDim == 256 || kHeadDim == 128,
+                "blocked Split-K decode is d=128/256 only");
+  const std::uint32_t kMaxHeads = (kHeadDim == 256) ? 16u : 32u;
+  if (kHeadDim != d || heads == 0 || kv_heads == 0 || heads > kMaxHeads ||
+      heads % kv_heads != 0 || n_tokens == 0 ||
       n_tokens > kBlockedSplitKMaxTokens || q == nullptr ||
       k_cache == nullptr || v_cache == nullptr || out == nullptr ||
       start_pos == nullptr || kv_len < kBlockedSplitKMinKv ||
@@ -303,6 +319,12 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
 }
 
 template bool AttentionBlockedSplitK<KvCodecQ8, 256>(
+    const float*, const std::uint8_t*, const std::uint8_t*, float*,
+    std::uint32_t, const std::uint32_t*, std::uint32_t, std::uint32_t,
+    std::uint32_t, std::uint32_t, hipStream_t, float, std::uint32_t,
+    std::uint32_t, float*, std::size_t);
+
+template bool AttentionBlockedSplitK<KvCodecQ8, 128>(
     const float*, const std::uint8_t*, const std::uint8_t*, float*,
     std::uint32_t, const std::uint32_t*, std::uint32_t, std::uint32_t,
     std::uint32_t, std::uint32_t, hipStream_t, float, std::uint32_t,
