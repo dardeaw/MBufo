@@ -48,7 +48,7 @@ void TestGpuGEMV() {
     HIP_CHECK(
         hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-    gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kF32, d_x, d_y, M, K);
+    gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kF32, d_x, d_y, M, K, nullptr, nullptr, 0);
     HIP_CHECK(hipDeviceSynchronize());
 
     HIP_CHECK(
@@ -112,7 +112,7 @@ void TestGpuGEMV() {
     HIP_CHECK(
         hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-    gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kBF16, d_x, d_y, M, K);
+    gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kBF16, d_x, d_y, M, K, nullptr, nullptr, 0);
     HIP_CHECK(hipDeviceSynchronize());
 
     HIP_CHECK(
@@ -217,7 +217,8 @@ void TestExactBf16SmallBatchGEMM(std::size_t batch, std::size_t M = 65,
                                                K);
   for (std::size_t token = 0; token < batch; ++token) {
     gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kBF16, d_X + (token * K),
-                          d_sequential + (token * M), M, K);
+                          d_sequential + (token * M), M, K, nullptr, nullptr,
+                          0);
   }
   HIP_CHECK(hipDeviceSynchronize());
 

@@ -26,7 +26,8 @@ void QuantGemm(const HipModuleContext& ctx, const QwenTensorRef& A,
     std::abort();
   }
   ::gufo::hip::LaunchGEMV(A.data, A.type, x.data(), y.data(), M, K,
-                          static_cast<hipStream_t>(ctx.Stream()));
+                          static_cast<hipStream_t>(ctx.Stream()),
+                          ctx.PreqScratch(), ctx.PreqBytes());
 }
 #endif
 

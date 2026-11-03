@@ -29,7 +29,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <mutex>
 
 namespace gufo::core::compute::gemm::preq {
 
@@ -144,50 +143,14 @@ int PrequantizeQ8_1(const float* x_f32, void* x_q8, std::size_t n,
   return hipGetLastError() == hipSuccess ? 0 : -2;
 }
 
-// Internal decode scratch: single-stream decode owns the stream ordering, so
-// a lazily-grown static buffer is safe without per-caller plumbing. Grows
-// monotonically; never shrinks. Graph-capture safe: hipMalloc is illegal
-// during stream capture (27B single-row decode captures), so a growth that
-// would malloc inside capture returns nullptr and the caller keeps its
-// legacy path. Call WarmupNarrowQ80Prequant() once outside capture (model
-// load) to pre-grow for the widest narrow shape; the captured graph then
-// contains the prequant route with no runtime allocation.
-void* NarrowQ80PrequantScratch(std::size_t bytes, hipStream_t stream) {
-  static std::mutex mu;
-  static void* ptr = nullptr;
-  static std::size_t cap = 0;
-  std::lock_guard<std::mutex> lk(mu);
-  if (bytes <= cap) {
-    return ptr;
-  }
-  hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
-  if (stream != nullptr &&
-      hipStreamIsCapturing(stream, &status) == hipSuccess &&
-      status != hipStreamCaptureStatusNone) {
-    return nullptr;
-  }
-  if (ptr != nullptr) {
-    (void)hipFree(ptr);
-    ptr = nullptr;
-    cap = 0;
-  }
-  if (hipMalloc(&ptr, bytes) != hipSuccess) {
-    ptr = nullptr;
-    cap = 0;
-    return nullptr;
-  }
-  cap = bytes;
-  return ptr;
-}
-
-void WarmupNarrowQ80Prequant(std::size_t max_tokens, std::size_t max_k,
-                             hipStream_t stream) {
-  if (max_tokens == 0 || max_k == 0) {
-    return;
-  }
-  const std::size_t bytes =
-      PreqQ81Bytes(max_tokens, (max_k + 31) / 32 * 32);
-  (void)NarrowQ80PrequantScratch(bytes, stream);
+// Caller-owned prequant scratch (§4.2: no `static` buffers inside
+// operators). Fixed 8-token ceiling: decode never stages more than 8 rows,
+// so one buffer sized for the widest decode projection input row serves the
+// whole batch (launches on one stream are serial). Allocated once by the
+// caller outside graph capture; capture only uses it, never grows it.
+std::size_t NarrowQ80PrequantScratchBytes(std::size_t max_k) {
+  const std::size_t k = (max_k + 31) / 32 * 32;
+  return PreqQ81Bytes(8, k);
 }
 
 std::size_t NarrowQ80PrequantBytes(std::size_t tokens, std::size_t k) {
@@ -199,8 +162,8 @@ std::size_t NarrowQ80PrequantStrideBlocks(std::size_t k) {
 }
 
 // Shared quantize -> narrow-GEMV for F32 activations (27B / gemma4 decode).
-// Returns false for out-of-contract shapes or scratch failure; the caller
-// keeps its legacy path.
+// `scratch` is caller-owned (§4.2); null or short scratch refuses cleanly
+// and the caller keeps its legacy path.
 bool LaunchNarrowQ80Decode(const void* weights, const void* input,
                            float* output, std::size_t k, std::size_t rows,
                            std::size_t tokens,
@@ -209,13 +172,13 @@ bool LaunchNarrowQ80Decode(const void* weights, const void* input,
 
 bool LaunchNarrowQ80Prequant(const void* weights, const float* x_f32,
                              float* output, std::size_t k, std::size_t rows,
-                             std::size_t tokens, hipStream_t stream) {
+                             std::size_t tokens, void* scratch,
+                             std::size_t scratch_bytes, hipStream_t stream) {
   if (weights == nullptr || x_f32 == nullptr || output == nullptr) return false;
   if (tokens < 1 || tokens > 8 || k == 0 || k % 32 != 0 || rows == 0)
     return false;
-  const std::size_t bytes = NarrowQ80PrequantBytes(tokens, k);
-  void* scratch = NarrowQ80PrequantScratch(bytes, stream);
-  if (scratch == nullptr) return false;
+  if (scratch == nullptr || scratch_bytes < NarrowQ80PrequantBytes(tokens, k))
+    return false;
   if (PrequantizeQ8_1(x_f32, scratch, tokens, k, stream) != 0) return false;
   const std::size_t stride = NarrowQ80PrequantStrideBlocks(k);
   return LaunchNarrowQ80Decode(weights, scratch, output, k, rows, tokens,

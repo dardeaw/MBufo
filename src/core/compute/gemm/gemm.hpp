@@ -102,17 +102,23 @@ std::size_t PreqQ81Bytes(std::size_t n, std::size_t k);
 int PrequantizeQ8_1(const float* x_f32, void* x_q8, std::size_t n,
                     std::size_t k, hipStream_t stream);
 // Scratch + geometry helpers for the prequant -> narrow-GEMV path.
-void* NarrowQ80PrequantScratch(std::size_t bytes, hipStream_t stream);
-void WarmupNarrowQ80Prequant(std::size_t max_tokens, std::size_t max_k,
-                             hipStream_t stream);
+// §4.2 Slot-concurrency iron rule: no `static` buffers inside operators.
+// The prequant scratch is caller-owned (executor/session arena, sized by
+// NarrowQ80PrequantScratchBytes for the 8-token decode ceiling); the arena
+// is allocated outside graph capture, so capture only uses it, never grows
+// it. Null or short scratch refuses cleanly and the caller keeps its legacy
+// path.
+std::size_t NarrowQ80PrequantScratchBytes(std::size_t max_k);
 std::size_t NarrowQ80PrequantBytes(std::size_t tokens, std::size_t k);
 std::size_t NarrowQ80PrequantStrideBlocks(std::size_t k);
 // Shared quantize -> narrow-GEMV for F32 activations (27B / gemma4 decode).
-// Returns false for out-of-contract shapes or scratch failure; caller keeps
-// its legacy path.
+// `scratch` is caller-owned device memory of at least
+// NarrowQ80PrequantBytes(tokens, k) bytes (§4.2). Returns false for
+// out-of-contract shapes or short scratch; the caller keeps its legacy path.
 bool LaunchNarrowQ80Prequant(const void* weights, const float* x_f32,
                              float* output, std::size_t k, std::size_t rows,
-                             std::size_t tokens, hipStream_t stream);
+                             std::size_t tokens, void* scratch,
+                             std::size_t scratch_bytes, hipStream_t stream);
 
 // ---- flash-next decode SmallGemm (F32/F16/BF16 narrow projections) ----
 namespace fn_compat {

@@ -91,9 +91,13 @@ private:
 
 /// Computes Matrix-Vector Multiplication: y = A * x
 /// Supports both F32 and BF16 weights A
+/// `preq_scratch` is caller-owned device memory of at least
+/// NarrowQ80PrequantBytes(1, K) bytes for the shared Q8_1 prequant route
+/// (§4.2, no statics inside operators); null selects the legacy path.
 void LaunchGEMV(
     const void* A, core::GgmlType a_type, const float* x, float* y,
-    std::size_t M, std::size_t K, hipStream_t stream = nullptr,
+    std::size_t M, std::size_t K, hipStream_t stream, void* preq_scratch,
+    std::size_t preq_bytes,
     models::qwen::QwenGemmMode mode = models::qwen::QwenGemmMode::kHipDecode);
 
 /// opt-c1xx-q8k-gemv: computes y = A * x where A is stored as block_q8_K

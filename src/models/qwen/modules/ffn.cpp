@@ -50,7 +50,7 @@ void FfnForward(const HipModuleContext& ctx, const FfnLayerView& view,
       act_scratch.data(), view.intermediate_size, view.hidden_size, stream);
   ::gufo::hip::LaunchGEMV(view.down.data, view.down.type, act_scratch.data(),
                           out.data(), view.hidden_size, view.intermediate_size,
-                          stream);
+                          stream, ctx.PreqScratch(), ctx.PreqBytes());
 }
 #endif
 

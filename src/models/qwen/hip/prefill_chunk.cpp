@@ -754,7 +754,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   // 5. LM Head Logits GEMV on final token
   LaunchGEMV(weights_.output.data, weights_.output.type,
              scratch.decode.normed.data(), scratch.decode.logits.data(),
-             vocab_size, hidden_size, arena_.stream);
+             vocab_size, hidden_size, arena_.stream, arena_.d_preq_q81,
+             arena_.preq_q81_bytes);
 
   // 6. GPU Argmax. The sampled-token view enters its documented alias epoch
   // only after all SSM layer uses of alpha have completed.
@@ -1680,7 +1681,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardPromptBatchMulti(
     LaunchGEMV(executor->weights_.output.data,
                executor->weights_.output.type, scratch.decode.normed.data(),
                scratch.decode.logits.data(), config.vocab_size, hidden_size,
-               executor->arena_.stream);
+               executor->arena_.stream, executor->arena_.d_preq_q81,
+               executor->arena_.preq_q81_bytes);
     auto* d_out_token = scratch.decode.sampled_token.data();
     LaunchGPUArgmax(scratch.decode.logits.data(), d_out_token,
                     config.vocab_size, executor->arena_.stream);

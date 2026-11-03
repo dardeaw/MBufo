@@ -14,6 +14,7 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/core/compute/gemm/gemm.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -399,6 +400,10 @@ QwenGpuMemoryUsage QwenGpuArena::EstimateMemoryUsage(
   AddAllocation(detail::DecodeAttentionScratchElements(
                     config.num_attention_heads, config.head_dim),
                 sizeof(float), &scratch);
+  AddAllocation(core::compute::gemm::NarrowQ80PrequantScratchBytes(
+                    std::max<std::size_t>(
+                        {hidden, intermediate, config.ssm_inner_size})),
+                1, &scratch);
 
   const std::size_t maximum_weight_width =
       std::max<std::size_t>({q_projection, kv, attention, intermediate, ssm_qkv,
@@ -794,6 +799,16 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
     HIP_CHECK(
         hipMalloc(&d_split_k_attention, split_k_elements * sizeof(float)));
 
+    // Shared Q8_1 prequant scratch (§4.2: caller-owned, no statics inside
+    // operators): 8-token ceiling over the widest decode projection input
+    // row. Allocated once here, outside graph capture; captured decode
+    // graphs only use it, never grow it.
+    const std::size_t preq_max_k = std::max<std::size_t>(
+        {hidden_size, intermediate_size, ssm_inner_size});
+    preq_q81_bytes =
+        core::compute::gemm::NarrowQ80PrequantScratchBytes(preq_max_k);
+    HIP_CHECK(hipMalloc(&d_preq_q81, preq_q81_bytes));
+
     // Weight BF16 scratch: largest per-layer matmul weight in bf16 elements,
     // used by the prefill dequant-to-BF16 then BF16 GEMM path.
     const std::size_t max_weight_elems =
@@ -888,6 +903,8 @@ QwenGpuScratchView QwenGpuArena::GetScratchView(
               // uint32 view.
               .sampled_token = {reinterpret_cast<std::uint32_t*>(d_alpha_buf),
                                 1},
+              .preq_q81 = {static_cast<std::uint8_t*>(d_preq_q81),
+                           preq_q81_bytes},
           },
       .attention =
           {
@@ -979,6 +996,8 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   d_scratch_bf16 = other.d_scratch_bf16;
   d_scratch_q8_act = other.d_scratch_q8_act;
   d_split_k_attention = other.d_split_k_attention;
+  d_preq_q81 = other.d_preq_q81;
+  preq_q81_bytes = other.preq_q81_bytes;
   d_weights_bf16 = other.d_weights_bf16;
   d_ssm_conv_buffers_ = other.d_ssm_conv_buffers_;
   d_ssm_deltanet_buffers_ = other.d_ssm_deltanet_buffers_;
@@ -1028,6 +1047,8 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   other.d_scratch_bf16 = nullptr;
   other.d_scratch_q8_act = nullptr;
   other.d_split_k_attention = nullptr;
+  other.d_preq_q81 = nullptr;
+  other.preq_q81_bytes = 0;
   other.d_weights_bf16 = nullptr;
   other.d_ssm_conv_buffers_ = {};
   other.d_ssm_deltanet_buffers_ = {};
@@ -1084,6 +1105,8 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     d_scratch_bf16 = other.d_scratch_bf16;
     d_scratch_q8_act = other.d_scratch_q8_act;
     d_split_k_attention = other.d_split_k_attention;
+  d_preq_q81 = other.d_preq_q81;
+  preq_q81_bytes = other.preq_q81_bytes;
     d_weights_bf16 = other.d_weights_bf16;
     d_ssm_conv_buffers_ = other.d_ssm_conv_buffers_;
     d_ssm_deltanet_buffers_ = other.d_ssm_deltanet_buffers_;
@@ -1130,6 +1153,8 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     other.d_scratch_bf16 = nullptr;
     other.d_scratch_q8_act = nullptr;
     other.d_split_k_attention = nullptr;
+  other.d_preq_q81 = nullptr;
+  other.preq_q81_bytes = 0;
     other.d_weights_bf16 = nullptr;
     other.d_ssm_conv_buffers_ = {};
     other.d_ssm_deltanet_buffers_ = {};
@@ -1252,6 +1277,8 @@ void QwenGpuArena::FreeAll() noexcept {
     LogCleanupError(hipFree(d_scratch_q8_act));
   if (d_split_k_attention != nullptr)
     LogCleanupError(hipFree(d_split_k_attention));
+  if (d_preq_q81 != nullptr)
+    LogCleanupError(hipFree(d_preq_q81));
   if (d_weights_bf16 != nullptr)
     LogCleanupError(hipFree(d_weights_bf16));
   if (d_ssm_replay_qkv_ != nullptr)
@@ -1298,6 +1325,8 @@ void QwenGpuArena::FreeAll() noexcept {
   d_scratch_bf16 = nullptr;
   d_scratch_q8_act = nullptr;
   d_split_k_attention = nullptr;
+  d_preq_q81 = nullptr;
+  preq_q81_bytes = 0;
   d_weights_bf16 = nullptr;
   d_ssm_conv_buffers_ = {};
   d_ssm_deltanet_buffers_ = {};

@@ -206,6 +206,10 @@ struct QwenDecodeScratch {
   /// Aliases the first element of QwenSsmScratch::alpha. It is legal only
   /// after all layer execution has completed, during the sampling/output epoch.
   std::span<std::uint32_t> sampled_token;
+
+  /// Shared Q8_1 prequant scratch (§4.2, caller-owned arena bytes sized by
+  /// NarrowQ80PrequantScratchBytes). Fixed-size; independent of batch.
+  std::span<std::uint8_t> preq_q81;
 };
 
 struct QwenAttentionScratch {
@@ -345,6 +349,8 @@ public:
   std::unique_ptr<HipblasLtGemm> hipblaslt_gemm;
   void* d_scratch_bf16{nullptr};
   float* d_split_k_attention{nullptr};
+  void* d_preq_q81{nullptr};
+  std::size_t preq_q81_bytes{0};
   hip_bfloat16* d_weights_bf16{nullptr};
   void* d_scratch_q8_act{nullptr};
 
