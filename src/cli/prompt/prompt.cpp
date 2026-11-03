@@ -33,6 +33,7 @@
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/models/gemma4/engine.hpp"
+#include "src/models/llama/engine.hpp"
 #endif
 
 namespace gufo::cli {
@@ -1241,6 +1242,85 @@ int RunPrompt(std::span<const char* const> args) {
                 << (dseconds > 0 ? static_cast<double>(generated.size()) /
                                        dseconds
                                  : 0.0)
+                << " tok/s)\n";
+    }
+    return 0;
+  }
+  if (reader->GetMetadataString("general.architecture") == "llama") {
+    // Llama-3.1-Instruct chat framing (manual template: system/user turns
+    // with explicit headers; the tokenizer maps them to special ids).
+    std::string llama_prompt = "<|begin_of_text|>";
+    if (!opt.system_prompt.empty()) {
+      llama_prompt += "<|start_header_id|>system<|end_header_id|>\n\n";
+      llama_prompt += opt.system_prompt;
+      llama_prompt += "<|eot_id|>";
+    }
+    llama_prompt += "<|start_header_id|>user<|end_header_id|>\n\n";
+    llama_prompt += opt.prompt_text;
+    llama_prompt += "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+    models::llama::ModelOptions lopt;
+    lopt.max_context = 32768;
+    if (const char* e = getenv("LLAMA_KV_QUANT"))
+      lopt.kv_cache_quant = e;
+    if (const char* e = getenv("LLAMA_CTX")) {
+      const long v = std::strtol(e, nullptr, 10);
+      if (v >= 1024)
+        lopt.max_context = static_cast<std::uint32_t>(v);
+    }
+    auto lmodel = models::llama::Model::Load(opt.model_path, lopt, &err);
+    if (!lmodel) {
+      std::cerr << "Llama load failed: " << err << '\n';
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    PrintModelLoadTime(model_load_start, true);
+    auto lsession = lmodel->CreateSession(&err);
+    if (!lsession) {
+      std::cerr << "Llama session failed: " << err << '\n';
+      return 1;
+    }
+    const auto lids = lmodel->Tokenize(llama_prompt, /*add_bos=*/false);
+    std::fprintf(stderr, "[llama] prompt tokens: %zu\n", lids.size());
+    std::vector<std::int32_t> prompt(lids.begin(), lids.end());
+    const auto gstart = std::chrono::steady_clock::now();
+    if (!lsession->Sync(prompt, &err)) {
+      std::cerr << "Llama prefill failed: " << err << '\n';
+      return 1;
+    }
+    const double prefill_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      gstart)
+            .count();
+    const auto dstart = std::chrono::steady_clock::now();
+    std::vector<std::int32_t> generated;
+    while (generated.size() < opt.max_tokens) {
+      const std::int32_t token = lsession->SampleGreedy();
+      std::cout << lmodel->Decode(std::span<const std::int32_t>(&token, 1))
+                << std::flush;
+      generated.push_back(token);
+      if (lmodel->IsStopToken(token))
+        break;
+      if (!lsession->Evaluate(token, &err)) {
+        std::cerr << "Llama decode failed: " << err << '\n';
+        return 1;
+      }
+    }
+    std::cout << '\n';
+    if (opt.verbose) {
+      const double dseconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        dstart)
+              .count();
+      std::cerr << "\nprefill: " << prompt.size() << " tokens in "
+                << prefill_seconds << "s ("
+                << (prefill_seconds > 0
+                        ? static_cast<double>(prompt.size()) / prefill_seconds
+                        : 0.0)
+                << " tok/s)\ndecode: " << generated.size() << " tokens in "
+                << dseconds << "s ("
+                << (dseconds > 0
+                        ? static_cast<double>(generated.size()) / dseconds
+                        : 0.0)
                 << " tok/s)\n";
     }
     return 0;

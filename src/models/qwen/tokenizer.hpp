@@ -98,6 +98,7 @@ private:
     kNone,
     kQwen35,
     kGemma4,
+    kLlama,
   };
 
   struct PairHash {
