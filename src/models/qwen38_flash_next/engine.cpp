@@ -1,4 +1,5 @@
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen38_flash_next/draft_backend.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1103,9 +1104,11 @@ bool Session::PrepareDecode(const DecodeRequest& request,
                           draft_vocab_.Fits(anchor, [&](std::int32_t token) {
                             return model_->InDraftSubset(token);
                           });
-  if (!defer_head && !DraftCatchUp(anchor, true, error_msg,
-                                   sampled ? &pending->candidates : nullptr,
-                                   pending->draft_subset)) {
+  FlashNextMtpDraftBackend draft_backend(*this);
+  if (!defer_head && !draft_backend.ProposeChain(
+                          anchor,
+                          sampled ? &pending->candidates : nullptr,
+                          pending->draft_subset, error_msg)) {
     return false;
   }
   pending->draft = draft_token_;
@@ -1273,9 +1276,9 @@ bool Session::FinishDecode(const DecodeRequest& request,
     }
     ++keep;
   }
-  if (!exec.Rollback(
-          *session_, keep, error_msg,
-          gpu_verification && !cpu_rows ? logits_.data() : nullptr)) {
+  FlashNextMtpDraftBackend draft_rollback(*this);
+  if (!draft_rollback.Rollback(keep, gpu_verification && !cpu_rows,
+                               error_msg)) {
     return false;
   }
   if (!gpu_verification || cpu_rows) {
@@ -1619,48 +1622,98 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
       }
     }
   }
-  std::vector<rocm::Executor::BatchItem> items;
+  struct VerifyCohortItem {
+    rocm::Executor::BatchItem batch;
+    std::size_t request;
+  };
+  std::vector<VerifyCohortItem> items;
+  bool any_speculative = false;
   for (std::size_t i = 0; i < requests.size(); ++i) {
     const auto& r = requests[i];
     if (!r.session->session_->Cancelled() && !pending[i].chain.empty()) {
-      items.push_back({r.session->session_.get(), pending[i].chain,
-                       pending[i].speculative});
+      items.push_back({{r.session->session_.get(), pending[i].chain,
+                        pending[i].speculative},
+                       i});
+      any_speculative = any_speculative || pending[i].speculative;
     }
   }
-  if (!items.empty() && !exec.ForwardBatch(items, error_msg))
-    return false;
-  std::uint32_t offset = 0;
+  // D-1 verify-batch core: a cohort carrying speculative verify chains shares
+  // one ForwardBatch only while its packed rows stay on the single-path
+  // kernels (kDecodeRows total). Past that the batched GEMM routes take
+  // different numerics from single Forward and flip greedy accepts at close
+  // races (measured: cold-concurrent exact, warm width-4 divergent,
+  // --draft-tokens 1 restores exactness). Plain-only cohorts are bit-exact at
+  // any width and keep the single launch.
+  constexpr std::uint32_t kVerifyBatchMaxRows = 8;
+  std::vector<std::pair<std::size_t, std::size_t>> groups;
+  if (!items.empty()) {
+    if (!any_speculative || items.size() <= 1) {
+      groups.emplace_back(0, items.size());
+    } else {
+      std::size_t begin = 0;
+      std::uint32_t rows = 0;
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto n = static_cast<std::uint32_t>(
+            items[i].batch.tokens.size());
+        if (i > begin && rows + n > kVerifyBatchMaxRows) {
+          groups.emplace_back(begin, i);
+          begin = i;
+          rows = 0;
+        }
+        rows += n;
+      }
+      groups.emplace_back(begin, items.size());
+    }
+  }
+  std::vector<bool> launched(requests.size(), false);
+  for (const auto [begin, end] : groups) {
+    std::vector<rocm::Executor::BatchItem> group;
+    group.reserve(end - begin);
+    for (std::size_t i = begin; i < end; ++i)
+      group.push_back(items[i].batch);
+    if (!exec.ForwardBatch(group, error_msg))
+      return false;
+    std::uint32_t offset = 0;
+    for (std::size_t i = begin; i < end; ++i) {
+      const auto& p = pending[items[i].request];
+      const auto& r = requests[items[i].request];
+      auto& session = *r.session;
+      const auto row_offset = offset;
+      offset += static_cast<std::uint32_t>(p.chain.size());
+      launched[items[i].request] = true;
+      if (!r.outcome->error.empty())
+        continue;
+      if (session.session_->Cancelled()) {
+        r.outcome->error = "generation cancelled";
+        continue;
+      }
+      float* logits = !p.speculative       ? session.logits_.data()
+                      : p.gpu_verification ? nullptr
+                                           : session.verify_logits_.data();
+      try {
+        r.outcome->completed =
+            exec.SelectBatchLogits(row_offset,
+                                   static_cast<std::uint32_t>(p.chain.size()),
+                                   logits, &r.outcome->error) &&
+            session.FinishDecode(r, p, &r.outcome->error);
+      } catch (const std::exception& exception) {
+        r.outcome->error = exception.what();
+      }
+    }
+  }
   for (std::size_t i = 0; i < requests.size(); ++i) {
-    const auto& p = pending[i];
+    if (launched[i])
+      continue;
     const auto& r = requests[i];
-    auto& session = *r.session;
-    const bool included =
-        std::any_of(items.begin(), items.end(), [&](const auto& item) {
-          return item.session == session.session_.get();
-        });
-    const auto row_offset = offset;
-    if (included)
-      offset += p.chain.size();
     if (!r.outcome->error.empty())
       continue;
-    if (session.session_->Cancelled()) {
+    if (r.session->session_->Cancelled()) {
       r.outcome->error = "generation cancelled";
       continue;
     }
-    if (p.chain.empty()) {
+    if (pending[i].chain.empty()) {
       r.outcome->completed = true;
       continue;
-    }
-    float* logits = !p.speculative       ? session.logits_.data()
-                    : p.gpu_verification ? nullptr
-                                         : session.verify_logits_.data();
-    try {
-      r.outcome->completed =
-          exec.SelectBatchLogits(row_offset, p.chain.size(), logits,
-                                 &r.outcome->error) &&
-          session.FinishDecode(r, p, &r.outcome->error);
-    } catch (const std::exception& exception) {
-      r.outcome->error = exception.what();
     }
   }
   const bool used_lookup =

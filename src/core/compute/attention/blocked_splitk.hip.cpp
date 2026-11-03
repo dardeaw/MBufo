@@ -260,7 +260,8 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
                             std::uint32_t kv_heads, std::uint32_t d,
                             hipStream_t stream, float score_scale,
                             std::uint32_t key_block_bytes,
-                            std::uint32_t value_block_bytes) {
+                            std::uint32_t value_block_bytes, float* partials,
+                            std::size_t partials_bytes) {
   static_assert(kHeadDim == 256, "blocked Split-K decode is d=256 (SWA) only");
   if (kHeadDim != 256 || d != kHeadDim || heads == 0 || kv_heads == 0 ||
       heads > 16 || heads % kv_heads != 0 || n_tokens == 0 ||
@@ -281,26 +282,23 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
   if (splits > kBlockedSplitKMaxSplits) {
     splits = kBlockedSplitKMaxSplits;
   }
-  // Scratch for the gated maxima (MaxTokens x 16 heads x 64 splits x (d+2)),
-  // allocated once like the F16 Split-K statics; failure falls back cleanly.
-  static float* s_partial = nullptr;
-  if (s_partial == nullptr) {
-    constexpr std::size_t kMaxPartials = 8ull * 16ull * 64ull * (256ull + 2ull);
-    void* p = nullptr;
-    if (hipMalloc(&p, kMaxPartials * sizeof(float)) != hipSuccess) {
-      return false;
-    }
-    s_partial = static_cast<float*>(p);
+  // Partials for the per-chunk online-softmax state (MaxTokens x 16 heads x
+  // 64 splits x (d+2)) come from the caller arena (§4.2: no statics inside
+  // operators); short scratch refuses cleanly. Launches on one stream are
+  // serial, so one buffer serves the whole batch.
+  if (partials == nullptr ||
+      partials_bytes < AttentionBlockedSplitKScratchBytes()) {
+    return false;
   }
   const std::uint32_t chunk = (kv_len + splits - 1u) / splits;
   hipLaunchKernelGGL((AttentionBlockedSplitKKernel<Codec, kHeadDim>),
                      dim3(heads, n_tokens, splits), dim3(kThreads), 0, stream,
-                     q, k_cache, v_cache, s_partial, start_pos, heads, kv_heads,
+                     q, k_cache, v_cache, partials, start_pos, heads, kv_heads,
                      score_scale, splits, chunk, key_block_bytes,
                      value_block_bytes);
   hipLaunchKernelGGL((AttentionBlockedSplitKMergeKernel<kHeadDim>),
                      dim3(heads, n_tokens), dim3(kThreads), 0, stream,
-                     s_partial, out, heads, splits);
+                     partials, out, heads, splits);
   return true;
 }
 
@@ -308,7 +306,7 @@ template bool AttentionBlockedSplitK<KvCodecQ8, 256>(
     const float*, const std::uint8_t*, const std::uint8_t*, float*,
     std::uint32_t, const std::uint32_t*, std::uint32_t, std::uint32_t,
     std::uint32_t, std::uint32_t, hipStream_t, float, std::uint32_t,
-    std::uint32_t);
+    std::uint32_t, float*, std::size_t);
 
 }  // namespace gufo::core::compute::blocked_splitk
 #endif  // ENGINE_ENABLE_HIP

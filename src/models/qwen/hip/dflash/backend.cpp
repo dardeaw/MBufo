@@ -17,6 +17,7 @@
 #include "src/core/sampling.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
+#include "src/core/speculative/draft_registry.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -831,6 +832,56 @@ void QwenDFlashGpuDraftBackend::Reset() noexcept {
   primed_ = false;
   proposal_active_ = false;
 }
+
+namespace {
+
+bool RegisterQwenDFlashDraftBackend() {
+  speculative::RegisterDraftBackend(
+      speculative::DraftBackendInfo{
+          .name = "dflash2",
+          .description =
+              "Qwen3.8-27B DFlash2 independent draft model "
+              "(target-bound; shares the blocked-KV target features)",
+          .requires_target_model = true,
+          .requires_session = false,
+      },
+      [](const speculative::DraftBackendRequest& request,
+         std::string* error_msg) -> std::unique_ptr<speculative::IDraftBackend> {
+        if (request.target_kind != "qwen27b" || request.target_model == nullptr) {
+          if (error_msg != nullptr) {
+            *error_msg =
+                "dflash2 backend requires a qwen27b target model "
+                "(target_kind=\"qwen27b\")";
+          }
+          return nullptr;
+        }
+        if (request.draft_model_path.empty()) {
+          if (error_msg != nullptr) {
+            *error_msg = "dflash2 backend requires draft_model_path "
+                         "(Qwen3.8-27B-DFlash2 GGUF)";
+          }
+          return nullptr;
+        }
+        auto target =
+            std::static_pointer_cast<const QwenGpuModel>(request.target_model);
+        QwenDFlashGpuDraftConfig config{
+            .max_context = request.max_context != 0
+                               ? request.max_context
+                               : target->GetConfig().context_length,
+            .max_draft_tokens = request.max_draft_tokens != 0
+                                    ? request.max_draft_tokens
+                                    : 7u,
+            .policy = speculative::DFlashDraftPolicy::kAdaptive,
+        };
+        return QwenDFlashGpuDraftBackend::CreateFromGguf(
+            request.draft_model_path, std::move(target), config, error_msg);
+      });
+  return true;
+}
+
+const bool kQwenDFlashDraftRegistered = RegisterQwenDFlashDraftBackend();
+
+}  // namespace
 
 }  // namespace gufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

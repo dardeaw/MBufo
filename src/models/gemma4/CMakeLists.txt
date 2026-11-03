@@ -14,6 +14,7 @@ if (ENGINE_ENABLE_HIP)
     kernels/attention_wmma.hip.cpp
     kernels/attention_wmma512.hip.cpp
     engine.cpp
+    draft_backend.cpp
     mtp.hip.cpp)
   set_source_files_properties(kernels/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/attention_wmma.hip.cpp PROPERTIES LANGUAGE HIP)
@@ -25,5 +26,6 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_gemma4 PUBLIC
     gufo_qwen38_flash_next
     gufo_core_blocked_kv
+    gufo_core_gemm
     hip::host roc::hipblas)
 endif()

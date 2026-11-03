@@ -76,8 +76,12 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
     const auto& layer = weights.layers[l];
     const auto route_plan = ResolveQwenLayerRoute(
         policy, QwenExecutionMode::kDecode, layer.is_full_attention);
+    // §4.2: the shared prequant scratch rides the module context so the
+    // module-routed GEMVs (attn_output, ffn_down) use the caller arena; the
+    // buffer is allocated outside graph capture, capture only uses it.
     const gufo::models::qwen::HipModuleContext module_ctx(
-        static_cast<void*>(arena.stream), l, pos);
+        static_cast<void*>(arena.stream), l, pos, arena.d_preq_q81,
+        arena.preq_q81_bytes);
 
     {
       // Pre-RMSNorm, routed through the norm module (HIP backend). Same
@@ -238,7 +242,7 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
 
       LaunchGEMV(layer.ssm_out.data, layer.ssm_out.type, ssm_scratch.out.data(),
                  attention_scratch.output.data(), hidden_size, ssm_inner_size,
-                 arena.stream);
+                 arena.stream, arena.d_preq_q81, arena.preq_q81_bytes);
     }
 
     {
@@ -289,7 +293,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
     // 4. LM Head Logits GEMV on final token
     LaunchGEMV(weights.output.data, weights.output.type,
                decode_scratch.normed.data(), decode_scratch.logits.data(),
-               vocab_size, hidden_size, arena.stream);
+               vocab_size, hidden_size, arena.stream, arena.d_preq_q81,
+               arena.preq_q81_bytes);
 
     // 5. Parallel GPU Argmax
     LaunchBatchedGPUArgmax(decode_scratch.logits.data(), d_out_token, 1,

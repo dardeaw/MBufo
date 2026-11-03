@@ -211,7 +211,7 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
                 static_cast<const float*>(weights.hidden_norm.data),
                 d_fusion_ + hidden, hidden, 1.0e-6F, stream_);
   LaunchGEMV(weights.fusion_projection.data, weights.fusion_projection.type,
-             d_fusion_, d_hidden_, hidden, 2 * hidden, stream_,
+             d_fusion_, d_hidden_, hidden, 2 * hidden, stream_, nullptr, 0,
              models::qwen::QwenGemmMode::kHipMtp);
 
   LaunchRMSNorm(d_hidden_, static_cast<const float*>(layer.attn_norm.data),
@@ -237,7 +237,7 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
       d_context_, 0, position, max_context_, config.num_attention_heads,
       config.num_key_value_heads, config.head_dim, stream_, d_split_k_scratch_);
   LaunchGEMV(layer.attn_output.data, layer.attn_output.type, d_context_,
-             d_attn_out_, hidden, attention, stream_,
+             d_attn_out_, hidden, attention, stream_, nullptr, 0,
              models::qwen::QwenGemmMode::kHipMtp);
   LaunchResidualAdd(d_hidden_, d_attn_out_, d_hidden_, hidden, stream_);
 
@@ -247,7 +247,7 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
                         layer.ffn_up.data, layer.ffn_up.type, d_normed_,
                         d_ffn_act_, config.intermediate_size, hidden, stream_);
   LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, d_ffn_act_, d_ffn_out_,
-             hidden, config.intermediate_size, stream_,
+             hidden, config.intermediate_size, stream_, nullptr, 0,
              models::qwen::QwenGemmMode::kHipMtp);
   LaunchResidualAdd(d_hidden_, d_ffn_out_, d_hidden_, hidden, stream_);
   LaunchRMSNorm(d_hidden_,
@@ -259,7 +259,7 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
     return 0;
   }
   LaunchGEMV(weights.output.data, weights.output.type, d_feedback_hidden_,
-             d_logits_, config.vocab_size, hidden, stream_,
+             d_logits_, config.vocab_size, hidden, stream_, nullptr, 0,
              models::qwen::QwenGemmMode::kHipMtp);
   LaunchGPUArgmax(d_logits_, d_out_token_, config.vocab_size, stream_);
   tokenization::TokenId result = 0;

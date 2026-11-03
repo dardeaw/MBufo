@@ -315,14 +315,14 @@ void TestFusedSSMInputProjectionMatchesGemv(gufo::core::GgmlType type,
   float* const split_alpha = split_gate + kInnerSize;
   float* const split_beta = split_alpha + kTimeStepRank;
   const auto mode = gufo::models::qwen::QwenGemmMode::kHipDecode;
-  gufo::hip::LaunchGEMV(d_qkv, type, d_x, split_qkv, kQkvSize, kHidden, nullptr,
+  gufo::hip::LaunchGEMV(d_qkv, type, d_x, split_qkv, kQkvSize, kHidden, nullptr, nullptr, 0,
                         mode);
   gufo::hip::LaunchGEMV(d_gate, type, d_x, split_gate, kInnerSize, kHidden,
-                        nullptr, mode);
+                        nullptr, nullptr, 0, mode);
   gufo::hip::LaunchGEMV(d_alpha, type, d_x, split_alpha, kTimeStepRank, kHidden,
-                        nullptr, mode);
+                        nullptr, nullptr, 0, mode);
   gufo::hip::LaunchGEMV(d_beta, type, d_x, split_beta, kTimeStepRank, kHidden,
-                        nullptr, mode);
+                        nullptr, nullptr, 0, mode);
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<float> fused(total);
@@ -486,7 +486,7 @@ void TestBatchedFfnDownMatchesGemv(gufo::core::GgmlType type, const char* label,
   HIP_CHECK(
       hipMemcpy(d_x, x.data(), columns * sizeof(float), hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchGEMV(d_w, type, d_x, d_reference, rows, columns, nullptr,
+  gufo::hip::LaunchGEMV(d_w, type, d_x, d_reference, rows, columns, nullptr, nullptr, 0,
                         gufo::models::qwen::QwenGemmMode::kHipDecode);
   HIP_CHECK(hipDeviceSynchronize());
   std::vector<float> reference(rows);
@@ -513,7 +513,7 @@ void TestBatchedFfnDownMatchesGemv(gufo::core::GgmlType type, const char* label,
                         columns * sizeof(float), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_x, batch_x[row].data(), columns * sizeof(float),
                         hipMemcpyHostToDevice));
-    gufo::hip::LaunchGEMV(d_w, type, d_x, d_reference, rows, columns, nullptr,
+    gufo::hip::LaunchGEMV(d_w, type, d_x, d_reference, rows, columns, nullptr, nullptr, 0,
                           gufo::models::qwen::QwenGemmMode::kHipDecode);
     HIP_CHECK(hipDeviceSynchronize());
     batch_reference[row].resize(rows);

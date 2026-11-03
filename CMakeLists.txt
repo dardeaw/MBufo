@@ -125,11 +125,14 @@ if (ENGINE_ENABLE_HIP)
   add_library(gufo_core_blocked_kv STATIC
     src/core/compute/attention/blocked_kv.hip.cpp
     src/core/compute/attention/blocked_wmma.hip.cpp
-    src/core/compute/attention/blocked_splitk.hip.cpp)
+    src/core/compute/attention/blocked_splitk.hip.cpp
+    src/core/compute/attention/mixed_batch_attn.hip.cpp
+    src/core/compute/attention/attention_dispatcher.hpp)
   set_source_files_properties(
     src/core/compute/attention/blocked_kv.hip.cpp
     src/core/compute/attention/blocked_wmma.hip.cpp
-    src/core/compute/attention/blocked_splitk.hip.cpp PROPERTIES LANGUAGE HIP)
+    src/core/compute/attention/blocked_splitk.hip.cpp
+    src/core/compute/attention/mixed_batch_attn.hip.cpp PROPERTIES LANGUAGE HIP)
   set_target_properties(gufo_core_blocked_kv PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
@@ -143,6 +146,56 @@ if (ENGINE_ENABLE_HIP)
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
   target_link_libraries(gufo_core_blocked_kv PUBLIC hip::host)
+endif()
+
+if (ENGINE_ENABLE_HIP)
+  # Shared decode GEMV / fused-MoE kernels (Phase B): gemma4 Wave32 sdot4
+  # base, 27B block shapes, flash-next SmallGemm + MoE epilogue. Same HIP
+  # dialect as the blocked-KV lib; the wave32 shuffles mean no
+  # -mwavefrontsize64.
+  add_library(gufo_core_gemm STATIC
+    src/core/compute/gemm/gemv_narrow_q8.hip
+    src/core/compute/gemm/quantize_q8_1.hip
+    src/core/compute/gemm/gemv_wave32_sdot4.hip
+    src/core/compute/gemm/moe_fused.hip
+    src/core/compute/gemm/w8a8_wmma.hip
+    src/core/compute/gemm/hipblaslt_runner.hip
+    src/core/compute/gemm/w8a8_tiled.hip
+    src/core/compute/gemm/dense_f16.hip
+    src/core/compute/gemm/routed_moe.hip
+    src/core/compute/gemm/argmax.hip
+    src/core/compute/gemm/gemm.hpp
+    src/core/compute/gemm/gemm_device.cuh
+    src/core/compute/gemm/gemm_dispatcher.hpp
+    src/core/compute/gemm/hipblaslt_runner.hpp)
+  set_source_files_properties(
+    src/core/compute/gemm/gemv_narrow_q8.hip
+    src/core/compute/gemm/quantize_q8_1.hip
+    src/core/compute/gemm/gemv_wave32_sdot4.hip
+    src/core/compute/gemm/moe_fused.hip
+    src/core/compute/gemm/w8a8_wmma.hip
+    src/core/compute/gemm/hipblaslt_runner.hip
+    src/core/compute/gemm/w8a8_tiled.hip
+    src/core/compute/gemm/dense_f16.hip
+    src/core/compute/gemm/routed_moe.hip
+    src/core/compute/gemm/argmax.hip PROPERTIES LANGUAGE HIP)
+  # The Wave64 WMMA instantiation needs wavefrontsize64 (the same per-file
+  # flag the model libs use for their WMMA TUs); this file holds no wave32
+  # shuffles. The scalar tail kernel is wave-size agnostic.
+  set_source_files_properties(
+    src/core/compute/gemm/w8a8_wmma.hip PROPERTIES COMPILE_OPTIONS
+    "-mwavefrontsize64")
+  set_target_properties(gufo_core_gemm PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+  target_compile_definitions(gufo_core_gemm PRIVATE ENGINE_ENABLE_HIP=1)
+  target_compile_options(gufo_core_gemm PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+  target_include_directories(gufo_core_gemm PUBLIC ${PROJECT_SOURCE_DIR})
+  target_include_directories(gufo_core_gemm SYSTEM PUBLIC
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR}
+    ${ROCWMMA_INCLUDE_DIR})
+  target_link_libraries(gufo_core_gemm PUBLIC hip::host roc::hipblaslt)
 endif()
 
 add_library(gufo_diagnostics STATIC
@@ -387,6 +440,7 @@ if (BUILD_TESTING)
 
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
+  add_subdirectory(tests/models/gemma4)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
 
@@ -460,6 +514,11 @@ if (BUILD_TESTING)
   target_link_libraries(sampling_test PRIVATE gufo_core)
   add_test(NAME sampling_test COMMAND sampling_test)
   set_tests_properties(sampling_test PROPERTIES LABELS "cpu;sampling")
+
+  add_executable(draft_registry_test tests/core/test_draft_registry.cpp)
+  target_link_libraries(draft_registry_test PRIVATE gufo_core)
+  add_test(NAME draft_registry_test COMMAND draft_registry_test)
+  set_tests_properties(draft_registry_test PROPERTIES LABELS "cpu;speculative")
 
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp

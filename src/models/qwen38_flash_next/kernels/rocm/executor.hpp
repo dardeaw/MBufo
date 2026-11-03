@@ -226,7 +226,7 @@ private:
   /// once (the GEMM tier's arena must be grown before capture).
   std::unordered_map<std::uint64_t, hipGraphExec_t> graphs_;
   std::unordered_set<std::uint64_t> warmed_;
-  std::vector<void*> allocations_;
+  mutable std::vector<void*> allocations_;
   std::size_t allocated_bytes_{0};
   std::size_t rollback_bytes_{0};
   std::function<bool()> is_cancelled_;
@@ -564,7 +564,7 @@ private:
                  std::uint32_t max_context, bool sparse, std::string* error_msg,
                  bool last_only, bool projections_ready, bool project_output,
                  std::uint32_t checkpoint_tokens, Session& session,
-                 bool defer_wmma = false) const;
+                 bool defer_wmma = false, bool is_verify = false) const;
   /// Provision and incrementally dequantize a session's persistent blocked
   /// staging up to `need` rows (shared by the staging path and mixed).
   [[nodiscard]] bool EnsureKvStaging(Session& session,
@@ -749,10 +749,12 @@ private:
   // preparing the next layer. ForwardBatch drains before reusing this table.
   mutable GdnBatchItem* batch_gdn_host_{nullptr};
   mutable GdnBatchItem* batch_gdn_{nullptr};
-  // Mapped MixedBlk table for the mixed-batch attention path: one entry per
-  // batch item, read directly by the GPU. ForwardBatch drains before reuse.
-  mutable MixedBlk* batch_mixed_host_{nullptr};
-  mutable MixedBlk* batch_mixed_{nullptr};
+  // Device scratch for the unified mixed-batch attention launcher
+  // (gufo::core::compute::mixed_batch): device descriptor table, position
+  // scalars and split-K partials. Allocated once, freed with allocations_
+  // at teardown. The caller owns the arena (§4.2).
+  mutable void* mixed_scratch_{nullptr};
+  mutable std::size_t mixed_scratch_bytes_{0};
   mutable std::uint64_t mixed_batches_{0};
   mutable std::uint32_t batch_rows_{0};
   mutable const float* selected_logits_{nullptr};
@@ -767,7 +769,7 @@ private:
   YarnRope yarn_{};
   /// Bounded score scratch, shared by sequential selector chunks.
   std::size_t select_score_floats_{0};
-  std::vector<void*> allocations_;
+  mutable std::vector<void*> allocations_;
   /// Coherent pinned storage, read directly by the GPU through s_.ple_emb.
   /// Reused only after the preceding forward has drained its stream.
   mutable hip::HostAllocations host_allocations_;

@@ -50,6 +50,14 @@ struct QwenGpuBatchItem {
   std::uint32_t position{0};
 };
 
+/// One session's prompt chunk inside a cross-session prefill batch.
+struct QwenPromptBatchItem {
+  QwenGpuExecutor* executor{nullptr};
+  std::span<const tokenization::TokenId> tokens;
+  std::uint32_t start_pos{0};
+  bool compute_logits{true};
+};
+
 struct QwenGpuVerificationItem {
   QwenGpuExecutor* executor{nullptr};
   std::span<const tokenization::TokenId> tokens;
@@ -198,6 +206,10 @@ struct QwenDecodeScratch {
   /// Aliases the first element of QwenSsmScratch::alpha. It is legal only
   /// after all layer execution has completed, during the sampling/output epoch.
   std::span<std::uint32_t> sampled_token;
+
+  /// Shared Q8_1 prequant scratch (§4.2, caller-owned arena bytes sized by
+  /// NarrowQ80PrequantScratchBytes). Fixed-size; independent of batch.
+  std::span<std::uint8_t> preq_q81;
 };
 
 struct QwenAttentionScratch {
@@ -337,6 +349,8 @@ public:
   std::unique_ptr<HipblasLtGemm> hipblaslt_gemm;
   void* d_scratch_bf16{nullptr};
   float* d_split_k_attention{nullptr};
+  void* d_preq_q81{nullptr};
+  std::size_t preq_q81_bytes{0};
   hip_bfloat16* d_weights_bf16{nullptr};
   void* d_scratch_q8_act{nullptr};
 
@@ -497,6 +511,16 @@ public:
   [[nodiscard]] static std::vector<tokenization::TokenId> ForwardTokenBatch(
       std::span<const QwenGpuBatchItem> items);
 
+  /// Runs independent sessions' prompt chunks layer-synchronously: every
+  /// session projects and appends KV with its own arena, one unified
+  /// mixed-batch attention launch
+  /// (gufo::core::compute::mixed_batch::LaunchMixedBatchAttention) covers
+  /// the batch's attention rows per layer, then every session runs its own
+  /// output projection and FFN. Refuses blocked-Q8 and non-F16 KV policies
+  /// (mirroring ForwardTokenBatch) and batches wider than the decode cap.
+  [[nodiscard]] static std::vector<tokenization::TokenId> ForwardPromptBatchMulti(
+      std::span<const QwenPromptBatchItem> items);
+
   /// Runs batched prompt prefill on GPU, returning the first predicted token
   /// ID.
   [[nodiscard]] tokenization::TokenId ForwardPromptBatch(
@@ -634,6 +658,39 @@ private:
   [[nodiscard]] tokenization::TokenId ForwardPromptChunk(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t start_pos, bool compute_logits);
+  // Per-session layer phases shared by ForwardPromptChunk (single) and
+  // ForwardPromptBatchMulti (cross-session, unified attention in the
+  // middle). Called on the session itself so `arena_` and friends are the
+  // session's own.
+  struct PrefillChunkCtx {
+    std::size_t batch_size{0};
+    std::uint32_t start_pos{0};
+    bool half_prefill{false};
+    bool norm_feeds_q8_only{false};
+    bool ffn_feeds_q8_only{false};
+    bool fuse_qknorm_rope_kv{false};
+    std::size_t output_first_row{0};
+    std::size_t output_rows{0};
+    std::size_t prompt_capture_offset{0};
+    std::size_t target_layer_count{0};
+    std::span<float> ws_gate;
+    std::span<float> ws_up;
+    float* decode_hidden{nullptr};
+  };
+  void PrefillGemmWeight(const models::QwenTensorRef& w,
+                         const void* bf16_input, const float* fp32_input,
+                         float* output, std::size_t batch, std::size_t m,
+                         std::size_t k, const void* q8_act, bool half_prefill);
+  void PrefillLayerNorm(const PrefillChunkCtx& ctx, std::uint32_t l);
+  void PrefillAttentionPre(const PrefillChunkCtx& ctx, std::uint32_t l);
+  // run_legacy=false skips the legacy attention dispatch (the unified
+  // launch already wrote d_ssm_out); the quantize + output projection run
+  // in both modes.
+  void PrefillAttentionPost(const PrefillChunkCtx& ctx, std::uint32_t l,
+                            bool run_legacy);
+  void PrefillSsmLayer(const PrefillChunkCtx& ctx, std::uint32_t l,
+                       QwenRecurrentStateIo recurrent_state);
+  void PrefillFfnTail(const PrefillChunkCtx& ctx, std::uint32_t l);
   [[nodiscard]] std::vector<tokenization::TokenId>
   ForwardDecodeEquivalentVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,

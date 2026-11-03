@@ -57,6 +57,7 @@ if (ENGINE_ENABLE_HIP)
     ${QFN_ROCM_DIR}/device_model.cpp
     ${QFN_ROCM_DIR}/executor.cpp
     ${QFN_ROCM_DIR}/batch.cpp
+    draft_backend.cpp
     engine.cpp)
   target_sources(gufo_qwen38_flash_next PRIVATE ${QFN_HIP_SOURCES})
   set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
@@ -73,6 +74,7 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_qwen38_flash_next PUBLIC
     gufo_cache_hip
     gufo_core_blocked_kv
+    gufo_core_gemm
     gufo_qwen38_flash_next_mmq hip::host roc::hipblas roc::hipblaslt)
 
   if (GUFO_BUILD_TOOLS AND NOT BUILD_TESTING)

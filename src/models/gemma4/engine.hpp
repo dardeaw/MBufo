@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include <hip/hip_runtime.h>
+
 #include "src/core/gguf_reader.hpp"
 #include "src/models/gemma4/weights.hpp"
 #include "src/models/qwen/tokenizer.hpp"
@@ -22,6 +24,8 @@ struct ModelOptions {
 };
 
 class Session;
+class GemmaMtpDraftBackend;
+struct GemmaTargetVerify;
 
 /// Minimal single-model runtime for Gemma 4 26B A4B on gfx1151. Weights
 /// stream from the mapped GGUF file through the Flash-Next mmq GEMM kernels;
@@ -65,6 +69,10 @@ private:
   std::shared_ptr<core::GgufReader> reader_;
   std::unique_ptr<ModelWeights> weights_;
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
+  // Caller-owned arena for Session::DecodeBatch unified launches (§4.2:
+  // allocated on first use, freed in ~Model).
+  mutable void* mixed_scratch_{nullptr};
+  mutable std::size_t mixed_scratch_bytes_{0};
 
   friend class Session;
 };
@@ -77,12 +85,25 @@ public:
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
-  /// Reprocesses the prompt from position 0 (no prefix reuse in v1).
+  /// Reprocesses the prompt; append-only growth over the previously synced
+  /// prefix forwards only the delta (incremental prefix: O(n) instead of
+  /// the v1 full O(n^2) replay). Anything else fully resyncs from 0.
   [[nodiscard]] bool Sync(std::span<const std::int32_t> prompt,
                           std::string* error_msg = nullptr);
   /// Appends one token and runs one forward step.
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
+  /// One decode step for a batch of sessions on the same model: per layer,
+  /// every session runs QKV projection + KV store, one unified mixed-batch
+  /// attention launch (gufo::core::compute::mixed_batch) covers the batch,
+  /// then every session runs wo + FFN. Full d=512 layers stay F16; blocked
+  /// SWA layers ride the unified blocked dispatch. Sessions with MTP enabled
+  /// are refused (use Evaluate instead). Returns false on validation
+  /// failure; a per-layer unified refusal falls back to the legacy
+  /// single-session core internally, so output matches serial Evaluate.
+  [[nodiscard]] static bool DecodeBatch(std::span<Session*> sessions,
+                                        std::span<const std::int32_t> tokens,
+                                        std::string* error_msg = nullptr);
   /// Runs a forward over `tokens` starting at `start_pos`.
   [[nodiscard]] bool Forward(std::span<const std::int32_t> tokens,
                              std::uint32_t start_pos,
@@ -100,6 +121,10 @@ public:
                                       std::uint32_t n_draft,
                                       std::vector<std::int32_t>* out,
                                       std::string* error_msg = nullptr);
+  /// Resolves the anchor token for an MTP round (pending correction or a
+  /// fresh greedy sample) and snapshots its target hidden state, mirroring
+  /// the preamble of SpeculativeRound. Used by the unified draft backend.
+  [[nodiscard]] std::int32_t ResolveDraftAnchor() const;
   [[nodiscard]] std::span<const float> Logits() const noexcept;
   [[nodiscard]] std::uint32_t Length() const noexcept;
   [[nodiscard]] std::int32_t SampleGreedy() const;
@@ -111,7 +136,37 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 
+  // Single-layer phases factored out of Forward so DecodeBatch can run them
+  // batch-wide with one unified attention launch in the middle.
+  static void ForwardLayerPre(Session& s, std::uint32_t il, std::uint32_t n,
+                              std::uint32_t start_pos, hipStream_t stream);
+  static void ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
+                               std::uint32_t start_pos, hipStream_t stream);
+  static void ForwardLayerPost(Session& s, std::uint32_t il, std::uint32_t n,
+                               std::uint32_t start_pos, hipStream_t stream);
+  static void ForwardFinish(Session& s, std::uint32_t n,
+                            std::uint32_t start_pos, bool all_logits,
+                            hipStream_t stream);
+  // SWA pointer-shift/rebase shared by the legacy core and DecodeBatch:
+  // dense-causal (k2, v2, sp, rebased) for keys [0, rebased + n).
+  static void SwaShiftedKV(Session& s, std::uint32_t kv_layer,
+                            std::uint32_t window, std::uint32_t start_pos,
+                            hipStream_t stream, const std::uint8_t*& k2,
+                            const std::uint8_t*& v2, const std::uint32_t*& sp,
+                            std::uint32_t& rebased);
+
   friend class Model;
+  friend class GemmaMtpDraftBackend;
+  friend struct GemmaTargetVerify;
+
+  /// Commits a verified round: assigns [cur, accepted drafts], moves the KV
+  /// length, and stages the correction token. Moved verbatim out of
+  /// SpeculativeRound (the accept comparison itself stays in the round).
+  [[nodiscard]] bool CommitMtpRound(const std::vector<std::int32_t>& vtoks,
+                                    const std::int32_t* vbest,
+                                    std::uint32_t accepted,
+                                    std::uint32_t old_length,
+                                    std::vector<std::int32_t>* out);
 };
 
 }  // namespace gufo::models::gemma4

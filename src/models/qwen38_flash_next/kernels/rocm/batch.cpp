@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "qfn_mmq.h"
+#include "src/core/compute/gemm/gemm.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
@@ -451,7 +453,7 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                      &session.control_->mtp_position,
                      &session.control_->mtp_blocks, session.mtp_.position, pool,
                      session.max_context_, sparse, error, false, true, false, 0,
-                     session))
+                     session, false, true))
         return false;
     }
     // Attention retains every catch-up KV row. Only each final residual
@@ -758,12 +760,16 @@ bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
   if (rows <= kDecodeRows)
     return Dense(w, x, out, rows, error);
   if (w.type != core::GgmlType::kQ8_0) {
-    SmallGemm(w.data, EmbeddingType(w.type), x, out, rows, w.rows, w.cols,
+    core::compute::gemm::fn_compat::SmallGemm(w.data, static_cast<int>(EmbeddingType(w.type)), x, out, rows, w.rows, w.cols,
               stream_);
     return true;
   }
   if (!QuantizeBatch(x, rows, w.cols, error))
     return false;
+  // Narrow-gemm note: rows above kDecodeRows keep the MMQ tiled route
+  // (a scalar fallback would lose the vec tiling); rows <= kDecodeRows go
+  // through Dense above, which routes contract shapes to the shared
+  // narrow-Q8 core (the verbatim MMQ kernel) and keeps the rest on MMQ.
   const auto project = [&](std::uint32_t first, std::uint32_t count) {
     const auto* input = static_cast<const std::uint8_t*>(s_.x_q8t) +
                         qfn_mmq_q8_1_bytes(first, w.cols);
@@ -886,7 +892,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
             base.gate_e, base.ids, base.down_e, c.hidden_size, c.expert_ff,
             rows * c.num_experts_used, c.num_experts, 1, stream_) != 0)
       return Fail(error, "batched routed vector projection failed");
-    MoeEpilogue(base.down_e, base.weights, base.shexp_out,
+    core::compute::gemm::fn_compat::MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
                 c.num_experts_used, c.hidden_size, stream_);
     return true;
@@ -916,7 +922,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
         return Fail(error, "batched routed vector projection failed");
       }
     }
-    MoeEpilogue(base.down_e, base.weights, base.shexp_out,
+    core::compute::gemm::fn_compat::MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
                 c.num_experts_used, c.hidden_size, stream_);
     return true;
@@ -1232,64 +1238,35 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                          &session.control_->position, &session.control_->blocks,
                          session.position_, pool, session.max_context_,
                          sparse[i], error, false, true, false, 0, session,
-                         use_mixed)) {
+                         use_mixed, item.speculative)) {
             return false;
           }
         }
       }
 
       if (use_mixed) {
-        // All items projected above (deferred): one mixed launch over the
-        // packed rows, then the shared output gate.
+        // All items projected above (deferred): one unified mixed-batch
+        // launch over the packed rows, then the shared output gate.
         // Refusal reruns the legacy per-item cores below (projections rerun
         // idempotently).
-        if (batch_mixed_host_ == nullptr) {
-          if (!Check(hipHostMalloc(reinterpret_cast<void**>(&batch_mixed_host_),
-                                   kBatchSessions * sizeof(MixedBlk),
-                                   hipHostMallocMapped),
-                     error))
-            return false;
-          if (!Check(hipHostGetDevicePointer(
-                         reinterpret_cast<void**>(&batch_mixed_),
-                         batch_mixed_host_, 0),
-                     error))
-            return false;
-        }
         const std::uint32_t kv_row = c.AttentionKvDim();
         for (std::size_t i = 0; i < items.size(); ++i) {
           const auto& item = items[i];
           auto& session = *item.session;
           const auto n = static_cast<std::uint32_t>(item.tokens.size());
           const auto& ks = session.attention_[il];
-          const __half* k_ptr = ks.k_cache;
-          const __half* v_ptr = ks.v_cache;
-          if (KvBlocked(options_.kv_format)) {
-            if (i8_mixed) {
-              // int8 WMMA reads the blocked caches directly: no staging
-              // traffic, and the pointers are reinterpreted by block bytes.
-              k_ptr = reinterpret_cast<const __half*>(ks.k_cache_kv);
-              v_ptr = reinterpret_cast<const __half*>(ks.v_cache_kv);
-            } else {
-              // Blocked sessions read their persistent F16 staging; ensure
-              // it covers the live rows first, else the whole batch falls
-              // back.
-              const std::uint32_t need = session.position_ + n;
-              if (!EnsureKvStaging(session,
-                                   const_cast<Session::AttentionState&>(ks),
-                                   need, kv_row, error)) {
-                use_mixed = false;
-                break;
-              }
-              k_ptr = session.kv_stage_k_;
-              v_ptr = session.kv_stage_v_;
+          if (KvBlocked(options_.kv_format) && !i8_mixed) {
+            // Blocked sessions read their persistent F16 staging; ensure
+            // it covers the live rows first, else the whole batch falls
+            // back.
+            const std::uint32_t need = session.position_ + n;
+            if (!EnsureKvStaging(session,
+                                 const_cast<Session::AttentionState&>(ks),
+                                 need, kv_row, error)) {
+              use_mixed = false;
+              break;
             }
           }
-          batch_mixed_host_[i] = {offsets[i],
-                                  reinterpret_cast<std::uint64_t>(k_ptr),
-                                  reinterpret_cast<std::uint64_t>(v_ptr),
-                                  session.position_ + n,
-                                  session.position_,
-                                  n};
         }
         if (!use_mixed) {
           // Staging ensure failed above: rerun the legacy per-item cores.
@@ -1310,24 +1287,84 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                            &session.control_->position,
                            &session.control_->blocks, session.position_, pool,
                            session.max_context_, sparse[i], error, false, true,
-                           false, 0, session)) {
+                           false, 0, session, false, item.speculative)) {
               return false;
             }
           }
           UseScratch(base);
         } else {
-          // Blocked sessions read F16 staging (see EnsureKvStaging above),
-          // so the mixed kernel takes its 34-byte / F16 value path there;
-          // the i8 route instead reads blocked caches directly.
-          const std::uint32_t mx_kbb = i8_mixed ? i8_kbb : kKvKeyBlockBytes;
-          const std::uint32_t mx_vbb = i8_mixed ? i8_vbb : kKvKeyBlockBytes;
-          const bool mx_ok = WmmaMixedAttention(
-              base.q, base.attn_gate, batch_mixed_,
-              static_cast<std::uint32_t>(items.size()), base.ctx, c.num_heads,
-              c.num_kv_heads, c.head_dim, c.compress_ratio, mx_kbb, mx_vbb,
-              stream_, i8_mixed);
-          fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d i8=%d\n", il,
-                  rows, items.size(), (int)mx_ok, (int)i8_mixed);
+          // Unified mixed-batch attention (§4.1): the caller only knows the
+          // core interface (gufo::core::compute::mixed_batch). F16 rows —
+          // plain caches or blocked caches via F16 staging — fuse in one
+          // varlen launch; blocked-direct (i8) rows are refused by the
+          // launcher (non-SWA geometry) and take the legacy cores below.
+          // Speculative/MTP-verify chains never reach here (excluded from
+          // use_mixed above) and stay on legacy by design: the packed mixed
+          // row family differs from the single-session family the MTP draft
+          // was built against (docs/MIXED_BATCH.md P1).
+          namespace mb = ::gufo::core::compute::mixed_batch;
+          mb::MixedBlk ublks[kBatchSessions];
+          const std::uint32_t qdim = c.AttentionQDim();
+          const auto codec = i8_mixed ? mb::MixedKvCodec::kQ8
+                                      : mb::MixedKvCodec::kF16;
+          for (std::size_t i = 0; i < items.size(); ++i) {
+            const auto& item = items[i];
+            auto& session = *item.session;
+            const auto n = static_cast<std::uint32_t>(item.tokens.size());
+            const auto& ks = session.attention_[il];
+            const __half* k_ptr = ks.k_cache;
+            const __half* v_ptr = ks.v_cache;
+            if (KvBlocked(options_.kv_format)) {
+              if (i8_mixed) {
+                // Blocked-direct read: no staging traffic, pointers are
+                // reinterpreted by block bytes inside the launcher.
+                k_ptr = reinterpret_cast<const __half*>(ks.k_cache_kv);
+                v_ptr = reinterpret_cast<const __half*>(ks.v_cache_kv);
+              } else {
+                k_ptr = session.kv_stage_k_;
+                v_ptr = session.kv_stage_v_;
+              }
+            }
+            const std::size_t qo = static_cast<std::size_t>(offsets[i]) * qdim;
+            ublks[i].q = base.q + qo;
+            ublks[i].k = k_ptr;
+            ublks[i].v = v_ptr;
+            ublks[i].gate = base.attn_gate + qo;
+            ublks[i].out = base.ctx + qo;
+            ublks[i].kv_len = session.position_ + n;
+            ublks[i].q_pos_base = session.position_;
+            ublks[i].n_rows = n;
+            ublks[i].k_codec = codec;
+            ublks[i].v_codec = codec;
+            ublks[i].head_dim = c.head_dim;
+            ublks[i].heads = c.num_heads;
+            ublks[i].kv_heads = c.num_kv_heads;
+            ublks[i].score_scale = 0.0F;
+            ublks[i].q_stride = 0;
+            ublks[i].k_stride = 0;
+            ublks[i].v_stride = 0;
+            ublks[i].gate_stride = 0;
+            ublks[i].out_stride = 0;
+            ublks[i].window = 0;
+            ublks[i].key_block_bytes = i8_mixed ? i8_kbb : kKvKeyBlockBytes;
+            ublks[i].value_block_bytes = i8_mixed ? i8_vbb : kKvKeyBlockBytes;
+          }
+          if (mixed_scratch_ == nullptr) {
+            // Caller-owned arena (§4.2): allocated once, freed with
+            // allocations_ at teardown.
+            const std::size_t need =
+                mb::MixedBatchScratchBytes(kBatchSessions);
+            void* p = nullptr;
+            if (!Check(hipMalloc(&p, need), error)) return false;
+            mixed_scratch_ = p;
+            mixed_scratch_bytes_ = need;
+            allocations_.push_back(p);
+          }
+          const bool mx_ok = mb::LaunchMixedBatchAttention(
+              ublks, items.size(), mixed_scratch_, mixed_scratch_bytes_,
+              stream_);
+          fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d i8=%d (unified)\n",
+                  il, rows, items.size(), (int)mx_ok, (int)i8_mixed);
           if (!mx_ok) {
             for (std::size_t i = 0; i < items.size(); ++i) {
               const auto& item = items[i];
@@ -1346,15 +1383,15 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                              n, &session.control_->position,
                              &session.control_->blocks, session.position_, pool,
                              session.max_context_, sparse[i], error, false,
-                             true, false, 0, session)) {
+                             true, false, 0, session, false, item.speculative)) {
                 return false;
               }
             }
           } else {
             ++mixed_batches_;
-            // NOTE: WmmaMixedAttention already applies the sigmoid output gate
-            // in its epilogue (like WmmaCausalAttention); re-applying here
-            // would square the gate. (Removed second SigmoidMul.)
+            // NOTE: the unified kernel already applies the sigmoid output
+            // gate in its epilogue (like WmmaCausalAttention); re-applying
+            // here would square the gate. (Gate iron rule.)
           }
         }
         UseScratch(base);

@@ -22,6 +22,8 @@
 #include <vector>
 
 #include "qfn_mmq.h"
+#include "src/core/compute/gemm/gemm.hpp"
+#include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
@@ -1704,6 +1706,8 @@ bool Executor::Quantize(const float* x, std::uint32_t n_tokens, std::uint32_t k,
 
 bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
                      std::string* error_msg) const {
+  // Phase C-2 note: the requant-copy path (Q4_1/Q5_1 decode_data) stays
+  // on MMQ; the shared sdot4 core has no Q4_1/Q5_1 decode GEMV.
   if (w.decode_data != nullptr && q.data != nullptr && q.n <= kVecBatch) {
     if (w.cols != q.k) {
       AssignError(error_msg, "quantized input width mismatch");
@@ -1727,6 +1731,32 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
     if (w.cols != q.k) {
       AssignError(error_msg, "quantized input width mismatch");
       return false;
+    }
+    // Narrow-Q8 core route: contract shapes run the shared core kernel
+    // (the source MMQ `mul_mat_vec_q8` moved verbatim into
+    // src/core/compute/gemm/gemv_narrow_q8.hip) so other models can reuse
+    // it; everything else keeps the MMQ route below. History: the sdot4
+    // shared core (GemvBatched Q8_0, F32 activations) was tried here on
+    // 2026-11-03 and reverted (tg32 34.2 -> 30.6 tok/s, -10.6%); this route
+    // reuses the winning narrow kernel instead of replacing it.
+    //
+    // Model-local exclusions first: the HC 320x10240 down projection and
+    // the single-row latency specialization (rows <= 64, K % 5120 == 0)
+    // use different accumulation order and stay on MMQ.
+    const bool narrow_hc = q.n <= 8 && w.rows == 320 && w.cols == 10240;
+    const bool narrow_ahead = q.n == 1 && w.rows <= 64 && w.cols % 5120 == 0;
+    // Activation row stride mirrors qfn_mmq_q8_1_bytes (512-element row
+    // pad); the core contract only requires stride_blocks >= K / 32.
+    const std::size_t narrow_stride =
+        (static_cast<std::size_t>(w.cols) + 511) / 512 * 512 / 32;
+    if (!narrow_hc && !narrow_ahead &&
+        core::compute::gemm::DecideNarrowDecodeRoute(
+            /*weight_q8_0=*/true, /*act_preq_q8_1=*/true,
+            /*gated=*/false, q.n, w.cols, w.rows, narrow_stride) ==
+            core::compute::gemm::NarrowDecodeRoute::kNarrowQ80 &&
+        core::compute::gemm::LaunchNarrowQ80Decode(
+            w.data, q.data, out, w.cols, w.rows, q.n, narrow_stride, stream_)) {
+      return true;
     }
     if (qfn_mmq_q8_0_dense_vec_preq(
             w.data, nullptr, q.data, out, static_cast<int>(w.rows),
@@ -1752,6 +1782,9 @@ bool Executor::GatedDense(const DeviceTensor& up, const DeviceTensor& gate,
     if (!Quantize(x, n_tokens, up.cols, &xq, error_msg)) {
       return false;
     }
+    // Phase C-2 note: stays on the MMQ fused pair. The shared sdot4
+    // fused gate/up applies GeluTanh; this model gates with SwiGLU (see the
+    // rounding comment above), so the core kernel is not equivalent.
     if (qfn_mmq_q8_0_dense_vec_preq(up.data, gate.data, xq.data, out,
                                     static_cast<int>(up.rows),
                                     static_cast<int>(n_tokens),
@@ -1845,14 +1878,23 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
         continue;
       }
       if (!(q8t_src_ == src && q8t_rows_ == rows && q8t_cols_ == w.cols)) {
-        QuantizeQ8Tiled(src, s_.x_q8t, rows, w.cols, stream_);
+        core::compute::gemm::QuantizeQ8Tiled(src, s_.x_q8t, rows, w.cols, stream_);
         q8t_src_ = src;
         q8t_rows_ = rows;
         q8t_cols_ = w.cols;
       }
-      if (!W8A8Gemm(w.data, s_.x_q8t,
-                    out + static_cast<std::size_t>(r0) * w.rows, rows, w.rows,
-                    w.cols, stream_)) {
+      // Phase B-3 (§3.2): host-side 16-split W8A8 via the shared GEMM
+      // core. Uncovered shapes return false and keep the legacy route below
+      // bit-identical to before.
+      bool w8a8_ok = core::compute::gemm::W8A8GemmVarlen(
+          w.data, s_.x_q8t, out + static_cast<std::size_t>(r0) * w.rows,
+          rows, w.rows, w.cols, stream_);
+      if (!w8a8_ok) {
+        w8a8_ok = core::compute::gemm::W8A8Gemm(w.data, s_.x_q8t,
+                           out + static_cast<std::size_t>(r0) * w.rows, rows,
+                           w.rows, w.cols, stream_);
+      }
+      if (!w8a8_ok) {
         AssignError(error_msg, "W8A8 GEMM failed");
         return false;
       }
@@ -1860,7 +1902,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     return true;
   }
   if (!MatrixRows(n_tokens)) {
-    SmallGemm(w.data, SmallType(w.type), x, out, n_tokens, w.rows, w.cols,
+    core::compute::gemm::fn_compat::SmallGemm(w.data, static_cast<int>(SmallType(w.type)), x, out, n_tokens, w.rows, w.cols,
               stream_);
     return true;
   }
@@ -1985,6 +2027,8 @@ bool Executor::Experts(const DeviceTensor& w, const float* x,
   if (tiled) {
     RoutedHints(w, n_tokens);
   }
+  // Phase C-2 note: decode MoE stays on MMQ (HC 4-stream geometry has
+  // no shared-core GEMV; only the epilogue is shared in fn_compat).
   int rc = -1;
   if (!tiled) {
     rc = qfn_mmq_moe_vec(static_cast<int>(w.type), w.data, x, ids, out, M, K, T,
@@ -2187,8 +2231,16 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
     }
   } else {
     if (xn_half_) {
-      if (!W8A8Gemm(m.down.data, s_.xn_q8t, s_.lo, n_tokens, m.down.rows,
-                    m.down.cols, stream_)) {
+      // Phase B-3 (§3.2): shared-core varlen first (narrow shapes fall
+      // through to the legacy route bit-identical to before).
+      bool hc_w8a8_ok = core::compute::gemm::W8A8GemmVarlen(
+          m.down.data, s_.xn_q8t, s_.lo, n_tokens, m.down.rows, m.down.cols,
+          stream_);
+      if (!hc_w8a8_ok) {
+        hc_w8a8_ok = core::compute::gemm::W8A8Gemm(m.down.data, s_.xn_q8t, s_.lo, n_tokens,
+                              m.down.rows, m.down.cols, stream_);
+      }
+      if (!hc_w8a8_ok) {
         AssignError(error_msg, "W8A8 mixer down projection failed");
         return false;
       }
@@ -2555,8 +2607,16 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
   }
   if (tiled) {
     q8t_src_ = nullptr;
-    if (!W8A8Gemm(l.ssm_out.data, s_.x_q8t, out, n_tokens, l.ssm_out.rows,
-                  l.ssm_out.cols, stream_)) {
+    // Phase B-3 (§3.2): shared-core varlen first (this 2560x6144 shape
+    // is the Wave64 fixed shape; others keep the legacy route).
+    bool ssm_w8a8_ok = core::compute::gemm::W8A8GemmVarlen(
+        l.ssm_out.data, s_.x_q8t, out, n_tokens, l.ssm_out.rows,
+        l.ssm_out.cols, stream_);
+    if (!ssm_w8a8_ok) {
+      ssm_w8a8_ok = core::compute::gemm::W8A8Gemm(l.ssm_out.data, s_.x_q8t, out, n_tokens,
+                             l.ssm_out.rows, l.ssm_out.cols, stream_);
+    }
+    if (!ssm_w8a8_ok) {
       AssignError(error_msg, "W8A8 GEMM failed");
       return false;
     }
@@ -2669,7 +2729,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                          std::string* error_msg, bool last_only,
                          bool projections_ready, bool project_output,
                          std::uint32_t checkpoint_tokens, Session& session,
-                         bool defer_wmma) const {
+                         bool defer_wmma, bool is_verify) const {
   const Config& c = config();
   const std::uint32_t kv_row = c.AttentionKvDim();
   const std::uint32_t index_capacity =
@@ -2893,6 +2953,37 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   if (defer_wmma) {
     return true;
   }
+  // Phase A: route blocked decode/prefill through the shared dispatcher.
+  // MTP verify, sparse and checkpoint callers keep the legacy selection
+  // below (iron rule); F16 inputs always consult kLegacy. Every blocked
+  // route lands on the kernel this function already selects (scalar
+  // AttentionKv -- the 24/2/256 geometry matches no WMMA/Split-K kernel),
+  // so the consult is the policy choke point, not a behavior change.
+  if (!is_verify && !sparse && checkpoint_tokens == 0 && mask == nullptr) {
+    namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+    attn_disp::AttentionDispatchInput attn_in;
+    attn_in.q_len = n_tokens;
+    attn_in.kv_len = start_pos + n_tokens;
+    attn_in.head_dim = c.head_dim;
+    attn_in.heads = c.num_heads;
+    attn_in.kv_heads = c.num_kv_heads;
+    if (options_.kv_format == KvFormat::kQ8) {
+      attn_in.k_codec = KvKeyIs4Bit(options_.kv_format)
+                            ? attn_disp::DispatchCodec::kQ4
+                            : attn_disp::DispatchCodec::kQ8;
+      attn_in.v_codec = KvValueIs4Bit(options_.kv_format)
+                            ? attn_disp::DispatchCodec::kQ4
+                            : attn_disp::DispatchCodec::kQ8;
+    } else if (options_.kv_format == KvFormat::kFp8) {
+      attn_in.k_codec = attn_disp::DispatchCodec::kFp8;
+      attn_in.v_codec = attn_disp::DispatchCodec::kFp8;
+    }
+    attn_in.window = 0;  // dense here (sparse excluded above)
+    const attn_disp::AttentionRoute attn_route =
+        attn_disp::RouteAttention(attn_in, attn_disp::AttentionDispatchPolicy::
+                                                    WithEnvDefaults());
+    (void)attn_route;  // current geometries fall through below unchanged.
+  }
   // Wide batches run the fused WMMA kernel (never inside a graph: the kv
   // extent is a host value), output gate included, skipping the key tiles
   // no query of a block selected; the per-token kernel covers the rest.
@@ -3034,6 +3125,39 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   }
   // Narrow batches split each row's key tiles over kAttnSplits blocks so a
   // decode step at depth fills the device.
+  // Phase C-2: decode-side attention consults the shared dispatcher. Q8/Q4
+  // blocked KV resolves to the scalar direct read (the AttentionKv call
+  // below, unchanged); F16, verify and the rest stay legacy (mandated by
+  // the dispatcher: d == 128 has no Split-K/WMMA instantiation yet).
+  namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+  attn_disp::AttentionDispatchPolicy attn_policy =
+      attn_disp::AttentionDispatchPolicy::WithEnvDefaults();
+  attn_disp::AttentionDispatchInput attn_in;
+  attn_in.q_len = n_tokens;
+  attn_in.kv_len = start_pos + n_tokens;
+  attn_in.head_dim = c.head_dim;
+  attn_in.heads = c.num_heads;
+  attn_in.kv_heads = c.num_kv_heads;
+  if (KvBlocked(options_.kv_format)) {
+    const bool k4 = KvKeyIs4Bit(options_.kv_format);
+    const bool v4 = KvValueIs4Bit(options_.kv_format);
+    attn_in.k_codec = k4 ? attn_disp::DispatchCodec::kQ4
+                         : attn_disp::DispatchCodec::kQ8;
+    attn_in.v_codec = v4 ? attn_disp::DispatchCodec::kQ4
+                         : attn_disp::DispatchCodec::kQ8;
+    if (options_.kv_format == rocm::KvFormat::kFp8)
+      attn_in.k_codec = attn_in.v_codec = attn_disp::DispatchCodec::kFp8;
+  }
+  attn_in.window = 0;
+  attn_in.is_verify = is_verify;
+  const attn_disp::AttentionRoute attn_route =
+      attn_disp::RouteAttention(attn_in, attn_policy);
+  if (const char* attn_diag = std::getenv("GUFO_ATTN_DIAG")) {
+    (void)attn_diag;
+    std::fprintf(stderr, "[attn-dispatch] flash-next q=%u kv=%u d=%u route=%s\n",
+                 n_tokens, start_pos + n_tokens, c.head_dim,
+                 attn_disp::AttentionRouteName(attn_route));
+  }
   const bool split = !MatrixRows(n_tokens);
   const std::uint32_t use_splits =
       split
@@ -3303,7 +3427,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                     s_.router + c.num_experts, c.num_experts + 1, out, n_tokens,
                     used, c.hidden_size, stream_);
   } else {
-    MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
+    core::compute::gemm::fn_compat::MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
                 c.num_experts + 1, out, n_tokens, used, c.hidden_size, stream_);
   }
   return true;
@@ -3681,7 +3805,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                           &session.control_->blocks, start_pos, pool_grid,
                           session.max_context_, sparse, error_msg,
                           last_attention, false, true,
-                          checkpoint ? checkpoint->tokens : 0, session)) {
+                          checkpoint ? checkpoint->tokens : 0, session,
+                          false, speculative)) {
       return false;
     }
 
@@ -5029,7 +5154,7 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
                  &session.control_->mtp_position, &session.control_->mtp_blocks,
                  pos, pool_grid, session.max_context_,
                  pos + n > c.indexer_top_k, error_msg, last_only, true,
-                 skipped == 0, 0, session)) {
+                 skipped == 0, 0, session, false, true)) {
     return false;
   }
   struct RestoreScratch {

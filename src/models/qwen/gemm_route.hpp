@@ -9,6 +9,10 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 
+// Phase C-3 note: GPU decode triage moved to the shared dispatcher
+// (src/core/compute/gemm/gemm_dispatcher.hpp, DecideQwenDecodeRoute).
+// ResolveQwenGemmRoute below now serves CPU paths, the prefill-legacy fine
+// triage and the kernel benchmark only.
 namespace gufo::models::qwen {
 
 enum class QwenGemmMode : std::uint8_t {

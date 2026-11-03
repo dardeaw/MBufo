@@ -519,7 +519,7 @@ gufo::bench::KernelBenchResult BenchmarkGemv(const CommandLineOptions& options,
     samples_us = MeasureKernel(options, marker, stream, [&] {
       gufo::hip::LaunchGEMV(weights.Get(), gufo::core::GgmlType::kBF16,
                             input.Get(), output.Get(), options.m, options.k,
-                            stream);
+                            stream, nullptr, 0);
     });
   } else {
     HipBuffer<float> weights(options.m * options.k);
@@ -528,7 +528,7 @@ gufo::bench::KernelBenchResult BenchmarkGemv(const CommandLineOptions& options,
     samples_us = MeasureKernel(options, marker, stream, [&] {
       gufo::hip::LaunchGEMV(weights.Get(), gufo::core::GgmlType::kF32,
                             input.Get(), output.Get(), options.m, options.k,
-                            stream);
+                            stream, nullptr, 0);
     });
   }
 
