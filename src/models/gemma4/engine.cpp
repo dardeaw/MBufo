@@ -13,6 +13,7 @@
 #include <unordered_set>
 
 #include "src/models/gemma4/kernels/kernels.hpp"
+#include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/blocked_wmma.hpp"
@@ -636,6 +637,25 @@ struct Session::Impl {
   float* d_pending_h{nullptr};
   bool has_pending_cur{false};
   std::int32_t pending_cur{0};
+  // MTP draft mirror of blocked SWA KV. The draft cross-attention kernel
+  // reads F16, so the blocked rows it attends are dequantized here once per
+  // row: fully after a Sync rewrites the cache, incrementally as further
+  // rows are appended. Covers the 34-byte 8-bit blocks and the 18-byte
+  // packed 4-bit blocks alike (shared DequantizeKvRowsKernel unpacks both).
+  // Only ProposeDrafts consumes the mirror, and it refreshes the mirror
+  // first; any future direct consumer must Ensure it too.
+  __half* mtp_blk_k{nullptr};  // [capacity][mtp_blk_dim] F16 mirror
+  __half* mtp_blk_v{nullptr};  // [capacity][mtp_blk_dim] F16 mirror
+  std::uint32_t mtp_blk_dim{0};    // F16 elements per token row
+  std::uint32_t mtp_blk_layer{0};  // target SWA layer mirrored
+  std::uint32_t mtp_blk_len{0};    // rows currently valid in the mirror
+  bool mtp_blk_dirty{true};
+
+  // Extends the blocked-KV mirror to `length` rows (full rebuild when the
+  // cache was rewritten, incremental dequant of appended rows otherwise).
+  [[nodiscard]] bool EnsureMtpBlockedMirror(std::uint32_t swa_layer,
+                                            std::uint32_t length,
+                                            std::string* error_msg);
   // Tokens covered by the incremental Sync fast path (Sync establishes,
   // SpeculativeRound clears). Lets append-only growth forward only the delta.
   std::vector<std::int32_t> synced_;
@@ -2105,6 +2125,10 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     start = prev.size();
   } else {
     impl_->length = 0;
+    // A full resync rewrites the KV caches from position 0; a blocked-KV
+    // draft mirror covering them must be rebuilt (incremental prefixes keep
+    // their rows, the mirror extends lazily at the next draft round).
+    impl_->mtp_blk_dirty = true;
   }
   std::size_t chunk = Session::Impl::kMaxChunk;
   if (const char* e = getenv("GEMMA4_CHUNK")) {
@@ -2265,14 +2289,67 @@ bool Session::DecodeBatch(std::span<Session*> sessions,
   return true;
 }
 
-bool Session::EnableMtp(const std::string& drafts_path, std::string* error_msg) {
-  if (model_->options_.kv_cache_quant != "f16") {
+bool Session::Impl::EnsureMtpBlockedMirror(std::uint32_t swa_layer,
+                                           std::uint32_t length,
+                                           std::string* error_msg) {
+  if (swa_layer != mtp_blk_layer || mtp_blk_k == nullptr ||
+      mtp_blk_v == nullptr || mtp_blk_dim == 0) {
     if (error_msg != nullptr)
-      *error_msg =
-          "MTP requires f16 KV caches (blocked q8 has no draft-cache path)";
+      *error_msg = "MTP draft mirror is not initialized for this layer";
     return false;
   }
+  const std::uint32_t blocks = (mtp_blk_dim + 31) / 32;
+  if (blocks == 0 || kv_row_bytes_k.size() <= swa_layer ||
+      kv_row_bytes_v.size() <= swa_layer) {
+    if (error_msg != nullptr)
+      *error_msg = "MTP draft mirror layer has no blocked KV geometry";
+    return false;
+  }
+  // Per-side block bytes follow the layer's own grid (34 = 8-bit codes,
+  // 18 = packed 4-bit nibbles); the shared dequant kernel unpacks both.
+  const std::uint32_t kbb = kv_row_bytes_k[swa_layer] / blocks;
+  const std::uint32_t vbb = kv_row_bytes_v[swa_layer] / blocks;
+  if ((kbb != 34 && kbb != 18) || (vbb != 34 && vbb != 18)) {
+    if (error_msg != nullptr)
+      *error_msg = "MTP draft mirror needs 34- or 18-byte blocked grids";
+    return false;
+  }
+  std::uint32_t from = 0;
+  if (!mtp_blk_dirty && length >= mtp_blk_len) {
+    from = mtp_blk_len;
+  }
+  if (from < length) {
+    const std::uint8_t* src_k =
+        kv_bk[swa_layer] +
+        static_cast<std::size_t>(from) * kv_row_bytes_k[swa_layer];
+    const std::uint8_t* src_v =
+        kv_bv[swa_layer] +
+        static_cast<std::size_t>(from) * kv_row_bytes_v[swa_layer];
+    namespace blocked_kv = ::gufo::core::compute::blocked_kv;
+    if (!blocked_kv::DequantizeKvRows(
+            src_k, mtp_blk_k + static_cast<std::size_t>(from) * mtp_blk_dim,
+            src_v, mtp_blk_v + static_cast<std::size_t>(from) * mtp_blk_dim,
+            length - from, mtp_blk_dim, kbb, vbb, blocked_kv::KvCodec::kQ8,
+            /*stream=*/nullptr)) {
+      if (error_msg != nullptr)
+        *error_msg = "MTP draft mirror dequantization failed";
+      return false;
+    }
+  }
+  mtp_blk_len = length;
+  mtp_blk_dirty = false;
+  return true;
+}
+
+bool Session::EnableMtp(const std::string& drafts_path, std::string* error_msg) {
   const auto& w = *model_->weights_;
+  const auto& c = w.config;
+  const bool blocked_q8 = model_->options_.kv_cache_quant == "q8";
+  if (model_->options_.kv_cache_quant != "f16" && !blocked_q8) {
+    if (error_msg != nullptr)
+      *error_msg = "kv cache quant must be f16 or q8";
+    return false;
+  }
   auto drafter = MtpDrafter::Load(drafts_path, w.config.hidden_size, error_msg);
   if (drafter == nullptr)
     return false;
@@ -2282,6 +2359,47 @@ bool Session::EnableMtp(const std::string& drafts_path, std::string* error_msg) 
                    ") does not match the target vocab (" +
                    std::to_string(w.config.vocab_size) + ")";
     return false;
+  }
+  if (blocked_q8) {
+    // The draft cross-attention kernel reads F16 KV. Full-attention layers
+    // stay F16 under q8; blocked SWA layers are served from the F16 draft
+    // mirror instead. Any blocked grid works (K8V8 and the 18-byte 4-bit
+    // grids alike); the mirror dequantizes whichever grid the layer uses.
+    int swa_l = -1;
+    for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+      if (!c.LayerHasKv(il) || impl_->kv_bk[il] == nullptr)
+        continue;
+      if (c.LayerIsSwa(il))
+        swa_l = static_cast<int>(il);
+    }
+    if (swa_l < 0) {
+      if (error_msg != nullptr)
+        *error_msg = "MTP q8 found no blocked SWA layer to draft from";
+      return false;
+    }
+    const std::uint32_t dim =
+        impl_->kv_stride[static_cast<std::uint32_t>(swa_l)];
+    if (dim == 0) {
+      if (error_msg != nullptr)
+        *error_msg = "MTP q8 blocked SWA layer has no KV stride";
+      return false;
+    }
+    const std::size_t rows =
+        static_cast<std::size_t>(model_->options_.max_context) * dim;
+    std::string alloc_error;
+    impl_->mtp_blk_k = impl_->buffers.Alloc<__half>(rows, &alloc_error);
+    impl_->mtp_blk_v = impl_->buffers.Alloc<__half>(rows, &alloc_error);
+    if (impl_->mtp_blk_k == nullptr || impl_->mtp_blk_v == nullptr) {
+      if (error_msg != nullptr)
+        *error_msg = "MTP q8 draft mirror allocation failed: " + alloc_error;
+      impl_->mtp_blk_k = nullptr;
+      impl_->mtp_blk_v = nullptr;
+      return false;
+    }
+    impl_->mtp_blk_dim = dim;
+    impl_->mtp_blk_layer = static_cast<std::uint32_t>(swa_l);
+    impl_->mtp_blk_len = 0;
+    impl_->mtp_blk_dirty = true;
   }
   impl_->mtp = std::move(drafter);
   return true;
@@ -2323,18 +2441,30 @@ bool GemmaMtpDraftBackend::ProposeDrafts(std::int32_t cur, std::uint32_t n_draft
 
   // Cross-attention sources: full-length KV of the last sliding layer and of
   // the last full-attention layer (llama.cpp gemma4-assistant.cpp parity).
+  // Cross-attention sources: full-length KV of the last sliding layer and of
+  // the last full-attention layer (llama.cpp gemma4-assistant.cpp parity).
+  // A blocked SWA layer (q8, either grid) is served from the F16 draft
+  // mirror; F16 layers are read directly, as before.
   int swa_l = -1;
   int full_l = -1;
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
-    if (!c.LayerHasKv(il) || session.impl_->kv_k[il] == nullptr) continue;
+    if (!c.LayerHasKv(il))
+      continue;
+    const bool has_kv = session.impl_->kv_k[il] != nullptr ||
+                        session.impl_->kv_bk[il] != nullptr;
+    if (!has_kv)
+      continue;
     if (c.LayerIsSwa(il)) {
-      swa_l = static_cast<int>(il);
+      // Prefer a blocked producer (the mirror source) over an F16 follower.
+      if (swa_l < 0 || session.impl_->kv_bk[il] != nullptr)
+        swa_l = static_cast<int>(il);
     } else {
       full_l = static_cast<int>(il);
     }
   }
   if (swa_l < 0 || full_l < 0) {
-    if (error_msg != nullptr) *error_msg = "speculative KV layers missing";
+    if (error_msg != nullptr)
+      *error_msg = "speculative KV layers missing";
     return false;
   }
 
@@ -2346,6 +2476,21 @@ bool GemmaMtpDraftBackend::ProposeDrafts(std::int32_t cur, std::uint32_t n_draft
           : nullptr;
   const std::uint32_t swa_kvh = c.KvHeads(static_cast<std::uint32_t>(swa_l));
   const std::uint32_t full_kvh = c.KvHeads(static_cast<std::uint32_t>(full_l));
+
+  // Blocked SWA KV is unreadable to the F16 draft cross-attention: draft
+  // from the F16 mirror, refreshed incrementally as rows append.
+  const std::uint32_t swa_u = static_cast<std::uint32_t>(swa_l);
+  const std::uint32_t full_u = static_cast<std::uint32_t>(full_l);
+  const __half* swa_k = session.impl_->kv_k[swa_u];
+  const __half* swa_v = session.impl_->kv_v[swa_u];
+  std::uint32_t swa_stride = session.impl_->kv_stride[swa_u];
+  if (session.impl_->kv_bk[swa_u] != nullptr) {
+    if (!session.impl_->EnsureMtpBlockedMirror(swa_u, old_length, error_msg))
+      return false;
+    swa_k = session.impl_->mtp_blk_k;
+    swa_v = session.impl_->mtp_blk_v;
+    swa_stride = session.impl_->mtp_blk_dim;
+  }
 
   if (times != nullptr) {
     times->t_start = std::chrono::steady_clock::now();
@@ -2367,13 +2512,12 @@ bool GemmaMtpDraftBackend::ProposeDrafts(std::int32_t cur, std::uint32_t n_draft
         (i == 0u) ? session.impl_->d_pending_h : session.impl_->d_draft_fb;
     float* next_fb = (i + 1u < n_draft) ? session.impl_->d_draft_fb : nullptr;
     if (!session.impl_->mtp->Step(
-            session.impl_->d_tgt_emb, feed_hidden, session.impl_->kv_k[swa_l],
-            session.impl_->kv_v[swa_l], session.impl_->kv_stride[swa_l], swa_kvh,
-            session.impl_->kv_k[full_l], session.impl_->kv_v[full_l],
-            session.impl_->kv_stride[full_l],
-            full_kvh, old_length, old_length, c.sliding_window,
-            c.rope_theta_swa, c.rope_theta_full, full_rope_freqs,
-            next_fb, session.impl_->d_draft_tok + i, error_msg)) {
+            session.impl_->d_tgt_emb, feed_hidden, swa_k, swa_v, swa_stride,
+            swa_kvh, session.impl_->kv_k[full_u], session.impl_->kv_v[full_u],
+            session.impl_->kv_stride[full_u], full_kvh, old_length, old_length,
+            c.sliding_window, c.rope_theta_swa, c.rope_theta_full,
+            full_rope_freqs, next_fb, session.impl_->d_draft_tok + i,
+            error_msg)) {
       return false;
     }
   }
