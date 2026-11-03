@@ -22,11 +22,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/compute/gemm/gemm_dispatcher.hpp"
 
 namespace gufo::core::compute::gemm {
@@ -210,7 +212,56 @@ void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
 void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
             std::uint32_t n_tokens, std::uint32_t vocab, hipStream_t stream);
 
+
+// Phase C-3 (27B decode triage, mirrors QwenGemmMode::kHipDecode): narrow
+// decode GEMV over the shared cores. kQ8KBlock runs the existing core Q8K
+// block kernel (identical to today's kHipQuantDirect route); kDenseLocal
+// keeps the caller's local F32/BF16 kernels; kReject preserves the old
+// abort behavior (zero/overflow shapes, F16 and other formats with no HIP
+// decode kernel, misaligned quant K). Coupling note: the covered quant set
+// must stay identical to DescribeQwenGemmFormat's hip_decode_direct set
+// (src/models/qwen/gemm_route.hpp); drift would silently reroute shapes.
+enum class QwenDecodeRoute { kReject, kQ8KBlock, kDenseLocal };
+
+[[nodiscard]] inline QwenDecodeRoute DecideQwenDecodeRoute(
+    core::GgmlType type, std::size_t m, std::size_t k) noexcept {
+  if (m == 0 || k == 0) {
+    return QwenDecodeRoute::kReject;
+  }
+  const std::size_t max_size = std::numeric_limits<std::size_t>::max();
+  if (m > max_size / k ||
+      m > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    return QwenDecodeRoute::kReject;
+  }
+  switch (type) {
+    case core::GgmlType::kQ8_0:
+    case core::GgmlType::kQ3_K:
+    case core::GgmlType::kQ4_K:
+    case core::GgmlType::kIQ4_NL:
+    case core::GgmlType::kIQ4_XS:
+    case core::GgmlType::kIQ3_S:
+    case core::GgmlType::kQ5_K:
+    case core::GgmlType::kQ6_K:
+    case core::GgmlType::kQ4_0_ROCMFP4:
+    case core::GgmlType::kQ4_0_ROCMFP4_FAST:
+    case core::GgmlType::kQ8_K:
+      break;
+    case core::GgmlType::kF32:
+    case core::GgmlType::kBF16:
+      return QwenDecodeRoute::kDenseLocal;
+    default:
+      return QwenDecodeRoute::kReject;
+  }
+  const std::size_t block_elements =
+      ::gufo::quant::QuantizedBlockElements(type);
+  if (block_elements == 0 || k % block_elements != 0) {
+    return QwenDecodeRoute::kReject;
+  }
+  return QwenDecodeRoute::kQ8KBlock;
+}
+
 }  // namespace gufo::core::compute::gemm
 
 #endif  // GUFO_CORE_COMPUTE_GEMM_GEMM_HPP_
+
 

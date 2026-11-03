@@ -175,21 +175,36 @@ void ExecuteDenseGemv(models::qwen::QwenGemmRoute route, const void* A,
 }  // namespace
 
 void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
-                std::size_t M, std::size_t K, hipStream_t stream,
-                models::qwen::QwenGemmMode mode) {
-  const auto resolution = models::qwen::ResolveQwenGemmRoute(
-      {.type = a_type, .batch_size = 1, .m = M, .k = K, .mode = mode});
-  switch (resolution.route) {
-    case models::qwen::QwenGemmRoute::kHipQuantDirect:
+                 std::size_t M, std::size_t K, hipStream_t stream,
+                 models::qwen::QwenGemmMode mode) {
+  // Phase C-3: the shared dispatcher owns decode triage (replaces the
+  // fat-switch ResolveQwenGemmRoute call). kQ8KBlock runs the existing core
+  // block kernel; kDenseLocal runs the local F32/BF16 kernels below (same
+  // triage as the old Baseline256/512/Wave32Single arms, kept inline with
+  // per-shape notes); kReject preserves the old abort behavior.
+  // MTP verify shares this path; watch its acceptance rate as usual.
+  (void)mode;
+  switch (core::compute::gemm::DecideQwenDecodeRoute(a_type, M, K)) {
+    case core::compute::gemm::QwenDecodeRoute::kQ8KBlock:
       core::compute::gemm::LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
       return;
-    case models::qwen::QwenGemmRoute::kHipF32Baseline256:
-    case models::qwen::QwenGemmRoute::kHipF32Baseline512:
-    case models::qwen::QwenGemmRoute::kHipBf16Baseline256:
-    case models::qwen::QwenGemmRoute::kHipBf16Baseline512:
-    case models::qwen::QwenGemmRoute::kHipBf16Wave32Single:
-      ExecuteDenseGemv(resolution.route, A, a_type, x, y, M, K, stream);
+    case core::compute::gemm::QwenDecodeRoute::kDenseLocal: {
+      // Legacy dense triage (unchanged): F32 splits at K == 16384; BF16
+      // takes the wave32 single row only for narrow K without remainder.
+      const auto route =
+          a_type == core::GgmlType::kF32
+              ? (K >= 16384
+                     ? models::qwen::QwenGemmRoute::kHipF32Baseline512
+                     : models::qwen::QwenGemmRoute::kHipF32Baseline256)
+              : ((K % 8 == 0 && K < 8192)
+                     ? models::qwen::QwenGemmRoute::kHipBf16Wave32Single
+                     : (K >= 16384
+                            ? models::qwen::QwenGemmRoute::kHipBf16Baseline512
+                            : models::qwen::QwenGemmRoute::kHipBf16Baseline256));
+      ExecuteDenseGemv(route, A, a_type, x, y, M, K, stream);
       return;
+    }
+    case core::compute::gemm::QwenDecodeRoute::kReject:
     default:
       std::abort();
   }

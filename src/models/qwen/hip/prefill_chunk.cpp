@@ -154,6 +154,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                  m, k, arena_.stream);
       return;
     }
+    // Phase C-3 note: prefill shapes stay on this legacy fine triage
+    // (quant-direct WMMA / hipblas / exact-fp32 / dequant+hipblaslt). The
+    // shared dispatcher only takes W8A8-varlen-covered shapes, which need
+    // tiled-Q8 activations this path does not stage; the hipblaslt runner
+    // stays declined (staged but unwired).
     const auto resolution = models::qwen::ResolveQwenGemmRoute(
         {.type = w.type,
          .batch_size = batch_size,
@@ -854,6 +859,11 @@ void QwenGpuExecutor::PrefillGemmWeight(
                                k, arena_.stream);
     return;
   }
+  // Phase C-3 note: prefill shapes stay on this legacy fine triage
+  // (quant-direct WMMA / hipblas / exact-fp32 / dequant+hipblaslt). The
+  // shared dispatcher only takes W8A8-varlen-covered shapes, which need
+  // tiled-Q8 activations this path does not stage; the hipblaslt runner
+  // stays declined (staged but unwired).
   const auto resolution = models::qwen::ResolveQwenGemmRoute(
       {.type = w.type,
        .batch_size = batch,
