@@ -24,6 +24,8 @@ struct ModelOptions {
 };
 
 class Session;
+class GemmaMtpDraftBackend;
+struct GemmaTargetVerify;
 
 /// Minimal single-model runtime for Gemma 4 26B A4B on gfx1151. Weights
 /// stream from the mapped GGUF file through the Flash-Next mmq GEMM kernels;
@@ -119,6 +121,10 @@ public:
                                       std::uint32_t n_draft,
                                       std::vector<std::int32_t>* out,
                                       std::string* error_msg = nullptr);
+  /// Resolves the anchor token for an MTP round (pending correction or a
+  /// fresh greedy sample) and snapshots its target hidden state, mirroring
+  /// the preamble of SpeculativeRound. Used by the unified draft backend.
+  [[nodiscard]] std::int32_t ResolveDraftAnchor() const;
   [[nodiscard]] std::span<const float> Logits() const noexcept;
   [[nodiscard]] std::uint32_t Length() const noexcept;
   [[nodiscard]] std::int32_t SampleGreedy() const;
@@ -150,6 +156,17 @@ private:
                             std::uint32_t& rebased);
 
   friend class Model;
+  friend class GemmaMtpDraftBackend;
+  friend struct GemmaTargetVerify;
+
+  /// Commits a verified round: assigns [cur, accepted drafts], moves the KV
+  /// length, and stages the correction token. Moved verbatim out of
+  /// SpeculativeRound (the accept comparison itself stays in the round).
+  [[nodiscard]] bool CommitMtpRound(const std::vector<std::int32_t>& vtoks,
+                                    const std::int32_t* vbest,
+                                    std::uint32_t accepted,
+                                    std::uint32_t old_length,
+                                    std::vector<std::int32_t>* out);
 };
 
 }  // namespace gufo::models::gemma4

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "src/models/qwen/hip/mtp.hpp"
+#include "src/core/speculative/draft_registry.hpp"
 
 namespace gufo::hip {
 
@@ -215,6 +216,55 @@ void QwenMtpGpuDraftBackend::Reset() noexcept {
   proposal_active_ = false;
   last_error_.clear();
 }
+
+namespace {
+
+bool RegisterQwenMtpDraftBackend() {
+  speculative::RegisterDraftBackend(
+      speculative::DraftBackendInfo{
+          .name = "qwen-mtp",
+          .description =
+              "Qwen3.8-27B MTP draft head (target-bound; consumes target "
+              "hidden states, layer-64 graph)",
+          .requires_target_model = true,
+          .requires_session = false,
+      },
+      [](const speculative::DraftBackendRequest& request,
+         std::string* error_msg) -> std::unique_ptr<speculative::IDraftBackend> {
+        if (request.target_kind != "qwen27b" || request.target_model == nullptr) {
+          if (error_msg != nullptr) {
+            *error_msg =
+                "qwen-mtp backend requires a qwen27b target model "
+                "(target_kind=\"qwen27b\")";
+          }
+          return nullptr;
+        }
+        if (request.draft_model_path.empty()) {
+          if (error_msg != nullptr) {
+            *error_msg =
+                "qwen-mtp backend requires draft_model_path (MTP sidecar GGUF)";
+          }
+          return nullptr;
+        }
+        auto target =
+            std::static_pointer_cast<const QwenGpuModel>(request.target_model);
+        QwenMtpGpuDraftConfig config{
+            .max_context = request.max_context != 0
+                               ? request.max_context
+                               : target->GetConfig().context_length,
+            .max_draft_tokens = request.max_draft_tokens != 0
+                                    ? request.max_draft_tokens
+                                    : 4u,
+        };
+        return QwenMtpGpuDraftBackend::CreateFromGguf(
+            request.draft_model_path, std::move(target), config, error_msg);
+      });
+  return true;
+}
+
+const bool kQwenMtpDraftRegistered = RegisterQwenMtpDraftBackend();
+
+}  // namespace
 
 }  // namespace gufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)
