@@ -1159,6 +1159,97 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
              "invalid_prompt");
 }
 
+// OpenAI-compatible embeddings: one prefill per input, pooled and
+// L2-normalized by the backend. Model resolution, the load gate, and LRU
+// accounting all ride the shared dispatch in HandleConnection; this handler
+// only validates the embedding request shape.
+HttpResponse HandleOpenAiEmbeddings(const HttpRequest& req,
+                                    TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+  if (!body.is_object())
+    return InvalidCompatibilityRequest("request body must be an object");
+  if (const auto* format = body.find("encoding_format")) {
+    if (!format->is_string() || format->str() != "float") {
+      return Err(400, "Bad Request",
+                 "only encoding_format \"float\" is supported",
+                 "invalid_request_error", "invalid_encoding_format");
+    }
+  }
+  if (const auto* dimensions = body.find("dimensions");
+      dimensions != nullptr && !dimensions->is_null()) {
+    return Err(400, "Bad Request",
+               "dimensions (Matryoshka truncation) is not supported",
+               "invalid_request_error", "invalid_dimensions");
+  }
+  const auto* input = body.find("input");
+  if (input == nullptr)
+    return InvalidCompatibilityRequest("'input' is required");
+  std::vector<std::string> inputs;
+  if (input->is_string()) {
+    inputs.push_back(input->str());
+  } else if (input->is_array()) {
+    for (const auto& item : input->items()) {
+      if (!item.is_string()) {
+        return InvalidCompatibilityRequest(
+            "'input' must be a string or an array of strings");
+      }
+      inputs.push_back(item.str());
+    }
+  } else {
+    return InvalidCompatibilityRequest(
+        "'input' must be a string or an array of strings");
+  }
+  if (inputs.empty())
+    return InvalidCompatibilityRequest("'input' must not be empty");
+  for (const auto& text : inputs) {
+    if (text.empty()) {
+      return InvalidCompatibilityRequest(
+          "'input' entries must not be empty");
+    }
+  }
+
+  json::Value data = json::Value::array();
+  std::size_t prompt_tokens = 0;
+  for (std::size_t i = 0; i < inputs.size(); ++i) {
+    std::string embed_error;
+    auto embedding = b.Embed(inputs[i], &embed_error);
+    if (!embedding.has_value()) {
+      return Err(400, "Bad Request", embed_error.c_str(),
+                 "invalid_request_error", "embedding_failed");
+    }
+    json::Value item = json::Value::object();
+    item["object"] = "embedding";
+    json::Value values = json::Value::array();
+    for (const float v : embedding->values)
+      values.push_back(json::Value(static_cast<double>(v)));
+    item["embedding"] = std::move(values);
+    item["index"] = i;
+    prompt_tokens += embedding->prompt_tokens;
+    data.push_back(std::move(item));
+  }
+  json::Value resp = json::Value::object();
+  resp["object"] = "list";
+  resp["data"] = std::move(data);
+  resp["model"] = RequestedModel(body, b);
+  json::Value usage = json::Value::object();
+  usage["prompt_tokens"] = prompt_tokens;
+  usage["total_tokens"] = prompt_tokens;
+  resp["usage"] = std::move(usage);
+  return Ok(resp);
+} catch (const std::length_error& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "context_length_exceeded");
+} catch (const std::invalid_argument& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "invalid_prompt");
+}
+
 HttpResponse OpenAiResponses(const HttpRequest& req,
                              TextGenerationBackend& b) try {
   json::Value body;
@@ -1896,7 +1987,7 @@ void HttpServer::register_routes() {
   add("POST", "/v1/completions", OpenAiCompletions);
   add("POST", "/v1/chat/completions", HandleOpenAiChat);
   add("POST", "/v1/responses", OpenAiResponses);
-  add("POST", "/v1/embeddings", NotImplemented);
+  add("POST", "/v1/embeddings", HandleOpenAiEmbeddings);
 
   // ---- Anthropic ----
   add("POST", "/v1/messages", AnthropicMessages);

@@ -164,6 +164,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/routed_moe.hip
     src/core/compute/gemm/argmax.hip
+    src/core/compute/pooling/pooling_norm.hip
     src/core/compute/gemm/gemm.hpp
     src/core/compute/gemm/gemm_device.cuh
     src/core/compute/gemm/gemm_dispatcher.hpp
@@ -178,7 +179,8 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/w8a8_tiled.hip
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/routed_moe.hip
-    src/core/compute/gemm/argmax.hip PROPERTIES LANGUAGE HIP)
+    src/core/compute/gemm/argmax.hip
+    src/core/compute/pooling/pooling_norm.hip PROPERTIES LANGUAGE HIP)
   # The Wave64 WMMA instantiation needs wavefrontsize64 (the same per-file
   # flag the model libs use for their WMMA TUs); this file holds no wave32
   # shuffles. The scalar tail kernel is wave-size agnostic.
@@ -504,6 +506,11 @@ if (BUILD_TESTING)
   target_link_libraries(json_test PRIVATE gufo_core)
   add_test(NAME json_test COMMAND json_test)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
+
+  add_executable(pooling_norm_test tests/core/pooling_norm_test.cpp)
+  target_link_libraries(pooling_norm_test PRIVATE gufo_core)
+  add_test(NAME pooling_norm_test COMMAND pooling_norm_test)
+  set_tests_properties(pooling_norm_test PROPERTIES LABELS "cpu;core;embedding")
 
   add_executable(heap_placement_test tests/core/heap_placement_test.cpp)
   target_link_libraries(heap_placement_test PRIVATE gufo_core)
