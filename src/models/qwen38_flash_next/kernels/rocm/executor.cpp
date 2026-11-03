@@ -1706,6 +1706,8 @@ bool Executor::Quantize(const float* x, std::uint32_t n_tokens, std::uint32_t k,
 
 bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
                      std::string* error_msg) const {
+  // Phase C-2 note: the requant-copy path (Q4_1/Q5_1 decode_data) stays
+  // on MMQ; the shared sdot4 core has no Q4_1/Q5_1 decode GEMV.
   if (w.decode_data != nullptr && q.data != nullptr && q.n <= kVecBatch) {
     if (w.cols != q.k) {
       AssignError(error_msg, "quantized input width mismatch");
@@ -1730,6 +1732,11 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
       AssignError(error_msg, "quantized input width mismatch");
       return false;
     }
+    // Phase C-2 note (sdot4 attempted 2026-11-03, reverted): decode GEMV
+    // via the shared sdot4 core (GemvBatched Q8_0, F32 activations) was
+    // tried here and reverted: tg32 34.2 -> 30.6 tok/s (-10.6%, tight
+    // A/A/B/B groups, not noise) while prefill held within tolerance.
+    // The MMQ Q8_1 route below stays.
     if (qfn_mmq_q8_0_dense_vec_preq(
             w.data, nullptr, q.data, out, static_cast<int>(w.rows),
             static_cast<int>(q.n), static_cast<int>(w.cols), stream_) != 0) {
@@ -1754,6 +1761,9 @@ bool Executor::GatedDense(const DeviceTensor& up, const DeviceTensor& gate,
     if (!Quantize(x, n_tokens, up.cols, &xq, error_msg)) {
       return false;
     }
+    // Phase C-2 note: stays on the MMQ fused pair. The shared sdot4
+    // fused gate/up applies GeluTanh; this model gates with SwiGLU (see the
+    // rounding comment above), so the core kernel is not equivalent.
     if (qfn_mmq_q8_0_dense_vec_preq(up.data, gate.data, xq.data, out,
                                     static_cast<int>(up.rows),
                                     static_cast<int>(n_tokens),
@@ -1847,7 +1857,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
         continue;
       }
       if (!(q8t_src_ == src && q8t_rows_ == rows && q8t_cols_ == w.cols)) {
-        QuantizeQ8Tiled(src, s_.x_q8t, rows, w.cols, stream_);
+        core::compute::gemm::QuantizeQ8Tiled(src, s_.x_q8t, rows, w.cols, stream_);
         q8t_src_ = src;
         q8t_rows_ = rows;
         q8t_cols_ = w.cols;
@@ -1859,7 +1869,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
           w.data, s_.x_q8t, out + static_cast<std::size_t>(r0) * w.rows,
           rows, w.rows, w.cols, stream_);
       if (!w8a8_ok) {
-        w8a8_ok = W8A8Gemm(w.data, s_.x_q8t,
+        w8a8_ok = core::compute::gemm::W8A8Gemm(w.data, s_.x_q8t,
                            out + static_cast<std::size_t>(r0) * w.rows, rows,
                            w.rows, w.cols, stream_);
       }
@@ -1996,6 +2006,8 @@ bool Executor::Experts(const DeviceTensor& w, const float* x,
   if (tiled) {
     RoutedHints(w, n_tokens);
   }
+  // Phase C-2 note: decode MoE stays on MMQ (HC 4-stream geometry has
+  // no shared-core GEMV; only the epilogue is shared in fn_compat).
   int rc = -1;
   if (!tiled) {
     rc = qfn_mmq_moe_vec(static_cast<int>(w.type), w.data, x, ids, out, M, K, T,
@@ -2204,7 +2216,7 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
           m.down.data, s_.xn_q8t, s_.lo, n_tokens, m.down.rows, m.down.cols,
           stream_);
       if (!hc_w8a8_ok) {
-        hc_w8a8_ok = W8A8Gemm(m.down.data, s_.xn_q8t, s_.lo, n_tokens,
+        hc_w8a8_ok = core::compute::gemm::W8A8Gemm(m.down.data, s_.xn_q8t, s_.lo, n_tokens,
                               m.down.rows, m.down.cols, stream_);
       }
       if (!hc_w8a8_ok) {
@@ -2580,7 +2592,7 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
         l.ssm_out.data, s_.x_q8t, out, n_tokens, l.ssm_out.rows,
         l.ssm_out.cols, stream_);
     if (!ssm_w8a8_ok) {
-      ssm_w8a8_ok = W8A8Gemm(l.ssm_out.data, s_.x_q8t, out, n_tokens,
+      ssm_w8a8_ok = core::compute::gemm::W8A8Gemm(l.ssm_out.data, s_.x_q8t, out, n_tokens,
                              l.ssm_out.rows, l.ssm_out.cols, stream_);
     }
     if (!ssm_w8a8_ok) {
@@ -3092,6 +3104,39 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   }
   // Narrow batches split each row's key tiles over kAttnSplits blocks so a
   // decode step at depth fills the device.
+  // Phase C-2: decode-side attention consults the shared dispatcher. Q8/Q4
+  // blocked KV resolves to the scalar direct read (the AttentionKv call
+  // below, unchanged); F16, verify and the rest stay legacy (mandated by
+  // the dispatcher: d == 128 has no Split-K/WMMA instantiation yet).
+  namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+  attn_disp::AttentionDispatchPolicy attn_policy =
+      attn_disp::AttentionDispatchPolicy::WithEnvDefaults();
+  attn_disp::AttentionDispatchInput attn_in;
+  attn_in.q_len = n_tokens;
+  attn_in.kv_len = start_pos + n_tokens;
+  attn_in.head_dim = c.head_dim;
+  attn_in.heads = c.num_heads;
+  attn_in.kv_heads = c.num_kv_heads;
+  if (KvBlocked(options_.kv_format)) {
+    const bool k4 = KvKeyIs4Bit(options_.kv_format);
+    const bool v4 = KvValueIs4Bit(options_.kv_format);
+    attn_in.k_codec = k4 ? attn_disp::DispatchCodec::kQ4
+                         : attn_disp::DispatchCodec::kQ8;
+    attn_in.v_codec = v4 ? attn_disp::DispatchCodec::kQ4
+                         : attn_disp::DispatchCodec::kQ8;
+    if (options_.kv_format == rocm::KvFormat::kFp8)
+      attn_in.k_codec = attn_in.v_codec = attn_disp::DispatchCodec::kFp8;
+  }
+  attn_in.window = 0;
+  attn_in.is_verify = is_verify;
+  const attn_disp::AttentionRoute attn_route =
+      attn_disp::RouteAttention(attn_in, attn_policy);
+  if (const char* attn_diag = std::getenv("GUFO_ATTN_DIAG")) {
+    (void)attn_diag;
+    std::fprintf(stderr, "[attn-dispatch] flash-next q=%u kv=%u d=%u route=%s\n",
+                 n_tokens, start_pos + n_tokens, c.head_dim,
+                 attn_disp::AttentionRouteName(attn_route));
+  }
   const bool split = !MatrixRows(n_tokens);
   const std::uint32_t use_splits =
       split

@@ -766,6 +766,9 @@ bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
   }
   if (!QuantizeBatch(x, rows, w.cols, error))
     return false;
+  // Phase C-2 note: rows above kDecodeRows keep the MMQ tiled route (the
+  // sdot4 scalar fallback would lose the vec tiling); rows <= kDecodeRows
+  // go through Dense above, which now prefers the sdot4 core for Q8_0.
   const auto project = [&](std::uint32_t first, std::uint32_t count) {
     const auto* input = static_cast<const std::uint8_t*>(s_.x_q8t) +
                         qfn_mmq_q8_1_bytes(first, w.cols);
