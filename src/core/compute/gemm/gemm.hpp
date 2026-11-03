@@ -84,6 +84,16 @@ void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
                         float* y, std::size_t M, std::size_t K,
                         hipStream_t stream);
 
+// ---- narrow Q8_0 decode GEMV (from flash-next MMQ, model-agnostic) ----
+// Contract: Q8_0 weights (34B blocks) x prequantized Q8_1 activations (36B
+// blocks), ungated, 1..8 tokens, K % 32 == 0, stride_blocks >= K / 32,
+// excluding N == 1 && M <= 64 && K % 5120 == 0 (model-local accumulation).
+// Returns false for out-of-contract shapes; the caller keeps its legacy path.
+bool LaunchNarrowQ80Decode(const void* weights, const void* input,
+                           float* output, std::size_t k, std::size_t rows,
+                           std::size_t tokens, std::size_t input_stride_blocks,
+                           hipStream_t stream);
+
 // ---- flash-next decode SmallGemm (F32/F16/BF16 narrow projections) ----
 namespace fn_compat {
 // type: 0 = F32, 1 = F16, 30 = BF16.

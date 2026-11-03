@@ -55,6 +55,36 @@ enum class PrefillRoute { kLegacy, kW8A8Varlen, kHipBlasLt };
   *tail_out = tail;
 }
 
+// Narrow Q8_0 decode route (narrow-gemm): the shared narrow-Q8 core owns
+// the ungated 1..8-token Q8_0 x prequantized-Q8_1 GEMV with K % 32 == 0 and an
+// explicit activation row stride (>= K / 32 blocks). The single-row latency
+// specialization (rows <= 64, K % 5120 == 0) is excluded: its accumulation
+// order differs, so it is not covered even though the shape test would pass.
+// Gated (fused SwiGLU), HC/matrix geometries and N > 8 tiles stay legacy;
+// callers enforce those model-local exclusions before consulting this route.
+enum class NarrowDecodeRoute { kLegacy, kNarrowQ80 };
+
+[[nodiscard]] inline NarrowDecodeRoute DecideNarrowDecodeRoute(
+    bool weight_q8_0, bool act_preq_q8_1, bool gated, std::size_t n_tokens,
+    std::size_t k, std::size_t rows, std::size_t stride_blocks) {
+  if (!weight_q8_0 || !act_preq_q8_1 || gated) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (n_tokens < 1 || n_tokens > 8) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (k == 0 || k % 32 != 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (rows == 0 || stride_blocks < k / 32) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (n_tokens == 1 && rows <= 64 && k % 5120 == 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  return NarrowDecodeRoute::kNarrowQ80;
+}
+
 }  // namespace gufo::core::compute::gemm
 
 #endif  // GUFO_CORE_COMPUTE_GEMM_DISPATCHER_HPP_

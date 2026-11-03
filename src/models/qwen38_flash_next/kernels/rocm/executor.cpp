@@ -1732,11 +1732,32 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
       AssignError(error_msg, "quantized input width mismatch");
       return false;
     }
-    // Phase C-2 note (sdot4 attempted 2026-11-03, reverted): decode GEMV
-    // via the shared sdot4 core (GemvBatched Q8_0, F32 activations) was
-    // tried here and reverted: tg32 34.2 -> 30.6 tok/s (-10.6%, tight
-    // A/A/B/B groups, not noise) while prefill held within tolerance.
-    // The MMQ Q8_1 route below stays.
+    // Narrow-Q8 core route: contract shapes run the shared core kernel
+    // (the source MMQ `mul_mat_vec_q8` moved verbatim into
+    // src/core/compute/gemm/gemv_narrow_q8.hip) so other models can reuse
+    // it; everything else keeps the MMQ route below. History: the sdot4
+    // shared core (GemvBatched Q8_0, F32 activations) was tried here on
+    // 2026-11-03 and reverted (tg32 34.2 -> 30.6 tok/s, -10.6%); this route
+    // reuses the winning narrow kernel instead of replacing it.
+    //
+    // Model-local exclusions first: the HC 320x10240 down projection and
+    // the single-row latency specialization (rows <= 64, K % 5120 == 0)
+    // use different accumulation order and stay on MMQ.
+    const bool narrow_hc = q.n <= 8 && w.rows == 320 && w.cols == 10240;
+    const bool narrow_ahead = q.n == 1 && w.rows <= 64 && w.cols % 5120 == 0;
+    // Activation row stride mirrors qfn_mmq_q8_1_bytes (512-element row
+    // pad); the core contract only requires stride_blocks >= K / 32.
+    const std::size_t narrow_stride =
+        (static_cast<std::size_t>(w.cols) + 511) / 512 * 512 / 32;
+    if (!narrow_hc && !narrow_ahead &&
+        core::compute::gemm::DecideNarrowDecodeRoute(
+            /*weight_q8_0=*/true, /*act_preq_q8_1=*/true,
+            /*gated=*/false, q.n, w.cols, w.rows, narrow_stride) ==
+            core::compute::gemm::NarrowDecodeRoute::kNarrowQ80 &&
+        core::compute::gemm::LaunchNarrowQ80Decode(
+            w.data, q.data, out, w.cols, w.rows, q.n, narrow_stride, stream_)) {
+      return true;
+    }
     if (qfn_mmq_q8_0_dense_vec_preq(
             w.data, nullptr, q.data, out, static_cast<int>(w.rows),
             static_cast<int>(q.n), static_cast<int>(w.cols), stream_) != 0) {

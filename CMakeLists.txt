@@ -154,6 +154,7 @@ if (ENGINE_ENABLE_HIP)
   # dialect as the blocked-KV lib; the wave32 shuffles mean no
   # -mwavefrontsize64.
   add_library(gufo_core_gemm STATIC
+    src/core/compute/gemm/gemv_narrow_q8.hip
     src/core/compute/gemm/gemv_wave32_sdot4.hip
     src/core/compute/gemm/moe_fused.hip
     src/core/compute/gemm/w8a8_wmma.hip
@@ -167,6 +168,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/gemm_dispatcher.hpp
     src/core/compute/gemm/hipblaslt_runner.hpp)
   set_source_files_properties(
+    src/core/compute/gemm/gemv_narrow_q8.hip
     src/core/compute/gemm/gemv_wave32_sdot4.hip
     src/core/compute/gemm/moe_fused.hip
     src/core/compute/gemm/w8a8_wmma.hip
