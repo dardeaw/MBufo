@@ -141,7 +141,16 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
       if (!reuse_x) {
         q38::QuantizeQ8Tiled(x, x_q8_slab, n_tokens, k, stream);
       }
-      if (q38::W8A8Gemm(q8_src, x_q8_slab, y, n_tokens, m, k, stream)) {
+      // Phase B-3 (§3.2): shared-core varlen first; uncovered shapes
+      // return false and fall through to the legacy route bit-identical to
+      // before.
+      bool g4_w8a8_ok = core::compute::gemm::W8A8GemmVarlen(
+          q8_src, x_q8_slab, y, n_tokens, m, k, stream);
+      if (!g4_w8a8_ok) {
+        g4_w8a8_ok =
+            q38::W8A8Gemm(q8_src, x_q8_slab, y, n_tokens, m, k, stream);
+      }
+      if (g4_w8a8_ok) {
         if (softcap > 0.0F) {
           kernels::SoftCap(y, softcap, static_cast<std::size_t>(n_tokens) * m,
                            stream);

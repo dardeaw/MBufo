@@ -1,5 +1,6 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
+#include "src/core/compute/gemm/gemm.hpp"
 
 namespace gufo::hip {
 
@@ -1520,6 +1521,14 @@ void LaunchBatchedQuantGEMMPreQuantized(core::GgmlType type, const void* w,
                                         std::size_t batch, std::size_t m,
                                         std::size_t k, hipStream_t stream) {
   if (m == 0 || k == 0 || batch == 0) {
+    return;
+  }
+  // Phase B-3 (§3.2): shared-core W8A8 varlen first
+  // (Q8_0 Wave64 fixed shape only); anything else falls
+  // through to the existing routes unchanged.
+  if (type == core::GgmlType::kQ8_0 &&
+      core::compute::gemm::W8A8GemmVarlen(w, q8_1_x, y, batch, m, k,
+                                         stream)) {
     return;
   }
   if (detail::TryLaunchQuantPrefillWave64(type, w, q8_1_x, y, batch, m, k,

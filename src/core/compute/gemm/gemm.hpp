@@ -27,6 +27,7 @@
 #include <hip/hip_runtime.h>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/compute/gemm/gemm_dispatcher.hpp"
 
 namespace gufo::core::compute::gemm {
 
@@ -130,6 +131,19 @@ void LaunchFusedSwiGLUGEMV(const void* gate_w, core::GgmlType gate_type,
                            const float* x, float* out,
                            std::size_t intermediate_size,
                            std::size_t hidden_size, hipStream_t stream);
+
+// ---- W8A8 varlen (Phase B-3, §3.2) ----
+// Fixed-shape Wave64 launch (verbatim geometry of flash-next W8A8GemmWave64),
+// its warmup probe, and the host-side 16-split dispatcher: main = batch &
+// ~15 via the original kernel binary, tail (if any) via a scalar kernel.
+// Returns false for uncovered shapes; callers keep the legacy route.
+void W8A8GemmWave64Core(const void* w, const void* x_tiled, float* out,
+                        std::size_t batch, std::size_t m, std::size_t k,
+                        hipStream_t stream);
+hipError_t PrepareW8A8GemmWave64Core();
+bool W8A8GemmVarlen(const void* w, const void* x_tiled, float* out,
+                    std::size_t batch, std::size_t m, std::size_t k,
+                    hipStream_t stream);
 
 }  // namespace gufo::core::compute::gemm
 

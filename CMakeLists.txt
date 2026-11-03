@@ -156,11 +156,23 @@ if (ENGINE_ENABLE_HIP)
   add_library(gufo_core_gemm STATIC
     src/core/compute/gemm/gemv_wave32_sdot4.hip
     src/core/compute/gemm/moe_fused.hip
+    src/core/compute/gemm/w8a8_wmma.hip
+    src/core/compute/gemm/hipblaslt_runner.hip
     src/core/compute/gemm/gemm.hpp
-    src/core/compute/gemm/gemm_device.cuh)
+    src/core/compute/gemm/gemm_device.cuh
+    src/core/compute/gemm/gemm_dispatcher.hpp
+    src/core/compute/gemm/hipblaslt_runner.hpp)
   set_source_files_properties(
     src/core/compute/gemm/gemv_wave32_sdot4.hip
-    src/core/compute/gemm/moe_fused.hip PROPERTIES LANGUAGE HIP)
+    src/core/compute/gemm/moe_fused.hip
+    src/core/compute/gemm/w8a8_wmma.hip
+    src/core/compute/gemm/hipblaslt_runner.hip PROPERTIES LANGUAGE HIP)
+  # The Wave64 WMMA instantiation needs wavefrontsize64 (the same per-file
+  # flag the model libs use for their WMMA TUs); this file holds no wave32
+  # shuffles. The scalar tail kernel is wave-size agnostic.
+  set_source_files_properties(
+    src/core/compute/gemm/w8a8_wmma.hip PROPERTIES COMPILE_OPTIONS
+    "-mwavefrontsize64")
   set_target_properties(gufo_core_gemm PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
   target_compile_definitions(gufo_core_gemm PRIVATE ENGINE_ENABLE_HIP=1)
@@ -171,7 +183,7 @@ if (ENGINE_ENABLE_HIP)
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
-  target_link_libraries(gufo_core_gemm PUBLIC hip::host)
+  target_link_libraries(gufo_core_gemm PUBLIC hip::host roc::hipblaslt)
 endif()
 
 add_library(gufo_diagnostics STATIC

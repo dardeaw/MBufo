@@ -1852,9 +1852,18 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
         q8t_rows_ = rows;
         q8t_cols_ = w.cols;
       }
-      if (!W8A8Gemm(w.data, s_.x_q8t,
-                    out + static_cast<std::size_t>(r0) * w.rows, rows, w.rows,
-                    w.cols, stream_)) {
+      // Phase B-3 (§3.2): host-side 16-split W8A8 via the shared GEMM
+      // core. Uncovered shapes return false and keep the legacy route below
+      // bit-identical to before.
+      bool w8a8_ok = core::compute::gemm::W8A8GemmVarlen(
+          w.data, s_.x_q8t, out + static_cast<std::size_t>(r0) * w.rows,
+          rows, w.rows, w.cols, stream_);
+      if (!w8a8_ok) {
+        w8a8_ok = W8A8Gemm(w.data, s_.x_q8t,
+                           out + static_cast<std::size_t>(r0) * w.rows, rows,
+                           w.rows, w.cols, stream_);
+      }
+      if (!w8a8_ok) {
         AssignError(error_msg, "W8A8 GEMM failed");
         return false;
       }
@@ -2189,8 +2198,16 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
     }
   } else {
     if (xn_half_) {
-      if (!W8A8Gemm(m.down.data, s_.xn_q8t, s_.lo, n_tokens, m.down.rows,
-                    m.down.cols, stream_)) {
+      // Phase B-3 (§3.2): shared-core varlen first (narrow shapes fall
+      // through to the legacy route bit-identical to before).
+      bool hc_w8a8_ok = core::compute::gemm::W8A8GemmVarlen(
+          m.down.data, s_.xn_q8t, s_.lo, n_tokens, m.down.rows, m.down.cols,
+          stream_);
+      if (!hc_w8a8_ok) {
+        hc_w8a8_ok = W8A8Gemm(m.down.data, s_.xn_q8t, s_.lo, n_tokens,
+                              m.down.rows, m.down.cols, stream_);
+      }
+      if (!hc_w8a8_ok) {
         AssignError(error_msg, "W8A8 mixer down projection failed");
         return false;
       }
@@ -2557,8 +2574,16 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
   }
   if (tiled) {
     q8t_src_ = nullptr;
-    if (!W8A8Gemm(l.ssm_out.data, s_.x_q8t, out, n_tokens, l.ssm_out.rows,
-                  l.ssm_out.cols, stream_)) {
+    // Phase B-3 (§3.2): shared-core varlen first (this 2560x6144 shape
+    // is the Wave64 fixed shape; others keep the legacy route).
+    bool ssm_w8a8_ok = core::compute::gemm::W8A8GemmVarlen(
+        l.ssm_out.data, s_.x_q8t, out, n_tokens, l.ssm_out.rows,
+        l.ssm_out.cols, stream_);
+    if (!ssm_w8a8_ok) {
+      ssm_w8a8_ok = W8A8Gemm(l.ssm_out.data, s_.x_q8t, out, n_tokens,
+                             l.ssm_out.rows, l.ssm_out.cols, stream_);
+    }
+    if (!ssm_w8a8_ok) {
       AssignError(error_msg, "W8A8 GEMM failed");
       return false;
     }
