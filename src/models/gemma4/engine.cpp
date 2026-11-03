@@ -18,7 +18,6 @@
 #include "src/core/compute/attention/blocked_wmma.hpp"
 #include "src/core/compute/attention/blocked_splitk.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
-#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 #include "src/models/gemma4/weights.hpp"
 
@@ -26,7 +25,6 @@ namespace gufo::models::gemma4 {
 
 namespace {
 
-namespace fn = ::gufo::models::qwen38_flash_next::rocm;
 
 /// 4-bit key grid (GUFO_KV_Q4): keys quantize onto the packed 18-byte nibble
 /// blocks (range 7) instead of the 34-byte INT8 blocks. Same study hook as
@@ -48,47 +46,29 @@ namespace fn = ::gufo::models::qwen38_flash_next::rocm;
   return value != nullptr && *value != '\0' && *value != '0';
 }
 
-/// Maps a GGML type to the FN kernel WeightType enum.
-[[nodiscard]] fn::WeightType SmallType(core::GgmlType t) {
-  switch (t) {
-    case core::GgmlType::kF32:
-      return fn::WeightType::kF32;
-    case core::GgmlType::kF16:
-      return fn::WeightType::kF16;
-    case core::GgmlType::kQ8_0:
-      return fn::WeightType::kQ8_0;
-    case core::GgmlType::kQ5_1:
-      return fn::WeightType::kQ5_1;
-    case core::GgmlType::kQ4_K:
-      return fn::WeightType::kQ4_K;
-    case core::GgmlType::kQ5_K:
-      return fn::WeightType::kQ5_K;
-    case core::GgmlType::kBF16:
-      return fn::WeightType::kBF16;
-    default:
-      return fn::WeightType::kF32;
-  }
-}
-
 namespace {
-// Grow-only F32 staging for in-place fused GEMV (x == y, as used by wo):
-// blocks read the whole x row while other blocks write y, so reading the
-// live buffer races. Staging one exact F32 copy removes the race.
-float* g_gemv_stage = nullptr;
-std::size_t g_gemv_stage_cap = 0;
-const float* StageGemvInput(const float* x, std::size_t count,
-                            hipStream_t stream) {
-  if (count > g_gemv_stage_cap) {
+// F32 staging for in-place fused GEMV (x == y, as used by wo): blocks read
+// the whole x row while other blocks write y, so reading the live buffer
+// races. Staging one exact F32 copy removes the race. Phase C-1: the arena
+// is caller-owned (Session::Impl::gemv_stage, sized for n <= 8 times the
+// widest projection row); growth below only runs if a future caller exceeds
+// it, and the grown buffer stays session-lifetime.
+const float* StageGemvInput(float*& stage, std::size_t& cap, const float* x,
+                            std::size_t count, hipStream_t stream) {
+  if (stage == nullptr || count > cap) {
+    if (stage != nullptr) (void)hipFree(stage);
     void* grown = nullptr;
     if (hipMalloc(&grown, count * sizeof(float)) != hipSuccess) {
+      stage = nullptr;
+      cap = 0;
       return x;
     }
-    g_gemv_stage = static_cast<float*>(grown);
-    g_gemv_stage_cap = count;
+    stage = static_cast<float*>(grown);
+    cap = count;
   }
-  (void)hipMemcpyAsync(g_gemv_stage, x, count * sizeof(float),
+  (void)hipMemcpyAsync(stage, x, count * sizeof(float),
                        hipMemcpyDeviceToDevice, stream);
-  return g_gemv_stage;
+  return stage;
 }
 }  // namespace
 
@@ -96,13 +76,13 @@ const float* StageGemvInput(const float* x, std::size_t count,
 void F32Gemm(const TensorRef& w, const float* x, float* y,
              std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
              hipStream_t stream, __half* slab, __half* x_slab,
-             float softcap = 0.0F, std::uint8_t* x_q8_slab = nullptr,
-             bool reuse_x = false) {
-  namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+             float softcap, std::uint8_t* x_q8_slab, bool reuse_x,
+             float*& gemv_stage, std::size_t& gemv_stage_cap) {
   if (n_tokens <= 8 && getenv("GEMMA4_NO_FUSED_GEMV") == nullptr) {
     const float* xr = x;
     if (x == y) {
-      xr = StageGemvInput(x, static_cast<std::size_t>(n_tokens) * k, stream);
+      xr = StageGemvInput(gemv_stage, gemv_stage_cap, x,
+                          static_cast<std::size_t>(n_tokens) * k, stream);
     }
     if (w.f16 != nullptr) {
       core::compute::gemm::GemvBatched(w.f16, 1,
@@ -139,7 +119,7 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
     }
     if (x_q8_slab != nullptr && getenv("GEMMA4_PREFILL_W8A8") != nullptr) {
       if (!reuse_x) {
-        q38::QuantizeQ8Tiled(x, x_q8_slab, n_tokens, k, stream);
+        core::compute::gemm::QuantizeQ8Tiled(x, x_q8_slab, n_tokens, k, stream);
       }
       // Phase B-3 (§3.2): shared-core varlen first; uncovered shapes
       // return false and fall through to the legacy route bit-identical to
@@ -148,7 +128,7 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
           q8_src, x_q8_slab, y, n_tokens, m, k, stream);
       if (!g4_w8a8_ok) {
         g4_w8a8_ok =
-            q38::W8A8Gemm(q8_src, x_q8_slab, y, n_tokens, m, k, stream);
+            core::compute::gemm::W8A8Gemm(q8_src, x_q8_slab, y, n_tokens, m, k, stream);
       }
       if (g4_w8a8_ok) {
         if (softcap > 0.0F) {
@@ -162,7 +142,7 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
       kernels::F32ToF16(x, x_slab, static_cast<std::size_t>(n_tokens) * k,
                         stream);
     }
-    if (q38::DenseF16Gemm(q8_src, x_slab, y, n_tokens, m, k, stream)) {
+    if (core::compute::gemm::DenseF16Gemm(q8_src, x_slab, y, n_tokens, m, k, stream)) {
       if (softcap > 0.0F) {
         kernels::SoftCap(y, softcap, static_cast<std::size_t>(n_tokens) * m,
                          stream);
@@ -638,7 +618,7 @@ struct Session::Impl {
   float* d_draft_fb{nullptr};   // [hidden] draft feedback hidden
   int32_t* d_draft_tok{nullptr};
   float* logits_prev{nullptr};   // [vocab] pre-verification row
-  fn::ArgmaxCandidate* d_argmax_scratch{nullptr};
+  core::compute::gemm::ArgmaxCandidate* d_argmax_scratch{nullptr};
   std::int32_t* d_argmax_out{nullptr};
   float* d_pending_h{nullptr};
   bool has_pending_cur{false};
@@ -649,6 +629,13 @@ struct Session::Impl {
   // Caller-owned arena for the shared blocked Split-K decode kernel (§4.2:
   // no statics inside operators). Sized by AttentionBlockedSplitKScratchBytes.
   float* splitk_partials{nullptr};
+  // Caller-owned arena for in-place fused-GEMV staging (Phase C-1, replaces
+  // the file-static g_gemv_stage): n <= 8 tokens times the widest row.
+  float* gemv_stage{nullptr};
+  std::size_t gemv_stage_cap{0};
+  ~Impl() {
+    if (gemv_stage != nullptr) (void)hipFree(gemv_stage);
+  }
   __half* w_slab{nullptr};     // dequant staging (largest matrix)
   __half* w_slab2{nullptr};    // second staging (up projection)
   __half* x_slab{nullptr};     // F16 activation staging
@@ -725,7 +712,7 @@ struct Session::Impl {
     logits = buffers.Alloc<float>(
         static_cast<std::size_t>(logit_cap) * w.config.vocab_size, error);
     // Compact-routing buffers (used by the compact MoE prefill path).
-    compact_cap = ::gufo::models::qwen38_flash_next::rocm::RoutedCompactRows(
+    compact_cap = ::gufo::core::compute::gemm::RoutedCompactRows(
         static_cast<std::size_t>(chunk) * w.config.experts_used,
         w.config.num_experts);
     routed_bounds = buffers.Alloc<std::int32_t>(w.config.num_experts + 1, error);
@@ -774,13 +761,26 @@ struct Session::Impl {
     x_slab = buffers.Alloc<__half>(
         static_cast<std::size_t>(chunk) * xwidth, error);
     x_q8_slab = buffers.Alloc<std::uint8_t>(
-        fn::Q8TiledBytes(chunk, xwidth), error);
+        core::compute::gemm::Q8TiledBytes(chunk, xwidth), error);
+    // Caller-owned GEMV staging arena: n <= 8 tokens times the widest row
+    // any staged projection reads (replaces the file-static g_gemv_stage).
+    const std::size_t gemv_k =
+        xwidth > w.config.expert_ff ? xwidth : w.config.expert_ff;
+    const std::size_t gemv_kw =
+        gemv_k > w.config.shared_ff ? gemv_k : w.config.shared_ff;
+    void* gemv_arena = nullptr;
+    if (!Check(hipMalloc(&gemv_arena, 8 * gemv_kw * sizeof(float)), error,
+               "gemma4 GEMV staging arena")) {
+      return false;
+    }
+    gemv_stage = static_cast<float*>(gemv_arena);
+    gemv_stage_cap = 8 * gemv_kw;
     d_tgt_emb = buffers.Alloc<float>(hidden, error);
     d_draft_fb = buffers.Alloc<float>(hidden, error);
     d_draft_tok = buffers.Alloc<std::int32_t>(16, error);
     logits_prev = buffers.Alloc<float>(w.config.vocab_size, error);
     d_argmax_scratch =
-        buffers.Alloc<fn::ArgmaxCandidate>(16 * fn::kArgmaxParts, error);
+        buffers.Alloc<core::compute::gemm::ArgmaxCandidate>(16 * core::compute::gemm::kArgmaxParts, error);
     d_argmax_out = buffers.Alloc<std::int32_t>(16, error);
     d_pending_h = buffers.Alloc<float>(hidden, error);
     // §4.2 arena for the shared blocked Split-K kernel (no statics).
@@ -948,7 +948,7 @@ std::int32_t Session::SampleGreedy() const {
   const auto logits = Logits();
   if (impl_->d_argmax_scratch != nullptr && impl_->d_argmax_out != nullptr &&
       getenv("GEMMA4_HOST_ARGMAX") == nullptr) {
-    fn::Argmax(logits.data(), impl_->d_argmax_scratch, impl_->d_argmax_out, 1u,
+    core::compute::gemm::Argmax(logits.data(), impl_->d_argmax_scratch, impl_->d_argmax_out, 1u,
                static_cast<std::uint32_t>(logits.size()), 0);
     std::int32_t best = 0;
     (void)hipMemcpy(&best, impl_->d_argmax_out, sizeof(std::int32_t),
@@ -974,11 +974,12 @@ namespace {
 /// y = x @ W^T over GGML quant weights (correctness-first path).
 void StagedGemm(const TensorRef& w, std::uint64_t m_rows, const float* x,
                 float* y, std::uint32_t n_tokens, __half* slab,
-                __half* x_slab, hipStream_t stream, float softcap = 0.0F,
-                std::uint8_t* x_q8_slab = nullptr, bool reuse_x = false) {
+                __half* x_slab, hipStream_t stream, float softcap,
+                std::uint8_t* x_q8_slab, bool reuse_x, float*& gemv_stage,
+                std::size_t& gemv_stage_cap) {
   F32Gemm(w, x, y, n_tokens, static_cast<std::uint32_t>(m_rows),
           static_cast<std::uint32_t>(w.cols), stream, slab, x_slab, softcap,
-          x_q8_slab, reuse_x);
+          x_q8_slab, reuse_x, gemv_stage, gemv_stage_cap);
 }
 
 }  // namespace
@@ -1054,15 +1055,16 @@ void Session::ForwardLayerPre(Session& s, std::uint32_t il,
     } else {
       const bool can_reuse_qkv_x = (n > 8u && qdim >= 256u && kvdim >= 256u);
       StagedGemm(l.wq, qdim, s.impl_->normed, s.impl_->qbuf, n, s.impl_->w_slab,
-                 s.impl_->x_slab, stream, 0.0F, s.impl_->x_q8_slab, false);
+                 s.impl_->x_slab, stream, 0.0F, s.impl_->x_q8_slab, false,
+                 s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
       if (l.has_kv && kv_heads > 0) {
         StagedGemm(l.wk, kvdim, s.impl_->normed, s.impl_->kbuf, n, s.impl_->w_slab,
                    s.impl_->x_slab, stream, 0.0F, s.impl_->x_q8_slab,
-                   can_reuse_qkv_x);
+                   can_reuse_qkv_x, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
         if (l.has_v_proj) {
           StagedGemm(l.wv, kvdim, s.impl_->normed, s.impl_->vbuf, n, s.impl_->w_slab,
                      s.impl_->x_slab, stream, 0.0F, s.impl_->x_q8_slab,
-                     can_reuse_qkv_x);
+                     can_reuse_qkv_x, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
         }
       }
     }
@@ -1326,7 +1328,7 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
     }
     StagedGemm(l.wo, hidden, s.impl_->attn_out, s.impl_->mlp_out, n,
                s.impl_->w_slab, s.impl_->x_slab, stream, 0.0F, s.impl_->x_q8_slab,
-               false);
+               false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
     if (debug_embed && il == 0 && n == 1) {
       hipDeviceSynchronize();
       std::vector<float> ah2(static_cast<std::size_t>(n) * hidden);
@@ -1375,17 +1377,17 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
       } else {
         F32Gemm(l.ffn_gate, s.impl_->normed, s.impl_->mlp_out, n, c.shared_ff,
                 hidden, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
-                s.impl_->x_q8_slab, false);
+                s.impl_->x_q8_slab, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
         F32Gemm(l.ffn_up, s.impl_->normed, s.impl_->expert_out, n, c.shared_ff,
                 hidden, stream, s.impl_->w_slab2, s.impl_->x_slab, 0.0F,
-                s.impl_->x_q8_slab, (n > 8u && c.shared_ff >= 256u));
+                s.impl_->x_q8_slab, (n > 8u && c.shared_ff >= 256u), s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
         kernels::GeluTanhSwiglu(s.impl_->mlp_out, s.impl_->expert_out,
                                 static_cast<std::size_t>(n) * c.shared_ff,
                                 stream);
       }
       F32Gemm(l.ffn_down, s.impl_->mlp_out, s.impl_->moe_out, n, hidden,
               c.shared_ff, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
-              s.impl_->x_q8_slab, false);
+              s.impl_->x_q8_slab, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
       kernels::RmsNormAdd(
           s.impl_->moe_out, static_cast<const float*>(l.ffn_post_norm.device),
           s.impl_->hidden, n, hidden, c.rms_eps,
@@ -1436,17 +1438,17 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
       } else {
         F32Gemm(l.ffn_gate, s.impl_->normed, s.impl_->mlp_out, n, c.shared_ff,
                 hidden, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
-                s.impl_->x_q8_slab, false);
+                s.impl_->x_q8_slab, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
         F32Gemm(l.ffn_up, s.impl_->normed, s.impl_->expert_out, n, c.shared_ff,
                 hidden, stream, s.impl_->w_slab2, s.impl_->x_slab, 0.0F,
-                s.impl_->x_q8_slab, (n > 8u && c.shared_ff >= 256u));
+                s.impl_->x_q8_slab, (n > 8u && c.shared_ff >= 256u), s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
         kernels::GeluTanhSwiglu(s.impl_->mlp_out, s.impl_->expert_out,
                                 static_cast<std::size_t>(n) * c.shared_ff,
                                 stream);
       }
       F32Gemm(l.ffn_down, s.impl_->mlp_out, s.impl_->expert_out, n, hidden,
               c.shared_ff, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
-              s.impl_->x_q8_slab, false);
+              s.impl_->x_q8_slab, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
 
       if (!fused_moe_norms) {
         kernels::RmsNorm(s.impl_->expert_out,
@@ -1463,8 +1465,8 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
       }
       StagedGemm(l.router, c.num_experts, s.impl_->router_tmp,
                  s.impl_->router_logits, n, s.impl_->w_slab, s.impl_->x_slab,
-                 stream);
-      fn::RouterTopK(s.impl_->router_logits, c.num_experts, s.impl_->expert_ids,
+                 stream, 0.0F, nullptr, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
+      core::compute::gemm::RouterTopK(s.impl_->router_logits, c.num_experts, s.impl_->expert_ids,
                      s.impl_->expert_weights, n, c.num_experts, c.experts_used,
                      stream);
       if (debug_embed && il == 0 && n <= 4) {
@@ -1540,7 +1542,6 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
               s.impl_->attn_out, n, used, hidden, stream);
         }
       } else if (fast_q4d_prefill) {
-        namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
         const std::uint32_t used = c.experts_used;
         const std::uint32_t ff = c.expert_ff;
         std::uint32_t tile_rows = 64u;
@@ -1549,9 +1550,9 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
           if (v == 16ul || v == 48ul || v == 64ul)
             tile_rows = static_cast<std::uint32_t>(v);
         }
-        q38::ExpertCounts(s.impl_->expert_ids, s.impl_->expert_counts, n,
+        core::compute::gemm::ExpertCounts(s.impl_->expert_ids, s.impl_->expert_counts, n,
                           c.num_experts, used, stream);
-        q38::RoutedCompact(s.impl_->expert_ids, s.impl_->expert_counts,
+        core::compute::gemm::RoutedCompact(s.impl_->expert_ids, s.impl_->expert_counts,
                            s.impl_->routed_bounds, s.impl_->routed_cursors,
                            s.impl_->rows_token, s.impl_->rows_slot, n, used,
                            c.num_experts, stream);
@@ -1566,14 +1567,14 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
         if (n_tiles > 0u && q4_rows > 0u) {
           kernels::F32ToF16(s.impl_->expert_down, s.impl_->x_half,
                             static_cast<std::size_t>(n) * hidden, stream);
-          q38::RoutedF16Gemm(l.gate_up_exps.device, q38::WeightType::kQ4_0,
+          core::compute::gemm::RoutedF16Gemm(l.gate_up_exps.device, core::compute::gemm::WeightType::kQ4_0,
                              s.impl_->x_half, s.impl_->q4_tiles, n_tiles, tile_rows,
                              s.impl_->routed_bounds, s.impl_->rows_token,
                              s.impl_->q4_identity, nullptr, s.impl_->q4_gateup,
                              nullptr, 2 * ff, hidden, stream);
           kernels::SwigluSplitF16(s.impl_->q4_gateup, s.impl_->q4_act, q4_rows, ff,
                                   stream);
-          q38::RoutedF16Gemm(l.down_exps.device, q38::WeightType::kQ4_0,
+          core::compute::gemm::RoutedF16Gemm(l.down_exps.device, core::compute::gemm::WeightType::kQ4_0,
                              s.impl_->q4_act, s.impl_->q4_tiles, n_tiles, tile_rows,
                              s.impl_->routed_bounds, s.impl_->q4_identity,
                              s.impl_->rows_slot, nullptr, s.impl_->moe_vec_down,
@@ -1610,10 +1611,9 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
       std::vector<std::int32_t> bounds_host;
       if (getenv("GEMMA4_NO_COMPACT") == nullptr && n > 1 &&
           s.impl_->rows_token != nullptr) {
-        namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
-        q38::ExpertCounts(s.impl_->expert_ids, s.impl_->expert_counts, n,
+        core::compute::gemm::ExpertCounts(s.impl_->expert_ids, s.impl_->expert_counts, n,
                           c.num_experts, c.experts_used, stream);
-        q38::RoutedCompact(s.impl_->expert_ids, s.impl_->expert_counts,
+        core::compute::gemm::RoutedCompact(s.impl_->expert_ids, s.impl_->expert_counts,
                            s.impl_->routed_bounds, s.impl_->routed_cursors,
                            s.impl_->rows_token, s.impl_->rows_slot, n,
                            c.experts_used, c.num_experts, stream);
@@ -1625,7 +1625,7 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
           hipMemcpy(&last_bound, s.impl_->routed_bounds + c.num_experts,
                     sizeof(std::int32_t), hipMemcpyDeviceToHost);
           const std::size_t cap =
-              ::gufo::models::qwen38_flash_next::rocm::RoutedCompactRows(
+              ::gufo::core::compute::gemm::RoutedCompactRows(
                   static_cast<std::size_t>(n) * c.experts_used, c.num_experts);
           if (static_cast<std::size_t>(last_bound) < cap) {
             hipMemsetAsync(s.impl_->rows_token + last_bound, 0xFF,
@@ -1664,7 +1664,6 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
           l.down_exps.device != nullptr &&
           getenv("GEMMA4_NO_Q4DIRECT") == nullptr;
       if (q4d) {
-        namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
         // Full-token F16 activations; the grouped kernel gathers rows itself
         // through rows_token, so CompactGatherF16 is skipped below.
         kernels::F32ToF16(s.impl_->normed, s.impl_->x_half,
@@ -1694,7 +1693,7 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
                          tiles.size() * sizeof(std::int32_t),
                          hipMemcpyHostToDevice, stream);
           const std::uint32_t ff = c.expert_ff;
-          q38::RoutedF16Gemm(l.gate_up_exps.device, q38::WeightType::kQ4_0,
+          core::compute::gemm::RoutedF16Gemm(l.gate_up_exps.device, core::compute::gemm::WeightType::kQ4_0,
                              s.impl_->x_half, s.impl_->q4_tiles,
                              static_cast<std::uint32_t>(tiles.size()), 16,
                              s.impl_->routed_bounds, s.impl_->rows_token,
@@ -1702,7 +1701,7 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
                              nullptr, 2 * ff, hidden, stream);
           kernels::SwigluSplitF16(s.impl_->q4_gateup, s.impl_->q4_act, q4_rows,
                                   ff, stream);
-          q38::RoutedF16Gemm(l.down_exps.device, q38::WeightType::kQ4_0,
+          core::compute::gemm::RoutedF16Gemm(l.down_exps.device, core::compute::gemm::WeightType::kQ4_0,
                              s.impl_->q4_act, s.impl_->q4_tiles,
                              static_cast<std::uint32_t>(tiles.size()), 16,
                              s.impl_->routed_bounds, s.impl_->q4_identity,
@@ -1808,46 +1807,45 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
           up_ref.device = up_ref.data;
           if (f16w && l.gate_up_f16 != nullptr) {
               // Pre-dequantized F16 arena: zero per-expert dequant launches.
-              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               const __half* wbase = static_cast<const __half*>(l.gate_up_f16) +
                   static_cast<std::size_t>(e) * 2 * c.expert_ff * hidden;
-              q38::UnquantizedF16Gemm(wbase, xg, gg, batch,
+              core::compute::gemm::UnquantizedF16Gemm(wbase, xg, gg, batch,
                                       c.expert_ff, hidden, stream);
-              q38::UnquantizedF16Gemm(
+              core::compute::gemm::UnquantizedF16Gemm(
                   wbase + static_cast<std::size_t>(c.expert_ff) * hidden, xg,
                   gu, batch, c.expert_ff, hidden, stream);
             } else if (f16w) {
               // F16 dequant path: write the dequantized weights once as raw
               // F16 rows (half the Q8_0 slab traffic) and feed the raw-F16
               // GEMM variant.
-              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               kernels::DequantSlabF16(gate_ref, c.expert_ff, s.impl_->w_slab,
                                       stream);
-              q38::UnquantizedF16Gemm(s.impl_->w_slab, xg, gg, batch,
+              core::compute::gemm::UnquantizedF16Gemm(s.impl_->w_slab, xg, gg, batch,
                                       c.expert_ff, hidden, stream);
               kernels::DequantSlabF16(up_ref, c.expert_ff, s.impl_->w_slab,
                                       stream);
-              q38::UnquantizedF16Gemm(s.impl_->w_slab, xg, gu, batch,
+              core::compute::gemm::UnquantizedF16Gemm(s.impl_->w_slab, xg, gu, batch,
                                       c.expert_ff, hidden, stream);
             } else if (compact_ok) {
               // WMMA path with padded batch (multiple of 16): the small-batch
               // hipBLAS fallback faults on odd batches below 96 rows.
-              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               kernels::DequantSlabQ8(gate_ref, c.expert_ff,
                                      reinterpret_cast<std::uint8_t*>(s.impl_->w_slab),
                                      stream);
-              q38::DenseF16Gemm(s.impl_->w_slab, xg, gg, batch,
+              core::compute::gemm::DenseF16Gemm(s.impl_->w_slab, xg, gg, batch,
                                 c.expert_ff, hidden, stream);
               kernels::DequantSlabQ8(up_ref, c.expert_ff,
                                      reinterpret_cast<std::uint8_t*>(s.impl_->w_slab),
                                      stream);
-              q38::DenseF16Gemm(s.impl_->w_slab, xg, gu, batch,
+              core::compute::gemm::DenseF16Gemm(s.impl_->w_slab, xg, gu, batch,
                                 c.expert_ff, hidden, stream);
             } else {
               F32Gemm(gate_ref, xin, gout, batch, c.expert_ff,
-                      hidden, stream, s.impl_->w_slab, s.impl_->x_slab);
+                      hidden, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
+                      nullptr, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
               F32Gemm(up_ref, xin, uout, batch, c.expert_ff,
-                      hidden, stream, s.impl_->w_slab2, s.impl_->x_slab);
+                      hidden, stream, s.impl_->w_slab2, s.impl_->x_slab, 0.0F,
+                      nullptr, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
             }
         } else {
           TensorRef gate_ref = l.gate_exps;
@@ -1859,44 +1857,43 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
           up_ref.device = up_ref.data;
           up_ref.experts = 1;
           F32Gemm(gate_ref, xin, gout, batch, c.expert_ff,
-                  hidden, stream, s.impl_->w_slab, s.impl_->x_slab);
+                  hidden, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
+                  nullptr, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
           F32Gemm(up_ref, xin, uout, batch, c.expert_ff,
-                  hidden, stream, s.impl_->w_slab2, s.impl_->x_slab);
+                  hidden, stream, s.impl_->w_slab2, s.impl_->x_slab, 0.0F,
+                  nullptr, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
         }
         if (compact_ok) {
           {
             if (f16wd && l.down_f16 != nullptr) {
-              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               // Fused epilogue: act_half = f16(silu(gate)*up) in one pass
               // (replaces the GeluTanhSwiglu + F32ToF16 pair, bit-identical).
               kernels::SwigluF16(gg, gu, s.impl_->x_half,
                                  static_cast<std::size_t>(batch) * c.expert_ff,
                                  stream);
-              q38::UnquantizedF16Gemm(
+              core::compute::gemm::UnquantizedF16Gemm(
                   static_cast<const __half*>(l.down_f16) +
                       static_cast<std::size_t>(e) * hidden * c.expert_ff,
                   s.impl_->x_half, gd, batch, hidden, c.expert_ff, stream);
             } else if (f16wd) {
-              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               kernels::DequantSlabF16(down_ref, hidden, s.impl_->w_slab,
                                       stream);
               kernels::SwigluF16(gg, gu, s.impl_->x_half,
                                  static_cast<std::size_t>(batch) * c.expert_ff,
                                  stream);
-              q38::UnquantizedF16Gemm(s.impl_->w_slab, s.impl_->x_half, gd,
+              core::compute::gemm::UnquantizedF16Gemm(s.impl_->w_slab, s.impl_->x_half, gd,
                                       batch, hidden, c.expert_ff, stream);
             } else if (getenv("GEMMA4_COMPACT_DOWN_WMMA") != nullptr) {
               // WMMA path for the down GEMM too (m=2816>=256, batch is a
               // multiple of 16); the hipBLAS fallback mis-handles the compact
               // batch here.
-              namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
               kernels::DequantSlabQ8(down_ref, hidden,
                                      reinterpret_cast<std::uint8_t*>(s.impl_->w_slab),
                                      stream);
               kernels::SwigluF16(gg, gu, s.impl_->x_half,
                                  static_cast<std::size_t>(batch) * c.expert_ff,
                                  stream);
-              q38::DenseF16Gemm(s.impl_->w_slab, s.impl_->x_half, dout, batch,
+              core::compute::gemm::DenseF16Gemm(s.impl_->w_slab, s.impl_->x_half, dout, batch,
                                 hidden, c.expert_ff, stream);
             } else {
               // Compact fallback was missing the SwiGLU activation: gg held the
@@ -1907,7 +1904,8 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
                   gg, gu, static_cast<std::size_t>(batch) * c.expert_ff,
                   stream);
               F32Gemm(down_ref, gg, gd, batch, hidden,
-                      c.expert_ff, stream, s.impl_->w_slab, s.impl_->x_slab);
+                      c.expert_ff, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
+                      nullptr, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
             }
             if (down_scale != 1.0F) {
               kernels::ScaleInplace(gd, down_scale,
@@ -1923,7 +1921,8 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
                                   static_cast<std::size_t>(n) * c.expert_ff,
                                   stream);
           F32Gemm(down_ref, s.impl_->mlp_out, s.impl_->expert_down, n, hidden,
-                  c.expert_ff, stream, s.impl_->w_slab, s.impl_->x_slab);
+                  c.expert_ff, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
+                  nullptr, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
           if (down_scale != 1.0F) {
             kernels::ScaleInplace(s.impl_->expert_down, down_scale,
                                   static_cast<std::size_t>(n) * hidden, stream);
@@ -2051,7 +2050,8 @@ void Session::ForwardFinish(Session& s, std::uint32_t n,
           ? (s.impl_->normed + static_cast<std::size_t>(n - logit_rows) * hidden)
           : (s.impl_->normed + static_cast<std::size_t>(n - 1) * hidden);
   StagedGemm(w.output, c.vocab_size, last_row, s.impl_->logits, logit_rows,
-             s.impl_->w_slab, s.impl_->x_slab, stream, c.final_logit_softcapping);
+             s.impl_->w_slab, s.impl_->x_slab, stream, c.final_logit_softcapping,
+             nullptr, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap);
 
   s.impl_->last_fwd_n = n;
   s.impl_->last_chunk_n = logit_rows;
@@ -2392,7 +2392,7 @@ bool GemmaTargetVerify::Verify(std::int32_t cur,
     return false;
   }
 
-  fn::Argmax(session.impl_->logits, session.impl_->d_argmax_scratch,
+  core::compute::gemm::Argmax(session.impl_->logits, session.impl_->d_argmax_scratch,
              session.impl_->d_argmax_out, verify_n, vocab, stream);
   (void)hipMemcpy(vbest, session.impl_->d_argmax_out,
                   verify_n * sizeof(std::int32_t), hipMemcpyDeviceToHost);

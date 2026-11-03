@@ -7,7 +7,6 @@
 #include <hipblas/hipblas.h>
 
 #include "src/models/gemma4/weights.hpp"
-#include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 
 namespace gufo::models::gemma4 {
 namespace kernels {

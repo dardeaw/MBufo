@@ -158,6 +158,10 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/moe_fused.hip
     src/core/compute/gemm/w8a8_wmma.hip
     src/core/compute/gemm/hipblaslt_runner.hip
+    src/core/compute/gemm/w8a8_tiled.hip
+    src/core/compute/gemm/dense_f16.hip
+    src/core/compute/gemm/routed_moe.hip
+    src/core/compute/gemm/argmax.hip
     src/core/compute/gemm/gemm.hpp
     src/core/compute/gemm/gemm_device.cuh
     src/core/compute/gemm/gemm_dispatcher.hpp
@@ -166,7 +170,11 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/gemv_wave32_sdot4.hip
     src/core/compute/gemm/moe_fused.hip
     src/core/compute/gemm/w8a8_wmma.hip
-    src/core/compute/gemm/hipblaslt_runner.hip PROPERTIES LANGUAGE HIP)
+    src/core/compute/gemm/hipblaslt_runner.hip
+    src/core/compute/gemm/w8a8_tiled.hip
+    src/core/compute/gemm/dense_f16.hip
+    src/core/compute/gemm/routed_moe.hip
+    src/core/compute/gemm/argmax.hip PROPERTIES LANGUAGE HIP)
   # The Wave64 WMMA instantiation needs wavefrontsize64 (the same per-file
   # flag the model libs use for their WMMA TUs); this file holds no wave32
   # shuffles. The scalar tail kernel is wave-size agnostic.

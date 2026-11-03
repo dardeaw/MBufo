@@ -145,6 +145,72 @@ bool W8A8GemmVarlen(const void* w, const void* x_tiled, float* out,
                     std::size_t batch, std::size_t m, std::size_t k,
                     hipStream_t stream);
 
+// Phase C-1 (GGUF v2 section 4): shared quantized-GEMM launchers relocated
+// verbatim from models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp.
+// gemma4 calls these; flash-next keeps its own copies until Phase C-2.
+
+/// GGML type ids accepted by the relocated launchers below.
+enum class WeightType : std::uint32_t {
+  kF32 = 0,
+  kF16 = 1,
+  kQ5_1 = 7,
+  kQ8_0 = 8,
+  kQ4_0 = 2,
+  kQ4_K = 12,
+  kQ5_K = 13,
+  kBF16 = 30,
+  kQ4_0_ROCMFP4_FAST = 101,
+};
+
+inline constexpr std::uint32_t kArgmaxParts = 64;
+struct ArgmaxCandidate {
+  float value;
+  std::int32_t index;
+};
+
+/// W8A8 tiled-activation bytes for `batch` rows over `k` columns.
+std::size_t Q8TiledBytes(std::size_t batch, std::size_t k);
+/// Quantize F32 rows into the W8A8 tiled fragment layout.
+void QuantizeQ8Tiled(const float* x, void* out, std::size_t batch,
+                     std::size_t k, hipStream_t stream);
+/// Legacy W8A8 dispatcher (general shapes; the varlen fast path above
+/// handles the aligned (2560, 6144) case via W8A8GemmVarlen).
+bool W8A8Gemm(const void* w, const void* x_tiled, float* out,
+              std::size_t batch, std::size_t m, std::size_t k,
+              hipStream_t stream);
+/// F16 activation rows, F16/unquantized weights, F32 accumulation.
+bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
+                        std::size_t batch, std::size_t m, std::size_t k,
+                        hipStream_t stream);
+/// F16 activations, Q8_0/Q4 weights dequantized in LDS, F32 accumulation.
+bool DenseF16Gemm(const void* w, const __half* x, float* out,
+                  std::size_t batch, std::size_t m, std::size_t k,
+                  hipStream_t stream, std::size_t input_stride = 0);
+/// Routed-expert compaction sizing and launchers (16-row padded buckets).
+std::size_t RoutedCompactRows(std::size_t slots, std::size_t n_experts);
+void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
+                   std::int32_t* pad_bounds, std::int32_t* cursors,
+                   std::int32_t* rows_token, std::int32_t* rows_slot,
+                   std::uint32_t n_tokens, std::uint32_t k,
+                   std::uint32_t n_experts, hipStream_t stream);
+bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
+                   const std::int32_t* tiles, std::uint32_t n_tiles,
+                   std::uint32_t tile_rows, const std::int32_t* pad_bounds,
+                   const std::int32_t* rows_in, const std::int32_t* rows_out,
+                   const float* swiglu_gate, float* out, __half* out_half,
+                   std::size_t m, std::size_t k, hipStream_t stream);
+/// Softmax + top-k routing.
+void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
+                float* weights, std::uint32_t n_tokens, std::uint32_t n_experts,
+                std::uint32_t k, hipStream_t stream);
+void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
+                  std::uint32_t n_tokens, std::uint32_t n_experts,
+                  std::uint32_t k, hipStream_t stream);
+/// Full-vocabulary greedy argmax; scratch holds n_tokens * kArgmaxParts.
+void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
+            std::uint32_t n_tokens, std::uint32_t vocab, hipStream_t stream);
+
 }  // namespace gufo::core::compute::gemm
 
 #endif  // GUFO_CORE_COMPUTE_GEMM_GEMM_HPP_
+
