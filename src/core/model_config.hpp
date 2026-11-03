@@ -77,6 +77,19 @@ struct ModelConfig {
            ssm_inner_size > 0 && (ssm_inner_size % ssm_time_step_rank) == 0 &&
            SsmValueSize() == 128 && is_text_only;
   }
+
+  /// Returns true for a dense full-attention decoder (e.g. Qwen3-Embedding,
+  /// arch "qwen3"): every layer is causal attention, the hybrid interval
+  /// collapses to 1, and there is no recurrent state. The shared RMSNorm /
+  /// RoPE / SwiGLU prefill kernels serve these layers unchanged; only the
+  /// hybrid-only geometry gates need to admit the config.
+  [[nodiscard]] constexpr bool IsDenseQwenAttention() const noexcept {
+    return head_dim > 0 && num_layers > 0 && hidden_size > 0 &&
+           intermediate_size > 0 && num_attention_heads > 0 &&
+           num_key_value_heads > 0 && vocab_size > 0 &&
+           full_attention_interval == 1 && rotary_dim > 0 &&
+           rotary_dim <= head_dim && (rotary_dim % 2) == 0 && is_text_only;
+  }
 };
 
 }  // namespace gufo::core

@@ -287,7 +287,13 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
       const std::size_t kv_size =
           static_cast<std::size_t>(weights.config.num_key_value_heads) *
           weights.config.head_dim;
-      if (!ValidateTensor(l.attn_q, 2 * attention_size * hidden_size,
+      // Dense decoders (e.g. Qwen3-Embedding) carry a plain Q projection;
+      // hybrid full-attention layers fuse Q with a per-head gate, doubling
+      // the rows. K/V/output/QK-norm layouts are identical in both.
+      const std::size_t q_rows = weights.config.IsDenseQwenAttention()
+                                     ? attention_size
+                                     : 2 * attention_size;
+      if (!ValidateTensor(l.attn_q, q_rows * hidden_size,
                           TensorRole::kProjection, prefix + "attn_q.weight",
                           error_msg, hidden_size) ||
           !ValidateTensor(l.attn_k, kv_size * hidden_size,
