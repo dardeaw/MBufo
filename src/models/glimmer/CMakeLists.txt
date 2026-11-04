@@ -23,5 +23,6 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_glimmer PUBLIC
     gufo_core
     gufo_core_gemm
+    gufo_core_blocked_kv
     hip::host roc::hipblas)
 endif()

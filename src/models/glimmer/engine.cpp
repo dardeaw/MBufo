@@ -1,7 +1,11 @@
 // glimmer dense-decoder runtime: GGUF load, chunked prefill, single-token
 // decode, greedy sampling. GEMM rides the shared core (GemvBatched decode,
-// DenseF16Gemm prefill); attention is a local dense/SWA F16 kernel
-// (v1 F16 KV only; blocked-Q8 arrives with DFlash serve).
+// DenseF16Gemm prefill); attention is a local dense/SWA F16 kernel (F16 KV
+// planes, or the shared blocked-Q8 grid with --kv-quant q8). The attention
+// phase of every forward runs through the shared unified mixed-batch
+// launcher first (single block for Forward, one block per session for
+// DecodeBatch) and falls back to the legacy cores on refusal, so F16
+// semantics never change. Sync is incremental on append-only growth.
 #include "src/models/glimmer/engine.hpp"
 
 #include <algorithm>
@@ -10,6 +14,9 @@
 #include <cstring>
 
 #include "src/core/compute/attention/attention_dispatcher.hpp"
+#include "src/core/compute/attention/blocked_kv.hpp"
+#include "src/core/compute/attention/blocked_splitk.hpp"
+#include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/glimmer/kernels/kernels.hpp"
 
@@ -20,6 +27,14 @@ constexpr std::uint32_t kMaxChunk = 512;
 /// Batched-verify row cap: speculative verification batches are short
 /// (1 anchor + a handful of drafts); wider batches fall back to serial.
 constexpr std::uint32_t kMaxVerify = 8;
+
+/// Unified-batch opt-out valve (default on): GUFO_GLIMMER_UNIFIED_BATCH=0
+/// keeps the legacy per-session attention cores everywhere (Forward and
+/// DecodeBatch). Read per call so tests can switch modes mid-process.
+[[nodiscard]] bool UnifiedBatchEnabled() {
+  const char* e = std::getenv("GUFO_GLIMMER_UNIFIED_BATCH");
+  return e == nullptr || e[0] != '0';
+}
 
 bool Check(hipError_t err, std::string* error_msg, const char* what) {
   if (err == hipSuccess)
@@ -161,9 +176,14 @@ void GlimmerGemm(const TensorRef& w, const float* x, __half* x16,
 
 struct SessionBuffers {
   std::vector<void*> allocations;
-  // KV caches, indexed by layer (F16 planes, v1).
+  // KV caches, indexed by layer. F16 planes for the f16 path; shared
+  // blocked-Q8 grids (with per-layer row bytes) for the q8 path.
   std::vector<__half*> kv_k;
   std::vector<__half*> kv_v;
+  std::vector<std::uint8_t*> kv_bk;
+  std::vector<std::uint8_t*> kv_bv;
+  std::vector<std::uint32_t> kv_row_bytes_k;
+  std::vector<std::uint32_t> kv_row_bytes_v;
 
   template <typename T>
   T* Alloc(std::size_t count, std::string* error) {
@@ -205,14 +225,20 @@ struct Session::Impl {
   void* preq_scratch{nullptr};  ///< session arena for preq-q81 narrow decode
   std::size_t preq_bytes{0};
   std::int32_t* d_tokens{nullptr};
+  std::uint32_t* d_pos{nullptr};  ///< device position scalar (blocked path)
+  std::uint32_t* d_pos_win{nullptr};  ///< rebased position (SWA shift)
+  float* splitk_partials{nullptr};  ///< blocked Split-K partials (q8 path)
   core::compute::gemm::ArgmaxCandidate* argmax_scratch{nullptr};
   std::int32_t* argmax_out{nullptr};
   std::uint32_t capacity{0};
   std::uint32_t length{0};
   std::vector<float> host_logits;
+  /// Previously synced prompt tokens: append-only growth forwards only the
+  /// delta (O(n) prefix + delta instead of O(n^2) replays).
+  std::vector<std::int32_t> synced_;
 
   [[nodiscard]] bool Ensure(const ModelWeights& w, std::uint32_t capacity,
-                            std::string* error) {
+                            bool use_blocked, std::string* error) {
     this->capacity = capacity;
     const std::uint32_t hidden_dim = w.config.hidden_size;
     const std::uint32_t qdim = w.config.num_heads * w.config.head_dim;
@@ -247,17 +273,28 @@ struct Session::Impl {
     preq_bytes = core::compute::gemm::NarrowQ80PrequantScratchBytes(wide_dim);
     preq_scratch = buffers.Alloc<std::uint8_t>(preq_bytes, error);
     d_tokens = buffers.Alloc<std::int32_t>(chunk, error);
+    d_pos = buffers.Alloc<std::uint32_t>(1, error);
+    d_pos_win = buffers.Alloc<std::uint32_t>(1, error);
+    if (use_blocked) {
+      splitk_partials = buffers.Alloc<float>(
+          core::compute::blocked_splitk::
+              AttentionBlockedSplitKScratchBytes() /
+              sizeof(float),
+          error);
+    }
     argmax_scratch = buffers.Alloc<core::compute::gemm::ArgmaxCandidate>(
         core::compute::gemm::kArgmaxParts, error);
     argmax_out = buffers.Alloc<std::int32_t>(1, error);
     host_logits.assign(w.config.vocab_size, 0.0f);
-    return hidden != nullptr && normed != nullptr && qbuf != nullptr &&
-           kbuf != nullptr && vbuf != nullptr && attn_out != nullptr &&
-           gate_out != nullptr && up_out != nullptr && gate_attn != nullptr &&
-            ffn_out != nullptr && logits != nullptr && verify_logits != nullptr &&
-            x16 != nullptr && q8tiled != nullptr && preq_scratch != nullptr &&
-            d_tokens != nullptr &&
+    const bool ok = hidden != nullptr && normed != nullptr &&
+           qbuf != nullptr && kbuf != nullptr && vbuf != nullptr &&
+           attn_out != nullptr && gate_out != nullptr && up_out != nullptr &&
+           gate_attn != nullptr && ffn_out != nullptr && logits != nullptr &&
+           verify_logits != nullptr && x16 != nullptr && q8tiled != nullptr &&
+           preq_scratch != nullptr && d_tokens != nullptr &&
+           d_pos != nullptr && d_pos_win != nullptr &&
            argmax_scratch != nullptr && argmax_out != nullptr;
+    return ok && (!use_blocked || splitk_partials != nullptr);
   }
 };
 
@@ -265,6 +302,30 @@ Model::~Model() {
   for (void* p : device_allocations_) {
     (void)hipFree(p);
   }
+  if (mixed_scratch_ != nullptr) {
+    (void)hipFree(mixed_scratch_);
+    mixed_scratch_ = nullptr;
+    mixed_scratch_bytes_ = 0;
+  }
+}
+
+bool Model::EnsureMixedScratch(std::size_t need, std::string* error_msg) {
+  if (mixed_scratch_ != nullptr && mixed_scratch_bytes_ >= need)
+    return true;
+  if (mixed_scratch_ != nullptr) {
+    (void)hipFree(mixed_scratch_);
+    mixed_scratch_ = nullptr;
+    mixed_scratch_bytes_ = 0;
+  }
+  void* p = nullptr;
+  if (hipMalloc(&p, need) != hipSuccess || p == nullptr) {
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = "glimmer mixed-batch scratch allocation failed";
+    return false;
+  }
+  mixed_scratch_ = p;
+  mixed_scratch_bytes_ = need;
+  return true;
 }
 
 std::shared_ptr<Model> Model::Load(const std::string& model_path,
@@ -284,9 +345,9 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       *error_msg = "Failed to bind glimmer weights: " + load_error;
     return nullptr;
   }
-  if (options.kv_cache_quant != "f16") {
+  if (options.kv_cache_quant != "f16" && options.kv_cache_quant != "q8") {
     if (error_msg != nullptr)
-      *error_msg = "glimmer v1 serves f16 KV only (q8 arrives with DFlash serve)";
+      *error_msg = "glimmer kv_cache_quant must be f16 or q8";
     return nullptr;
   }
   if (weights->config.head_dim != 128) {
@@ -378,9 +439,11 @@ Session::Session(std::shared_ptr<Model> model)
 Session::~Session() = default;
 
 std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
+  const bool use_blocked = options_.kv_cache_quant == "q8";
   auto session = std::unique_ptr<Session>(new Session(shared_from_this()));
   std::string error;
-  if (!session->impl_->Ensure(*weights_, options_.max_context, &error)) {
+  if (!session->impl_->Ensure(*weights_, options_.max_context, use_blocked,
+                              &error)) {
     if (error_msg != nullptr)
       *error_msg = error;
     return nullptr;
@@ -389,9 +452,38 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
   auto& impl = *session->impl_;
   impl.buffers.kv_k.assign(w.config.num_layers, nullptr);
   impl.buffers.kv_v.assign(w.config.num_layers, nullptr);
+  impl.buffers.kv_bk.assign(w.config.num_layers, nullptr);
+  impl.buffers.kv_bv.assign(w.config.num_layers, nullptr);
+  impl.buffers.kv_row_bytes_k.assign(w.config.num_layers, 0);
+  impl.buffers.kv_row_bytes_v.assign(w.config.num_layers, 0);
   const std::uint32_t kvdim =
       w.config.num_kv_heads * w.config.head_dim;
+  // Shared blocked grid: (d/32) blocks of 34 bytes per KV head, packed per
+  // row (llama q8 convention: one row_bytes stride for every layer).
+  const std::uint32_t row_bytes =
+      (w.config.head_dim / 32) * 34 * w.config.num_kv_heads;
   for (std::uint32_t il = 0; il < w.config.num_layers; ++il) {
+    if (use_blocked) {
+      // Post-RoPE rows quantize straight into the shared blocked layout
+      // (per-32-block f16 scale, 34 bytes per head-block for Q8).
+      const std::size_t bytes =
+          static_cast<std::size_t>(options_.max_context) * row_bytes;
+      auto* kb = impl.buffers.Alloc<std::uint8_t>(bytes, &error);
+      auto* vb = impl.buffers.Alloc<std::uint8_t>(bytes, &error);
+      if (kb == nullptr || vb == nullptr) {
+        if (error_msg != nullptr)
+          *error_msg = "blocked KV cache allocation failed (layer " +
+                       std::to_string(il) + ")";
+        return nullptr;
+      }
+      (void)hipMemset(kb, 0, bytes);
+      (void)hipMemset(vb, 0, bytes);
+      impl.buffers.kv_bk[il] = kb;
+      impl.buffers.kv_bv[il] = vb;
+      impl.buffers.kv_row_bytes_k[il] = row_bytes;
+      impl.buffers.kv_row_bytes_v[il] = row_bytes;
+      continue;
+    }
     const std::size_t elems =
         static_cast<std::size_t>(options_.max_context) * kvdim;
     auto* kk = impl.buffers.Alloc<__half>(elems, &error);
@@ -410,8 +502,8 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
   return session;
 }
 
-void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
-                           std::uint32_t start_pos, hipStream_t stream) {
+void Session::ForwardLayerPre(Session& s, std::uint32_t il, std::uint32_t n,
+                              std::uint32_t start_pos, hipStream_t stream) {
   auto& w = *s.model_->weights_;
   const auto& c = w.config;
   const std::uint32_t hidden = c.hidden_size;
@@ -421,8 +513,7 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
   const auto& l = w.layers[il];
   auto& impl = *s.impl_;
   const bool swa = c.LayerIsSwa(il);
-  const float score_scale = 1.0F / std::sqrt(static_cast<float>(d));
-  const std::uint32_t window = swa ? c.sliding_window : 0;
+  const bool use_blocked = s.model_->options_.kv_cache_quant == "q8";
 
   float* hidden_buf = impl.hidden;
   // Pre-attention norm.
@@ -449,45 +540,197 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
     kernels::Rope(impl.kbuf, n, c.num_kv_heads, d, start_pos,
                   c.rope_theta_swa, stream);
   }
-  // F16 KV store + dense/SWA causal attention (v1; no blocked-Q8 path).
+  if (use_blocked) {
+    // Post-RoPE rows quantize straight into the shared blocked layout
+    // (per-32-block f16 scale, 34 bytes per head-block for Q8), exactly
+    // like the llama q8 path; d_pos (uploaded by the caller) selects the
+    // destination rows [pos, pos+n).
+    namespace blocked = core::compute::blocked_kv;
+    (void)blocked::QuantizeKvRows(
+        impl.kbuf, kvdim, d, impl.buffers.kv_bk[il], kvdim, c.num_kv_heads,
+        d, n, blocked::KvCodec::kQ8, 127.0F, 34, impl.d_pos, stream);
+    (void)blocked::QuantizeKvRows(
+        impl.vbuf, kvdim, d, impl.buffers.kv_bv[il], kvdim, c.num_kv_heads,
+        d, n, blocked::KvCodec::kQ8, 127.0F, 34, impl.d_pos, stream);
+    return;
+  }
+  // F16 KV store (v1 dense planes).
   kernels::StoreKvF16(impl.kbuf, impl.buffers.kv_k[il], n, kvdim,
                       start_pos, stream);
   kernels::StoreKvF16(impl.vbuf, impl.buffers.kv_v[il], n, kvdim,
                       start_pos, stream);
-  // Prefill attention consults the shared dispatcher and stays on the F16
-  // legacy route; the multi-query blocking kernel below is that route's
-  // accelerator (same online-softmax math, F16 semantics unchanged).
-  // `false` = unsupported shape (tiny/decode/non-d128) -> legacy runs.
-  bool attn_mqb_ran = false;
-  {
+}
+
+void Session::SwaShiftedKV(Session& s, std::uint32_t il, std::uint32_t window,
+                           std::uint32_t start_pos, hipStream_t stream,
+                           const std::uint8_t*& k2, const std::uint8_t*& v2,
+                           const std::uint32_t*& sp, std::uint32_t& rebased) {
+  (void)stream;
+  k2 = s.impl_->buffers.kv_bk[il];
+  v2 = s.impl_->buffers.kv_bv[il];
+  sp = s.impl_->d_pos;
+  rebased = start_pos;
+  if (window != 0 && start_pos + 1 > window) {
+    const std::uint32_t lo = (start_pos + 1 - window) & ~3u;
+    if (lo != 0 && lo <= start_pos) {
+      rebased = start_pos - lo;
+      if (hipMemcpy(s.impl_->d_pos_win, &rebased, sizeof(rebased),
+                    hipMemcpyHostToDevice) == hipSuccess) {
+        k2 += static_cast<std::size_t>(lo) *
+              s.impl_->buffers.kv_row_bytes_k[il];
+        v2 += static_cast<std::size_t>(lo) *
+              s.impl_->buffers.kv_row_bytes_v[il];
+        sp = s.impl_->d_pos_win;
+      }
+    }
+  }
+}
+
+void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
+                               std::uint32_t start_pos, hipStream_t stream,
+                               bool try_unified) {
+  auto& w = *s.model_->weights_;
+  const auto& c = w.config;
+  const std::uint32_t d = c.head_dim;
+  auto& impl = *s.impl_;
+  const bool swa = c.LayerIsSwa(il);
+  const float score_scale = 1.0F / std::sqrt(static_cast<float>(d));
+  const std::uint32_t window = swa ? c.sliding_window : 0;
+  const bool use_blocked = s.model_->options_.kv_cache_quant == "q8";
+
+  if (use_blocked) {
+    // Blocked-Q8 read (llama convention): SWA layers pre-shift past the
+    // window and rebase to dense-causal; the shared dispatcher picks
+    // Split-K decode for long contexts and the scalar direct read
+    // otherwise (same math, fused dequant).
+    const std::uint8_t* k2 = impl.buffers.kv_bk[il];
+    const std::uint8_t* v2 = impl.buffers.kv_bv[il];
+    const std::uint32_t* sp = impl.d_pos;
+    std::uint32_t base = start_pos;
+    if (window != 0) {
+      SwaShiftedKV(s, il, window, start_pos, stream, k2, v2, sp, base);
+    }
     namespace attn_disp = core::compute::attention_dispatcher;
     attn_disp::AttentionDispatchInput din;
     din.q_len = n;
-    din.kv_len = start_pos + n;
+    din.kv_len = base + n;
     din.head_dim = d;
     din.heads = c.num_heads;
     din.kv_heads = c.num_kv_heads;
-    din.k_codec = attn_disp::DispatchCodec::kF16;
-    din.v_codec = attn_disp::DispatchCodec::kF16;
-    din.window = window;
+    din.k_codec = attn_disp::DispatchCodec::kQ8;
+    din.v_codec = attn_disp::DispatchCodec::kQ8;
+    din.window = 0;
     din.is_verify = false;
-    const auto attn_policy =
-        attn_disp::AttentionDispatchPolicy::WithEnvDefaults();
-    if (attn_policy.dispatch_enabled &&
-        attn_disp::RouteAttention(din, attn_policy) ==
-            attn_disp::AttentionRoute::kLegacy) {
-      attn_mqb_ran = kernels::AttentionF16MQB(
-          impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
-          impl.attn_out, n, start_pos, c.num_heads, c.num_kv_heads, d,
-          stream, score_scale, window);
+    const auto route = attn_disp::RouteAttention(
+        din, attn_disp::AttentionDispatchPolicy::WithEnvDefaults());
+    bool ran = false;
+    if (route == attn_disp::AttentionRoute::kBlockedSplitK &&
+        impl.splitk_partials != nullptr) {
+      ran = core::compute::blocked_splitk::AttentionBlockedSplitK<
+          core::compute::blocked_splitk::KvCodecQ8, 128>(
+          impl.qbuf, k2, v2, impl.attn_out, n, sp, base + n, c.num_heads,
+          c.num_kv_heads, d, stream, score_scale, 34, 34,
+          impl.splitk_partials,
+          core::compute::blocked_splitk::
+              AttentionBlockedSplitKScratchBytes());
+    }
+    if (!ran) {
+      core::compute::blocked_kv::AttentionKv(
+          impl.qbuf, k2, v2, /*mask=*/nullptr, /*mask_words=*/0,
+          impl.attn_out, /*partials=*/nullptr, /*splits=*/1, n, sp,
+          c.num_heads, c.num_kv_heads, d, /*ratio=*/1, 34, 34,
+          core::compute::blocked_kv::KvCodec::kQ8, stream, score_scale);
+    }
+    return;
+  }
+
+  // F16 path: one unified mixed-batch launch (single block) first; refusal
+  // falls back to the legacy cores below with F16 semantics unchanged.
+  bool attn_unified_ran = false;
+  if (try_unified) {
+    namespace mb = core::compute::mixed_batch;
+    mb::MixedBlk blk{};
+    blk.q = impl.qbuf;
+    blk.k = impl.buffers.kv_k[il];
+    blk.v = impl.buffers.kv_v[il];
+    blk.gate = nullptr;  // the output gate stays a post-hoc SigmoidMul
+    blk.out = impl.attn_out;
+    blk.kv_len = start_pos + n;
+    blk.q_pos_base = start_pos;
+    blk.n_rows = n;
+    blk.k_codec = mb::MixedKvCodec::kF16;
+    blk.v_codec = mb::MixedKvCodec::kF16;
+    blk.head_dim = d;
+    blk.heads = c.num_heads;
+    blk.kv_heads = c.num_kv_heads;
+    blk.score_scale = score_scale;
+    blk.q_stride = 0;
+    blk.k_stride = 0;
+    blk.v_stride = 0;
+    blk.k_head_stride = 0;
+    blk.v_head_stride = 0;
+    blk.gate_stride = 0;
+    blk.out_stride = 0;
+    blk.window = window;
+    blk.key_block_bytes = 34;
+    blk.value_block_bytes = 34;
+    std::string scratch_error;
+    if (s.model_->EnsureMixedScratch(mb::MixedBatchF16ScratchBytes(1),
+                                     &scratch_error)) {
+      attn_unified_ran = mb::LaunchMixedBatchAttention(
+          &blk, 1, s.model_->mixed_scratch_, s.model_->mixed_scratch_bytes_,
+          stream);
     }
   }
-  if (!attn_mqb_ran) {
-    kernels::AttentionF16(impl.qbuf, impl.buffers.kv_k[il],
-                          impl.buffers.kv_v[il], impl.attn_out, n, start_pos,
-                          c.num_heads, c.num_kv_heads, d, stream,
-                          score_scale, window);
+  if (!attn_unified_ran) {
+    // Prefill attention consults the shared dispatcher and stays on the F16
+    // legacy route; the multi-query blocking kernel below is that route's
+    // accelerator (same online-softmax math, F16 semantics unchanged).
+    // `false` = unsupported shape (tiny/decode/non-d128) -> legacy runs.
+    bool attn_mqb_ran = false;
+    {
+      namespace attn_disp = core::compute::attention_dispatcher;
+      attn_disp::AttentionDispatchInput din;
+      din.q_len = n;
+      din.kv_len = start_pos + n;
+      din.head_dim = d;
+      din.heads = c.num_heads;
+      din.kv_heads = c.num_kv_heads;
+      din.k_codec = attn_disp::DispatchCodec::kF16;
+      din.v_codec = attn_disp::DispatchCodec::kF16;
+      din.window = window;
+      din.is_verify = false;
+      const auto attn_policy =
+          attn_disp::AttentionDispatchPolicy::WithEnvDefaults();
+      if (attn_policy.dispatch_enabled &&
+          attn_disp::RouteAttention(din, attn_policy) ==
+              attn_disp::AttentionRoute::kLegacy) {
+        attn_mqb_ran = kernels::AttentionF16MQB(
+            impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+            impl.attn_out, n, start_pos, c.num_heads, c.num_kv_heads, d,
+            stream, score_scale, window);
+      }
+    }
+    if (!attn_mqb_ran) {
+      kernels::AttentionF16(impl.qbuf, impl.buffers.kv_k[il],
+                            impl.buffers.kv_v[il], impl.attn_out, n, start_pos,
+                            c.num_heads, c.num_kv_heads, d, stream,
+                            score_scale, window);
+    }
   }
+}
+
+void Session::ForwardLayerPost(Session& s, std::uint32_t il, std::uint32_t n,
+                               std::uint32_t start_pos, hipStream_t stream) {
+  auto& w = *s.model_->weights_;
+  const auto& c = w.config;
+  const std::uint32_t hidden = c.hidden_size;
+  const std::uint32_t d = c.head_dim;
+  const std::uint32_t qdim = c.num_heads * d;
+  const auto& l = w.layers[il];
+  auto& impl = *s.impl_;
+
+  float* hidden_buf = impl.hidden;
   // Attention output gate: attn_out *= sigmoid(gate_proj(pre-attn hidden)).
   GlimmerGemm(l.gate, impl.normed, impl.x16, impl.q8tiled, impl.preq_scratch, impl.preq_bytes, impl.gate_attn, n, qdim,
               hidden, stream);
@@ -635,6 +878,11 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   }
   hipStream_t stream = 0;
   auto& impl = *impl_;
+  if (model_->options_.kv_cache_quant == "q8") {
+    // Blocked-path destination rows [pos, pos+n) for every layer below.
+    (void)hipMemcpyAsync(impl.d_pos, &start_pos, sizeof(start_pos),
+                         hipMemcpyHostToDevice, stream);
+  }
   std::vector<std::int32_t> host_tokens(tokens.begin(), tokens.end());
   if (host_tokens.size() > kMaxChunk) {
     if (error_msg != nullptr)
@@ -687,7 +935,10 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     sum_of(impl.hidden, static_cast<std::size_t>(n) * hidden, "embed");
   }
   for (std::uint32_t il = 0; il < w.config.num_layers; ++il) {
-    ForwardLayer(*this, il, n, start_pos, stream);
+    ForwardLayerPre(*this, il, n, start_pos, stream);
+    ForwardLayerAttn(*this, il, n, start_pos, stream,
+                     /*try_unified=*/UnifiedBatchEnabled());
+    ForwardLayerPost(*this, il, n, start_pos, stream);
     if (getenv("GLIMMER_DEBUG_SUMS") != nullptr && n <= 32 &&
         (il < 2 || il % 4 == 0 || il + 1 == w.config.num_layers)) {
       (void)hipStreamSynchronize(stream);
@@ -715,6 +966,160 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     }
   }
   ForwardFinish(*this, n, start_pos, stream, all_logits);
+  return true;
+}
+
+bool Session::DecodeBatch(std::span<BatchItem> items,
+                          std::string* error_msg) {
+  namespace mb = core::compute::mixed_batch;
+  const auto fail = [&](const std::string& m) {
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = m;
+    return false;
+  };
+  if (items.empty() || items.size() > mb::kMaxMixedBlks)
+    return fail("glimmer DecodeBatch needs 1..32 batch items");
+  Model* model =
+      (items[0].session != nullptr) ? items[0].session->model_.get() : nullptr;
+  if (model == nullptr)
+    return fail("glimmer DecodeBatch has a null session");
+  const auto& w = *model->weights_;
+  const auto& c = w.config;
+  const bool use_blocked = model->options_.kv_cache_quant == "q8";
+  hipStream_t stream = 0;
+  std::vector<std::uint32_t> rows;
+  rows.reserve(items.size());
+  for (const auto& item : items) {
+    if (item.session == nullptr || item.session->model_.get() != model)
+      return fail("glimmer DecodeBatch sessions must share one model");
+    const std::uint32_t n = static_cast<std::uint32_t>(item.tokens.size());
+    if (n == 0 || n > kMaxChunk)
+      return fail("glimmer DecodeBatch item needs 1..512 tokens");
+    if (item.session->impl_->length + n > item.session->impl_->capacity)
+      return fail("glimmer DecodeBatch token exceeds KV capacity");
+    rows.push_back(n);
+  }
+  // Stage one token span per session; the blocked path additionally stages
+  // the per-session decode position each layer's QuantizeKvRows writes to.
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    auto& impl = *items[i].session->impl_;
+    std::vector<std::int32_t> host_tokens(items[i].tokens.begin(),
+                                          items[i].tokens.end());
+    (void)hipMemcpyAsync(impl.d_tokens, host_tokens.data(),
+                         host_tokens.size() * sizeof(std::int32_t),
+                         hipMemcpyHostToDevice, stream);
+    if (use_blocked) {
+      const std::uint32_t pos = impl.length;
+      (void)hipMemcpyAsync(impl.d_pos, &pos, sizeof(pos),
+                           hipMemcpyHostToDevice, stream);
+    }
+  }
+  // Embed + embd_norm prologue per session (mirrors Forward): each item's
+  // rows enter its own hidden staging before the joint layer loop.
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    auto& impl = *items[i].session->impl_;
+    kernels::Embed(w.token_embd.device, w.token_embd.type, impl.d_tokens,
+                   impl.hidden, rows[i], c.hidden_size, stream);
+    kernels::RmsNormPlain(impl.hidden, impl.hidden, rows[i], c.hidden_size,
+                          c.rms_eps, stream);
+  }
+  // Caller-owned arena (§4.2): sized for this width, regrown on demand.
+  // Opt-out valve (default on): GUFO_GLIMMER_UNIFIED_BATCH=0 keeps the
+  // legacy per-session attention cores everywhere (Forward and DecodeBatch).
+  const bool use_unified = UnifiedBatchEnabled();
+  if (use_unified) {
+    std::string scratch_error;
+    if (!model->EnsureMixedScratch(mb::MixedBatchScratchBytes(items.size()),
+                                   &scratch_error)) {
+      return fail("glimmer DecodeBatch scratch allocation failed: " +
+                  scratch_error);
+    }
+  }
+  mb::MixedBlk blks[mb::kMaxMixedBlks];
+  const float score_scale =
+      1.0F / std::sqrt(static_cast<float>(c.head_dim));
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      ForwardLayerPre(*items[i].session, il, rows[i],
+                      items[i].session->impl_->length, stream);
+    }
+    bool attn_ran = false;
+    if (use_unified) {
+      const bool swa = c.LayerIsSwa(il);
+      const std::uint32_t window = swa ? c.sliding_window : 0;
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        Session* s = items[i].session;
+        auto& impl = *s->impl_;
+        mb::MixedBlk& b = blks[i];
+        b.q = impl.qbuf;
+        b.gate = nullptr;  // the output gate stays a post-hoc SigmoidMul
+        b.out = impl.attn_out;
+        b.head_dim = c.head_dim;
+        b.heads = c.num_heads;
+        b.kv_heads = c.num_kv_heads;
+        b.score_scale = score_scale;
+        b.q_stride = 0;
+        b.k_stride = 0;
+        b.v_stride = 0;
+        b.k_head_stride = 0;
+        b.v_head_stride = 0;
+        b.gate_stride = 0;
+        b.out_stride = 0;
+        b.key_block_bytes = 34;
+        b.value_block_bytes = 34;
+        if (!use_blocked) {
+          b.k = impl.buffers.kv_k[il];
+          b.v = impl.buffers.kv_v[il];
+          b.k_codec = mb::MixedKvCodec::kF16;
+          b.v_codec = mb::MixedKvCodec::kF16;
+          b.window = window;
+          b.kv_len = impl.length + rows[i];
+          b.q_pos_base = impl.length;
+          b.n_rows = rows[i];
+        } else {
+          // Blocked SWA layers are pre-shifted past the window (dense-causal
+          // from here, exactly like the single-session path above).
+          const std::uint8_t* k2 = nullptr;
+          const std::uint8_t* v2 = nullptr;
+          const std::uint32_t* sp = nullptr;
+          std::uint32_t rebased = 0;
+          SwaShiftedKV(*s, il, window, impl.length, stream, k2, v2, sp,
+                       rebased);
+          (void)sp;
+          b.k = k2;
+          b.v = v2;
+          b.k_codec = mb::MixedKvCodec::kQ8;
+          b.v_codec = mb::MixedKvCodec::kQ8;
+          b.window = 0;
+          b.kv_len = rebased + rows[i];
+          b.q_pos_base = rebased;
+          b.n_rows = rows[i];
+        }
+      }
+      attn_ran = mb::LaunchMixedBatchAttention(
+          blks, items.size(), model->mixed_scratch_,
+          model->mixed_scratch_bytes_, stream);
+    }
+    if (!attn_ran) {
+      // Unified refusal (or opt-out): legacy single-session cores,
+      // numerically identical to the serial per-session forwards.
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        ForwardLayerAttn(*items[i].session, il, rows[i],
+                         items[i].session->impl_->length, stream,
+                         /*try_unified=*/false);
+      }
+    }
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      ForwardLayerPost(*items[i].session, il, rows[i],
+                       items[i].session->impl_->length, stream);
+    }
+  }
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    ForwardFinish(*items[i].session, rows[i],
+                  items[i].session->impl_->length, stream,
+                  /*all_logits=*/false);
+  }
+  (void)hipStreamSynchronize(0);
   return true;
 }
 
@@ -750,18 +1155,32 @@ bool Session::Verify(std::span<const std::int32_t> tokens,
 
 bool Session::Sync(std::span<const std::int32_t> prompt,
                    std::string* error_msg) {
-  if (prompt.size() > model_->options_.max_context) {
+  if (prompt.size() > impl_->capacity) {
     if (error_msg != nullptr)
       *error_msg = "prompt exceeds glimmer KV capacity";
     return false;
   }
-  impl_->length = 0;
-  for (std::size_t off = 0; off < prompt.size(); off += kMaxChunk) {
+  // Incremental prefix: when the new prompt extends the previously synced
+  // prefix, KV rows [0, synced) are intact (Evaluate only appends past
+  // them) and only the delta is forwarded. Anything else falls back to a
+  // full resync from 0. This turns append-only multi-turn growth from O(n^2)
+  // replays into O(n) prefix + delta.
+  std::size_t start = 0;
+  const auto& prev = impl_->synced_;
+  if (!prev.empty() && prompt.size() >= prev.size() &&
+      impl_->length >= prev.size() &&
+      std::equal(prev.begin(), prev.end(), prompt.begin())) {
+    start = prev.size();
+  } else {
+    impl_->length = 0;
+  }
+  for (std::size_t off = start; off < prompt.size(); off += kMaxChunk) {
     const std::size_t len = std::min<std::size_t>(kMaxChunk, prompt.size() - off);
     if (!Forward(prompt.subspan(off, len), static_cast<std::uint32_t>(off),
                  error_msg))
       return false;
   }
+  impl_->synced_.assign(prompt.begin(), prompt.end());
   (void)hipStreamSynchronize(0);
   return true;
 }
