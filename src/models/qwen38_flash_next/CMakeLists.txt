@@ -84,3 +84,9 @@ if (ENGINE_ENABLE_HIP)
       gufo_qwen38_flash_next)
   endif()
 endif()
+
+# L1 registry adapter (EngineModel/SpeculativeSession over flash-next
+# Model/Session); HIP-only like the rest of the package.
+if (ENGINE_ENABLE_HIP)
+  target_sources(gufo_qwen38_flash_next PRIVATE engine_adapter.cpp)
+endif()
