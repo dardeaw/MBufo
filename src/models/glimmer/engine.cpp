@@ -88,18 +88,51 @@ bool UploadWeights(ModelWeights& w, std::vector<void*>& owned,
   return true;
 }
 
-// One projection: narrow decode rides the fused quant GEMV, prefill converts
-// activations to F16 once and rides the shared dense kernel (Q8_0 weights
-// dequantize in LDS).
-void GlimmerGemm(const TensorRef& w, const float* x, __half* x16, float* y,
-               std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
-               hipStream_t stream) {
+// One projection: narrow decode rides the fused quant GEMV; large-batch
+// prefill quantizes activations once and rides the shared W8A8 core (WMMA
+// int8, same kernels as the Qwen prefill path). Batches below 96 stay on the
+// Dense F16 path so short prompts are bit-identical to the f16 reference;
+// shapes the W8A8 launcher rejects fall through to Dense (legacy preserved).
+void GlimmerGemm(const TensorRef& w, const float* x, __half* x16,
+                 void* q8tiled, float* y, std::uint32_t n_tokens,
+                 std::uint32_t m, std::uint32_t k, hipStream_t stream) {
   const void* dev = w.device != nullptr ? w.device : w.data;
   if (n_tokens <= 8) {
     core::compute::gemm::GemvBatched(dev, static_cast<int>(w.type),
                                      w.RowBytes(), k, x, y, n_tokens, m, 0.0F,
                                      stream);
     return;
+  }
+  if (n_tokens >= 96 && q8tiled != nullptr &&
+      w.type == core::GgmlType::kQ8_0) {
+    // Host-side 16-split (dispatcher contract): mirror W8A8TailSplit so
+    // only rows the scalar tail kernel would otherwise burn (~40x slower
+    // per row, k <= 10240 only) divert to the Dense F16 path. Every other
+    // batch rides one W8A8 launch whose edge clamping is exact, so common
+    // shapes keep yesterday's numerics bit-for-bit.
+    std::size_t main_n = n_tokens, tail_n = 0;
+    const std::size_t tail128 = n_tokens % 128;
+    if (n_tokens > 128 && tail128 != 0 && tail128 <= 16 &&
+        k <= core::compute::gemm::kW8A8VarlenMaxK) {
+      main_n = n_tokens - tail128;
+      tail_n = tail128;
+    }
+    bool w8a8_ok = (main_n == 0);
+    if (main_n != 0) {
+      core::compute::gemm::QuantizeQ8Tiled(x, q8tiled, main_n, k, stream);
+      w8a8_ok = core::compute::gemm::W8A8Gemm(dev, q8tiled, y, main_n, m, k,
+                                              stream);
+    }
+    if (w8a8_ok && tail_n != 0) {
+      const float* xt = x + static_cast<std::size_t>(main_n) * k;
+      float* yt = y + static_cast<std::size_t>(main_n) * m;
+      kernels::F32ToF16(xt, x16, tail_n * k, stream);
+      core::compute::gemm::DenseF16Gemm(dev, x16, yt, tail_n, m, k, stream);
+      return;
+    }
+    if (w8a8_ok) {
+      return;
+    }
   }
   kernels::F32ToF16(x, x16, static_cast<std::size_t>(n_tokens) * k, stream);
   if (w.type == core::GgmlType::kF16) {
@@ -152,6 +185,7 @@ struct Session::Impl {
   float* logits{nullptr};
   float* verify_logits{nullptr};  ///< [kMaxVerify, vocab] batched verify rows
   __half* x16{nullptr};
+  void* q8tiled{nullptr};
   std::int32_t* d_tokens{nullptr};
   core::compute::gemm::ArgmaxCandidate* argmax_scratch{nullptr};
   std::int32_t* argmax_out{nullptr};
@@ -166,6 +200,12 @@ struct Session::Impl {
     const std::uint32_t qdim = w.config.num_heads * w.config.head_dim;
     const std::uint32_t kvdim = w.config.num_kv_heads * w.config.head_dim;
     const std::uint32_t ff = w.config.intermediate_size;
+    // x16 stages F16 activations for every prefill GEMM, including the FFN
+    // down-projection whose row width (intermediate) exceeds hidden. Size it
+    // for the widest row: with hidden only, prompts past
+    // chunk*hidden/intermediate tokens write past the buffer and corrupt the
+    // session heap (GPU page fault on long prompts).
+    const std::uint32_t wide_dim = std::max({hidden_dim, ff, qdim});
     const std::size_t chunk = kMaxChunk;
     hidden = buffers.Alloc<float>(chunk * hidden_dim, error);
     normed = buffers.Alloc<float>(chunk * hidden_dim, error);
@@ -180,7 +220,9 @@ struct Session::Impl {
     logits = buffers.Alloc<float>(w.config.vocab_size, error);
     verify_logits = buffers.Alloc<float>(
         static_cast<std::size_t>(kMaxVerify) * w.config.vocab_size, error);
-    x16 = buffers.Alloc<__half>(chunk * hidden_dim, error);
+    x16 = buffers.Alloc<__half>(chunk * wide_dim, error);
+    q8tiled = buffers.Alloc<std::uint8_t>(
+        core::compute::gemm::Q8TiledBytes(chunk, ff), error);
     d_tokens = buffers.Alloc<std::int32_t>(chunk, error);
     argmax_scratch = buffers.Alloc<core::compute::gemm::ArgmaxCandidate>(
         core::compute::gemm::kArgmaxParts, error);
@@ -190,7 +232,7 @@ struct Session::Impl {
            kbuf != nullptr && vbuf != nullptr && attn_out != nullptr &&
            gate_out != nullptr && up_out != nullptr && gate_attn != nullptr &&
            ffn_out != nullptr && logits != nullptr && verify_logits != nullptr &&
-           x16 != nullptr && d_tokens != nullptr &&
+           x16 != nullptr && q8tiled != nullptr && d_tokens != nullptr &&
            argmax_scratch != nullptr && argmax_out != nullptr;
   }
 };
@@ -363,11 +405,11 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
   kernels::RmsNorm(hidden_buf,
                    static_cast<const float*>(l.attn_norm.device),
                    impl.normed, n, hidden, c.rms_eps, stream);
-  GlimmerGemm(l.wq, impl.normed, impl.x16, impl.qbuf, n, qdim,
+  GlimmerGemm(l.wq, impl.normed, impl.x16, impl.q8tiled, impl.qbuf, n, qdim,
               hidden, stream);
-  GlimmerGemm(l.wk, impl.normed, impl.x16, impl.kbuf, n, kvdim,
+  GlimmerGemm(l.wk, impl.normed, impl.x16, impl.q8tiled, impl.kbuf, n, kvdim,
               hidden, stream);
-  GlimmerGemm(l.wv, impl.normed, impl.x16, impl.vbuf, n, kvdim,
+  GlimmerGemm(l.wv, impl.normed, impl.x16, impl.q8tiled, impl.vbuf, n, kvdim,
               hidden, stream);
   // QK-norm (per-head RMS over d; absorbs the qk_scale_factor).
   kernels::RmsNorm(impl.qbuf,
@@ -393,12 +435,12 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                         c.num_heads, c.num_kv_heads, d, stream, score_scale,
                         window);
   // Attention output gate: attn_out *= sigmoid(gate_proj(pre-attn hidden)).
-  GlimmerGemm(l.gate, impl.normed, impl.x16, impl.gate_attn, n, qdim,
+  GlimmerGemm(l.gate, impl.normed, impl.x16, impl.q8tiled, impl.gate_attn, n, qdim,
               hidden, stream);
   kernels::SigmoidMul(impl.gate_attn, impl.attn_out, impl.attn_out,
                       static_cast<std::size_t>(n) * qdim, stream);
   // o_proj, post-attention norm (eps 1e-8), residual add.
-  GlimmerGemm(l.wo, impl.attn_out, impl.x16, impl.ffn_out, n, hidden,
+  GlimmerGemm(l.wo, impl.attn_out, impl.x16, impl.q8tiled, impl.ffn_out, n, hidden,
               qdim, stream);
   kernels::RmsNormAdd(impl.ffn_out,
                       static_cast<const float*>(l.attn_post_norm.device),
@@ -408,14 +450,14 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
   kernels::RmsNorm(hidden_buf,
                    static_cast<const float*>(l.ffn_norm.device),
                    impl.normed, n, hidden, c.rms_eps, stream);
-  GlimmerGemm(l.ffn_gate, impl.normed, impl.x16, impl.gate_out, n,
+  GlimmerGemm(l.ffn_gate, impl.normed, impl.x16, impl.q8tiled, impl.gate_out, n,
             c.intermediate_size, hidden, stream);
-  GlimmerGemm(l.ffn_up, impl.normed, impl.x16, impl.up_out, n,
+  GlimmerGemm(l.ffn_up, impl.normed, impl.x16, impl.q8tiled, impl.up_out, n,
             c.intermediate_size, hidden, stream);
   kernels::SiluMul(impl.gate_out, impl.up_out, impl.gate_out,
                    static_cast<std::size_t>(n) * c.intermediate_size,
                    stream);
-  GlimmerGemm(l.ffn_down, impl.gate_out, impl.x16, impl.ffn_out, n,
+  GlimmerGemm(l.ffn_down, impl.gate_out, impl.x16, impl.q8tiled, impl.ffn_out, n,
             hidden, c.intermediate_size, stream);
   if (getenv("GLIMMER_DUMP_QKV") != nullptr && n <= 32 && il < 2) {
     (void)hipStreamSynchronize(stream);
@@ -473,7 +515,7 @@ void Session::ForwardFinish(Session& s, std::uint32_t n,
       const float* row_in = impl.normed + static_cast<std::size_t>(r) * hidden;
       float* row_out =
           impl.verify_logits + static_cast<std::size_t>(r) * c.vocab_size;
-      GlimmerGemm(w.output, row_in, impl.x16, row_out, 1, c.vocab_size,
+      GlimmerGemm(w.output, row_in, impl.x16, impl.q8tiled, row_out, 1, c.vocab_size,
                   hidden, stream);
       if (c.logit_scale != 1.0F) {
         kernels::ScaleInplace(row_out, c.logit_scale,
@@ -486,7 +528,7 @@ void Session::ForwardFinish(Session& s, std::uint32_t n,
   } else {
     const float* last_row =
         impl.normed + static_cast<std::size_t>(n - 1) * hidden;
-    GlimmerGemm(w.output, last_row, impl.x16, impl.logits, 1,
+    GlimmerGemm(w.output, last_row, impl.x16, impl.q8tiled, impl.logits, 1,
                 c.vocab_size, hidden, stream);
     // Output gain then tanh softcap (matches the reference order).
     if (c.logit_scale != 1.0F) {
