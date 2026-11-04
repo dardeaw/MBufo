@@ -83,13 +83,11 @@ std::optional<DraftConfig> DraftConfig::FromGguf(
       }
     }
   }
-  const auto* embd = gguf.FindTensor("token_embd.weight");
-  if (embd == nullptr || embd->dimensions.size() < 2) {
-    r.Fail("dflash artifact is missing token_embd.weight");
-    return std::nullopt;
-  }
-  c.vocab_size = static_cast<std::uint32_t>(embd->dimensions[1]);
-  if (c.num_layers == 0 || c.vocab_size == 0 ||
+  // No embedding and no vocabulary head in the artifact: the draft
+  // consumes fused target features and predicts with the target head.
+  // The backend fills vocab_size from the target model.
+  c.vocab_size = 0;
+  if (c.num_layers == 0 ||
       c.target_layer_ids.size() != c.num_layers) {
     r.Fail("dflash artifact has inconsistent dimensions");
     return std::nullopt;
@@ -182,6 +180,9 @@ std::optional<DraftModelWeights> DraftModelWeights::Bind(
   DraftModelWeights w;
   w.config = *config;
   const std::uint64_t hidden = config->hidden_size;
+  // Fusion width: one hidden vector per tapped target layer.
+  const std::uint64_t enc_in =
+      static_cast<std::uint64_t>(config->target_layer_ids.size()) * hidden;
 
   auto mirror = [&](const std::string& name, DraftTensorRef& ref,
                     std::uint64_t cols, std::uint64_t rows) -> bool {
@@ -193,8 +194,18 @@ std::optional<DraftModelWeights> DraftModelWeights::Bind(
     }
     if (info->dimensions.size() < 1 || info->dimensions[0] != cols ||
         (info->dimensions.size() > 1 && info->dimensions[1] != rows)) {
-      if (error_msg != nullptr && error_msg->empty())
-        *error_msg = "draft tensor has unexpected dimensions: " + name;
+      if (error_msg != nullptr && error_msg->empty()) {
+        std::string dims = "[";
+        for (std::size_t i = 0; i < info->dimensions.size(); ++i) {
+          if (i != 0)
+            dims += ",";
+          dims += std::to_string(info->dimensions[i]);
+        }
+        dims += "]";
+        *error_msg = "draft tensor has unexpected dimensions: " + name +
+                     " got " + dims + " want [" + std::to_string(cols) +
+                     "," + std::to_string(rows) + "]";
+      }
       return false;
     }
     std::vector<float> host;
@@ -221,17 +232,11 @@ std::optional<DraftModelWeights> DraftModelWeights::Bind(
     return true;
   };
 
-  if (!mirror("token_embd.weight", w.token_embd, hidden,
-              config->vocab_size))
+  if (!mirror("fc.weight", w.fc, enc_in, hidden))
     return std::nullopt;
-  // Draft shares the target vocabulary; output head mirrors the embedding
-  // unless the artifact carries its own.
-  if (reader.FindTensor("output.weight") != nullptr) {
-    if (!mirror("output.weight", w.output, hidden, config->vocab_size))
-      return std::nullopt;
-  } else {
-    w.output = w.token_embd;
-  }
+  // Encoder norm over the fused features.
+  if (!mirror("enc.output_norm.weight", w.enc_norm, hidden, 1))
+    return std::nullopt;
   if (!mirror("output_norm.weight", w.output_norm, hidden, 1))
     return std::nullopt;
 

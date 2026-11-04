@@ -18,6 +18,8 @@
 #include "src/core/compute/attention/blocked_splitk.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
+#include "src/core/speculative/draft_backend.hpp"
+#include "src/models/glimmer/draft_backend.hpp"
 #include "src/models/glimmer/kernels/kernels.hpp"
 
 namespace gufo::models::glimmer {
@@ -220,6 +222,7 @@ struct Session::Impl {
   float* ffn_out{nullptr};
   float* logits{nullptr};
   float* verify_logits{nullptr};  ///< [kMaxVerify, vocab] batched verify rows
+  std::int32_t* verify_out{nullptr};  ///< [kMaxVerify] device verify argmax
   __half* x16{nullptr};
   void* q8tiled{nullptr};
   void* preq_scratch{nullptr};  ///< session arena for preq-q81 narrow decode
@@ -236,6 +239,10 @@ struct Session::Impl {
   /// Previously synced prompt tokens: append-only growth forwards only the
   /// delta (O(n) prefix + delta instead of O(n^2) replays).
   std::vector<std::int32_t> synced_;
+  /// Zero-based tapped layer outputs for draft feature capture (empty =
+  /// taps disabled). Staging holds the last forwarded row per tap.
+  std::vector<std::uint32_t> tap_layers_;
+  float* tap_staging_{nullptr};
 
   [[nodiscard]] bool Ensure(const ModelWeights& w, std::uint32_t capacity,
                             bool use_blocked, std::string* error) {
@@ -285,6 +292,7 @@ struct Session::Impl {
     argmax_scratch = buffers.Alloc<core::compute::gemm::ArgmaxCandidate>(
         core::compute::gemm::kArgmaxParts, error);
     argmax_out = buffers.Alloc<std::int32_t>(1, error);
+    verify_out = buffers.Alloc<std::int32_t>(kMaxVerify, error);
     host_logits.assign(w.config.vocab_size, 0.0f);
     const bool ok = hidden != nullptr && normed != nullptr &&
            qbuf != nullptr && kbuf != nullptr && vbuf != nullptr &&
@@ -293,7 +301,8 @@ struct Session::Impl {
            verify_logits != nullptr && x16 != nullptr && q8tiled != nullptr &&
            preq_scratch != nullptr && d_tokens != nullptr &&
            d_pos != nullptr && d_pos_win != nullptr &&
-           argmax_scratch != nullptr && argmax_out != nullptr;
+           argmax_scratch != nullptr && argmax_out != nullptr &&
+           verify_out != nullptr;
     return ok && (!use_blocked || splitk_partials != nullptr);
   }
 };
@@ -721,7 +730,8 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
 }
 
 void Session::ForwardLayerPost(Session& s, std::uint32_t il, std::uint32_t n,
-                               std::uint32_t start_pos, hipStream_t stream) {
+                               std::uint32_t start_pos, hipStream_t stream,
+                               TapSink* tap) {
   auto& w = *s.model_->weights_;
   const auto& c = w.config;
   const std::uint32_t hidden = c.hidden_size;
@@ -780,6 +790,28 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il, std::uint32_t n,
   kernels::RmsNormAdd(impl.ffn_out,
                       static_cast<const float*>(l.ffn_post_norm.device),
                       hidden_buf, n, hidden, c.post_norm_eps, stream);
+  // Draft feature taps: refresh the staged last row for tapped layers and
+  // fire the one-shot sink (prompt priming / verify capture). Both see the
+  // finished residual stream of this layer.
+  if (!impl.tap_layers_.empty() || tap != nullptr) {
+    const float* last_row =
+        hidden_buf + static_cast<std::size_t>(n - 1) * hidden;
+    for (std::size_t t = 0; t < impl.tap_layers_.size(); ++t) {
+      if (impl.tap_layers_[t] == il && impl.tap_staging_ != nullptr) {
+        (void)hipMemcpyAsync(
+            impl.tap_staging_ + static_cast<std::size_t>(t) * hidden,
+            last_row, hidden * sizeof(float), hipMemcpyDeviceToDevice,
+            stream);
+      }
+    }
+    if (tap != nullptr) {
+      for (const std::uint32_t tapped : tap->layers) {
+        if (tapped == il && tap->fn) {
+          tap->fn(il, hidden_buf, n, start_pos);
+        }
+      }
+    }
+  }
   if (getenv("GLIMMER_DUMP_QKV") != nullptr && n <= 32) {
     (void)hipStreamSynchronize(stream);
     std::vector<float> h(static_cast<std::size_t>(n) * hidden);
@@ -862,7 +894,7 @@ void Session::ForwardFinish(Session& s, std::uint32_t n,
 
 bool Session::Forward(std::span<const std::int32_t> tokens,
                       std::uint32_t start_pos, std::string* error_msg,
-                      bool all_logits) {
+                      bool all_logits, TapSink* tap) {
   const auto& w = *model_->weights_;
   const std::uint32_t hidden = w.config.hidden_size;
   const std::uint32_t n = static_cast<std::uint32_t>(tokens.size());
@@ -938,7 +970,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
     ForwardLayerPre(*this, il, n, start_pos, stream);
     ForwardLayerAttn(*this, il, n, start_pos, stream,
                      /*try_unified=*/UnifiedBatchEnabled());
-    ForwardLayerPost(*this, il, n, start_pos, stream);
+    ForwardLayerPost(*this, il, n, start_pos, stream, tap);
     if (getenv("GLIMMER_DEBUG_SUMS") != nullptr && n <= 32 &&
         (il < 2 || il % 4 == 0 || il + 1 == w.config.num_layers)) {
       (void)hipStreamSynchronize(stream);
@@ -1125,36 +1157,244 @@ bool Session::DecodeBatch(std::span<BatchItem> items,
 
 bool Session::Verify(std::span<const std::int32_t> tokens,
                      std::uint32_t start_pos, std::vector<std::int32_t>& vbest,
-                     std::string* error_msg) {
+                     std::string* error_msg, TapSink* tap) {
   const std::uint32_t n = static_cast<std::uint32_t>(tokens.size());
   if (n == 0 || n > kMaxVerify) {
     if (error_msg != nullptr)
       *error_msg = "glimmer Verify needs 1..8 tokens";
     return false;
   }
-  if (!Forward(tokens, start_pos, error_msg, /*all_logits=*/true))
+  if (!Forward(tokens, start_pos, error_msg, /*all_logits=*/true, tap))
     return false;
-  vbest.assign(n, -1);
   auto& impl = *impl_;
-  (void)hipStreamSynchronize(0);
+  // Device-side argmax over every verify row (the host must never
+  // dereference the device verify_logits staging directly).
+  core::compute::gemm::Argmax(impl.verify_logits, impl.argmax_scratch,
+                              impl.verify_out, n,
+                              model_->weights_->config.vocab_size, 0);
+  vbest.assign(n, -1);
+  (void)hipMemcpy(vbest.data(), impl.verify_out, n * sizeof(std::int32_t),
+                  hipMemcpyDeviceToHost);
+  // Keep both logits views on the last row so SampleGreedy/Logits work
+  // right after a verify (the round commit moves them to the accepted row).
   const std::size_t vocab = impl.host_logits.size();
-  for (std::uint32_t t = 0; t < n; ++t) {
-    const float* row = impl.verify_logits + static_cast<std::size_t>(t) * vocab;
-    std::int32_t best = 0;
-    float best_v = row[0];
-    for (std::size_t i = 1; i < vocab; ++i) {
-      if (row[i] > best_v) {
-        best_v = row[i];
-        best = static_cast<std::int32_t>(i);
-      }
+  hipStream_t stream = 0;
+  (void)hipMemcpyAsync(impl.logits,
+                       impl.verify_logits +
+                           static_cast<std::size_t>(n - 1) * vocab,
+                       vocab * sizeof(float), hipMemcpyDeviceToDevice, stream);
+  (void)hipMemcpyAsync(impl.host_logits.data(), impl.logits,
+                       vocab * sizeof(float), hipMemcpyDeviceToHost, stream);
+  (void)hipStreamSynchronize(0);
+  return true;
+}
+
+bool Session::EnableDraftTaps(std::span<const std::uint32_t> layers,
+                               std::string* error_msg) {
+  auto& impl = *impl_;
+  impl.tap_layers_.assign(layers.begin(), layers.end());
+  const auto& w = *model_->weights_;
+  for (const std::uint32_t il : impl.tap_layers_) {
+    if (il >= w.config.num_layers) {
+      if (error_msg != nullptr)
+        *error_msg = "glimmer tap layer out of range";
+      impl.tap_layers_.clear();
+      return false;
     }
-    vbest[t] = best;
+  }
+  if (!impl.tap_layers_.empty() && impl.tap_staging_ == nullptr) {
+    std::string error;
+    impl.tap_staging_ = impl.buffers.Alloc<float>(
+        impl.tap_layers_.size() * w.config.hidden_size, &error);
+    if (impl.tap_staging_ == nullptr) {
+      if (error_msg != nullptr)
+        *error_msg = error;
+      impl.tap_layers_.clear();
+      return false;
+    }
   }
   return true;
 }
 
+bool Session::CopyTappedRow(std::span<float> host_out,
+                            std::string* error_msg) const {
+  const auto& impl = *impl_;
+  const std::size_t need =
+      impl.tap_layers_.size() * model_->weights_->config.hidden_size;
+  if (impl.tap_staging_ == nullptr || host_out.size() < need) {
+    if (error_msg != nullptr)
+      *error_msg = "glimmer tapped rows unavailable (enable taps first)";
+    return false;
+  }
+  if (hipMemcpy(host_out.data(), impl.tap_staging_,
+                need * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess) {
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = "glimmer tapped row copy failed";
+    return false;
+  }
+  return true;
+}
+
+bool Session::SpeculativeRound(speculative::IDraftBackend& draft,
+                               std::span<const std::int32_t> prefix,
+                               std::uint32_t n_draft,
+                               std::vector<std::int32_t>* out,
+                               std::string* error_msg) {
+  const auto fail = [&](const std::string& m) {
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = m;
+    return false;
+  };
+  if (out == nullptr)
+    return fail("glimmer SpeculativeRound needs an output");
+  if (impl_->length == 0)
+    return fail("speculative round needs a prompt");
+  if (prefix.size() != impl_->length)
+    return fail("speculative prefix desync (needs Length())");
+  auto* dflash = dynamic_cast<GlimmerDflashDraftBackend*>(&draft);
+  if (dflash == nullptr)
+    return fail("glimmer SpeculativeRound needs the glimmer-dflash backend");
+  const auto tap_span = dflash->TargetHiddenLayerIds();
+  const std::vector<std::uint32_t> taps(tap_span.begin(), tap_span.end());
+  if (taps.empty() || impl_->tap_layers_ != taps)
+    return fail("draft tap mismatch (call EnableDraftTaps first)");
+  const std::uint32_t hidden = model_->weights_->config.hidden_size;
+  const std::uint32_t feat_width =
+      static_cast<std::uint32_t>(taps.size()) * hidden;
+  const std::uint32_t P = impl_->length;
+  // Anchor prediction for position P (from the last committed row).
+  const std::int32_t T0 = SampleGreedy();
+  // Plain step shared by the spec-off / no-room / no-proposal paths.
+  // It advances the target AND the draft (bonus-equivalent single row),
+  // keeping the two in lockstep.
+  auto plain_step = [&](std::string* err) -> bool {
+    out->assign(1, T0);
+    if (!Forward({&T0, 1}, P, err))
+      return false;
+    if (dflash->primed()) {
+      std::vector<float> anchor_feats(feat_width);
+      if (!CopyTappedRow(anchor_feats, err))
+        return false;
+      std::vector<tokenization::TokenId> toks = {
+          static_cast<tokenization::TokenId>(T0)};
+      speculative::DraftTargetContext ctx;
+      ctx.prompt_tokens = toks;
+      ctx.prompt_hidden_states = anchor_feats;
+      ctx.hidden_size = feat_width;
+      ctx.first_token = toks[0];
+      if (!dflash->AppendTargetContext(ctx, P)) {
+        if (err != nullptr && err->empty())
+          *err = "glimmer draft append failed";
+        return false;
+      }
+      std::vector<tokenization::TokenId> empty;
+      dflash->AcceptFeedback(empty,
+                             static_cast<tokenization::TokenId>(T0));
+    }
+    return true;
+  };
+  // Cap the round: verify width and context (commit + bonus must fit).
+  if (P + 1 > impl_->capacity)
+    return fail("glimmer context exhausted");
+  std::uint32_t k = std::min({n_draft, kMaxVerify, impl_->capacity - P - 1});
+  if (k == 0)
+    return plain_step(error_msg);
+  // Advisory prefix for the draft (the draft tracks positions itself).
+  std::vector<tokenization::TokenId> advisory;
+  advisory.reserve(prefix.size());
+  for (const std::int32_t t : prefix)
+    advisory.push_back(static_cast<tokenization::TokenId>(t));
+  // The verify below performs KV surgery past P; drop the
+  // incremental-Sync marker conservatively (next Sync fully resyncs).
+  impl_->synced_.clear();
+  auto proposal = draft.Propose(advisory, P, k);
+  if (proposal.tokens.empty())
+    return plain_step(error_msg);
+  k = std::min(static_cast<std::uint32_t>(proposal.tokens.size()),
+               kMaxVerify);
+  if (k == 0)
+    return plain_step(error_msg);
+  // Verify [d_0..] with a one-shot tap capturing every verify row per
+  // tapped layer (host, [taps][k][hidden]).
+  std::vector<std::vector<float>> tap_rows(taps.size());
+  TapSink sink;
+  sink.layers = taps;
+  sink.fn = [&](std::uint32_t il, const float* d_rows, std::uint32_t n,
+                std::uint32_t start) {
+    (void)start;
+    for (std::size_t s = 0; s < taps.size(); ++s) {
+      if (taps[s] == il) {
+        tap_rows[s].assign(static_cast<std::size_t>(n) * hidden, 0.0F);
+        (void)hipMemcpy(tap_rows[s].data(), d_rows,
+                        static_cast<std::size_t>(n) * hidden * sizeof(float),
+                        hipMemcpyDeviceToHost);
+      }
+    }
+  };
+  std::vector<std::int32_t> vtoks;
+  vtoks.reserve(k);
+  for (std::uint32_t i = 0; i < k; ++i)
+    vtoks.push_back(static_cast<std::int32_t>(proposal.tokens[i]));
+  std::vector<std::int32_t> vbest;
+  if (!Verify(vtoks, P, vbest, error_msg, &sink))
+    return false;
+  // Greedy prefix-accept: T[0] is the carried anchor prediction,
+  // T[j>=1] is verify row j-1 (row j-1 predicts position P+j).
+  std::uint32_t accepted = 0;
+  while (accepted < k &&
+         static_cast<std::int32_t>(proposal.tokens[accepted]) ==
+             (accepted == 0 ? T0 : vbest[accepted - 1])) {
+    ++accepted;
+  }
+  const std::int32_t bonus = (accepted == 0) ? T0 : vbest[accepted - 1];
+  out->clear();
+  for (std::uint32_t i = 0; i < accepted; ++i)
+    out->push_back(static_cast<std::int32_t>(proposal.tokens[i]));
+  out->push_back(bonus);
+  // Commit the target: rewind to P+accepted, then forward the bonus
+  // (extends the KV past the accepted rows and refreshes the tap
+  // staging with the bonus features for the next round).
+  impl_->length = P + accepted;
+  if (!Evaluate(bonus, error_msg))
+    return false;
+  // Commit the draft: accepted rows (true verify features) + bonus row.
+  std::vector<tokenization::TokenId> commit_toks;
+  commit_toks.reserve(accepted + 1);
+  for (std::uint32_t i = 0; i < accepted; ++i)
+    commit_toks.push_back(proposal.tokens[i]);
+  commit_toks.push_back(static_cast<tokenization::TokenId>(bonus));
+  std::vector<float> commit_feats;
+  commit_feats.reserve(static_cast<std::size_t>(accepted + 1) * feat_width);
+  for (std::uint32_t j = 0; j < accepted; ++j) {
+    for (std::size_t s = 0; s < taps.size(); ++s) {
+      const float* row =
+          tap_rows[s].data() + static_cast<std::size_t>(j) * hidden;
+      commit_feats.insert(commit_feats.end(), row, row + hidden);
+    }
+  }
+  std::vector<float> bonus_feats(feat_width);
+  if (!CopyTappedRow(bonus_feats, error_msg))
+    return false;
+  commit_feats.insert(commit_feats.end(), bonus_feats.begin(),
+                      bonus_feats.end());
+  speculative::DraftTargetContext commit_ctx;
+  commit_ctx.prompt_tokens = commit_toks;
+  commit_ctx.prompt_hidden_states = commit_feats;
+  commit_ctx.hidden_size = feat_width;
+  commit_ctx.first_token = commit_toks[0];
+  if (!dflash->AppendTargetContext(commit_ctx, P)) {
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = "glimmer draft append failed";
+    return false;
+  }
+  std::vector<tokenization::TokenId> matched(
+      proposal.tokens.begin(), proposal.tokens.begin() + accepted);
+  dflash->AcceptFeedback(matched, static_cast<tokenization::TokenId>(bonus));
+  return true;
+}
+
 bool Session::Sync(std::span<const std::int32_t> prompt,
-                   std::string* error_msg) {
+                   std::string* error_msg, TapSink* tap) {
   if (prompt.size() > impl_->capacity) {
     if (error_msg != nullptr)
       *error_msg = "prompt exceeds glimmer KV capacity";
@@ -1177,7 +1417,7 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
   for (std::size_t off = start; off < prompt.size(); off += kMaxChunk) {
     const std::size_t len = std::min<std::size_t>(kMaxChunk, prompt.size() - off);
     if (!Forward(prompt.subspan(off, len), static_cast<std::uint32_t>(off),
-                 error_msg))
+                 error_msg, /*all_logits=*/false, tap))
       return false;
   }
   impl_->synced_.assign(prompt.begin(), prompt.end());

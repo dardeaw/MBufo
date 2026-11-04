@@ -13,7 +13,9 @@ if (ENGINE_ENABLE_HIP)
     kernels/kernels.hip.cpp
     kernels/attn_f16_mqb.hip.cpp
     engine.cpp
-    draft_model.cpp)
+    draft_model.cpp
+    draft_engine.cpp
+    draft_backend.cpp)
   set_source_files_properties(kernels/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/attn_f16_mqb.hip.cpp PROPERTIES
     LANGUAGE HIP)

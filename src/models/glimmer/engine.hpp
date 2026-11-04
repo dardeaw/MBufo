@@ -2,6 +2,7 @@
 #define GUFO_MODELS_GLIMMER_ENGINE_HPP_
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -12,6 +13,10 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/glimmer/weights.hpp"
 #include "src/models/qwen/tokenizer.hpp"
+
+namespace gufo::speculative {
+class IDraftBackend;
+}  // namespace gufo::speculative
 
 namespace gufo::models::glimmer {
 
@@ -97,10 +102,21 @@ class Session final {
   /// One session's rows inside a DecodeBatch launch: 1 token is a decode
   /// row, N tokens are prefill-chunk rows. Every item must share one model
   /// (hence one KV codec); the attention phase runs a single unified
-  /// launch and falls back to the legacy per-session cores on refusal.
+  /// launch and falls back to the legacy per-item cores on refusal.
   struct BatchItem {
     Session* session{nullptr};
     std::span<const std::int32_t> tokens;
+  };
+
+  /// Per-layer hidden-state tap fired inside the forward layer loop
+  /// (covers Forward and DecodeBatch uniformly). `d_rows` points at the
+  /// layer's output residual rows on device ([n][hidden]); the callback
+  /// must copy synchronously if it needs the data past the call.
+  struct TapSink {
+    std::vector<std::uint32_t> layers;
+    std::function<void(std::uint32_t layer, const float* d_rows,
+                       std::uint32_t n, std::uint32_t start)>
+        fn;
   };
 
   /// Runs one forward step for every item (variable rows per session) and
@@ -113,8 +129,11 @@ class Session final {
   /// Reprocesses the prompt in 512-token chunks. Append-only growth
   /// (the new prompt extends the previously synced prefix) forwards only
   /// the delta; anything else falls back to a full resync from 0.
+  /// When `tap` is set, its layers fire per chunk (prompt feature taps
+  /// for draft priming).
   [[nodiscard]] bool Sync(std::span<const std::int32_t> prompt,
-                          std::string* error_msg = nullptr);
+                          std::string* error_msg = nullptr,
+                          TapSink* tap = nullptr);
   /// Appends one token and runs one forward step.
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
@@ -122,13 +141,42 @@ class Session final {
   [[nodiscard]] bool Forward(std::span<const std::int32_t> tokens,
                              std::uint32_t start_pos,
                              std::string* error_msg = nullptr,
-                             bool all_logits = false);
+                             bool all_logits = false,
+                             TapSink* tap = nullptr);
   /// Batched verify: forward `tokens` and return the greedy token for EVERY
   /// position (used by speculative verification). `vbest` must hold `n`.
+  /// When `tap` is set, its layers fire once for the whole block (covers
+  /// the verify rows for draft feature capture).
   [[nodiscard]] bool Verify(std::span<const std::int32_t> tokens,
                             std::uint32_t start_pos,
                             std::vector<std::int32_t>& vbest,
-                            std::string* error_msg = nullptr);
+                            std::string* error_msg = nullptr,
+                            TapSink* tap = nullptr);
+  /// One temperature-0 speculative round against an independent draft
+  /// backend (e.g. glimmer-dflash): the draft proposes from its primed
+  /// state, the target verifies the drafts in a single batched forward,
+  /// greedy prefix-accept commits the matched drafts plus the target
+  /// bonus token (forwarded, so its features exist for the next round),
+  /// and the commit (accepted + bonus rows) is appended to the draft.
+  ///
+  /// `prefix` is the fully committed sequence: prefix.size() == Length().
+  /// The driver appends every element of `out`. The session and the draft
+  /// stay in lockstep (a plain step advances both when the draft cannot
+  /// propose). Requires EnableDraftTaps with the backend's tap layers.
+  [[nodiscard]] bool SpeculativeRound(speculative::IDraftBackend& draft,
+                                     std::span<const std::int32_t> prefix,
+                                     std::uint32_t n_draft,
+                                     std::vector<std::int32_t>* out,
+                                     std::string* error_msg = nullptr);
+  /// Enables tapped-layer last-row staging for draft feature capture
+  /// (allocates [layers][hidden] device staging; every forward refreshes
+  /// the tapped rows). `layers` are zero-based tapped layer outputs and
+  /// must match the draft backend's tap list.
+  [[nodiscard]] bool EnableDraftTaps(std::span<const std::uint32_t> layers,
+                                     std::string* error_msg = nullptr);
+  /// Copies the staged tapped-layer last rows ([layers][hidden] host).
+  [[nodiscard]] bool CopyTappedRow(std::span<float> host_out,
+                                   std::string* error_msg = nullptr) const;
   [[nodiscard]] std::span<const float> Logits() const noexcept;
   [[nodiscard]] std::uint32_t Length() const noexcept;
   [[nodiscard]] std::int32_t SampleGreedy();
@@ -142,7 +190,8 @@ class Session final {
                                std::uint32_t start_pos, hipStream_t stream,
                                bool try_unified);
   static void ForwardLayerPost(Session& s, std::uint32_t il, std::uint32_t n,
-                               std::uint32_t start_pos, hipStream_t stream);
+                               std::uint32_t start_pos, hipStream_t stream,
+                               TapSink* tap = nullptr);
   // Blocked-KV SWA pointer shift: advances the cache base past rows that
   // fell out of the window and rebases the position, keeping dense-causal
   // semantics for the caller (gemma4 SwaShiftedKV convention).
