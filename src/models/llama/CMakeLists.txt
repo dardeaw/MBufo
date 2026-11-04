@@ -11,7 +11,8 @@ target_link_libraries(gufo_llama PUBLIC gufo_core Threads::Threads)
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_llama PRIVATE
     kernels/kernels.hip.cpp
-    engine.cpp)
+    engine.cpp
+    engine_adapter.cpp)
   set_source_files_properties(kernels/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
   target_compile_options(gufo_llama PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O2>

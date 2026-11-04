@@ -445,6 +445,7 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/qwen27b)
   add_subdirectory(tests/models/gemma4)
   add_subdirectory(tests/models/glimmer)
+  add_subdirectory(tests/models/llama)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
 
