@@ -125,12 +125,16 @@ __global__ void RmsNormAddKernel(const float* __restrict__ x,
   }
 }
 
+// Consecutive-pair rotation (GGML_ROPE_TYPE_NORMAL): pair (2i, 2i+1)
+// rotates by pos * theta^(-2i/head_dim). muse-glimmer maps to
+// LLAMA_ROPE_TYPE_NORM (not NeoX), so the halves must NOT be paired as
+// (i, i+d/2); that mismatch collapses attention into echo.
 __global__ void RopeKernel(float* __restrict__ x, std::uint32_t heads,
                            std::uint32_t head_dim, std::uint32_t start_pos,
                            float theta) {
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t h = blockIdx.y;
-  const std::uint32_t i = threadIdx.x;  // 0 .. head_dim/2
+  const std::uint32_t i = threadIdx.x;  // 0 .. head_dim/2 (pair index)
   if (i >= head_dim / 2)
     return;
   float* row =
@@ -142,10 +146,10 @@ __global__ void RopeKernel(float* __restrict__ x, std::uint32_t heads,
   const float ang = pos * inv_freq;
   const float c = cosf(ang);
   const float s = sinf(ang);
-  const float a = row[i];
-  const float b = row[i + head_dim / 2];
-  row[i] = a * c - b * s;
-  row[i + head_dim / 2] = a * s + b * c;
+  const float a = row[2u * i];
+  const float b = row[2u * i + 1u];
+  row[2u * i] = a * c - b * s;
+  row[2u * i + 1u] = a * s + b * c;
 }
 
 __global__ void SiluMulKernel(const float* __restrict__ gate,

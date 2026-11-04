@@ -41,8 +41,9 @@ void RmsNormAdd(const float* x, const float* gamma, float* residual,
 void ResidualAdd(const float* x, float* residual, std::size_t count,
                  hipStream_t stream);
 
-/// Standard NeoX RoPE over the full head dim (llama arch): pair
-/// (x[i], x[i+d/2]) rotates by position * theta^(-2i/d), i in [0, d/2).
+/// Consecutive-pair RoPE over the full head dim (muse-glimmer maps to
+/// LLAMA_ROPE_TYPE_NORM): pair (x[2i], x[2i+1]) rotates by position *
+/// theta^(-2i/d), i in [0, d/2).
 void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
           std::uint32_t head_dim, std::uint32_t start_pos, float theta,
           hipStream_t stream);
