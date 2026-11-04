@@ -541,6 +541,10 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
       std::optional<std::string_view>{"llama-bpe"}) {
     tokenizer->pre_tokenizer_ = PreTokenizer::kLlama;
   }
+  if (reader.GetMetadataString("tokenizer.ggml.pre") ==
+      std::optional<std::string_view>{"llama4"}) {
+    tokenizer->pre_tokenizer_ = PreTokenizer::kLlama4;
+  }
 
   if (auto eos = reader.GetMetadataUint32("tokenizer.ggml.eos_token_id")) {
     tokenizer->eos_token_id_ = *eos;
@@ -800,9 +804,10 @@ std::vector<TokenId> QwenTokenizer::BpeMergeChunk(
 }
 
 std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
-  // llama-bpe (tiktoken) does not NFC-normalize; skip the Qwen conversion.
-  const bool normalize =
-      pre_tokenizer_ != PreTokenizer::kLlama;
+  // llama-bpe (tiktoken) and llama4 do not NFC-normalize; skip the Qwen
+  // conversion for both.
+  const bool normalize = pre_tokenizer_ != PreTokenizer::kLlama &&
+                         pre_tokenizer_ != PreTokenizer::kLlama4;
   if (pre_tokenizer_ == PreTokenizer::kGemma4) {
     // Sentencepiece-style BPE: normalize spaces to U+2581, then merge whole
     // newline-delimited chunks without word splitting (newline-only chunks
@@ -824,7 +829,8 @@ std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
     return tokens;
   }
   if (pre_tokenizer_ != PreTokenizer::kQwen35 &&
-      pre_tokenizer_ != PreTokenizer::kLlama) {
+      pre_tokenizer_ != PreTokenizer::kLlama &&
+      pre_tokenizer_ != PreTokenizer::kLlama4) {
     return BpeMergeChunk(text);
   }
 
@@ -854,7 +860,8 @@ std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
     pieces.reserve(128);
   std::size_t offset = 0;
   while (offset < text.size()) {
-    const std::size_t end = pre_tokenizer_ == PreTokenizer::kLlama
+    const std::size_t end = (pre_tokenizer_ == PreTokenizer::kLlama ||
+                               pre_tokenizer_ == PreTokenizer::kLlama4)
                                   ? LlamaPieceEnd(text, offset)
                                   : Qwen35PieceEnd(text, offset);
     const auto piece = text.substr(offset, end - offset);

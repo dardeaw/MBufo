@@ -34,6 +34,7 @@
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/models/gemma4/engine.hpp"
 #include "src/models/llama/engine.hpp"
+#include "src/models/glimmer/engine.hpp"
 #endif
 
 namespace gufo::cli {
@@ -1302,6 +1303,99 @@ int RunPrompt(std::span<const char* const> args) {
         break;
       if (!lsession->Evaluate(token, &err)) {
         std::cerr << "Llama decode failed: " << err << '\n';
+        return 1;
+      }
+    }
+    std::cout << '\n';
+    if (opt.verbose) {
+      const double dseconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        dstart)
+              .count();
+      std::cerr << "\nprefill: " << prompt.size() << " tokens in "
+                << prefill_seconds << "s ("
+                << (prefill_seconds > 0
+                        ? static_cast<double>(prompt.size()) / prefill_seconds
+                        : 0.0)
+                << " tok/s)\ndecode: " << generated.size() << " tokens in "
+                << dseconds << "s ("
+                << (dseconds > 0
+                        ? static_cast<double>(generated.size()) / dseconds
+                        : 0.0)
+                << " tok/s)\n";
+    }
+    return 0;
+  }
+  if (reader->GetMetadataString("general.architecture") == "muse-glimmer") {
+    // Muse Glimmer chat framing (lma4 style): <|begin_of_text|> then
+    // <|start|>role<|message|> turns closed by <|eot|>. The tokenizer maps
+    // the bracket tokens to special ids; generation opens the assistant
+    // turn without closing it.
+    std::string glimmer_prompt = "<|begin_of_text|>";
+    if (!opt.system_prompt.empty()) {
+      glimmer_prompt += "<|start|>system<|message|>";
+      glimmer_prompt += opt.system_prompt;
+      glimmer_prompt += "<|eot|>";
+    }
+    glimmer_prompt += "<|start|>user<|message|>";
+    glimmer_prompt += opt.prompt_text;
+    // Generation prompt opens the assistant turn for the default user
+    // channel (mirrors the template's add_generation_prompt branch output).
+    glimmer_prompt += "<|eot|><|start|>assistant to=user<|message|>";
+    models::glimmer::ModelOptions lopt;
+    lopt.max_context = 32768;
+    if (const char* e = getenv("GLIMMER_CTX")) {
+      const long v = std::strtol(e, nullptr, 10);
+      if (v >= 1024)
+        lopt.max_context = static_cast<std::uint32_t>(v);
+    }
+    auto lmodel = models::glimmer::Model::Load(opt.model_path, lopt, &err);
+    if (!lmodel) {
+      std::cerr << "Glimmer load failed: " << err << '\n';
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    // Turn-boundary stops: EOS plus the template's eot/eom markers, which
+    // the generic tokenizer may not flag as stops on its own.
+    std::vector<std::int32_t> glimmer_stops;
+    glimmer_stops.push_back(lmodel->EosToken());
+    for (const char* st : {"<|eot|>", "<|eot_id|>", "<|eom|>"}) {
+      if (const auto id = lmodel->tokenizer().FindSpecialToken(st)) {
+        glimmer_stops.push_back(static_cast<std::int32_t>(*id));
+      }
+    }
+    PrintModelLoadTime(model_load_start, true);
+    auto lsession = lmodel->CreateSession(&err);
+    if (!lsession) {
+      std::cerr << "Glimmer session failed: " << err << '\n';
+      return 1;
+    }
+    const auto lids = lmodel->Tokenize(glimmer_prompt, /*add_bos=*/false);
+    std::fprintf(stderr, "[glimmer] prompt tokens: %zu\n", lids.size());
+    std::vector<std::int32_t> prompt(lids.begin(), lids.end());
+    const auto gstart = std::chrono::steady_clock::now();
+    if (!lsession->Sync(prompt, &err)) {
+      std::cerr << "Glimmer prefill failed: " << err << '\n';
+      return 1;
+    }
+    const double prefill_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      gstart)
+            .count();
+    const auto dstart = std::chrono::steady_clock::now();
+    std::vector<std::int32_t> generated;
+    while (generated.size() < opt.max_tokens) {
+      const std::int32_t token = lsession->SampleGreedy();
+      std::cout << lmodel->Decode(std::span<const std::int32_t>(&token, 1))
+                << std::flush;
+      generated.push_back(token);
+      bool glimmer_stop = lmodel->IsStopToken(token);
+      for (std::int32_t st : glimmer_stops)
+        glimmer_stop = glimmer_stop || (st == token);
+      if (glimmer_stop)
+        break;
+      if (!lsession->Evaluate(token, &err)) {
+        std::cerr << "Glimmer decode failed: " << err << '\n';
         return 1;
       }
     }

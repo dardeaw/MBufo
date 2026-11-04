@@ -99,6 +99,7 @@ private:
     kQwen35,
     kGemma4,
     kLlama,
+    kLlama4,
   };
 
   struct PairHash {
