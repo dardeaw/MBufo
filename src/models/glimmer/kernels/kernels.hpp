@@ -82,6 +82,20 @@ void AttentionF16(const float* q, const __half* k_cache,
                   std::uint32_t kv_heads, std::uint32_t d, hipStream_t stream,
                   float score_scale, std::uint32_t window = 0);
 
+/// Multi-query blocking F16 causal attention (d == 128 only): one 128-thread
+/// block serves a tile of 4 query rows of a single head (one wavefront per
+/// query, same lane decomposition and online-softmax order as AttentionF16,
+/// hence bit-identical outputs); K/V rows are staged once per block in LDS
+/// and shared by the 4 queries. Returns true when the call ran; returns
+/// false -- launching nothing -- for unsupported shapes (non-d128,
+/// degenerate geometry, tiny calls). `window` follows AttentionF16.
+bool AttentionF16MQB(const float* q, const __half* k_cache,
+                     const __half* v_cache, float* out,
+                     std::uint32_t n_tokens, std::uint32_t start_pos,
+                     std::uint32_t heads, std::uint32_t kv_heads,
+                     std::uint32_t d, hipStream_t stream, float score_scale,
+                     std::uint32_t window = 0);
+
 }  // namespace gufo::models::glimmer::kernels
 
 #endif  // GUFO_MODELS_GLIMMER_KERNELS_KERNELS_HPP_

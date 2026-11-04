@@ -11,9 +11,12 @@ target_link_libraries(gufo_glimmer PUBLIC gufo_core Threads::Threads)
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_glimmer PRIVATE
     kernels/kernels.hip.cpp
+    kernels/attn_f16_mqb.hip.cpp
     engine.cpp
     draft_model.cpp)
   set_source_files_properties(kernels/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(kernels/attn_f16_mqb.hip.cpp PROPERTIES
+    LANGUAGE HIP)
   target_compile_options(gufo_glimmer PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O2>
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)

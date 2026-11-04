@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/glimmer/kernels/kernels.hpp"
 
@@ -430,10 +431,40 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                       start_pos, stream);
   kernels::StoreKvF16(impl.vbuf, impl.buffers.kv_v[il], n, kvdim,
                       start_pos, stream);
-  kernels::AttentionF16(impl.qbuf, impl.buffers.kv_k[il],
-                        impl.buffers.kv_v[il], impl.attn_out, n, start_pos,
-                        c.num_heads, c.num_kv_heads, d, stream, score_scale,
-                        window);
+  // Prefill attention consults the shared dispatcher and stays on the F16
+  // legacy route; the multi-query blocking kernel below is that route's
+  // accelerator (same online-softmax math, F16 semantics unchanged).
+  // `false` = unsupported shape (tiny/decode/non-d128) -> legacy runs.
+  bool attn_mqb_ran = false;
+  {
+    namespace attn_disp = core::compute::attention_dispatcher;
+    attn_disp::AttentionDispatchInput din;
+    din.q_len = n;
+    din.kv_len = start_pos + n;
+    din.head_dim = d;
+    din.heads = c.num_heads;
+    din.kv_heads = c.num_kv_heads;
+    din.k_codec = attn_disp::DispatchCodec::kF16;
+    din.v_codec = attn_disp::DispatchCodec::kF16;
+    din.window = window;
+    din.is_verify = false;
+    const auto attn_policy =
+        attn_disp::AttentionDispatchPolicy::WithEnvDefaults();
+    if (attn_policy.dispatch_enabled &&
+        attn_disp::RouteAttention(din, attn_policy) ==
+            attn_disp::AttentionRoute::kLegacy) {
+      attn_mqb_ran = kernels::AttentionF16MQB(
+          impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+          impl.attn_out, n, start_pos, c.num_heads, c.num_kv_heads, d,
+          stream, score_scale, window);
+    }
+  }
+  if (!attn_mqb_ran) {
+    kernels::AttentionF16(impl.qbuf, impl.buffers.kv_k[il],
+                          impl.buffers.kv_v[il], impl.attn_out, n, start_pos,
+                          c.num_heads, c.num_kv_heads, d, stream,
+                          score_scale, window);
+  }
   // Attention output gate: attn_out *= sigmoid(gate_proj(pre-attn hidden)).
   GlimmerGemm(l.gate, impl.normed, impl.x16, impl.q8tiled, impl.gate_attn, n, qdim,
               hidden, stream);
