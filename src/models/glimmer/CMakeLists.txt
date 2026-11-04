@@ -28,3 +28,8 @@ if (ENGINE_ENABLE_HIP)
     gufo_core_blocked_kv
     hip::host roc::hipblas)
 endif()
+# L1 registry adapter (EngineModel/SpeculativeSession over glimmer
+# Model/Session); HIP-only like the rest of the package.
+if (ENGINE_ENABLE_HIP)
+  target_sources(gufo_glimmer PRIVATE engine_adapter.cpp)
+endif()

@@ -17,3 +17,12 @@ if (ENGINE_ENABLE_HIP)
     -Wl,--whole-archive gufo_glimmer -Wl,--no-whole-archive
     gufo_core hip::host)
 endif()
+# Glimmer registry pilot (direct adapter vs registry, DecodeStep
+# fallback, read-only Verify, q8 smoke; needs weights + GPU).
+# Explicit-only, not part of the default or CI check sets.
+if (ENGINE_ENABLE_HIP)
+  add_executable(glimmer_registry_pilot_test EXCLUDE_FROM_ALL
+    registry_pilot_test.cpp)
+  target_link_libraries(glimmer_registry_pilot_test PRIVATE gufo_glimmer
+    gufo_core hip::host)
+endif()
