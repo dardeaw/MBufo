@@ -1331,17 +1331,21 @@ int RunPrompt(std::span<const char* const> args) {
     // <|start|>role<|message|> turns closed by <|eot|>. The tokenizer maps
     // the bracket tokens to special ids; generation opens the assistant
     // turn without closing it.
-    std::string glimmer_prompt = "<|begin_of_text|>";
-    if (!opt.system_prompt.empty()) {
-      glimmer_prompt += "<|start|>system<|message|>";
-      glimmer_prompt += opt.system_prompt;
-      glimmer_prompt += "<|eot|>";
+    // --raw passes the input through untouched (mirrors gemma4).
+    std::string glimmer_prompt =
+        opt.use_chat_template ? "<|begin_of_text|>" : opt.prompt_text;
+    if (opt.use_chat_template) {
+      if (!opt.system_prompt.empty()) {
+        glimmer_prompt += "<|start|>system<|message|>";
+        glimmer_prompt += opt.system_prompt;
+        glimmer_prompt += "<|eot|>";
+      }
+      glimmer_prompt += "<|start|>user<|message|>";
+      glimmer_prompt += opt.prompt_text;
+      // Generation prompt opens the assistant turn for the default user
+      // channel (mirrors the template's add_generation_prompt branch output).
+      glimmer_prompt += "<|eot|><|start|>assistant to=user<|message|>";
     }
-    glimmer_prompt += "<|start|>user<|message|>";
-    glimmer_prompt += opt.prompt_text;
-    // Generation prompt opens the assistant turn for the default user
-    // channel (mirrors the template's add_generation_prompt branch output).
-    glimmer_prompt += "<|eot|><|start|>assistant to=user<|message|>";
     models::glimmer::ModelOptions lopt;
     lopt.max_context = 32768;
     if (const char* e = getenv("GLIMMER_CTX")) {
