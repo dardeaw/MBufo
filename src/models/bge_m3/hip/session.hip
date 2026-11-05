@@ -1,0 +1,589 @@
+// bge-m3 HIP leg-1 prefill: the same full-sequence encoder math as
+// CpuForward, F32 throughout, composed from hipBLAS SGEMM (projections +
+// batched attention) and small elementwise kernels (embed, split/merge,
+// softmax, bias-add, residual+LayerNorm, bias+GELU).
+//
+// Why SGEMM-F32 and not the shared hipblaslt F16 runner: precision-first
+// leg-1. The GGUF stores projections in F16; the F32 mirror is exact, and
+// F32 SGEMM keeps the device path comparable to the CPU reference
+// (cosine > 0.9999 expected; the HIP test pins this). F16 compute and
+// quantization are later legs, never silent substitutions.
+//
+// Layout note: hipBLAS is column-major; every projection below is
+// C[M,N] = A[M,K] x B[N,K]^T over row-major buffers, issued as
+//   hipblasSgemm(OP_T, OP_N, N, M, K, &alpha, B, K, A, K, &beta, C, N)
+// (B_row as col-major KxN, transposed back). Attention scores/context use
+// the strided-batched forms over the per-head [heads, n, hd] split buffers.
+#include <hip/hip_runtime.h>
+#include <hipblas/hipblas.h>
+
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <vector>
+
+#include "src/core/compute/gelu/gelu.hpp"
+#include "src/models/bge_m3/engine.hpp"
+
+namespace gufo::models::bge_m3 {
+namespace {
+
+// ---------------------------------------------------------------- kernels
+
+// out[row] = LayerNorm(word[row] + pos[row] + ttype) for row in [0, n).
+// word/pos are [n, hidden] staging; ttype is the single row-0 vector.
+__global__ void EmbedKernel(const float* __restrict__ word,
+                            const float* __restrict__ pos,
+                            const float* __restrict__ ttype,
+                            const float* __restrict__ norm_w,
+                            const float* __restrict__ norm_b, float eps,
+                            float* __restrict__ out, int n, int hidden) {
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= n) return;
+  float* orow = out + static_cast<std::size_t>(row) * hidden;
+  const float* wrow = word + static_cast<std::size_t>(row) * hidden;
+  const float* prow = pos + static_cast<std::size_t>(row) * hidden;
+  double sum = 0.0, sumsq = 0.0;
+  for (int d = static_cast<int>(threadIdx.x); d < hidden;
+       d += static_cast<int>(blockDim.x)) {
+    const double v =
+        static_cast<double>(wrow[d] + prow[d] + ttype[d]);
+    orow[d] = static_cast<float>(v);
+    sum += v;
+    sumsq += v * v;
+  }
+  __shared__ double sh_sum[256];
+  __shared__ double sh_sq[256];
+  const int tid = static_cast<int>(threadIdx.x);
+  sh_sum[tid] = sum;
+  sh_sq[tid] = sumsq;
+  __syncthreads();
+  for (int stride = 128; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      sh_sum[tid] += sh_sum[tid + stride];
+      sh_sq[tid] += sh_sq[tid + stride];
+    }
+    __syncthreads();
+  }
+  const double mean = sh_sum[0] / hidden;
+  double var = sh_sq[0] / hidden - mean * mean;
+  if (var < 0 && var > -1e-12) var = 0;
+  const float inv =
+      static_cast<float>(1.0 / sqrt(var + static_cast<double>(eps)));
+  const float mean_f = static_cast<float>(mean);
+  for (int d = tid; d < hidden; d += static_cast<int>(blockDim.x)) {
+    orow[d] = (orow[d] - mean_f) * inv * norm_w[d] + norm_b[d];
+  }
+}
+
+__global__ void SplitHeadsKernel(const float* __restrict__ in,
+                                 float* __restrict__ out, int seq, int heads,
+                                 int head_dim) {
+  const std::size_t idx =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t total =
+      static_cast<std::size_t>(seq) * heads * head_dim;
+  if (idx >= total) return;
+  const int d = static_cast<int>(idx % static_cast<std::size_t>(head_dim));
+  const std::size_t tmp = idx / static_cast<std::size_t>(head_dim);
+  const int i = static_cast<int>(tmp % static_cast<std::size_t>(seq));
+  const int hh = static_cast<int>(tmp / static_cast<std::size_t>(seq));
+  const int hidden = heads * head_dim;
+  out[(static_cast<std::size_t>(hh) * seq + i) * head_dim + d] =
+      in[static_cast<std::size_t>(i) * hidden +
+         static_cast<std::size_t>(hh) * head_dim + d];
+}
+
+__global__ void MergeHeadsKernel(const float* __restrict__ in,
+                                 float* __restrict__ out, int seq, int heads,
+                                 int head_dim) {
+  const std::size_t idx =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t total =
+      static_cast<std::size_t>(seq) * heads * head_dim;
+  if (idx >= total) return;
+  const int d = static_cast<int>(idx % static_cast<std::size_t>(head_dim));
+  const std::size_t tmp = idx / static_cast<std::size_t>(head_dim);
+  const int i = static_cast<int>(tmp % static_cast<std::size_t>(seq));
+  const int hh = static_cast<int>(tmp / static_cast<std::size_t>(seq));
+  const int hidden = heads * head_dim;
+  out[static_cast<std::size_t>(i) * hidden +
+      static_cast<std::size_t>(hh) * head_dim + d] =
+      in[(static_cast<std::size_t>(hh) * seq + i) * head_dim + d];
+}
+
+// In-place rowwise softmax over [rows, cols].
+__global__ void SoftmaxRowsKernel(float* __restrict__ scores, int rows,
+                                  int cols) {
+  const int r = static_cast<int>(blockIdx.x);
+  if (r >= rows) return;
+  float* srow = scores + static_cast<std::size_t>(r) * cols;
+  const int bd = static_cast<int>(blockDim.x);
+  const int tid = static_cast<int>(threadIdx.x);
+  float local_max = -3.402823466e+38F;
+  for (int j = tid; j < cols; j += bd) {
+    if (srow[j] > local_max) local_max = srow[j];
+  }
+  __shared__ float sh_max[256];
+  sh_max[tid] = local_max;
+  __syncthreads();
+  for (int stride = 128; stride > 0; stride >>= 1) {
+    if (tid < stride && sh_max[tid + stride] > sh_max[tid]) {
+      sh_max[tid] = sh_max[tid + stride];
+    }
+    __syncthreads();
+  }
+  const float mx = sh_max[0];
+  double sum = 0.0;
+  for (int j = tid; j < cols; j += bd) {
+    const double e = exp(static_cast<double>(srow[j] - mx));
+    srow[j] = static_cast<float>(e);
+    sum += e;
+  }
+  __shared__ double sh_sum[256];
+  sh_sum[tid] = sum;
+  __syncthreads();
+  for (int stride = 128; stride > 0; stride >>= 1) {
+    if (tid < stride) sh_sum[tid] += sh_sum[tid + stride];
+    __syncthreads();
+  }
+  const float inv = static_cast<float>(1.0 / sh_sum[0]);
+  for (int j = tid; j < cols; j += bd) srow[j] *= inv;
+}
+
+// out[row] = bias[row % cols] added in place (x == out safe).
+__global__ void BiasAddKernel(float* __restrict__ x, const float* __restrict__ bias,
+                              int rows, int cols) {
+  const std::size_t idx =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t total = static_cast<std::size_t>(rows) * cols;
+  if (idx >= total) return;
+  x[idx] += bias[idx % static_cast<std::size_t>(cols)];
+}
+
+// out[row] = LayerNorm(x[row] + y[row]).
+__global__ void ResidualLnKernel(const float* __restrict__ x,
+                                 const float* __restrict__ y,
+                                 const float* __restrict__ norm_w,
+                                 const float* __restrict__ norm_b, float eps,
+                                 float* __restrict__ out, int n, int hidden) {
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= n) return;
+  const float* xr = x + static_cast<std::size_t>(row) * hidden;
+  const float* yr = y + static_cast<std::size_t>(row) * hidden;
+  float* orow = out + static_cast<std::size_t>(row) * hidden;
+  const int bd = static_cast<int>(blockDim.x);
+  const int tid = static_cast<int>(threadIdx.x);
+  double sum = 0.0, sumsq = 0.0;
+  for (int d = tid; d < hidden; d += bd) {
+    const double v = static_cast<double>(xr[d]) + static_cast<double>(yr[d]);
+    orow[d] = static_cast<float>(v);
+    sum += v;
+    sumsq += v * v;
+  }
+  __shared__ double sh_sum[256];
+  __shared__ double sh_sq[256];
+  sh_sum[tid] = sum;
+  sh_sq[tid] = sumsq;
+  __syncthreads();
+  for (int stride = 128; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      sh_sum[tid] += sh_sum[tid + stride];
+      sh_sq[tid] += sh_sq[tid + stride];
+    }
+    __syncthreads();
+  }
+  const double mean = sh_sum[0] / hidden;
+  double var = sh_sq[0] / hidden - mean * mean;
+  if (var < 0 && var > -1e-12) var = 0;
+  const float inv =
+      static_cast<float>(1.0 / sqrt(var + static_cast<double>(eps)));
+  const float mean_f = static_cast<float>(mean);
+  for (int d = tid; d < hidden; d += bd) {
+    orow[d] = (orow[d] - mean_f) * inv * norm_w[d] + norm_b[d];
+  }
+}
+
+// out[i] = GELU-exact(x[i] + bias[i % cols]).
+__device__ inline float GeluExactDevice(float x);
+
+__global__ void BiasGeluKernel(const float* __restrict__ x,
+                               const float* __restrict__ bias,
+                               float* __restrict__ out, int rows, int cols) {
+  const std::size_t idx =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t total = static_cast<std::size_t>(rows) * cols;
+  if (idx >= total) return;
+  out[idx] = GeluExactDevice(
+      x[idx] + bias[idx % static_cast<std::size_t>(cols)]);
+}
+
+// Device twin of core::gelu::GeluExact: the core helper is host-only
+// (std::erf), while HIP device code provides its own erf.
+__device__ inline float GeluExactDevice(float x) {
+  constexpr double kSqrtHalf = 0.70710678118654752440;  // 1/sqrt(2)
+  const double xd = static_cast<double>(x);
+  return static_cast<float>(0.5 * xd * (1.0 + erf(xd * kSqrtHalf)));
+}
+
+}  // namespace
+
+// ------------------------------------------------------------ device state
+// (bge_m3 scope: HipState is EngineModel's nested type and InitHipState
+// / HipSync are its friends, so they cannot live in the anonymous
+// namespace above.)
+
+struct HipWeights {
+  std::vector<float*> owned;  // every hipMalloc, freed with the state
+  const BgeM3F32Weights* f32{nullptr};
+  const float* token_embd{nullptr};
+  const float* position_embd{nullptr};
+  const float* token_types{nullptr};
+  const float* emb_norm_w{nullptr};
+  const float* emb_norm_b{nullptr};
+  struct HipLayer {
+    const float *q_w, *q_b, *k_w, *k_b, *v_w, *v_b;
+    const float *out_w, *out_b, *attn_norm_w, *attn_norm_b;
+    const float *up_w, *up_b, *down_w, *down_b;
+    const float *out_norm_w, *out_norm_b;
+  };
+  std::vector<HipLayer> layers;
+};
+
+struct EngineModel::HipState {
+  hipStream_t stream{nullptr};
+  hipblasHandle_t blas{nullptr};
+  std::mutex mutex;
+  HipWeights weights;
+  float *hidden{nullptr}, *normed{nullptr};
+  float *qkv{nullptr};
+  float *split{nullptr};
+  float *scores{nullptr};
+  float *context{nullptr};
+  float *proj{nullptr};
+  float *ffn_inter{nullptr};
+  float *ffn_out{nullptr};
+  bool ok{false};
+  std::string error;
+  ~HipState() {
+    // Buffers are named individually for the prefill below; every one of
+    // them is also tracked in weights.owned for release.
+    for (float* p : weights.owned) hipFree(p);
+    weights.owned.clear();
+    if (blas != nullptr) hipblasDestroy(blas);
+    if (stream != nullptr) hipStreamDestroy(stream);
+  }
+};
+
+const float* UploadVec(const std::vector<float>& host,
+                       std::vector<float*>& owned, hipStream_t stream,
+                       bool& ok) {
+  if (host.empty()) {
+    ok = false;
+    return nullptr;
+  }
+  float* dev = nullptr;
+  if (hipMalloc(&dev, host.size() * sizeof(float)) != hipSuccess) {
+    ok = false;
+    return nullptr;
+  }
+  owned.push_back(dev);
+  if (hipMemcpyAsync(dev, host.data(), host.size() * sizeof(float),
+                     hipMemcpyHostToDevice, stream) != hipSuccess) {
+    ok = false;
+    return nullptr;
+  }
+  return dev;
+}
+
+float* AllocScratch(std::size_t elements, std::vector<float*>& owned) {
+  float* dev = nullptr;
+  if (hipMalloc(&dev, elements * sizeof(float)) != hipSuccess) {
+    return nullptr;
+  }
+  owned.push_back(dev);
+  return dev;
+}
+
+void InitHipState(EngineModel& model) {
+  auto state = std::make_unique<EngineModel::HipState>();
+  bool ok = true;
+  if (hipStreamCreate(&state->stream) != hipSuccess) {
+    state->error = "bge-m3 HIP: hipStreamCreate failed";
+    model.hip_ = std::move(state);
+    return;
+  }
+  if (hipblasCreate(&state->blas) != hipSuccess) {
+    state->error = "bge-m3 HIP: hipblasCreate failed";
+    model.hip_ = std::move(state);
+    return;
+  }
+  hipblasSetStream(state->blas, state->stream);
+  const BgeM3F32Weights& f32 = model.f32_;
+  HipWeights& w = state->weights;
+  w.f32 = &f32;
+  std::vector<float*> owned;
+  w.token_embd = UploadVec(f32.token_embd, owned, state->stream, ok);
+  w.position_embd = UploadVec(f32.position_embd, owned, state->stream, ok);
+  w.token_types = UploadVec(f32.token_types, owned, state->stream, ok);
+  w.emb_norm_w = UploadVec(f32.emb_norm_w, owned, state->stream, ok);
+  w.emb_norm_b = UploadVec(f32.emb_norm_b, owned, state->stream, ok);
+  w.layers.resize(f32.layers.size());
+  for (std::size_t i = 0; i < f32.layers.size() && ok; ++i) {
+    const auto& src = f32.layers[i];
+    auto& dst = w.layers[i];
+    dst.q_w = UploadVec(src.q_w, owned, state->stream, ok);
+    dst.q_b = UploadVec(src.q_b, owned, state->stream, ok);
+    dst.k_w = UploadVec(src.k_w, owned, state->stream, ok);
+    dst.k_b = UploadVec(src.k_b, owned, state->stream, ok);
+    dst.v_w = UploadVec(src.v_w, owned, state->stream, ok);
+    dst.v_b = UploadVec(src.v_b, owned, state->stream, ok);
+    dst.out_w = UploadVec(src.out_w, owned, state->stream, ok);
+    dst.out_b = UploadVec(src.out_b, owned, state->stream, ok);
+    dst.attn_norm_w = UploadVec(src.attn_norm_w, owned, state->stream, ok);
+    dst.attn_norm_b = UploadVec(src.attn_norm_b, owned, state->stream, ok);
+    dst.up_w = UploadVec(src.up_w, owned, state->stream, ok);
+    dst.up_b = UploadVec(src.up_b, owned, state->stream, ok);
+    dst.down_w = UploadVec(src.down_w, owned, state->stream, ok);
+    dst.down_b = UploadVec(src.down_b, owned, state->stream, ok);
+    dst.out_norm_w = UploadVec(src.out_norm_w, owned, state->stream, ok);
+    dst.out_norm_b = UploadVec(src.out_norm_b, owned, state->stream, ok);
+  }
+  const std::size_t max_seq = kBgeM3Leg1MaxTokens;
+  const std::size_t h = f32.config.hidden_size;
+  const std::size_t heads = f32.config.num_attention_heads;
+  const std::size_t hd = h / heads;
+  const std::size_t inter = f32.config.intermediate_size;
+  state->hidden = AllocScratch(max_seq * h, owned);
+  state->normed = AllocScratch(max_seq * h, owned);
+  state->qkv = AllocScratch(3 * max_seq * h, owned);
+  state->split = AllocScratch(3 * heads * max_seq * hd, owned);
+  state->scores = AllocScratch(heads * max_seq * max_seq, owned);
+  state->context = AllocScratch(heads * max_seq * hd, owned);
+  state->proj = AllocScratch(max_seq * h, owned);
+  state->ffn_inter = AllocScratch(max_seq * inter, owned);
+  state->ffn_out = AllocScratch(max_seq * h, owned);
+  ok = ok && state->hidden != nullptr && state->normed != nullptr &&
+       state->qkv != nullptr && state->split != nullptr &&
+       state->scores != nullptr && state->context != nullptr &&
+       state->proj != nullptr && state->ffn_inter != nullptr &&
+       state->ffn_out != nullptr;
+  if (!ok && state->error.empty()) {
+    state->error = "bge-m3 HIP: device allocation or upload failed";
+  }
+  if (hipStreamSynchronize(state->stream) != hipSuccess) {
+    ok = false;
+    if (state->error.empty()) {
+      state->error = "bge-m3 HIP: initial upload sync failed";
+    }
+  }
+  state->ok = ok;
+  if (!ok) {
+    for (float* p : owned) hipFree(p);
+    model.hip_ = std::make_unique<EngineModel::HipState>();
+    model.hip_->error = state->error;
+    return;
+  }
+  state->weights.owned = std::move(owned);
+  model.hip_ = std::move(state);
+}
+
+// Out-of-line EngineModel destructor: HipState is complete only here.
+EngineModel::EngineModel() = default;
+EngineModel::~EngineModel() = default;
+
+std::optional<EngineSession::SyncResult> HipSync(
+    const EngineModel& model, std::span<const std::uint32_t> ids,
+    std::string* error_msg) {
+  auto refuse = [&](const std::string& message) {
+    if (error_msg != nullptr) *error_msg = message;
+    return std::optional<EngineSession::SyncResult>{};
+  };
+  EngineModel& mutable_model = const_cast<EngineModel&>(model);
+  if (mutable_model.hip_ == nullptr) {
+    InitHipState(mutable_model);
+  }
+  EngineModel::HipState& st = *mutable_model.hip_;
+  const std::lock_guard<std::mutex> lock(st.mutex);
+  if (!st.ok) {
+    return refuse(st.error.empty() ? "bge-m3 HIP: device state unavailable"
+                                    : st.error);
+  }
+  const BgeM3Config& config = model.Config();
+  const std::size_t n = ids.size();
+  const std::size_t h = config.hidden_size;
+  const std::size_t heads = config.num_attention_heads;
+  const std::size_t hd = h / heads;
+  const std::size_t inter = config.intermediate_size;
+  if (n == 0 || n > kBgeM3Leg1MaxTokens) {
+    return refuse("bge-m3 HIP Sync: sequence length out of leg-1 window");
+  }
+  const float kOne = 1.0F;
+  const float kZero = 0.0F;
+  const float kScale =
+      static_cast<float>(1.0 / sqrt(static_cast<double>(hd)));
+  const auto start = std::chrono::steady_clock::now();
+  auto fail = [&](const std::string& what) {
+    return refuse("bge-m3 HIP prefill failed at " + what);
+  };
+  const HipWeights& w = st.weights;
+  const int nn = static_cast<int>(n);
+  const int hh = static_cast<int>(heads);
+  const int hdd = static_cast<int>(hd);
+  const int hdim = static_cast<int>(h);
+  const int ninter = static_cast<int>(inter);
+  constexpr unsigned kBlock = 256;
+  const auto blocks = [&](std::size_t total) {
+    return static_cast<unsigned>((total + kBlock - 1) / kBlock);
+  };
+
+  // Embed: word rows gathered on the host (ids are host data), uploaded to
+  // qkv staging, then pos/type added and normalized into hidden. The upload
+  // is synchronous: `staged` is a stack local, so an async copy could read
+  // it after it dies.
+  {
+    std::vector<float> staged(n * h);
+    for (std::size_t t = 0; t < n; ++t) {
+      if (ids[t] >= config.vocab_size) {
+        return refuse("bge-m3 HIP Sync: token id out of vocabulary");
+      }
+      const float* src = w.f32->token_embd.data() +
+                         static_cast<std::size_t>(ids[t]) * h;
+      std::copy(src, src + h, staged.data() + t * h);
+    }
+    if (hipMemcpy(st.qkv, staged.data(), staged.size() * sizeof(float),
+                  hipMemcpyHostToDevice) != hipSuccess) {
+      return fail("embed upload");
+    }
+  }
+  EmbedKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
+      st.qkv, w.position_embd, w.token_types, w.emb_norm_w, w.emb_norm_b,
+      config.layer_norm_eps, st.hidden, nn, hdim);
+
+  float* q = st.qkv;
+  float* k = st.qkv + n * h;
+  float* v = st.qkv + 2 * n * h;
+  float* qh = st.split;
+  float* kh = st.split + heads * n * hd;
+  float* vh = st.split + 2 * heads * n * hd;
+  const long long stride_qkv = static_cast<long long>(n) * hdd;
+  const long long stride_scores = static_cast<long long>(n) * n;
+
+  for (const auto& layer : w.layers) {
+    // QKV projections: [n,h] = [n,h] x [h,h]^T, then per-row bias add.
+    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, hdim,
+                     &kOne, layer.q_w, hdim, st.hidden, hdim, &kZero, q,
+                     hdim) != HIPBLAS_STATUS_SUCCESS) {
+      return fail("attn_q gemm");
+    }
+    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(q, layer.q_b, nn,
+                                                           hdim);
+    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, hdim,
+                     &kOne, layer.k_w, hdim, st.hidden, hdim, &kZero, k,
+                     hdim) != HIPBLAS_STATUS_SUCCESS) {
+      return fail("attn_k gemm");
+    }
+    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(k, layer.k_b, nn,
+                                                           hdim);
+    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, hdim,
+                     &kOne, layer.v_w, hdim, st.hidden, hdim, &kZero, v,
+                     hdim) != HIPBLAS_STATUS_SUCCESS) {
+      return fail("attn_v gemm");
+    }
+    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(v, layer.v_b, nn,
+                                                           hdim);
+    // Per-head split, batched scores = QK^T, softmax, batched context.
+    SplitHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
+        q, qh, nn, hh, hdd);
+    SplitHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
+        k, kh, nn, hh, hdd);
+    SplitHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
+        v, vh, nn, hh, hdd);
+    if (hipblasSgemmStridedBatched(
+            st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, nn, nn, hdd, &kScale, kh,
+            hdd, stride_qkv, qh, hdd, stride_qkv, &kZero, st.scores, nn,
+            stride_scores, hh) != HIPBLAS_STATUS_SUCCESS) {
+      return fail("attention scores gemm");
+    }
+    SoftmaxRowsKernel<<<hh * static_cast<unsigned>(nn), kBlock, 0,
+                        st.stream>>>(st.scores, hh * nn, nn);
+    // Context = S . V row-major. The scores buffer reads row-major as S
+    // (its col-major content is S^T), so the second operand passes OP_N:
+    // C_col = V^T . S^T, which row-major reads back as (V^T . S^T)^T = S . V.
+    if (hipblasSgemmStridedBatched(
+            st.blas, HIPBLAS_OP_N, HIPBLAS_OP_N, hdd, nn, nn, &kOne, vh, hdd,
+            stride_qkv, st.scores, nn, stride_scores, &kZero, st.context,
+            hdd, stride_qkv, hh) != HIPBLAS_STATUS_SUCCESS) {
+      return fail("attention context gemm");
+    }
+    // Merge, output projection + bias, residual + post-attention LayerNorm.
+    MergeHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
+        st.context, q, nn, hh, hdd);  // q staging reused as merged [n,h]
+    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, hdim,
+                     &kOne, layer.out_w, hdim, q, hdim, &kZero, st.proj,
+                     hdim) != HIPBLAS_STATUS_SUCCESS) {
+      return fail("attn_output gemm");
+    }
+    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(st.proj,
+                                                           layer.out_b, nn,
+                                                           hdim);
+    ResidualLnKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
+        st.hidden, st.proj, layer.attn_norm_w, layer.attn_norm_b,
+        config.layer_norm_eps, st.normed, nn, hdim);
+    // FFN: up + bias + exact GELU, down + bias, residual + LayerNorm.
+    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, ninter, nn, hdim,
+                     &kOne, layer.up_w, hdim, st.normed, hdim, &kZero,
+                     st.ffn_inter, ninter) != HIPBLAS_STATUS_SUCCESS) {
+      return fail("ffn_up gemm");
+    }
+    BiasGeluKernel<<<blocks(n * inter), kBlock, 0, st.stream>>>(
+        st.ffn_inter, layer.up_b, st.ffn_inter, nn, ninter);
+    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, ninter,
+                     &kOne, layer.down_w, ninter, st.ffn_inter, ninter,
+                     &kZero, st.ffn_out, hdim) != HIPBLAS_STATUS_SUCCESS) {
+      return fail("ffn_down gemm");
+    }
+    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(st.ffn_out,
+                                                           layer.down_b, nn,
+                                                           hdim);
+    ResidualLnKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
+        st.normed, st.ffn_out, layer.out_norm_w, layer.out_norm_b,
+        config.layer_norm_eps, st.hidden, nn, hdim);
+  }
+
+  if (hipStreamSynchronize(st.stream) != hipSuccess) {
+    return fail("stream sync");
+  }
+  const double prefill_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - start)
+          .count();
+  // CLS row (row 0) to host; pooling + L2 stay on the shared core path.
+  std::vector<float> cls(h);
+  if (hipMemcpy(cls.data(), st.hidden, h * sizeof(float),
+                hipMemcpyDeviceToHost) != hipSuccess) {
+    return fail("cls download");
+  }
+  EngineSession::SyncResult result;
+  result.values = std::move(cls);
+  result.prefill_ms = prefill_ms;
+  {
+    // L2Normalize reports the pre-norm; a zero vector is refused, never
+    // returned silently (same contract as the CPU Sync).
+    double norm_sq = 0.0;
+    for (const float x : result.values) {
+      norm_sq += static_cast<double>(x) * static_cast<double>(x);
+    }
+    result.pre_norm = std::sqrt(norm_sq);
+    if (!(result.pre_norm > 0.0)) {
+      return refuse("bge-m3 HIP Sync: zero-norm embedding refused");
+    }
+    const float inv = static_cast<float>(1.0 / result.pre_norm);
+    for (float& x : result.values) x *= inv;
+  }
+  return result;
+}
+
+}  // namespace gufo::models::bge_m3
