@@ -1,24 +1,28 @@
-// bge-m3 HIP prefill (leg-2 step 2): the same full-sequence encoder math as
+// bge-m3 HIP prefill (leg-2 step 3): the same full-sequence encoder math as
 // CpuForward, F16 projections via hipBLASLt (F32 accumulate/output) plus
-// F32 strided-batched scores and fused attention elementwise.
+// F32 strided-batched attention and fused elementwise.
 //
 // What changed from leg-1 (F32 SGEMM throughout):
 //   * step 1: the projection tables per layer stay F16 on the device
-//     (raw GGUF bytes, one upload, no F32 mirror on device); each layer
-//     narrows its F32 activation once per distinct input into a shared F16
-//     staging buffer; hipBLASLt runs the GEMM with an exact-(m,n,k) plan
-//     cache (workspace-free heuristic selection, warmed once at load).
+//     (raw GGUF bytes, one upload, no F32 mirror on device); hipBLASLt
+//     runs each GEMM with an exact-(m,n,k) plan cache (workspace-free
+//     heuristic selection, warmed once at load).
 //   * step 2: the three QKV projections share one narrowed activation and
 //     a single fused split+bias kernel fans them out to per-head buffers
-//     (bias folded into the split; bit-exact vs split-then-add). A single
-//     [3h, h] GEMM was tried first and reverted (its small-n kernel loses
-//     to three m=1024 GEMMs); the projections stay three launches over the
-//     proven shapes. Scores stay a strided-batched SGEMM (it streams V once
-//     per layer; a fused per-row context would re-read V per query and
-//     multiply traffic by n), followed by the in-place softmax, a
-//     strided-batched context SGEMM, and the merge. Per layer this cuts
-//     25 launches to 20 with identical buffer traffic.
-// Attention scores, LayerNorm, GELU all stay F32. Precision gate:
+//     (bias folded into the split; bit-exact vs split-then-add).
+//   * step 3: activations live in F16 (hidden/normed/merged/ffn_inter);
+//     the narrow passes are gone because every producer stores F16
+//     directly (LN/merge/GELU compute in F32 registers, single rounding at
+//     store -- the same values a separate narrow would write). The
+//     out/down projection biases fold into the residual LayerNorm adds;
+//     token ids upload once per prefill and a device kernel gathers the
+//     F16 word table (+pos/type, embed LN) with no host staging. Per layer
+//     this cuts 20 launches to 13 and roughly halves activation traffic.
+//     (A tiled online-softmax fused attention was tried on top and
+//     reverted: the hand kernel runs ~5x slower than the strided-batched
+//     SGEMMs, so scores stay materialized.)
+// QKV split buffers and the GEMM I/O boundaries stay F32, so the new
+// rounding is one F16 store per activation per layer. Precision gate:
 // HIP-vs-CPU cosine >= 0.999 (leg-1 was ~1.0).
 //
 // Layout note for the remaining hipBLAS calls: column-major, issued as
@@ -50,25 +54,31 @@ namespace {
 
 // ---------------------------------------------------------------- kernels
 
-// out[row] = LayerNorm(word[row] + pos[row] + ttype) for row in [0, n).
-// word/pos are [n, hidden] staging; ttype is the single row-0 vector.
-__global__ void EmbedKernel(const float* __restrict__ word,
-                            const float* __restrict__ pos,
-                            const float* __restrict__ ttype,
-                            const float* __restrict__ norm_w,
-                            const float* __restrict__ norm_b, float eps,
-                            float* __restrict__ out, int n, int hidden) {
+// out[row] = LayerNorm(word[row] + pos[row] + ttype) stored as F16.
+// word rows gather on device from the F16 token table by ids (uploaded per
+// prefill); ids are bounds-checked host-side before upload. The sum and
+// norm compute in F32/double registers; the F16 store is the only rounding.
+__global__ void EmbedGatherKernel(const std::uint32_t* __restrict__ ids,
+                                  const __half* __restrict__ tok,
+                                  const float* __restrict__ pos,
+                                  const float* __restrict__ ttype,
+                                  const float* __restrict__ norm_w,
+                                  const float* __restrict__ norm_b, float eps,
+                                  __half* __restrict__ out, int n,
+                                  int hidden) {
   const int row = static_cast<int>(blockIdx.x);
   if (row >= n) return;
-  float* orow = out + static_cast<std::size_t>(row) * hidden;
-  const float* wrow = word + static_cast<std::size_t>(row) * hidden;
+  __half* orow = out + static_cast<std::size_t>(row) * hidden;
+  const __half* wrow =
+      tok + static_cast<std::size_t>(ids[row]) * hidden;
   const float* prow = pos + static_cast<std::size_t>(row) * hidden;
+  const int bd = static_cast<int>(blockDim.x);
   double sum = 0.0, sumsq = 0.0;
-  for (int d = static_cast<int>(threadIdx.x); d < hidden;
-       d += static_cast<int>(blockDim.x)) {
-    const double v =
-        static_cast<double>(wrow[d] + prow[d] + ttype[d]);
-    orow[d] = static_cast<float>(v);
+  for (int d = static_cast<int>(threadIdx.x); d < hidden; d += bd) {
+    const double v = static_cast<double>(__half2float(wrow[d])) +
+                     static_cast<double>(prow[d]) +
+                     static_cast<double>(ttype[d]);
+    orow[d] = __half(static_cast<float>(v));
     sum += v;
     sumsq += v * v;
   }
@@ -91,8 +101,9 @@ __global__ void EmbedKernel(const float* __restrict__ word,
   const float inv =
       static_cast<float>(1.0 / sqrt(var + static_cast<double>(eps)));
   const float mean_f = static_cast<float>(mean);
-  for (int d = tid; d < hidden; d += static_cast<int>(blockDim.x)) {
-    orow[d] = (orow[d] - mean_f) * inv * norm_w[d] + norm_b[d];
+  for (int d = tid; d < hidden; d += bd) {
+    orow[d] = __half((__half2float(orow[d]) - mean_f) * inv * norm_w[d] +
+                     norm_b[d]);
   }
 }
 
@@ -132,10 +143,10 @@ __global__ void QkvSplitBiasKernel(const float* __restrict__ q,
       in[static_cast<std::size_t>(i) * h + dh] + bias;
 }
 
-// In-place rowwise softmax over [rows, cols]. (Kept as its own kernel:
-// folding context into the same pass would re-stream V once per query
-// row, multiplying V traffic by n; the strided-batched context SGEMM
-// below streams V once per layer instead.)
+// In-place rowwise softmax over [rows, cols]. (A tiled online-softmax
+// fused attention was tried here and reverted: the hand-written kernel
+// runs ~5x slower than the strided-batched SGEMMs it replaces (scalar
+// dots + expf cannot match the library), so scores stay materialized.)
 __global__ void SoftmaxRowsKernel(float* __restrict__ scores, int rows,
                                   int cols) {
   const int r = static_cast<int>(blockIdx.x);
@@ -175,7 +186,7 @@ __global__ void SoftmaxRowsKernel(float* __restrict__ scores, int rows,
 }
 
 __global__ void MergeHeadsKernel(const float* __restrict__ in,
-                                 float* __restrict__ out, int seq, int heads,
+                                 __half* __restrict__ out, int seq, int heads,
                                  int head_dim) {
   const std::size_t idx =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -189,36 +200,33 @@ __global__ void MergeHeadsKernel(const float* __restrict__ in,
   const int hidden = heads * head_dim;
   out[static_cast<std::size_t>(i) * hidden +
       static_cast<std::size_t>(hh) * head_dim + d] =
-      in[(static_cast<std::size_t>(hh) * seq + i) * head_dim + d];
+      __half(
+          in[(static_cast<std::size_t>(hh) * seq + i) * head_dim + d]);
 }
 
-// out[row] = bias[row % cols] added in place (x == out safe).
-__global__ void BiasAddKernel(float* __restrict__ x, const float* __restrict__ bias,
-                              int rows, int cols) {
-  const std::size_t idx =
-      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const std::size_t total = static_cast<std::size_t>(rows) * cols;
-  if (idx >= total) return;
-  x[idx] += bias[idx % static_cast<std::size_t>(cols)];
-}
-
-// out[row] = LayerNorm(x[row] + y[row]).
-__global__ void ResidualLnKernel(const float* __restrict__ x,
+// out[row] = LayerNorm(upcast(x[row]) + y[row] + bias[row % hidden]),
+// stored as F16. Step 3 folds the output/down projection biases into the
+// residual add (one addition per element, no extra pass) and stores F16
+// directly (compute stays F32/double in registers).
+__global__ void ResidualLnKernel(const __half* __restrict__ x,
                                  const float* __restrict__ y,
+                                 const float* __restrict__ bias,
                                  const float* __restrict__ norm_w,
                                  const float* __restrict__ norm_b, float eps,
-                                 float* __restrict__ out, int n, int hidden) {
+                                 __half* __restrict__ out, int n, int hidden) {
   const int row = static_cast<int>(blockIdx.x);
   if (row >= n) return;
-  const float* xr = x + static_cast<std::size_t>(row) * hidden;
+  const __half* xr = x + static_cast<std::size_t>(row) * hidden;
   const float* yr = y + static_cast<std::size_t>(row) * hidden;
-  float* orow = out + static_cast<std::size_t>(row) * hidden;
+  __half* orow = out + static_cast<std::size_t>(row) * hidden;
   const int bd = static_cast<int>(blockDim.x);
   const int tid = static_cast<int>(threadIdx.x);
   double sum = 0.0, sumsq = 0.0;
   for (int d = tid; d < hidden; d += bd) {
-    const double v = static_cast<double>(xr[d]) + static_cast<double>(yr[d]);
-    orow[d] = static_cast<float>(v);
+    const double v = static_cast<double>(__half2float(xr[d])) +
+                     static_cast<double>(yr[d]) +
+                     static_cast<double>(bias[d]);
+    orow[d] = __half(static_cast<float>(v));
     sum += v;
     sumsq += v * v;
   }
@@ -241,7 +249,8 @@ __global__ void ResidualLnKernel(const float* __restrict__ x,
       static_cast<float>(1.0 / sqrt(var + static_cast<double>(eps)));
   const float mean_f = static_cast<float>(mean);
   for (int d = tid; d < hidden; d += bd) {
-    orow[d] = (orow[d] - mean_f) * inv * norm_w[d] + norm_b[d];
+    orow[d] = __half((__half2float(orow[d]) - mean_f) * inv * norm_w[d] +
+                     norm_b[d]);
   }
 }
 
@@ -250,13 +259,13 @@ __device__ inline float GeluExactDevice(float x);
 
 __global__ void BiasGeluKernel(const float* __restrict__ x,
                                const float* __restrict__ bias,
-                               float* __restrict__ out, int rows, int cols) {
+                               __half* __restrict__ out, int rows, int cols) {
   const std::size_t idx =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const std::size_t total = static_cast<std::size_t>(rows) * cols;
   if (idx >= total) return;
-  out[idx] = GeluExactDevice(
-      x[idx] + bias[idx % static_cast<std::size_t>(cols)]);
+  out[idx] = __half(GeluExactDevice(
+      x[idx] + bias[idx % static_cast<std::size_t>(cols)]));
 }
 
 // Device twin of core::gelu::GeluExact: the core helper is host-only
@@ -265,19 +274,6 @@ __device__ inline float GeluExactDevice(float x) {
   constexpr double kSqrtHalf = 0.70710678118654752440;  // 1/sqrt(2)
   const double xd = static_cast<double>(x);
   return static_cast<float>(0.5 * xd * (1.0 + erf(xd * kSqrtHalf)));
-}
-
-// F32 activations narrowed to F16 for the hipBLASLt projections (step 1;
-// the GEMMs accumulate in F32, so this single rounding is the only new
-// error source on the projection path).
-__global__ void NarrowHalfKernel(const float* __restrict__ in,
-                                 __half* __restrict__ out,
-                                 std::size_t count) {
-  const std::size_t idx =
-      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx < count) {
-    out[idx] = __half(in[idx]);
-  }
 }
 
 // ------------------------------------------------- hipBLASLt plan cache
@@ -396,8 +392,10 @@ bool BlasLtGemm(hipblasLtHandle_t handle, BlasLtPlanCache& plans,
 struct HipWeights {
   std::vector<void*> owned;  // every hipMalloc, freed with the state
   const BgeM3F32Weights* f32{nullptr};
-  // F32 tables still consumed on device (embed positions/types, all biases
+  // Device token table (F16, gathered on device by ids) plus the F32
+  // tables still consumed on device (embed positions/types, all biases
   // and LayerNorm parameters):
+  const __half* token_embd{nullptr};
   const float* position_embd{nullptr};
   const float* token_types{nullptr};
   const float* emb_norm_w{nullptr};
@@ -421,15 +419,19 @@ struct EngineModel::HipState {
   std::mutex mutex;
   HipWeights weights;
   BlasLtPlanCache plans;  // destroyed before blaslt (declared after it)
-  float *hidden{nullptr}, *normed{nullptr};
-  float *qkv{nullptr};
+  // Activations live in F16 (hidden/normed/merged/ffn_inter); GEMM I/O
+  // boundaries and the attention path stay F32:
+  __half *hidden{nullptr}, *normed{nullptr};
+  __half* merged{nullptr};
+  __half* ffn_inter{nullptr};
+  float *qkv{nullptr};  // QKV GEMM outputs [3*n*h]
   float *split{nullptr};
   float *scores{nullptr};
   float *context{nullptr};
-  float *proj{nullptr};
-  float *ffn_inter{nullptr};
-  float *ffn_out{nullptr};
-  __half* half_buf{nullptr};  // shared F16 activation staging
+  float *proj{nullptr};    // out-proj GEMM output [n*h]
+  float* ffn_up_out{nullptr};  // up-proj GEMM output [n*inter]
+  float *ffn_out{nullptr};     // down-proj GEMM output [n*h]
+  std::uint32_t* ids{nullptr};  // per-prefill token ids (H2D, then gather)
   bool ok{false};
   std::string error;
   ~HipState() {
@@ -505,6 +507,15 @@ __half* AllocHalf(std::size_t elements, std::vector<void*>& owned) {
   return dev;
 }
 
+std::uint32_t* AllocU32(std::size_t elements, std::vector<void*>& owned) {
+  std::uint32_t* dev = nullptr;
+  if (hipMalloc(&dev, elements * sizeof(std::uint32_t)) != hipSuccess) {
+    return nullptr;
+  }
+  owned.push_back(dev);
+  return dev;
+}
+
 void InitHipState(EngineModel& model) {
   auto state = std::make_unique<EngineModel::HipState>();
   bool ok = true;
@@ -529,6 +540,14 @@ void InitHipState(EngineModel& model) {
   HipWeights& w = state->weights;
   w.f32 = &f32;
   std::vector<void*> owned;
+  // Device token table: raw F16 GGUF bytes (step 3 gathers on device).
+  if (raw.token_embd.type != core::GgmlType::kF16) {
+    ok = false;
+  } else {
+    w.token_embd = static_cast<const __half*>(UploadRaw(
+        raw.token_embd.data, raw.token_embd.num_elements * sizeof(std::uint16_t),
+        owned, state->stream, ok));
+  }
   w.position_embd = UploadVec(f32.position_embd, owned, state->stream, ok);
   w.token_types = UploadVec(f32.token_types, owned, state->stream, ok);
   w.emb_norm_w = UploadVec(f32.emb_norm_w, owned, state->stream, ok);
@@ -574,21 +593,24 @@ void InitHipState(EngineModel& model) {
   const std::size_t heads = f32.config.num_attention_heads;
   const std::size_t hd = h / heads;
   const std::size_t inter = f32.config.intermediate_size;
-  state->hidden = AllocScratch(max_seq * h, owned);
-  state->normed = AllocScratch(max_seq * h, owned);
+  state->hidden = AllocHalf(max_seq * h, owned);
+  state->normed = AllocHalf(max_seq * h, owned);
+  state->merged = AllocHalf(max_seq * h, owned);
+  state->ffn_inter = AllocHalf(max_seq * inter, owned);
   state->qkv = AllocScratch(3 * max_seq * h, owned);
   state->split = AllocScratch(3 * heads * max_seq * hd, owned);
   state->scores = AllocScratch(heads * max_seq * max_seq, owned);
   state->context = AllocScratch(heads * max_seq * hd, owned);
   state->proj = AllocScratch(max_seq * h, owned);
-  state->ffn_inter = AllocScratch(max_seq * inter, owned);
+  state->ffn_up_out = AllocScratch(max_seq * inter, owned);
   state->ffn_out = AllocScratch(max_seq * h, owned);
-  state->half_buf = AllocHalf(max_seq * inter, owned);
+  state->ids = AllocU32(max_seq, owned);
   ok = ok && state->hidden != nullptr && state->normed != nullptr &&
+       state->merged != nullptr && state->ffn_inter != nullptr &&
        state->qkv != nullptr && state->split != nullptr &&
        state->scores != nullptr && state->context != nullptr &&
-       state->proj != nullptr && state->ffn_inter != nullptr &&
-       state->ffn_out != nullptr && state->half_buf != nullptr;
+       state->proj != nullptr && state->ffn_up_out != nullptr &&
+       state->ffn_out != nullptr && state->ids != nullptr;
   if (!ok && state->error.empty()) {
     state->error = "bge-m3 HIP: device allocation or upload failed";
   }
@@ -670,35 +692,22 @@ std::optional<EngineSession::SyncResult> HipSync(
   const auto blocks = [&](std::size_t total) {
     return static_cast<unsigned>((total + kBlock - 1) / kBlock);
   };
-  const auto narrow = [&](const float* src, std::size_t count) {
-    NarrowHalfKernel<<<blocks(count), kBlock, 0, st.stream>>>(
-        src, st.half_buf, count);
-  };
-
-  // Embed: word rows gathered on the host (ids are host data), uploaded to
-  // qkv staging, then pos/type added and normalized into hidden. The upload
-  // is synchronous: `staged` is a stack local, so an async copy could read
-  // it after it dies.
-  {
-    std::vector<float> staged(n * h);
-    for (std::size_t t = 0; t < n; ++t) {
-      if (ids[t] >= config.vocab_size) {
-        return refuse("bge-m3 HIP Sync: token id out of vocabulary");
-      }
-      const float* src = w.f32->token_embd.data() +
-                         static_cast<std::size_t>(ids[t]) * h;
-      std::copy(src, src + h, staged.data() + t * h);
-    }
-    if (hipMemcpy(st.qkv, staged.data(), staged.size() * sizeof(float),
-                  hipMemcpyHostToDevice) != hipSuccess) {
-      return fail("embed upload");
+  // Embed: ids upload once per prefill (bounds-checked host-side first),
+  // then the device kernel gathers the F16 word table, adds pos/type, and
+  // normalizes into F16 hidden. No host staging of word rows.
+  for (std::size_t t = 0; t < n; ++t) {
+    if (ids[t] >= config.vocab_size) {
+      return refuse("bge-m3 HIP Sync: token id out of vocabulary");
     }
   }
-  EmbedKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
-      st.qkv, w.position_embd, w.token_types, w.emb_norm_w, w.emb_norm_b,
-      config.layer_norm_eps, st.hidden, nn, hdim);
+  if (hipMemcpy(st.ids, ids.data(), n * sizeof(std::uint32_t),
+                hipMemcpyHostToDevice) != hipSuccess) {
+    return fail("embed ids upload");
+  }
+  EmbedGatherKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
+      st.ids, w.token_embd, w.position_embd, w.token_types, w.emb_norm_w,
+      w.emb_norm_b, config.layer_norm_eps, st.hidden, nn, hdim);
 
-  float* merged = st.qkv;  // [3*n*h] QKV output, then merged [n,h] reuse
   float* qh = st.split;
   float* kh = st.split + heads * n * hd;
   float* vh = st.split + 2 * heads * n * hd;
@@ -710,27 +719,25 @@ std::optional<EngineSession::SyncResult> HipSync(
   float* v = st.qkv + 2 * n * h;
 
   for (const auto& layer : w.layers) {
-    // QKV: three F16 hipBLASLt projections over one shared narrowed
-    // activation, then a single fused split+bias kernel fans all three
-    // parts out to the per-head buffers (bias folded into the split).
-    narrow(st.hidden, n * h);
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.q_w, st.half_buf, q, hdim, nn,
+    // QKV: three F16 hipBLASLt projections over the F16 hidden state,
+    // then a single fused split+bias kernel fans all three parts out to
+    // the per-head buffers (bias folded into the split).
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.q_w, st.hidden, q, hdim, nn,
                     hdim, st.stream)) {
       return fail("attn_q gemm");
     }
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.k_w, st.half_buf, k, hdim, nn,
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.k_w, st.hidden, k, hdim, nn,
                     hdim, st.stream)) {
       return fail("attn_k gemm");
     }
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.v_w, st.half_buf, v, hdim, nn,
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.v_w, st.hidden, v, hdim, nn,
                     hdim, st.stream)) {
       return fail("attn_v gemm");
     }
     QkvSplitBiasKernel<<<blocks(3 * n * h), kBlock, 0, st.stream>>>(
         q, k, v, layer.q_b, layer.k_b, layer.v_b, qh, kh, vh, nn, hh, hdd);
-    // Batched scores = QK^T, in-place softmax, strided-batched context
-    // (streams V once per layer), merge back to [n,h] into the now-dead
-    // QKV staging.
+    // Batched scores = QK^T, in-place softmax, strided-batched context,
+    // merge straight into F16 (the out-proj GEMM consumes it directly).
     if (hipblasSgemmStridedBatched(
             st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, nn, nn, hdd, &kScale, kh,
             hdd, stride_qkv, qh, hdd, stride_qkv, &kZero, st.scores, nn,
@@ -746,38 +753,31 @@ std::optional<EngineSession::SyncResult> HipSync(
       return fail("attention context gemm");
     }
     MergeHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
-        st.context, merged, nn, hh, hdd);
-    // Output projection + bias, residual + post-attention LayerNorm.
-    narrow(merged, n * h);
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.out_w, st.half_buf, st.proj,
+        st.context, st.merged, nn, hh, hdd);
+    // Output projection, then residual (+bias) + post-attention LayerNorm
+    // into F16.
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.out_w, st.merged, st.proj,
                     hdim, nn, hdim, st.stream)) {
       return fail("attn_output gemm");
     }
-    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(st.proj,
-                                                           layer.out_b, nn,
-                                                           hdim);
     ResidualLnKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
-        st.hidden, st.proj, layer.attn_norm_w, layer.attn_norm_b,
-        config.layer_norm_eps, st.normed, nn, hdim);
-    // FFN: up + bias + exact GELU, down + bias, residual + LayerNorm.
-    narrow(st.normed, n * h);
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.up_w, st.half_buf,
-                    st.ffn_inter, ninter, nn, hdim, st.stream)) {
+        st.hidden, st.proj, layer.out_b, layer.attn_norm_w,
+        layer.attn_norm_b, config.layer_norm_eps, st.normed, nn, hdim);
+    // FFN: up + bias + exact GELU into F16, down, residual (+bias) +
+    // LayerNorm into F16 hidden.
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.up_w, st.normed,
+                    st.ffn_up_out, ninter, nn, hdim, st.stream)) {
       return fail("ffn_up gemm");
     }
     BiasGeluKernel<<<blocks(n * inter), kBlock, 0, st.stream>>>(
-        st.ffn_inter, layer.up_b, st.ffn_inter, nn, ninter);
-    narrow(st.ffn_inter, n * inter);
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.down_w, st.half_buf,
+        st.ffn_up_out, layer.up_b, st.ffn_inter, nn, ninter);
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.down_w, st.ffn_inter,
                     st.ffn_out, hdim, nn, ninter, st.stream)) {
       return fail("ffn_down gemm");
     }
-    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(st.ffn_out,
-                                                           layer.down_b, nn,
-                                                           hdim);
     ResidualLnKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
-        st.normed, st.ffn_out, layer.out_norm_w, layer.out_norm_b,
-        config.layer_norm_eps, st.hidden, nn, hdim);
+        st.normed, st.ffn_out, layer.down_b, layer.out_norm_w,
+        layer.out_norm_b, config.layer_norm_eps, st.hidden, nn, hdim);
   }
 
   if (hipStreamSynchronize(st.stream) != hipSuccess) {
@@ -787,11 +787,16 @@ std::optional<EngineSession::SyncResult> HipSync(
       std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - start)
           .count();
-  // CLS row (row 0) to host; pooling + L2 stay on the shared core path.
-  std::vector<float> cls(h);
-  if (hipMemcpy(cls.data(), st.hidden, h * sizeof(float),
+  // CLS row (row 0) to host; hidden is F16 on device, upcast on receipt.
+  // Pooling + L2 stay on the shared core path.
+  std::vector<__half> cls_h(h);
+  if (hipMemcpy(cls_h.data(), st.hidden, h * sizeof(__half),
                 hipMemcpyDeviceToHost) != hipSuccess) {
     return fail("cls download");
+  }
+  std::vector<float> cls(h);
+  for (std::size_t d = 0; d < h; ++d) {
+    cls[d] = __half2float(cls_h[d]);
   }
   EngineSession::SyncResult result;
   result.values = std::move(cls);
