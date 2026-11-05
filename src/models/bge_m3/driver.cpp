@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -74,6 +75,7 @@ int main(int argc, char** argv) {
   std::string ids_file;
   std::string ids_list;
   std::string out_path;
+  int repeat = 1;
   bool use_hip = true;
   bool dump_ids = false;
   bool has_text = false;
@@ -88,6 +90,8 @@ int main(int argc, char** argv) {
       ids_list = argv[++i];
     } else if (arg == "--out" && i + 1 < argc) {
       out_path = argv[++i];
+    } else if (arg == "--repeat" && i + 1 < argc) {
+      repeat = std::max(1, std::stoi(argv[++i]));
     } else if (arg == "--dump-ids") {
       dump_ids = true;
     } else if (arg == "--cpu") {
@@ -144,12 +148,13 @@ int main(int argc, char** argv) {
     std::cout << "\n";
     return 0;
   }
+  for (int r = 0; r < repeat; ++r) {
   auto result = session.Sync(ids, use_hip, &error);
   if (!result.has_value()) {
     std::cerr << "bge_m3_embed: Sync failed: " << error << "\n";
     return 3;
   }
-  if (!out_path.empty()) {
+  if (r + 1 == repeat && !out_path.empty()) {
     std::ofstream out(out_path, std::ios::binary);
     if (!out) {
       std::cerr << "bge_m3_embed: cannot open --out: " + out_path + "\n";
@@ -168,5 +173,6 @@ int main(int argc, char** argv) {
     std::cout << result->values[i];
   }
   std::cout << "]}\n";
+  }
   return 0;
 }
