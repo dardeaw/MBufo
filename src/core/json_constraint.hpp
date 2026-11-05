@@ -22,7 +22,7 @@ namespace gufo::sampling {
 // verification.
 class JsonConstraint {
 public:
-  enum class ToolFormat { kJson, kQwen, kDeepSeek, kGemma };
+  enum class ToolFormat { kJson, kQwen, kDeepSeek, kGemma, kAtem };
   struct Stack {
     std::vector<std::uint32_t> symbols;
     std::string lexeme;

@@ -105,6 +105,16 @@ struct GemmaToolSyntax {
   static constexpr std::string_view kQuote = "<|\"|>";
 };
 
+// Muse Glimmer native tool-call framing (canonical chat template).
+struct AtemToolSyntax {
+  static constexpr std::string_view kCallsOpen = "<atem:function_calls>";
+  static constexpr std::string_view kInvokeOpen = "<atem:invoke";
+  static constexpr std::string_view kInvokeClose = "</atem:invoke>";
+  static constexpr std::string_view kParamOpen = "<atem:parameter";
+  static constexpr std::string_view kParamClose = "</atem:parameter>";
+  static constexpr std::string_view kCallsClose = "</atem:function_calls>";
+};
+
 ToolMarkerSet ToolMarkers(
     std::optional<sampling::JsonConstraint::ToolFormat> format) {
   using Format = sampling::JsonConstraint::ToolFormat;
@@ -112,6 +122,8 @@ ToolMarkerSet ToolMarkers(
       tokenization::QwenToolSyntax::kCallOpen};
   static constexpr std::array<std::string_view, 1> gemma{
       GemmaToolSyntax::kCallOpen};
+  static constexpr std::array<std::string_view, 1> atem{
+      AtemToolSyntax::kCallsOpen};
   // The template writes "\n\n" before the call block. As in llama.cpp
   // common/parsers/deepseek.cpp (TC_SEPARATOR + FC_START), that separator is
   // framing: returning it as content would double it when history is replayed.
@@ -129,6 +141,8 @@ ToolMarkerSet ToolMarkers(
     return ToolMarkerSet(deepseek);
   if (*format == Format::kGemma)
     return ToolMarkerSet(gemma);
+  if (*format == Format::kAtem)
+    return ToolMarkerSet(atem);
   return ToolMarkerSet(qwen);
 }
 
@@ -167,6 +181,10 @@ constexpr std::array<std::string_view, 2> kGemmaClosers{
     GemmaToolSyntax::kCallClose,
     "</invoke>",
 };
+constexpr std::array<std::string_view, 2> kAtemClosers{
+    AtemToolSyntax::kCallsClose,
+    "</invoke>",
+};
 constexpr std::array<std::string_view, 9> kToolClosers{
     // Qwen family.
     tokenization::QwenToolSyntax::kParameterClose,
@@ -200,6 +218,8 @@ ToolCloserSet ToolClosers(
   // them parses.
   if (*format == Format::kGemma)
     return kGemmaClosers;
+  if (*format == Format::kAtem)
+    return kAtemClosers;
   return kQwenClosers;
 }
 
@@ -1927,6 +1947,191 @@ std::vector<std::string_view> GemmaSplitTopLevel(std::string_view text,
 // Converts the raw {...} payload to shared API arguments. Template quotes
 // become JSON quotes first; keys may be bare or quoted, values follow the
 // JSON kinds with lenient bare-word strings (a model that skips quotes).
+struct AtemRawCall {
+  std::string name;
+  std::vector<std::pair<std::string, std::string>> params;
+};
+
+struct AtemCallScan {
+  bool matched{false};
+  std::vector<AtemRawCall> calls;
+  // Bytes consumed before scanning resumes when the envelope is rejected;
+  // bytes through the envelope closer on success.
+  std::size_t progress{0};
+  std::size_t end{0};
+};
+
+// Scans one <atem:function_calls> envelope starting at text[0]. Parameter
+// values run raw until their closer (the template emits scalars as-is);
+// only ASCII whitespace is tolerated between elements, mirroring the
+// template newline layout.
+AtemCallScan ScanAtemToolCall(std::string_view text) {
+  AtemCallScan scan;
+  using Syntax = AtemToolSyntax;
+  if (!text.starts_with(Syntax::kCallsOpen))
+    return scan;
+  std::size_t cursor = Syntax::kCallsOpen.size();
+  const auto skip_ws = [&] {
+    while (cursor < text.size() && (text[cursor] == ' ' || text[cursor] == '\t' ||
+                                    text[cursor] == '\r' || text[cursor] == '\n'))
+      ++cursor;
+  };
+  const auto expect = [&](std::string_view token) {
+    if (!text.substr(cursor).starts_with(token))
+      return false;
+    cursor += token.size();
+    return true;
+  };
+  const auto read_quoted = [&](std::string* out) {
+    if (!expect("\""))
+      return false;
+    const std::size_t begin = cursor;
+    while (cursor < text.size() && text[cursor] != '"')
+      ++cursor;
+    if (cursor >= text.size() || cursor == begin)
+      return false;
+    *out = std::string(text.substr(begin, cursor - begin));
+    ++cursor;
+    return true;
+  };
+  skip_ws();
+  bool any_invoke = false;
+  while (text.substr(cursor).starts_with(Syntax::kInvokeOpen)) {
+    cursor += Syntax::kInvokeOpen.size();
+    skip_ws();
+    std::string invoke_name;
+    if (!expect("name=") || !read_quoted(&invoke_name)) {
+      scan.progress = cursor > 0 ? cursor : Syntax::kCallsOpen.size();
+      return scan;
+    }
+    skip_ws();
+    if (!expect(">")) {
+      scan.progress = cursor;
+      return scan;
+    }
+    AtemRawCall call;
+    call.name = std::move(invoke_name);
+    for (;;) {
+      skip_ws();
+      if (text.substr(cursor).starts_with(Syntax::kInvokeClose)) {
+        cursor += Syntax::kInvokeClose.size();
+        break;
+      }
+      if (!text.substr(cursor).starts_with(Syntax::kParamOpen)) {
+        scan.progress = cursor;
+        return scan;
+      }
+      cursor += Syntax::kParamOpen.size();
+      skip_ws();
+      std::string param_name;
+      if (!expect("name=") || !read_quoted(&param_name)) {
+        scan.progress = cursor;
+        return scan;
+      }
+      skip_ws();
+      if (!expect(">")) {
+        scan.progress = cursor;
+        return scan;
+      }
+      const std::size_t value_begin = cursor;
+      const std::size_t value_end = text.find(Syntax::kParamClose, cursor);
+      if (value_end == std::string_view::npos) {
+        scan.progress = cursor;
+        return scan;
+      }
+      cursor = value_end + Syntax::kParamClose.size();
+      call.params.emplace_back(
+          std::move(param_name),
+          std::string(text.substr(value_begin, value_end - value_begin)));
+    }
+    scan.calls.push_back(std::move(call));
+    any_invoke = true;
+    skip_ws();
+  }
+  if (!any_invoke) {
+    scan.progress = cursor > 0 ? cursor : Syntax::kCallsOpen.size();
+    return scan;
+  }
+  if (!expect(Syntax::kCallsClose)) {
+    scan.progress = cursor;
+    return scan;
+  }
+  scan.end = cursor;
+  scan.matched = true;
+  return scan;
+}
+
+// Converts one scanned invoke's raw parameters to shared API arguments,
+// mirroring ParseGemmaArgs: values try JSON first (numbers, booleans, null,
+// lists, objects), falling back to lenient bare strings.
+bool ParseAtemArgs(
+    const std::vector<std::pair<std::string, std::string>>& params,
+    std::vector<tokenization::ChatMessage::ToolArgument>* arguments) {
+  for (const auto& [key, raw] : params) {
+    const std::string name = std::string(Trim(key));
+    std::string value = std::string(Trim(raw));
+    if (name.empty())
+      return false;
+    tokenization::ChatMessage::ToolArgument argument;
+    argument.name = name;
+    if (value.empty()) {
+      argument.value = {};
+      argument.is_string = true;
+    } else if (const auto parsed = TryParseJson(value)) {
+      if (parsed->is_string()) {
+        argument.value = parsed->get_str();
+        argument.is_string = true;
+      } else {
+        argument.value = std::move(value);
+        argument.is_string = false;
+      }
+    } else {
+      argument.value = std::move(value);
+      argument.is_string = true;
+    }
+    const auto duplicate = std::ranges::find_if(
+        *arguments,
+        [&](const auto& existing) { return existing.name == argument.name; });
+    if (duplicate == arguments->end())
+      arguments->push_back(std::move(argument));
+  }
+  return true;
+}
+
+void ParseAtemCalls(
+    std::string_view text, std::span<const tokenization::ChatTool> tools,
+    std::vector<ParsedToolCall>* calls,
+    std::vector<std::pair<std::size_t, std::size_t>>* spans = nullptr) {
+  std::size_t cursor = 0;
+  while ((cursor = text.find(AtemToolSyntax::kCallsOpen, cursor)) !=
+         std::string_view::npos) {
+    const auto marker_begin = cursor;
+    const auto scan = ScanAtemToolCall(text.substr(marker_begin));
+    if (!scan.matched) {
+      cursor = marker_begin +
+               (scan.progress > 0 ? scan.progress
+                                  : AtemToolSyntax::kCallsOpen.size());
+      continue;
+    }
+    cursor = marker_begin + scan.end;
+    for (const auto& raw : scan.calls) {
+      ParsedToolCall call;
+      call.name = raw.name;
+      const bool known =
+          tools.empty() ||
+          std::ranges::any_of(tools, [&](const auto& tool) {
+            return tool.name == call.name;
+          });
+      if (known && ParseAtemArgs(raw.params, &call.arguments)) {
+        call.id = RandomId("call_");
+        calls->push_back(std::move(call));
+        if (spans)
+          spans->emplace_back(marker_begin, cursor);
+      }
+    }
+  }
+}
+
 bool ParseGemmaArgs(
     std::string_view args_text,
     std::vector<tokenization::ChatMessage::ToolArgument>* arguments) {
@@ -2146,6 +2351,10 @@ ParsedGeneration ParseGeneration(
              markers.front() == GemmaToolSyntax::kCallOpen &&
              text_from_tools.starts_with(GemmaToolSyntax::kCallOpen))
       ParseGemmaCalls(parsed.text, tools, &parsed.tool_calls, nullptr);
+    else if (markers.size() == 1 &&
+             markers.front() == AtemToolSyntax::kCallsOpen &&
+             text_from_tools.starts_with(AtemToolSyntax::kCallsOpen))
+      ParseAtemCalls(parsed.text, tools, &parsed.tool_calls, nullptr);
     else
       ParseDsmlCalls(
           text_from_tools, markers, tools, &parsed.tool_calls, &spans,
@@ -2283,9 +2492,14 @@ ParsedGeneration ParseStructuredGeneration(
     std::vector<std::pair<std::size_t, std::size_t>> spans;
     const bool gemma = markers.size() == 1 &&
                        markers.front() == GemmaToolSyntax::kCallOpen;
+    const bool atem = markers.size() == 1 &&
+                      markers.front() == AtemToolSyntax::kCallsOpen;
     if (gemma)
       ParseGemmaCalls(content, tools, &call.tool_calls,
                        tool_only ? &spans : nullptr);
+    else if (atem)
+      ParseAtemCalls(content, tools, &call.tool_calls,
+                     tool_only ? &spans : nullptr);
     else
       ParseQwenCalls(content, tools, &call.tool_calls,
                       tool_only ? &spans : nullptr, false, partial);
