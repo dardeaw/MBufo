@@ -130,9 +130,10 @@ class ModelRegistry {
 
 #ifdef ENGINE_ENABLE_HIP
 /// Device prefill twin of the CPU Sync path (hip/session.hip): the same
-/// full-sequence encoder math via hipBLAS SGEMM (F32) plus elementwise
-/// kernels, returning the pooled+L2 vector. Failure is an explicit nullopt,
-/// never a silent CPU fallback (see EngineSession::Sync).
+/// full-sequence encoder math via hipBLASLt F16 projections (F32 accumulate)
+/// plus F32 batched attention and elementwise kernels, returning the
+/// pooled+L2 vector. Failure is an explicit nullopt, never a silent CPU
+/// fallback (see EngineSession::Sync).
 [[nodiscard]] std::optional<EngineSession::SyncResult> HipSync(
     const EngineModel& model, std::span<const std::uint32_t> ids,
     std::string* error_msg = nullptr);

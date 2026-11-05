@@ -1,26 +1,38 @@
-// bge-m3 HIP leg-1 prefill: the same full-sequence encoder math as
-// CpuForward, F32 throughout, composed from hipBLAS SGEMM (projections +
-// batched attention) and small elementwise kernels (embed, split/merge,
-// softmax, bias-add, residual+LayerNorm, bias+GELU).
+// bge-m3 HIP prefill (leg-2 step 1): the same full-sequence encoder math as
+// CpuForward, F16 projections via hipBLASLt (F32 accumulate/output) plus
+// F32 strided-batched attention and the leg-1 elementwise kernels.
 //
-// Why SGEMM-F32 and not the shared hipblaslt F16 runner: precision-first
-// leg-1. The GGUF stores projections in F16; the F32 mirror is exact, and
-// F32 SGEMM keeps the device path comparable to the CPU reference
-// (cosine > 0.9999 expected; the HIP test pins this). F16 compute and
-// quantization are later legs, never silent substitutions.
+// What changed from leg-1 (F32 SGEMM throughout):
+//   * the 7 projection tables per layer (q/k/v/out/up/down) stay F16 on the
+//     device (raw GGUF bytes, one upload, no F32 mirror on device);
+//   * each layer narrows its F32 activation once per distinct input
+//     (hidden for QKV, merged context for out-proj, post-attn norm for up,
+//     post-GELU ffn_inter for down) into a shared F16 staging buffer;
+//   * hipBLASLt runs the GEMM with an exact-(m,n,k) plan cache (same
+//     workspace-free heuristic selection as the shared HipBlasLtRunner /
+//     flash-next BlasLt); biases stay separate kernels until step 3.
+// Attention scores/context, softmax, LayerNorm, GELU all stay F32, so the
+// only new rounding is the activation narrow + F16 weights with F32
+// accumulation. Precision gate: HIP-vs-CPU cosine >= 0.999 (leg-1 was ~1.0).
 //
-// Layout note: hipBLAS is column-major; every projection below is
-// C[M,N] = A[M,K] x B[N,K]^T over row-major buffers, issued as
+// Layout note for the remaining hipBLAS calls: column-major, issued as
 //   hipblasSgemm(OP_T, OP_N, N, M, K, &alpha, B, K, A, K, &beta, C, N)
-// (B_row as col-major KxN, transposed back). Attention scores/context use
-// the strided-batched forms over the per-head [heads, n, hd] split buffers.
+// over row-major buffers. hipBLASLt takes row-major semantics directly:
+// out[n][m] = in[n][k] x W[m][k]^T with weights layout (k, m), input
+// layout (k, n), output layout (m, n), transA=T, transB=N.
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
+#include <hipblaslt/hipblaslt-ext.hpp>
+#include <hipblaslt/hipblaslt.h>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -228,6 +240,125 @@ __device__ inline float GeluExactDevice(float x) {
   return static_cast<float>(0.5 * xd * (1.0 + erf(xd * kSqrtHalf)));
 }
 
+// F32 activations narrowed to F16 for the hipBLASLt projections (step 1;
+// the GEMMs accumulate in F32, so this single rounding is the only new
+// error source on the projection path).
+__global__ void NarrowHalfKernel(const float* __restrict__ in,
+                                 __half* __restrict__ out,
+                                 std::size_t count) {
+  const std::size_t idx =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < count) {
+    out[idx] = __half(in[idx]);
+  }
+}
+
+// ------------------------------------------------- hipBLASLt plan cache
+// Minimal per-state runner mirroring the shared HipBlasLtRunner selection
+// (exact (m, n, k) keys, workspace-free heuristic pick, no trial GEMMs on
+// model data). Only F16-in/F32-out dense projections are needed here, so
+// there are no own-kernel hooks: every shape goes through the library.
+struct BlasLtPlan {
+  hipblasLtMatmulDesc_t op{nullptr};
+  hipblasLtMatrixLayout_t weights{nullptr};
+  hipblasLtMatrixLayout_t input{nullptr};
+  hipblasLtMatrixLayout_t output{nullptr};
+  hipblasLtMatmulAlgo_t algo{};
+
+  ~BlasLtPlan() {
+    if (output != nullptr) hipblasLtMatrixLayoutDestroy(output);
+    if (input != nullptr) hipblasLtMatrixLayoutDestroy(input);
+    if (weights != nullptr) hipblasLtMatrixLayoutDestroy(weights);
+    if (op != nullptr) hipblasLtMatmulDescDestroy(op);
+  }
+};
+
+bool BlasLtMakePlan(hipblasLtHandle_t handle, int m, int n, int k,
+                     BlasLtPlan& plan) {
+  const hipblasOperation_t transpose = HIPBLAS_OP_T;
+  const hipblasOperation_t normal = HIPBLAS_OP_N;
+  if (hipblasLtMatmulDescCreate(&plan.op, HIPBLAS_COMPUTE_32F, HIP_R_32F) !=
+          HIPBLAS_STATUS_SUCCESS ||
+      hipblasLtMatmulDescSetAttribute(plan.op, HIPBLASLT_MATMUL_DESC_TRANSA,
+                                      &transpose, sizeof(transpose)) !=
+          HIPBLAS_STATUS_SUCCESS ||
+      hipblasLtMatmulDescSetAttribute(plan.op, HIPBLASLT_MATMUL_DESC_TRANSB,
+                                      &normal, sizeof(normal)) !=
+          HIPBLAS_STATUS_SUCCESS ||
+      hipblasLtMatrixLayoutCreate(&plan.weights, HIP_R_16F, k, m, k) !=
+          HIPBLAS_STATUS_SUCCESS ||
+      hipblasLtMatrixLayoutCreate(&plan.input, HIP_R_16F, k, n, k) !=
+          HIPBLAS_STATUS_SUCCESS ||
+      hipblasLtMatrixLayoutCreate(&plan.output, HIP_R_32F, m, n, m) !=
+          HIPBLAS_STATUS_SUCCESS) {
+    return false;
+  }
+  const float one = 1.0F;
+  const float zero = 0.0F;
+  const auto usable = [&](hipblasLtMatmulAlgo_t& algo) {
+    std::size_t workspace = 0;
+    return hipblaslt_ext::matmulIsAlgoSupported(
+               handle, plan.op, &one, plan.weights, plan.input, &zero,
+               plan.output, plan.output, algo,
+               workspace) == HIPBLAS_STATUS_SUCCESS &&
+           workspace == 0;
+  };
+  hipblasLtMatmulPreference_t preference = nullptr;
+  if (hipblasLtMatmulPreferenceCreate(&preference) != HIPBLAS_STATUS_SUCCESS) {
+    return false;
+  }
+  constexpr std::size_t kWorkspace = 0;
+  (void)hipblasLtMatmulPreferenceSetAttribute(
+      preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &kWorkspace,
+      sizeof(kWorkspace));
+  std::array<hipblasLtMatmulHeuristicResult_t, 16> candidates{};
+  int count = 0;
+  const auto status = hipblasLtMatmulAlgoGetHeuristic(
+      handle, plan.op, plan.weights, plan.input, plan.output, plan.output,
+      preference, candidates.size(), candidates.data(), &count);
+  (void)hipblasLtMatmulPreferenceDestroy(preference);
+  if (status != HIPBLAS_STATUS_SUCCESS) {
+    return false;
+  }
+  for (int i = 0; i < count; ++i) {
+    if (candidates[i].state == HIPBLAS_STATUS_SUCCESS &&
+        candidates[i].workspaceSize == 0 && usable(candidates[i].algo)) {
+      plan.algo = candidates[i].algo;
+      return true;
+    }
+  }
+  return false;
+}
+
+using BlasLtPlanCache =
+    std::map<std::array<int, 3>, std::unique_ptr<BlasLtPlan>>;
+
+// Row-major out[n][m] = input[n][k] x weights[m][k]^T, F16 in, F32 out.
+bool BlasLtGemm(hipblasLtHandle_t handle, BlasLtPlanCache& plans,
+                const void* weights, const __half* input, float* out, int m,
+                int n, int k, hipStream_t stream) {
+  if (handle == nullptr || weights == nullptr || input == nullptr ||
+      out == nullptr || m <= 0 || n <= 0 || k <= 0) {
+    return false;
+  }
+  const std::array<int, 3> key{m, n, k};
+  auto it = plans.find(key);
+  if (it == plans.end()) {
+    auto plan = std::make_unique<BlasLtPlan>();
+    if (!BlasLtMakePlan(handle, m, n, k, *plan)) {
+      return false;
+    }
+    it = plans.emplace(key, std::move(plan)).first;
+  }
+  const BlasLtPlan& plan = *it->second;
+  const float one = 1.0F;
+  const float zero = 0.0F;
+  return hipblasLtMatmul(handle, plan.op, &one, weights, plan.weights, input,
+                         plan.input, &zero, out, plan.output, out,
+                         plan.output, &plan.algo, nullptr, 0,
+                         stream) == HIPBLAS_STATUS_SUCCESS;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------ device state
@@ -236,18 +367,22 @@ __device__ inline float GeluExactDevice(float x) {
 // namespace above.)
 
 struct HipWeights {
-  std::vector<float*> owned;  // every hipMalloc, freed with the state
+  std::vector<void*> owned;  // every hipMalloc, freed with the state
   const BgeM3F32Weights* f32{nullptr};
-  const float* token_embd{nullptr};
+  // F32 tables still consumed on device (embed positions/types, all biases
+  // and LayerNorm parameters):
   const float* position_embd{nullptr};
   const float* token_types{nullptr};
   const float* emb_norm_w{nullptr};
   const float* emb_norm_b{nullptr};
   struct HipLayer {
-    const float *q_w, *q_b, *k_w, *k_b, *v_w, *v_b;
-    const float *out_w, *out_b, *attn_norm_w, *attn_norm_b;
-    const float *up_w, *up_b, *down_w, *down_b;
-    const float *out_norm_w, *out_norm_b;
+    // Projection tables stay F16 on device (raw GGUF bytes, no F32 mirror):
+    const void *q_w, *k_w, *v_w;
+    const float *q_b, *k_b, *v_b;
+    const void* out_w;
+    const float *out_b, *attn_norm_w, *attn_norm_b;
+    const void *up_w, *down_w;
+    const float *up_b, *down_b, *out_norm_w, *out_norm_b;
   };
   std::vector<HipLayer> layers;
 };
@@ -255,8 +390,10 @@ struct HipWeights {
 struct EngineModel::HipState {
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
+  hipblasLtHandle_t blaslt{nullptr};
   std::mutex mutex;
   HipWeights weights;
+  BlasLtPlanCache plans;  // destroyed before blaslt (declared after it)
   float *hidden{nullptr}, *normed{nullptr};
   float *qkv{nullptr};
   float *split{nullptr};
@@ -265,12 +402,15 @@ struct EngineModel::HipState {
   float *proj{nullptr};
   float *ffn_inter{nullptr};
   float *ffn_out{nullptr};
+  __half* half_buf{nullptr};  // shared F16 activation staging
   bool ok{false};
   std::string error;
   ~HipState() {
+    plans.clear();  // descriptors reference the handle; drop them first
+    if (blaslt != nullptr) hipblasLtDestroy(blaslt);
     // Buffers are named individually for the prefill below; every one of
     // them is also tracked in weights.owned for release.
-    for (float* p : weights.owned) hipFree(p);
+    for (void* p : weights.owned) hipFree(p);
     weights.owned.clear();
     if (blas != nullptr) hipblasDestroy(blas);
     if (stream != nullptr) hipStreamDestroy(stream);
@@ -278,7 +418,7 @@ struct EngineModel::HipState {
 };
 
 const float* UploadVec(const std::vector<float>& host,
-                       std::vector<float*>& owned, hipStream_t stream,
+                       std::vector<void*>& owned, hipStream_t stream,
                        bool& ok) {
   if (host.empty()) {
     ok = false;
@@ -298,9 +438,40 @@ const float* UploadVec(const std::vector<float>& host,
   return dev;
 }
 
-float* AllocScratch(std::size_t elements, std::vector<float*>& owned) {
+// Raw GGUF bytes (F16 projection tables): uploaded as-is, never upcast.
+const void* UploadRaw(const void* host, std::size_t bytes,
+                      std::vector<void*>& owned, hipStream_t stream,
+                      bool& ok) {
+  if (host == nullptr || bytes == 0) {
+    ok = false;
+    return nullptr;
+  }
+  void* dev = nullptr;
+  if (hipMalloc(&dev, bytes) != hipSuccess) {
+    ok = false;
+    return nullptr;
+  }
+  owned.push_back(dev);
+  if (hipMemcpyAsync(dev, host, bytes, hipMemcpyHostToDevice, stream) !=
+      hipSuccess) {
+    ok = false;
+    return nullptr;
+  }
+  return dev;
+}
+
+float* AllocScratch(std::size_t elements, std::vector<void*>& owned) {
   float* dev = nullptr;
   if (hipMalloc(&dev, elements * sizeof(float)) != hipSuccess) {
+    return nullptr;
+  }
+  owned.push_back(dev);
+  return dev;
+}
+
+__half* AllocHalf(std::size_t elements, std::vector<void*>& owned) {
+  __half* dev = nullptr;
+  if (hipMalloc(&dev, elements * sizeof(__half)) != hipSuccess) {
     return nullptr;
   }
   owned.push_back(dev);
@@ -321,35 +492,55 @@ void InitHipState(EngineModel& model) {
     return;
   }
   hipblasSetStream(state->blas, state->stream);
+  if (hipblasLtCreate(&state->blaslt) != HIPBLAS_STATUS_SUCCESS) {
+    state->error = "bge-m3 HIP: hipblasLtCreate failed";
+    model.hip_ = std::move(state);
+    return;
+  }
   const BgeM3F32Weights& f32 = model.f32_;
+  const BgeM3Weights& raw = model.weights_;
   HipWeights& w = state->weights;
   w.f32 = &f32;
-  std::vector<float*> owned;
-  w.token_embd = UploadVec(f32.token_embd, owned, state->stream, ok);
+  std::vector<void*> owned;
   w.position_embd = UploadVec(f32.position_embd, owned, state->stream, ok);
   w.token_types = UploadVec(f32.token_types, owned, state->stream, ok);
   w.emb_norm_w = UploadVec(f32.emb_norm_w, owned, state->stream, ok);
   w.emb_norm_b = UploadVec(f32.emb_norm_b, owned, state->stream, ok);
+  // Leg-2 step 1 requires raw F16 projection tables; anything else refuses
+  // the F16 path explicitly (never a silent upcast back to F32).
+  const auto upload_f16 = [&](const BgeM3TensorRef& ref, const void*& dst) {
+    if (ref.type != core::GgmlType::kF16) {
+      ok = false;
+      return;
+    }
+    dst = UploadRaw(ref.data, ref.num_elements * sizeof(std::uint16_t), owned,
+                    state->stream, ok);
+  };
   w.layers.resize(f32.layers.size());
   for (std::size_t i = 0; i < f32.layers.size() && ok; ++i) {
     const auto& src = f32.layers[i];
+    const auto& raw_layer = raw.layers[i];
     auto& dst = w.layers[i];
-    dst.q_w = UploadVec(src.q_w, owned, state->stream, ok);
+    upload_f16(raw_layer.attn_q_weight, dst.q_w);
+    upload_f16(raw_layer.attn_k_weight, dst.k_w);
+    upload_f16(raw_layer.attn_v_weight, dst.v_w);
+    upload_f16(raw_layer.attn_output_weight, dst.out_w);
+    upload_f16(raw_layer.ffn_up_weight, dst.up_w);
+    upload_f16(raw_layer.ffn_down_weight, dst.down_w);
     dst.q_b = UploadVec(src.q_b, owned, state->stream, ok);
-    dst.k_w = UploadVec(src.k_w, owned, state->stream, ok);
     dst.k_b = UploadVec(src.k_b, owned, state->stream, ok);
-    dst.v_w = UploadVec(src.v_w, owned, state->stream, ok);
     dst.v_b = UploadVec(src.v_b, owned, state->stream, ok);
-    dst.out_w = UploadVec(src.out_w, owned, state->stream, ok);
     dst.out_b = UploadVec(src.out_b, owned, state->stream, ok);
     dst.attn_norm_w = UploadVec(src.attn_norm_w, owned, state->stream, ok);
     dst.attn_norm_b = UploadVec(src.attn_norm_b, owned, state->stream, ok);
-    dst.up_w = UploadVec(src.up_w, owned, state->stream, ok);
     dst.up_b = UploadVec(src.up_b, owned, state->stream, ok);
-    dst.down_w = UploadVec(src.down_w, owned, state->stream, ok);
     dst.down_b = UploadVec(src.down_b, owned, state->stream, ok);
     dst.out_norm_w = UploadVec(src.out_norm_w, owned, state->stream, ok);
     dst.out_norm_b = UploadVec(src.out_norm_b, owned, state->stream, ok);
+  }
+  if (!ok && state->error.empty()) {
+    state->error =
+        "bge-m3 HIP: F16 projection upload failed (non-F16 storage?)";
   }
   const std::size_t max_seq = kBgeM3Leg1MaxTokens;
   const std::size_t h = f32.config.hidden_size;
@@ -365,11 +556,12 @@ void InitHipState(EngineModel& model) {
   state->proj = AllocScratch(max_seq * h, owned);
   state->ffn_inter = AllocScratch(max_seq * inter, owned);
   state->ffn_out = AllocScratch(max_seq * h, owned);
+  state->half_buf = AllocHalf(max_seq * inter, owned);
   ok = ok && state->hidden != nullptr && state->normed != nullptr &&
        state->qkv != nullptr && state->split != nullptr &&
        state->scores != nullptr && state->context != nullptr &&
        state->proj != nullptr && state->ffn_inter != nullptr &&
-       state->ffn_out != nullptr;
+       state->ffn_out != nullptr && state->half_buf != nullptr;
   if (!ok && state->error.empty()) {
     state->error = "bge-m3 HIP: device allocation or upload failed";
   }
@@ -381,10 +573,23 @@ void InitHipState(EngineModel& model) {
   }
   state->ok = ok;
   if (!ok) {
-    for (float* p : owned) hipFree(p);
+    for (void* p : owned) hipFree(p);
     model.hip_ = std::make_unique<EngineModel::HipState>();
     model.hip_->error = state->error;
     return;
+  }
+  // Warm the hipBLASLt solution library at load time (same category as
+  // weight uploads: once per process, outside the prefill timer), so the
+  // first prefill only pays per-shape heuristic picks (~ms each), not the
+  // library init (~100 ms on first use). A later prefill with n == 128
+  // reuses this plan exactly; any other n builds its own on first use.
+  {
+    const int warm_m = static_cast<int>(h);
+    auto warm = std::make_unique<BlasLtPlan>();
+    if (BlasLtMakePlan(state->blaslt, warm_m, 128, warm_m, *warm)) {
+      state->plans.emplace(std::array<int, 3>{warm_m, 128, warm_m},
+                           std::move(warm));
+    }
   }
   state->weights.owned = std::move(owned);
   model.hip_ = std::move(state);
@@ -438,6 +643,10 @@ std::optional<EngineSession::SyncResult> HipSync(
   const auto blocks = [&](std::size_t total) {
     return static_cast<unsigned>((total + kBlock - 1) / kBlock);
   };
+  const auto narrow = [&](const float* src, std::size_t count) {
+    NarrowHalfKernel<<<blocks(count), kBlock, 0, st.stream>>>(
+        src, st.half_buf, count);
+  };
 
   // Embed: word rows gathered on the host (ids are host data), uploaded to
   // qkv staging, then pos/type added and normalized into hidden. The upload
@@ -472,24 +681,23 @@ std::optional<EngineSession::SyncResult> HipSync(
   const long long stride_scores = static_cast<long long>(n) * n;
 
   for (const auto& layer : w.layers) {
-    // QKV projections: [n,h] = [n,h] x [h,h]^T, then per-row bias add.
-    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, hdim,
-                     &kOne, layer.q_w, hdim, st.hidden, hdim, &kZero, q,
-                     hdim) != HIPBLAS_STATUS_SUCCESS) {
+    // QKV: one narrowed activation feeds three F16 hipBLASLt projections
+    // (F32 accumulate/output); per-row biases still separate until step 3.
+    narrow(st.hidden, n * h);
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.q_w, st.half_buf, q, hdim, nn,
+                    hdim, st.stream)) {
       return fail("attn_q gemm");
     }
     BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(q, layer.q_b, nn,
                                                            hdim);
-    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, hdim,
-                     &kOne, layer.k_w, hdim, st.hidden, hdim, &kZero, k,
-                     hdim) != HIPBLAS_STATUS_SUCCESS) {
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.k_w, st.half_buf, k, hdim, nn,
+                    hdim, st.stream)) {
       return fail("attn_k gemm");
     }
     BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(k, layer.k_b, nn,
                                                            hdim);
-    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, hdim,
-                     &kOne, layer.v_w, hdim, st.hidden, hdim, &kZero, v,
-                     hdim) != HIPBLAS_STATUS_SUCCESS) {
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.v_w, st.half_buf, v, hdim, nn,
+                    hdim, st.stream)) {
       return fail("attn_v gemm");
     }
     BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(v, layer.v_b, nn,
@@ -521,9 +729,9 @@ std::optional<EngineSession::SyncResult> HipSync(
     // Merge, output projection + bias, residual + post-attention LayerNorm.
     MergeHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
         st.context, q, nn, hh, hdd);  // q staging reused as merged [n,h]
-    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, hdim,
-                     &kOne, layer.out_w, hdim, q, hdim, &kZero, st.proj,
-                     hdim) != HIPBLAS_STATUS_SUCCESS) {
+    narrow(q, n * h);
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.out_w, st.half_buf, st.proj,
+                    hdim, nn, hdim, st.stream)) {
       return fail("attn_output gemm");
     }
     BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(st.proj,
@@ -533,16 +741,16 @@ std::optional<EngineSession::SyncResult> HipSync(
         st.hidden, st.proj, layer.attn_norm_w, layer.attn_norm_b,
         config.layer_norm_eps, st.normed, nn, hdim);
     // FFN: up + bias + exact GELU, down + bias, residual + LayerNorm.
-    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, ninter, nn, hdim,
-                     &kOne, layer.up_w, hdim, st.normed, hdim, &kZero,
-                     st.ffn_inter, ninter) != HIPBLAS_STATUS_SUCCESS) {
+    narrow(st.normed, n * h);
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.up_w, st.half_buf,
+                    st.ffn_inter, ninter, nn, hdim, st.stream)) {
       return fail("ffn_up gemm");
     }
     BiasGeluKernel<<<blocks(n * inter), kBlock, 0, st.stream>>>(
         st.ffn_inter, layer.up_b, st.ffn_inter, nn, ninter);
-    if (hipblasSgemm(st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, hdim, nn, ninter,
-                     &kOne, layer.down_w, ninter, st.ffn_inter, ninter,
-                     &kZero, st.ffn_out, hdim) != HIPBLAS_STATUS_SUCCESS) {
+    narrow(st.ffn_inter, n * inter);
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.down_w, st.half_buf,
+                    st.ffn_out, hdim, nn, ninter, st.stream)) {
       return fail("ffn_down gemm");
     }
     BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(st.ffn_out,
