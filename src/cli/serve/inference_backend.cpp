@@ -1039,8 +1039,8 @@ public:
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
   /// Shared weights for serve-side single-prefill features (embeddings).
-  /// The weights stay owned by the runner; callers only borrow them to build
-  /// a transient executor whose KV is released with the request.
+  /// The weights stay owned by the runner; the backend caches one executor
+  /// over them (see Impl) instead of rebuilding it per request.
   [[nodiscard]] std::shared_ptr<const hip::QwenGpuModel> QwenModel()
       const noexcept {
     return model_;
@@ -3785,6 +3785,16 @@ struct InferenceBackend::Impl {
 
   mutable std::mutex state_mutex;
   std::shared_ptr<const State> state;
+  // Persistent single-prefill embedding executor (leg-2): building a
+  // QwenGpuExecutor per request costs a full 4096-context arena plus the
+  // sampling workspace (tens of ms of hipMalloc/stream setup), dwarfing the
+  // encode itself on short prompts. The executor is stateless across Reset()
+  // calls, so one cached instance per loaded model serves every Embed
+  // request; embed_mutex serializes concurrent use.
+  mutable std::mutex embed_mutex;
+  std::shared_ptr<const hip::QwenGpuModel> embed_model;
+  std::unique_ptr<hip::QwenGpuExecutor> embed_executor;
+  std::uint32_t embed_context{0};
 #endif
 };
 
@@ -4899,9 +4909,10 @@ std::optional<std::size_t> InferenceBackend::count_chat_tokens(
 #endif
 }
 
-// Leg-1 single-prefill embedding: tokenize, run one prefill with hidden
-// capture and no lm_head, pool to one vector, L2-normalize, release. No
-// decode runs and the transient executor (with its KV) dies with the call.
+// Leg-2 single-prefill embedding: tokenize, run one prefill on the cached
+// executor with hidden capture and no lm_head, pool to one vector,
+// L2-normalize, release. No decode runs; the cached executor is Reset() to a
+// cold state before every prefill.
 std::optional<EmbeddingResult> InferenceBackend::Embed(
     const std::string& text, std::string* error) {
 #if defined(ENGINE_ENABLE_HIP)
@@ -4951,7 +4962,7 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
       return refuse("embedding model has no EOS token");
     if (prompt_tokens.back() != eos) prompt_tokens.push_back(eos);
   }
-  // Leg-1 window: the transient executor sizes its KV arena to this bound,
+  // Leg-1 window: the cached executor sizes its KV arena to this bound once,
   // so longer inputs are refused explicitly instead of oversubscribing.
   constexpr std::uint32_t kEmbeddingMaxTokens = 4096;
   const std::uint32_t embed_context =
@@ -4966,18 +4977,33 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
   for (const TextRunnerToken token : prompt_tokens)
     ids.push_back(static_cast<tokenization::TokenId>(token));
   std::string exec_error;
-  auto executor = hip::QwenGpuExecutor::Create(
-      model, &exec_error, embed_context, qwen->ExecutionPolicy());
-  if (executor == nullptr)
-    return refuse("embedding executor init failed: " + exec_error);
+  // Reuse the cached embedding executor across requests (see Impl): it is
+  // Reset() to a cold state before every prefill, so prompt lengths and
+  // contents may vary freely. A model reload swaps the shared weights,
+  // which retires the stale executor via the identity check below.
+  std::unique_lock<std::mutex> embed_lock(impl_->embed_mutex);
+  if (impl_->embed_executor == nullptr || impl_->embed_model != model ||
+      impl_->embed_context != embed_context) {
+    impl_->embed_executor = hip::QwenGpuExecutor::Create(
+        model, &exec_error, embed_context, qwen->ExecutionPolicy());
+    if (impl_->embed_executor == nullptr) {
+      impl_->embed_model.reset();
+      impl_->embed_context = 0;
+      return refuse("embedding executor init failed: " + exec_error);
+    }
+    impl_->embed_model = model;
+    impl_->embed_context = embed_context;
+  }
+  auto& executor = *impl_->embed_executor;
+  executor.Reset();
   const std::size_t dim = model->GetConfig().hidden_size;
-  executor->SetPromptHiddenCapture(true);
+  executor.SetPromptHiddenCapture(true);
   const auto start = std::chrono::steady_clock::now();
   try {
     // compute_logits=false skips the lm_head matmul; hidden states are what
     // the pooling reads. The predicted token is intentionally unused: an
     // embedding request never decodes.
-    (void)executor->ForwardPromptBatch(ids, 0, false);
+    (void)executor.ForwardPromptBatch(ids, 0, false);
   } catch (const std::exception& exception) {
     return refuse(std::string("embedding prefill failed: ") +
                   exception.what());
@@ -4986,7 +5012,7 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
       std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - start)
           .count();
-  const std::span<const float> hidden = executor->GetPromptHiddenStates();
+  const std::span<const float> hidden = executor.GetPromptHiddenStates();
   if (hidden.size() != ids.size() * dim || dim == 0)
     return refuse("embedding hidden capture size mismatch");
   EmbeddingResult result;
@@ -5007,8 +5033,8 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
   }
   if (!(core::embedding::L2Normalize(result.values) > 0.0))
     return refuse("embedding has zero norm; refused");
-  // Transient executor dies here: no decode ran and no KV is retained.
-  executor.reset();
+  // No decode ran and no KV is retained: the cached executor returns to a
+  // cold prefill state via Reset() on the next Embed call.
   return result;
 #else
   (void)text;
