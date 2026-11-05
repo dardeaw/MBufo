@@ -145,6 +145,19 @@ void MoeVecGateUpSwiglu(const void* gate_up_dev, std::uint64_t row_bytes,
                         std::uint32_t slots, std::uint32_t used,
                         std::uint32_t ff, std::uint32_t hidden,
                         hipStream_t stream);
+// Native MXFP4 vec MoE (OCP microscaling, GGML type 39, 17 bytes/block).
+// Same geometry as the Q4_0 vec path; weights stay MXFP4 (no conversion).
+void MoeVecGateUpMxfp4(const void* gate_up_dev, std::uint64_t row_bytes,
+                       std::uint64_t expert_stride_bytes, const float* x,
+                       const std::int32_t* ids, float* gout, float* uout,
+                       std::uint32_t slots, std::uint32_t used,
+                       std::uint32_t ff, std::uint32_t hidden,
+                       hipStream_t stream);
+void GemvQSlotMxfp4(const void* down_dev, std::uint64_t row_bytes,
+                    std::uint64_t expert_stride_bytes, const float* act,
+                    const std::int32_t* ids, float* out, std::uint32_t slots,
+                    std::uint32_t hidden, std::uint32_t ff,
+                    hipStream_t stream);
 void GemvQSlot(const void* down_dev, std::uint64_t row_bytes,
                std::uint64_t expert_stride_bytes, const float* act,
                const std::int32_t* ids, float* out, std::uint32_t slots,

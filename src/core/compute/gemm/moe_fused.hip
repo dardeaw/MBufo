@@ -833,6 +833,122 @@ void MoeSlotEpilogueOverwrite(const float* slot_down, const std::int32_t* ids,
                      used, dim);
 }
 
+
+// ---- native MXFP4 vec MoE (gpt-oss experts, GGML type 39) ----
+// OCP microscaling: 32 e2m1 values sharing one e8m0 scale (1 scale byte +
+// 16 value bytes = 17 bytes/block). Low nibbles give elements 0..15, high
+// nibbles 16..31. The codebook is 2xE2M1 with a halved scale, matching
+// llama.cpp (kvalues_mxfp4 x GGML_E8M0_TO_FP32_HALF) bit-for-bit.
+__constant__ std::int8_t kMxfp4VecValues[16] = {0, 1, 2,  3,  4,  6,  8,  12,
+                                                0, -1, -2, -3, -4, -6, -8, -12};
+
+// One MXFP4 block (17 bytes) dotted with 32 F32 activations.
+__device__ __forceinline__ float Mxfp4BlockDot(
+    const std::uint8_t* __restrict__ blk, const float* __restrict__ xv) {
+  const float d = exp2f(static_cast<float>(blk[0]) - 128.0F);
+  float sum = 0.0F;
+#pragma unroll
+  for (int j = 0; j < 16; ++j) {
+    const std::uint8_t b = blk[1 + j];
+    sum += static_cast<float>(kMxfp4VecValues[b & 0x0F]) * xv[j];
+    sum += static_cast<float>(kMxfp4VecValues[b >> 4]) * xv[j + 16];
+  }
+  return d * sum;
+}
+
+__global__ void MoeVecGateUpMxfp4Kernel(
+    const void* __restrict__ gate_up, std::uint64_t row_bytes,
+    std::uint64_t expert_stride_bytes, const float* __restrict__ x,
+    const std::int32_t* __restrict__ ids, float* __restrict__ gout,
+    float* __restrict__ uout, std::uint32_t used, std::uint32_t ff,
+    std::uint32_t hidden) {
+  const std::uint32_t row = blockIdx.x;  // token*used + slot
+  const std::uint32_t r = blockIdx.y;    // 0..2*ff-1 (first ff = gate rows)
+  const std::int32_t e = ids[row];
+  if (e < 0) return;
+  const bool is_up = r >= ff;
+  const std::uint32_t out_row = is_up ? r - ff : r;
+  const auto* wrow = static_cast<const std::uint8_t*>(gate_up) +
+                     static_cast<std::size_t>(e) * expert_stride_bytes +
+                     static_cast<std::size_t>(r) * row_bytes;
+  const float* xr = x + static_cast<std::size_t>(row / used) * hidden;
+  float sum = 0.0F;
+  const std::uint64_t nblk = hidden / 32;
+  for (std::uint64_t b = threadIdx.x; b < nblk;
+       b += static_cast<std::uint64_t>(blockDim.x)) {
+    sum += Mxfp4BlockDot(wrow + b * 17, xr + b * 32);
+  }
+  for (std::uint32_t off = 16; off > 0; off >>= 1)
+    sum += __shfl_down_sync(0xffffffffffffffffull, sum, off);
+  __shared__ float shared[kThreads / 32];
+  if ((threadIdx.x & 31) == 0) shared[threadIdx.x / 32] = sum;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float v = threadIdx.x < blockDim.x / 32 ? shared[threadIdx.x] : 0.0F;
+    for (std::uint32_t off = 16; off > 0; off >>= 1)
+      v += __shfl_down_sync(0xffffffffffffffffull, v, off);
+    if (threadIdx.x == 0)
+      (is_up ? uout : gout)[static_cast<std::size_t>(row) * ff + out_row] = v;
+  }
+}
+
+__global__ void GemvQSlotMxfp4Kernel(
+    const void* __restrict__ down, std::uint64_t row_bytes,
+    std::uint64_t expert_stride_bytes, const float* __restrict__ act,
+    const std::int32_t* __restrict__ ids, float* __restrict__ out,
+    std::uint32_t hidden, std::uint32_t ff) {
+  const std::uint32_t slot = blockIdx.x;
+  const std::uint32_t h = blockIdx.y;
+  const std::size_t orow = static_cast<std::size_t>(slot) * hidden + h;
+  const std::int32_t e = ids[slot];
+  if (e < 0) {
+    if (threadIdx.x == 0) out[orow] = 0.0F;
+    return;
+  }
+  const auto* wrow = static_cast<const std::uint8_t*>(down) +
+                     static_cast<std::size_t>(e) * expert_stride_bytes +
+                     static_cast<std::size_t>(h) * row_bytes;
+  const float* ar = act + static_cast<std::size_t>(slot) * ff;
+  float sum = 0.0F;
+  const std::uint64_t nblk = ff / 32;
+  for (std::uint64_t b = threadIdx.x; b < nblk;
+       b += static_cast<std::uint64_t>(blockDim.x)) {
+    sum += Mxfp4BlockDot(wrow + b * 17, ar + b * 32);
+  }
+  __shared__ float red[256];
+  red[threadIdx.x] = sum;
+  __syncthreads();
+  for (std::uint32_t s = 128; s > 0; s >>= 1) {
+    if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) out[orow] = red[0];
+}
+
+void MoeVecGateUpMxfp4(const void* gate_up_dev, std::uint64_t row_bytes,
+                       std::uint64_t expert_stride_bytes, const float* x,
+                       const std::int32_t* ids, float* gout, float* uout,
+                       std::uint32_t slots, std::uint32_t used,
+                       std::uint32_t ff, std::uint32_t hidden,
+                       hipStream_t stream) {
+  if (slots == 0) return;
+  hipLaunchKernelGGL(MoeVecGateUpMxfp4Kernel, dim3(slots, 2 * ff),
+                     dim3(kThreads), 0, stream, gate_up_dev, row_bytes,
+                     expert_stride_bytes, x, ids, gout, uout, used, ff,
+                     hidden);
+}
+
+void GemvQSlotMxfp4(const void* down_dev, std::uint64_t row_bytes,
+                    std::uint64_t expert_stride_bytes, const float* act,
+                    const std::int32_t* ids, float* out, std::uint32_t slots,
+                    std::uint32_t hidden, std::uint32_t ff,
+                    hipStream_t stream) {
+  if (slots == 0 || hidden == 0) return;
+  hipLaunchKernelGGL(GemvQSlotMxfp4Kernel, dim3(slots, hidden), dim3(kThreads),
+                     0, stream, down_dev, row_bytes, expert_stride_bytes,
+                     act, ids, out, hidden, ff);
+}
+
 void GemvQSlot(const void* down_dev, std::uint64_t row_bytes,
                std::uint64_t expert_stride_bytes, const float* act,
                const std::int32_t* ids, float* out, std::uint32_t slots,
