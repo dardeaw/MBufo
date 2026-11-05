@@ -1,19 +1,25 @@
-// bge-m3 HIP prefill (leg-2 step 1): the same full-sequence encoder math as
+// bge-m3 HIP prefill (leg-2 step 2): the same full-sequence encoder math as
 // CpuForward, F16 projections via hipBLASLt (F32 accumulate/output) plus
-// F32 strided-batched attention and the leg-1 elementwise kernels.
+// F32 strided-batched scores and fused attention elementwise.
 //
 // What changed from leg-1 (F32 SGEMM throughout):
-//   * the 7 projection tables per layer (q/k/v/out/up/down) stay F16 on the
-//     device (raw GGUF bytes, one upload, no F32 mirror on device);
-//   * each layer narrows its F32 activation once per distinct input
-//     (hidden for QKV, merged context for out-proj, post-attn norm for up,
-//     post-GELU ffn_inter for down) into a shared F16 staging buffer;
-//   * hipBLASLt runs the GEMM with an exact-(m,n,k) plan cache (same
-//     workspace-free heuristic selection as the shared HipBlasLtRunner /
-//     flash-next BlasLt); biases stay separate kernels until step 3.
-// Attention scores/context, softmax, LayerNorm, GELU all stay F32, so the
-// only new rounding is the activation narrow + F16 weights with F32
-// accumulation. Precision gate: HIP-vs-CPU cosine >= 0.999 (leg-1 was ~1.0).
+//   * step 1: the projection tables per layer stay F16 on the device
+//     (raw GGUF bytes, one upload, no F32 mirror on device); each layer
+//     narrows its F32 activation once per distinct input into a shared F16
+//     staging buffer; hipBLASLt runs the GEMM with an exact-(m,n,k) plan
+//     cache (workspace-free heuristic selection, warmed once at load).
+//   * step 2: the three QKV projections share one narrowed activation and
+//     a single fused split+bias kernel fans them out to per-head buffers
+//     (bias folded into the split; bit-exact vs split-then-add). A single
+//     [3h, h] GEMM was tried first and reverted (its small-n kernel loses
+//     to three m=1024 GEMMs); the projections stay three launches over the
+//     proven shapes. Scores stay a strided-batched SGEMM (it streams V once
+//     per layer; a fused per-row context would re-read V per query and
+//     multiply traffic by n), followed by the in-place softmax, a
+//     strided-batched context SGEMM, and the merge. Per layer this cuts
+//     25 launches to 20 with identical buffer traffic.
+// Attention scores, LayerNorm, GELU all stay F32. Precision gate:
+// HIP-vs-CPU cosine >= 0.999 (leg-1 was ~1.0).
 //
 // Layout note for the remaining hipBLAS calls: column-major, issued as
 //   hipblasSgemm(OP_T, OP_N, N, M, K, &alpha, B, K, A, K, &beta, C, N)
@@ -90,43 +96,46 @@ __global__ void EmbedKernel(const float* __restrict__ word,
   }
 }
 
-__global__ void SplitHeadsKernel(const float* __restrict__ in,
-                                 float* __restrict__ out, int seq, int heads,
-                                 int head_dim) {
+// Fused QKV split + bias (leg-2 step 2): one launch fans the three [n, h]
+// projection outputs out to the per-head q/k/v buffers while adding each
+// part's bias. Bit-exact vs the old split-then-BiasAdd order (one addition
+// per element, same order): out[(hh, i), d] = in_part[i, hh*hd + d]
+// + bias_part[hh*hd + d]. (A single [3h, h] GEMM was tried first and
+// reverted: the m=3072 hipBLASLt kernel loses to three m=1024 GEMMs at
+// small n, so the projections stay three launches over the proven shapes
+// and only the split/bias fan-out fuses.)
+__global__ void QkvSplitBiasKernel(const float* __restrict__ q,
+                                   const float* __restrict__ k,
+                                   const float* __restrict__ v,
+                                   const float* __restrict__ q_b,
+                                   const float* __restrict__ k_b,
+                                   const float* __restrict__ v_b,
+                                   float* __restrict__ qh,
+                                   float* __restrict__ kh,
+                                   float* __restrict__ vh, int n, int heads,
+                                   int hd) {
   const std::size_t idx =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const std::size_t total =
-      static_cast<std::size_t>(seq) * heads * head_dim;
-  if (idx >= total) return;
-  const int d = static_cast<int>(idx % static_cast<std::size_t>(head_dim));
-  const std::size_t tmp = idx / static_cast<std::size_t>(head_dim);
-  const int i = static_cast<int>(tmp % static_cast<std::size_t>(seq));
-  const int hh = static_cast<int>(tmp / static_cast<std::size_t>(seq));
-  const int hidden = heads * head_dim;
-  out[(static_cast<std::size_t>(hh) * seq + i) * head_dim + d] =
-      in[static_cast<std::size_t>(i) * hidden +
-         static_cast<std::size_t>(hh) * head_dim + d];
+  const int h = heads * hd;
+  const std::size_t plane = static_cast<std::size_t>(n) * h;
+  if (idx >= plane * 3) return;
+  const int part = static_cast<int>(idx / plane);
+  const std::size_t rem = idx % plane;
+  const int i = static_cast<int>(rem / static_cast<std::size_t>(h));
+  const int dh = static_cast<int>(rem % static_cast<std::size_t>(h));
+  const int hh = dh / hd;
+  const int d = dh % hd;
+  const float* in = (part == 0 ? q : (part == 1 ? k : v));
+  const float bias = (part == 0 ? q_b : (part == 1 ? k_b : v_b))[dh];
+  float* out = (part == 0 ? qh : (part == 1 ? kh : vh));
+  out[(static_cast<std::size_t>(hh) * n + i) * hd + d] =
+      in[static_cast<std::size_t>(i) * h + dh] + bias;
 }
 
-__global__ void MergeHeadsKernel(const float* __restrict__ in,
-                                 float* __restrict__ out, int seq, int heads,
-                                 int head_dim) {
-  const std::size_t idx =
-      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const std::size_t total =
-      static_cast<std::size_t>(seq) * heads * head_dim;
-  if (idx >= total) return;
-  const int d = static_cast<int>(idx % static_cast<std::size_t>(head_dim));
-  const std::size_t tmp = idx / static_cast<std::size_t>(head_dim);
-  const int i = static_cast<int>(tmp % static_cast<std::size_t>(seq));
-  const int hh = static_cast<int>(tmp / static_cast<std::size_t>(seq));
-  const int hidden = heads * head_dim;
-  out[static_cast<std::size_t>(i) * hidden +
-      static_cast<std::size_t>(hh) * head_dim + d] =
-      in[(static_cast<std::size_t>(hh) * seq + i) * head_dim + d];
-}
-
-// In-place rowwise softmax over [rows, cols].
+// In-place rowwise softmax over [rows, cols]. (Kept as its own kernel:
+// folding context into the same pass would re-stream V once per query
+// row, multiplying V traffic by n; the strided-batched context SGEMM
+// below streams V once per layer instead.)
 __global__ void SoftmaxRowsKernel(float* __restrict__ scores, int rows,
                                   int cols) {
   const int r = static_cast<int>(blockIdx.x);
@@ -163,6 +172,24 @@ __global__ void SoftmaxRowsKernel(float* __restrict__ scores, int rows,
   }
   const float inv = static_cast<float>(1.0 / sh_sum[0]);
   for (int j = tid; j < cols; j += bd) srow[j] *= inv;
+}
+
+__global__ void MergeHeadsKernel(const float* __restrict__ in,
+                                 float* __restrict__ out, int seq, int heads,
+                                 int head_dim) {
+  const std::size_t idx =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t total =
+      static_cast<std::size_t>(seq) * heads * head_dim;
+  if (idx >= total) return;
+  const int d = static_cast<int>(idx % static_cast<std::size_t>(head_dim));
+  const std::size_t tmp = idx / static_cast<std::size_t>(head_dim);
+  const int i = static_cast<int>(tmp % static_cast<std::size_t>(seq));
+  const int hh = static_cast<int>(tmp / static_cast<std::size_t>(seq));
+  const int hidden = heads * head_dim;
+  out[static_cast<std::size_t>(i) * hidden +
+      static_cast<std::size_t>(hh) * head_dim + d] =
+      in[(static_cast<std::size_t>(hh) * seq + i) * head_dim + d];
 }
 
 // out[row] = bias[row % cols] added in place (x == out safe).
@@ -671,44 +698,39 @@ std::optional<EngineSession::SyncResult> HipSync(
       st.qkv, w.position_embd, w.token_types, w.emb_norm_w, w.emb_norm_b,
       config.layer_norm_eps, st.hidden, nn, hdim);
 
-  float* q = st.qkv;
-  float* k = st.qkv + n * h;
-  float* v = st.qkv + 2 * n * h;
+  float* merged = st.qkv;  // [3*n*h] QKV output, then merged [n,h] reuse
   float* qh = st.split;
   float* kh = st.split + heads * n * hd;
   float* vh = st.split + 2 * heads * n * hd;
   const long long stride_qkv = static_cast<long long>(n) * hdd;
   const long long stride_scores = static_cast<long long>(n) * n;
 
+  float* q = st.qkv;
+  float* k = st.qkv + n * h;
+  float* v = st.qkv + 2 * n * h;
+
   for (const auto& layer : w.layers) {
-    // QKV: one narrowed activation feeds three F16 hipBLASLt projections
-    // (F32 accumulate/output); per-row biases still separate until step 3.
+    // QKV: three F16 hipBLASLt projections over one shared narrowed
+    // activation, then a single fused split+bias kernel fans all three
+    // parts out to the per-head buffers (bias folded into the split).
     narrow(st.hidden, n * h);
     if (!BlasLtGemm(st.blaslt, st.plans, layer.q_w, st.half_buf, q, hdim, nn,
                     hdim, st.stream)) {
       return fail("attn_q gemm");
     }
-    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(q, layer.q_b, nn,
-                                                           hdim);
     if (!BlasLtGemm(st.blaslt, st.plans, layer.k_w, st.half_buf, k, hdim, nn,
                     hdim, st.stream)) {
       return fail("attn_k gemm");
     }
-    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(k, layer.k_b, nn,
-                                                           hdim);
     if (!BlasLtGemm(st.blaslt, st.plans, layer.v_w, st.half_buf, v, hdim, nn,
                     hdim, st.stream)) {
       return fail("attn_v gemm");
     }
-    BiasAddKernel<<<blocks(n * h), kBlock, 0, st.stream>>>(v, layer.v_b, nn,
-                                                           hdim);
-    // Per-head split, batched scores = QK^T, softmax, batched context.
-    SplitHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
-        q, qh, nn, hh, hdd);
-    SplitHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
-        k, kh, nn, hh, hdd);
-    SplitHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
-        v, vh, nn, hh, hdd);
+    QkvSplitBiasKernel<<<blocks(3 * n * h), kBlock, 0, st.stream>>>(
+        q, k, v, layer.q_b, layer.k_b, layer.v_b, qh, kh, vh, nn, hh, hdd);
+    // Batched scores = QK^T, in-place softmax, strided-batched context
+    // (streams V once per layer), merge back to [n,h] into the now-dead
+    // QKV staging.
     if (hipblasSgemmStridedBatched(
             st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, nn, nn, hdd, &kScale, kh,
             hdd, stride_qkv, qh, hdd, stride_qkv, &kZero, st.scores, nn,
@@ -717,19 +739,16 @@ std::optional<EngineSession::SyncResult> HipSync(
     }
     SoftmaxRowsKernel<<<hh * static_cast<unsigned>(nn), kBlock, 0,
                         st.stream>>>(st.scores, hh * nn, nn);
-    // Context = S . V row-major. The scores buffer reads row-major as S
-    // (its col-major content is S^T), so the second operand passes OP_N:
-    // C_col = V^T . S^T, which row-major reads back as (V^T . S^T)^T = S . V.
     if (hipblasSgemmStridedBatched(
             st.blas, HIPBLAS_OP_N, HIPBLAS_OP_N, hdd, nn, nn, &kOne, vh, hdd,
             stride_qkv, st.scores, nn, stride_scores, &kZero, st.context,
             hdd, stride_qkv, hh) != HIPBLAS_STATUS_SUCCESS) {
       return fail("attention context gemm");
     }
-    // Merge, output projection + bias, residual + post-attention LayerNorm.
     MergeHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
-        st.context, q, nn, hh, hdd);  // q staging reused as merged [n,h]
-    narrow(q, n * h);
+        st.context, merged, nn, hh, hdd);
+    // Output projection + bias, residual + post-attention LayerNorm.
+    narrow(merged, n * h);
     if (!BlasLtGemm(st.blaslt, st.plans, layer.out_w, st.half_buf, st.proj,
                     hdim, nn, hdim, st.stream)) {
       return fail("attn_output gemm");
