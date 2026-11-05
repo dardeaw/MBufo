@@ -49,6 +49,7 @@
 #include <mutex>
 #include <vector>
 
+#include "src/core/compute/attention/flash_f16_dense.hpp"
 #include "src/core/compute/gelu/gelu.hpp"
 #include "src/models/bge_m3/engine.hpp"
 
@@ -344,6 +345,12 @@ struct BlasLtPlan {
 // faster kernels. Longer shapes take the outright winner under the cosine
 // gate (>= 0.999 vs CPU/HF).
 inline constexpr int kAutotuneBitwiseMaxTokens = 64;
+
+// Leg-3 step 2: flash floor. n <= 128 keeps the SGEMM+softmax path
+// (short-prompt bitwise identity, and small scores stay cache-resident);
+// above it the fused online-softmax WMMA kernel removes the scores
+// materialization. GUFO_BGE_FLASH=0 forces the legacy path (A/B control).
+inline constexpr int kFlashMinTokens = 128;
 
 bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
                     const BlasLtPlan& plan,
@@ -946,21 +953,39 @@ std::optional<EngineSession::SyncResult> HipSync(
     }
     QkvSplitBiasKernel<<<blocks(3 * n * h), kBlock, 0, st.stream>>>(
         q, k, v, layer.q_b, layer.k_b, layer.v_b, qh, kh, vh, nn, hh, hdd);
-    // Batched scores = QK^T, in-place softmax, strided-batched context,
-    // merge straight into F16 (the out-proj GEMM consumes it directly).
-    if (hipblasSgemmStridedBatched(
-            st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, nn, nn, hdd, &kScale, kh,
-            hdd, stride_qkv, qh, hdd, stride_qkv, &kZero, st.scores, nn,
-            stride_scores, hh) != HIPBLAS_STATUS_SUCCESS) {
-      return fail("attention scores gemm");
-    }
-    SoftmaxRowsKernel<<<hh * static_cast<unsigned>(nn), kBlock, 0,
-                        st.stream>>>(st.scores, hh * nn, nn);
-    if (hipblasSgemmStridedBatched(
-            st.blas, HIPBLAS_OP_N, HIPBLAS_OP_N, hdd, nn, nn, &kOne, vh, hdd,
-            stride_qkv, st.scores, nn, stride_scores, &kZero, st.context,
-            hdd, stride_qkv, hh) != HIPBLAS_STATUS_SUCCESS) {
-      return fail("attention context gemm");
+    // Attention: fused online-softmax WMMA flash above kFlashMinTokens
+    // (no scores materialization), else the legacy batched SGEMM + softmax
+    // path (short-prompt bitwise identity).
+    static const bool kUseFlash =
+        std::getenv("GUFO_BGE_FLASH") == nullptr ||
+        std::getenv("GUFO_BGE_FLASH")[0] != '0';
+    if (kUseFlash && nn > kFlashMinTokens) {
+      if (!gufo::core::compute::flash_f16::FlashF16DenseMha(
+              qh, kh, vh, st.context, static_cast<std::uint32_t>(nn),
+              static_cast<std::uint32_t>(hh), static_cast<std::uint32_t>(hdd),
+              kScale, st.stream)) {
+        return fail("flash attention");
+      }
+      if (hipStreamSynchronize(st.stream) != hipSuccess) {
+        return fail("flash attention sync");
+      }
+    } else {
+      // Batched scores = QK^T, in-place softmax, strided-batched context,
+      // merge straight into F16 (the out-proj GEMM consumes it directly).
+      if (hipblasSgemmStridedBatched(
+              st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, nn, nn, hdd, &kScale, kh,
+              hdd, stride_qkv, qh, hdd, stride_qkv, &kZero, st.scores, nn,
+              stride_scores, hh) != HIPBLAS_STATUS_SUCCESS) {
+        return fail("attention scores gemm");
+      }
+      SoftmaxRowsKernel<<<hh * static_cast<unsigned>(nn), kBlock, 0,
+                          st.stream>>>(st.scores, hh * nn, nn);
+      if (hipblasSgemmStridedBatched(
+              st.blas, HIPBLAS_OP_N, HIPBLAS_OP_N, hdd, nn, nn, &kOne, vh, hdd,
+              stride_qkv, st.scores, nn, stride_scores, &kZero, st.context,
+              hdd, stride_qkv, hh) != HIPBLAS_STATUS_SUCCESS) {
+        return fail("attention context gemm");
+      }
     }
     MergeHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
         st.context, st.merged, nn, hh, hdd);

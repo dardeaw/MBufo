@@ -16,6 +16,8 @@ if (ENGINE_ENABLE_HIP)
     PROPERTIES LANGUAGE HIP)
   # session.hip issues hipBLAS SGEMM directly (F32 precision-first prefill).
   target_link_libraries(gufo_core PRIVATE roc::hipblas)
+  # leg-3 flash attention lives in the shared blocked_kv lib (qwen precedent).
+  target_link_libraries(gufo_core PRIVATE gufo_core_blocked_kv)
 endif()
 
 if (BUILD_TESTING)
