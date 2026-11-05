@@ -45,6 +45,7 @@
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/gemma4/engine.hpp"
+#include "src/models/glimmer/engine.hpp"
 #include "src/models/qwen/continuation_adapter.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
@@ -2986,6 +2987,521 @@ private:
 // round-trip through the native <|tool_call>call:NAME{...}<tool_call|>
 // envelope (parsed back in openai_chat.cpp ParseGemmaCalls).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Muse Glimmer HTTP backend: plain Sync/Evaluate sessions owned per request
+// slot, no speculative sidecar and no continuation snapshots in serve. Prompt
+// framing mirrors the GGUF canonical template (Onyx ATEM tool format);
+// tool calls round-trip through the native ATEM envelope (parsed back in
+// openai_chat.cpp ParseAtemCalls).
+// ---------------------------------------------------------------------------
+constexpr std::string_view kGlimmerStateAbi = "glimmer-gfx1151-state-v1";
+
+using GlimmerModel = models::glimmer::Model;
+using GlimmerSession = models::glimmer::Session;
+
+std::vector<std::int32_t> GlimmerEngineTokens(
+    std::span<const TextRunnerToken> tokens) {
+  std::vector<std::int32_t> converted;
+  converted.reserve(tokens.size());
+  for (const TextRunnerToken token : tokens) {
+    if (token > static_cast<TextRunnerToken>(
+                    std::numeric_limits<std::int32_t>::max())) {
+      throw std::invalid_argument("Glimmer token ID exceeds engine range");
+    }
+    converted.push_back(static_cast<std::int32_t>(token));
+  }
+  return converted;
+}
+
+
+// Tool namespace of first appearance, mirroring the template's namespace
+// grouping for the metadata block and the recipient list.
+std::vector<std::string> GlimmerToolNamespaces(
+    std::span<const tokenization::ChatTool> tools) {
+  std::vector<std::string> namespaces;
+  for (const auto& tool : tools) {
+    const auto dot = tool.name.find('.');
+    const std::string ns =
+        dot == std::string::npos ? tool.name : tool.name.substr(0, dot);
+    if (std::ranges::find(namespaces, ns) == namespaces.end())
+      namespaces.push_back(ns);
+  }
+  return namespaces;
+}
+
+void GlimmerAppendParam(std::string& out, std::string_view key,
+                        std::string_view value) {
+  out += '<';
+  out += "atem:parameter";
+  out += ' ';
+  out += "name";
+  out += '=';
+  out += '"';
+  out += key;
+  out += '"';
+  out += '>';
+  out += value;
+  out += '<';
+  out += "/atem:parameter>";
+}
+
+std::string GlimmerToolDefs(std::span<const tokenization::ChatTool> tools) {
+  std::string out = "Available tools (JSONSchema):\n// Tool metadata\n";
+  out += "Sketch:\n<atem:function_calls>\n<atem:invoke name=\"NAME\">\n";
+  GlimmerAppendParam(out, "ARG", "VALUE");
+  out += "\n</atem:invoke>\n</atem:function_calls>\n";
+
+  for (const auto& ns : GlimmerToolNamespaces(tools)) {
+    out += "{\"name\": " + json::Value(ns).dump();
+    out += ", \"description\": \"\"}\n";
+  }
+  out += "// Function schemas";
+  for (const auto& tool : tools) {
+    const json::Value params = tool.parameters_json.empty()
+                                   ? json::Value::object()
+                                   : json::parse(tool.parameters_json);
+    out += "\n{\"name\": " + json::Value(tool.name).dump();
+    out += ", \"description\": " + json::Value(tool.description).dump();
+    out += ", \"parameters\": " + params.dump() + "}";
+  }
+  out += "Example:\nto=example_tool_name.example_function_name\n\n";
+  out += "<atem:function_calls>\n<atem:invoke name=\"example_tool_name.example_function_name\">\n";
+  GlimmerAppendParam(out, "example_parameter_1", "value_1");
+  GlimmerAppendParam(out, "example_parameter_2", "line one\nline two");
+  out += "\n</atem:invoke>\n</atem:function_calls>";
+
+  return out;
+}
+std::string GlimmerSystemMeta(std::span<const tokenization::ChatTool> tools) {
+  std::string out = "# Valid recipients: \"self\"";
+  for (const auto& ns : GlimmerToolNamespaces(tools)) {
+    out += ", \"" + ns + ".*\"";
+  }
+  out += ", \"user\".";
+  return out;
+}
+
+std::string GlimmerRenderAtemCall(
+    std::string_view name,
+    std::span<const tokenization::ChatMessage::ToolArgument> args) {
+  std::string out = "<atem:function_calls>\n<atem:invoke name=\"";
+  out += name;
+  out += "\">\n";
+  for (const auto& argument : args) {
+    out += std::string("<") + "atem:parameter" + " " + "name" + '=' + '"';
+    out += argument.name;
+    out += "\">";
+    out += argument.value;
+    out += "</atem:parameter>\n";
+  }
+  out += "</atem:invoke>\n</atem:function_calls>";
+  return out;
+}
+
+std::string GlimmerRenderPrompt(
+    std::span<const tokenization::ChatMessage> messages,
+    std::span<const tokenization::ChatTool> tools) {
+  std::string out = "<|begin_of_text|>";
+  std::size_t body_begin = 0;
+  std::string system_text;
+  if (!messages.empty() &&
+      (messages.front().role == tokenization::ChatRole::kSystem ||
+       messages.front().role == tokenization::ChatRole::kDeveloper)) {
+    system_text = messages.front().content + messages.front().framing_suffix;
+    body_begin = 1;
+  } else {
+    system_text = "You are a helpful AI assistant.\nKnowledge cutoff: 2026-01-04.";
+  }
+  out += "<|start|>system<|message|>" + system_text;
+  out += "\n\nReasoning strength: low.";
+  if (!tools.empty()) {
+    out += "\n\n" + GlimmerToolDefs(tools);
+  }
+  out += "\n\n" + GlimmerSystemMeta(tools) + "<|eot|>";
+  for (std::size_t i = body_begin; i < messages.size(); ++i) {
+    const auto& message = messages[i];
+    if (message.role == tokenization::ChatRole::kTool) {
+      std::string tool_name = message.name;
+      if (tool_name.empty() && !message.tool_call_id.empty()) {
+        for (std::size_t j = i; j-- > 0;) {
+          if (messages[j].role != tokenization::ChatRole::kAssistant)
+            continue;
+          for (const auto& call : messages[j].tool_calls) {
+            if (call.id == message.tool_call_id)
+              tool_name = call.name;
+          }
+        }
+        if (tool_name.empty())
+          tool_name = message.tool_call_id;
+      }
+      if (tool_name.empty())
+        tool_name = "unknown";
+    out += "<|start|>tool " + tool_name + "<|message|>" + std::string("<") + "tool_output" + " " + "name" + '=' + '"';
+      out += tool_name;
+    out += "\">\n" + message.content + "\n</tool_output><|eot|>";
+      continue;
+    }
+    if (message.role == tokenization::ChatRole::kAssistant) {
+      if (!message.thought.empty()) {
+        out += "<|start|>assistant to=self<|message|>";
+        out += message.thought;
+        out += "<|eom|>";
+      }
+      if (!message.tool_calls.empty()) {
+        for (std::size_t k = 0; k < message.tool_calls.size(); ++k) {
+          const auto& call = message.tool_calls[k];
+          out += "<|start|>assistant to=" + call.name + "<|message|>";
+          out += GlimmerRenderAtemCall(call.name, call.arguments);
+          const bool last_turn =
+              (k + 1 == message.tool_calls.size()) &&
+              (i + 1 == messages.size() ||
+               messages[i + 1].role != tokenization::ChatRole::kAssistant);
+          out += last_turn ? "<|eot|>" : "<|eom|>";
+        }
+        continue;
+      }
+      const bool end_turn =
+          (i + 1 == messages.size()) ||
+          (messages[i + 1].role != tokenization::ChatRole::kAssistant);
+      out += "<|start|>assistant to=user<|message|>" + message.content;
+      out += end_turn ? "<|eot|>" : "<|eom|>";
+      continue;
+    }
+    out += "<|start|>user<|message|>" + message.content + "<|eot|>";
+  }
+  out += "<|start|>assistant";
+  return out;
+}
+
+class GlimmerTextRunnerState final : public TextRunnerState {
+ public:
+  explicit GlimmerTextRunnerState(const std::shared_ptr<GlimmerModel>& model) {
+    std::string error;
+    session_ = model->CreateSession(&error);
+    if (session_ == nullptr) {
+      throw std::runtime_error("Failed to create Glimmer session: " + error);
+    }
+  }
+
+  void SetCancellationCheck(const CancellationCheck&) override {}
+  void Invalidate() noexcept override { position_ = 0; }
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
+      const noexcept override {
+    return {};
+  }
+
+  [[nodiscard]] GlimmerSession& session() const { return *session_; }
+  [[nodiscard]] std::size_t position() const noexcept { return position_; }
+  void set_position(std::size_t position) noexcept { position_ = position; }
+
+ private:
+  std::unique_ptr<GlimmerSession> session_;
+  std::size_t position_{0};
+};
+
+GlimmerTextRunnerState& RequireGlimmerState(TextRunnerState& state) {
+  auto* glimmer = dynamic_cast<GlimmerTextRunnerState*>(&state);
+  if (glimmer == nullptr) {
+    throw std::logic_error("text runner state is not Glimmer");
+  }
+  return *glimmer;
+}
+
+const GlimmerTextRunnerState& RequireGlimmerState(
+    const TextRunnerState& state) {
+  const auto* glimmer = dynamic_cast<const GlimmerTextRunnerState*>(&state);
+  if (glimmer == nullptr) {
+    throw std::logic_error("text runner state is not Glimmer");
+  }
+  return *glimmer;
+}
+
+class GlimmerTextRunner final : public HipTextModelRunner {
+ public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kAtem;
+  }
+
+  GlimmerTextRunner(std::shared_ptr<GlimmerModel> model,
+                    std::uint32_t max_context)
+      : model_(std::move(model)), max_context_(max_context) {
+    // Turn-boundary stops from the template: the end-of-turn markers end
+    // generation, while the continuation marker never does on its own.
+    for (const char* marker : {"<|eot|>", "<|eot_id|>"}) {
+      if (const auto id = model_->tokenizer().FindSpecialToken(marker)) {
+        turn_stops_.push_back(static_cast<std::int32_t>(*id));
+      }
+    }
+  }
+
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    return {
+        .model_id = model_->ModelName(),
+        .state_abi = std::string(kGlimmerStateAbi),
+        .max_context = max_context_,
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = false,
+                .fork = false,
+                .final_token_advance_required = false,
+                .incremental_text_is_exact = true,
+                .multi_token_decode = false,
+                .batched_multi_token_decode = false,
+                .batched_multi_token_decode_max_width = 0,
+                .prefix_reuse = false,
+            },
+        .persistence = std::nullopt,
+    };
+  }
+
+  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      capacity = free_bytes;
+    }
+    return {
+        .resident_weights_bytes = model_->ResidentBytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = std::nullopt,
+        .temporary_scratch_bytes = std::nullopt,
+        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .requires_device_runtime_lock = true,
+    };
+  }
+
+  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+    std::vector<TextExecutionPlan> plans{
+        {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    for (std::size_t width = 2; width <= 8; ++width) {
+      plans.push_back(
+          {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+    }
+    return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          const std::int32_t token = static_cast<std::int32_t>(id);
+          const std::int32_t unit[1] = {token};
+          return sampling::ConstraintVocabulary::Piece{
+              model_->Decode(std::span<const std::int32_t>(unit, 1)),
+              model_->IsStopToken(token)};
+        });
+  }
+
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return model_->VocabSize();
+  }
+
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"", "", {}};
+  }
+
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+      std::string_view text) const override {
+    std::vector<TextRunnerToken> tokens;
+    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/false)) {
+      tokens.push_back(static_cast<TextRunnerToken>(id));
+    }
+    return tokens;
+  }
+
+  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ChatRequest& request) const override {
+    const auto tools =
+        request.tool_choice == ChatRequest::ToolChoice::kNone
+            ? std::span<const tokenization::ChatTool>{}
+            : std::span<const tokenization::ChatTool>{request.tools};
+    const std::string prompt = GlimmerRenderPrompt(request.messages, tools);
+    if (prompt.empty())
+      return std::nullopt;
+    return Tokenize(prompt);
+  }
+
+  [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
+      const ChatRequest&) const override {
+    return TextGenerationBackend::InitialOutputState::kContent;
+  }
+
+  [[nodiscard]] std::string Decode(
+      std::span<const TextRunnerToken> tokens) const override {
+    const auto ids = GlimmerEngineTokens(tokens);
+    return model_->Decode(ids);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+    return std::make_unique<GlimmerTextRunnerState>(model_);
+  }
+
+  [[nodiscard]] bool IsTurnStopToken(std::int32_t token) const noexcept {
+    if (model_->IsStopToken(token))
+      return true;
+    return std::ranges::find(turn_stops_, token) != turn_stops_.end();
+  }
+
+  [[nodiscard]] std::string DecodeToken(std::int32_t token) const {
+    return model_->Decode(std::span<const std::int32_t>(&token, 1));
+  }
+
+  // Glimmer Sync replays only the delta when the prompt extends the retained
+  // prefix and resynchronizes from zero otherwise, so every prefill step
+  // replays the whole retained prefix through one Sync call.
+  [[nodiscard]] TextPrefillStep Prefill(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens) const override {
+    auto& glimmer = RequireGlimmerState(state);
+    if (offset != glimmer.position()) {
+      throw std::logic_error(
+          "Glimmer prefill offset does not match retained state");
+    }
+    if (offset >= prompt.size()) {
+      throw std::logic_error("Glimmer prefill has no remaining input");
+    }
+    const std::size_t consumed =
+        std::min(max_input_tokens, prompt.size() - offset);
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_) {
+      throw std::runtime_error("Glimmer prompt exceeds the served context");
+    }
+    const auto prefix = GlimmerEngineTokens(prompt.first(next_position));
+    std::string error;
+    if (!glimmer.session().Sync(prefix, &error)) {
+      glimmer.set_position(0);
+      throw std::runtime_error("Glimmer prefill failed: " + error);
+    }
+    glimmer.set_position(next_position);
+    return {
+        .consumed_tokens = consumed,
+        .decode_ready = next_position == prompt.size(),
+    };
+  }
+
+  [[nodiscard]] TextDecodeSelection SelectNext(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    auto& glimmer = RequireGlimmerState(state);
+    if (glimmer.position() >= max_context_)
+      return {.stop = true, .piece = {}};
+    const auto logits = glimmer.session().Logits();
+    if (logits.empty()) {
+      throw std::runtime_error("Glimmer token selection has no logits");
+    }
+    const auto token =
+        static_cast<std::int32_t>(sampler.Sample(logits));
+    if (glimmer.stop_at_eos() && IsTurnStopToken(token)) {
+      return {
+          .stop = true,
+          .token = 0,
+          .piece = {},
+      };
+    }
+    return {
+        .stop = false,
+        .token = static_cast<TextRunnerToken>(token),
+        .piece = DecodeToken(token),
+    };
+  }
+
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    if (token > static_cast<TextRunnerToken>(
+                    std::numeric_limits<std::int32_t>::max())) {
+      throw std::invalid_argument("Glimmer token ID exceeds engine range");
+    }
+    auto& glimmer = RequireGlimmerState(state);
+    std::string error;
+    if (!glimmer.session().Evaluate(static_cast<std::int32_t>(token),
+                                     &error)) {
+      throw std::runtime_error("Glimmer decode failed: " + error);
+    }
+    glimmer.set_position(glimmer.position() + 1);
+  }
+
+  // Batched single-token decode across sessions through the engine's unified
+  // mixed-batch launch. Each lane samples its current frontier on the host,
+  // then every pending token advances in one DecodeBatch; a launch refusal
+  // falls back to the serial base path. (The scheduler only routes here when
+  // the batched multi-token capability is advertised.)
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+      std::span<const TextRunnerDecode> decodes) const override {
+    if (decodes.size() < 2) {
+      return TextModelRunner::DecodeBatch(decodes);
+    }
+    std::vector<std::int32_t> pending;
+    pending.reserve(decodes.size());
+    std::vector<std::size_t> active;
+    active.reserve(decodes.size());
+    std::vector<TextDecodeStep> steps(decodes.size());
+    for (std::size_t index = 0; index < decodes.size(); ++index) {
+      auto& glimmer = RequireGlimmerState(decodes[index].state.get());
+      if (glimmer.position() >= max_context_) {
+        steps[index] = {.stop = true};
+        continue;
+      }
+      const auto logits = glimmer.session().Logits();
+      if (logits.empty()) {
+        TextDecodeStep failed;
+        failed.failure = std::make_exception_ptr(
+            std::runtime_error("Glimmer batched decode has no logits"));
+        steps[index] = std::move(failed);
+        continue;
+      }
+      const auto token = static_cast<std::int32_t>(
+          decodes[index].sampler.get().Sample(logits));
+      if (glimmer.stop_at_eos() && IsTurnStopToken(token)) {
+        steps[index] = {.stop = true};
+        continue;
+      }
+      pending.push_back(token);
+      active.push_back(index);
+    }
+    if (!active.empty()) {
+      std::vector<GlimmerSession::BatchItem> items;
+      items.reserve(active.size());
+      for (std::size_t k = 0; k < active.size(); ++k) {
+        auto& glimmer = RequireGlimmerState(decodes[active[k]].state.get());
+        items.push_back({&glimmer.session(),
+                         std::span<const std::int32_t>(&pending[k], 1)});
+      }
+      std::string error;
+      if (!GlimmerSession::DecodeBatch(items, &error)) {
+        return TextModelRunner::DecodeBatch(decodes);
+      }
+      for (std::size_t k = 0; k < active.size(); ++k) {
+        const std::size_t lane = active[k];
+        auto& glimmer = RequireGlimmerState(decodes[lane].state.get());
+        glimmer.set_position(glimmer.position() + 1);
+        steps[lane].selections.push_back(TextDecodeSelection{
+            .stop = false,
+            .token = static_cast<TextRunnerToken>(pending[k]),
+            .piece = DecodeToken(pending[k]),
+        });
+      }
+    }
+    return steps;
+  }
+
+  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    return SelectNext(state, sampler);
+  }
+
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return RequireGlimmerState(state).position();
+  }
+
+ private:
+  std::shared_ptr<GlimmerModel> model_;
+  std::uint32_t max_context_;
+  // Turn-boundary stops from the template's turn closers.
+  std::vector<std::int32_t> turn_stops_;
+};
+
 constexpr std::string_view kGemma4StateAbi = "gemma4-gfx1151-state-v1";
 
 using Gemma4Model = models::gemma4::Model;
@@ -4023,6 +4539,39 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
+  if (reader->GetMetadataString("general.architecture") == "muse-glimmer") {
+    if (!vision_model_path.empty()) {
+      SetError(error, "Glimmer HTTP models do not support --mmproj");
+      return false;
+    }
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error,
+               "Glimmer HTTP models do not support speculative decoding "
+               "(pass --speculative off)");
+      return false;
+    }
+    auto model = models::glimmer::Model::Load(
+        model_path,
+        models::glimmer::ModelOptions{
+            .max_context = max_context,
+            .kv_cache_quant = kv_cache_quant,
+        },
+        &load_error);
+    if (model == nullptr) {
+      SetError(error, "Failed to create Glimmer model: " + load_error);
+      return false;
+    }
+    // Glimmer sessions expose no continuation snapshots, so there is no
+    // persistent disk-cache identity; the RAM pool owns every session.
+    if (DiskCacheEnabled(resolved_disk_cache_config)) {
+      SetError(error,
+               "Glimmer HTTP models do not support the persistent disk cache");
+      return false;
+    }
+    return load(std::move(model), error, max_context, session_count,
+                prefill_policy, scheduler_policy, speculative_config,
+                std::move(resolved_disk_cache_config), ram_cache_config);
+  }
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
     if (reader->GetMetadataUint64("qwen35.embedding_length") == 5120) {
@@ -4402,6 +4951,65 @@ bool InferenceBackend::load(
     auto runner_pool = std::make_shared<TextRunnerPool>(
         std::move(runner), session_count, std::move(runner_disk_cache),
         ram_cache_config);
+    new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+        std::move(runner_pool), prefill_policy, scheduler_policy);
+    {
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
+}
+
+bool InferenceBackend::load(
+    std::shared_ptr<models::glimmer::Model> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config) {
+  if (model == nullptr) {
+    SetError(error, "Glimmer model must not be null");
+    return false;
+  }
+  if (max_context == 0)
+    max_context = model->MaxContext();
+
+  if (session_count == 0) {
+    SetError(error, "HTTP session count must be at least one");
+    return false;
+  }
+  if (max_context == 0 || max_context > model->MaxContext()) {
+    SetError(error, "HTTP context exceeds the loaded Glimmer model context");
+    return false;
+  }
+  if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    SetError(error,
+             "Glimmer HTTP models do not support speculative decoding");
+    return false;
+  }
+  // No continuation snapshots exist for Glimmer sessions, so the disk cache
+  // has no identity to key on; the RAM pool owns every execution slot.
+  if (DiskCacheEnabled(disk_cache_config)) {
+    SetError(error,
+             "Glimmer HTTP models do not support the persistent disk cache");
+    return false;
+  }
+  try {
+    auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextModelPreset::kUnspecified;
+    new_state->sampling_defaults.supplied = {};
+    new_state->supports_images = false;
+    auto runner =
+        std::make_shared<GlimmerTextRunner>(std::move(model), max_context);
+    new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
+    auto runner_pool = std::make_shared<TextRunnerPool>(
+        std::move(runner), session_count, std::nullopt, ram_cache_config);
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {
