@@ -608,10 +608,9 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
   const bool use_blocked = s.model_->options_.kv_cache_quant == "q8";
 
   if (use_blocked) {
-    // Blocked-Q8 read (llama convention): SWA layers pre-shift past the
-    // window and rebase to dense-causal; the shared dispatcher picks
-    // Split-K decode for long contexts and the scalar direct read
-    // otherwise (same math, fused dequant).
+    // Blocked-Q8 path (codec branch; MQB cannot consume blocked KV): the
+    // unified mixed-batch launcher runs first, with the legacy dispatcher
+    // cores below as backup (Q8 semantics unchanged).
     const std::uint8_t* k2 = impl.buffers.kv_bk[il];
     const std::uint8_t* v2 = impl.buffers.kv_bv[il];
     const std::uint32_t* sp = impl.d_pos;
@@ -630,33 +629,99 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
     din.v_codec = attn_disp::DispatchCodec::kQ8;
     din.window = 0;
     din.is_verify = false;
-    const auto route = attn_disp::RouteAttention(
-        din, attn_disp::AttentionDispatchPolicy::WithEnvDefaults());
-    bool ran = false;
-    if (route == attn_disp::AttentionRoute::kBlockedSplitK &&
-        impl.splitk_partials != nullptr) {
-      ran = core::compute::blocked_splitk::AttentionBlockedSplitK<
-          core::compute::blocked_splitk::KvCodecQ8, 128>(
-          impl.qbuf, k2, v2, impl.attn_out, n, sp, base + n, c.num_heads,
-          c.num_kv_heads, d, stream, score_scale, 34, 34,
-          impl.splitk_partials,
-          core::compute::blocked_splitk::
-              AttentionBlockedSplitKScratchBytes());
+    bool attn_unified_ran = false;
+    if (try_unified) {
+      namespace mb = core::compute::mixed_batch;
+      mb::MixedBlk blk{};
+      blk.q = impl.qbuf;
+      blk.k = k2;
+      blk.v = v2;
+      blk.gate = nullptr;  // the output gate stays a post-hoc SigmoidMul
+      blk.out = impl.attn_out;
+      blk.kv_len = base + n;
+      blk.q_pos_base = base;
+      blk.n_rows = n;
+      blk.k_codec = mb::MixedKvCodec::kQ8;
+      blk.v_codec = mb::MixedKvCodec::kQ8;
+      blk.head_dim = d;
+      blk.heads = c.num_heads;
+      blk.kv_heads = c.num_kv_heads;
+      blk.score_scale = score_scale;
+      blk.q_stride = 0;
+      blk.k_stride = 0;
+      blk.v_stride = 0;
+      blk.k_head_stride = 0;
+      blk.v_head_stride = 0;
+      blk.gate_stride = 0;
+      blk.out_stride = 0;
+      blk.window = 0;  // SWA already pre-shifted above; dense-causal from here
+      blk.key_block_bytes = 34;
+      blk.value_block_bytes = 34;
+      std::string scratch_error;
+      if (s.model_->EnsureMixedScratch(mb::MixedBatchScratchBytes(1),
+                                       &scratch_error)) {
+        attn_unified_ran = mb::LaunchMixedBatchAttention(
+            &blk, 1, s.model_->mixed_scratch_, s.model_->mixed_scratch_bytes_,
+            stream);
+      }
     }
-    if (!ran) {
-      core::compute::blocked_kv::AttentionKv(
-          impl.qbuf, k2, v2, /*mask=*/nullptr, /*mask_words=*/0,
-          impl.attn_out, /*partials=*/nullptr, /*splits=*/1, n, sp,
-          c.num_heads, c.num_kv_heads, d, /*ratio=*/1, 34, 34,
-          core::compute::blocked_kv::KvCodec::kQ8, stream, score_scale);
+    if (!attn_unified_ran) {
+      const auto route = attn_disp::RouteAttention(
+          din, attn_disp::AttentionDispatchPolicy::WithEnvDefaults());
+      bool ran = false;
+      if (route == attn_disp::AttentionRoute::kBlockedSplitK &&
+          impl.splitk_partials != nullptr) {
+        ran = core::compute::blocked_splitk::AttentionBlockedSplitK<
+            core::compute::blocked_splitk::KvCodecQ8, 128>(
+            impl.qbuf, k2, v2, impl.attn_out, n, sp, base + n, c.num_heads,
+            c.num_kv_heads, d, stream, score_scale, 34, 34,
+            impl.splitk_partials,
+            core::compute::blocked_splitk::
+                AttentionBlockedSplitKScratchBytes());
+      }
+      if (!ran) {
+        core::compute::blocked_kv::AttentionKv(
+            impl.qbuf, k2, v2, /*mask=*/nullptr, /*mask_words=*/0,
+            impl.attn_out, /*partials=*/nullptr, /*splits=*/1, n, sp,
+            c.num_heads, c.num_kv_heads, d, /*ratio=*/1, 34, 34,
+            core::compute::blocked_kv::KvCodec::kQ8, stream, score_scale);
+      }
     }
     return;
   }
-
-  // F16 path: one unified mixed-batch launch (single block) first; refusal
-  // falls back to the legacy cores below with F16 semantics unchanged.
+  // F16 path (codec branch): the MQB fast path runs first (verbatim legacy
+  // core); only on refusal does the unified mixed-batch launcher run as
+  // backup, with dense causal as the last resort.
+  // Prefill attention consults the shared dispatcher and stays on the F16
+  // legacy route; the multi-query blocking kernel below is that route's
+  // accelerator (same online-softmax math, F16 semantics unchanged).
+  // `false` = unsupported shape (tiny/decode/non-d128) -> legacy runs.
+  bool attn_mqb_ran = false;
+  {
+    namespace attn_disp = core::compute::attention_dispatcher;
+    attn_disp::AttentionDispatchInput din;
+    din.q_len = n;
+    din.kv_len = start_pos + n;
+    din.head_dim = d;
+    din.heads = c.num_heads;
+    din.kv_heads = c.num_kv_heads;
+    din.k_codec = attn_disp::DispatchCodec::kF16;
+    din.v_codec = attn_disp::DispatchCodec::kF16;
+    din.window = window;
+    din.is_verify = false;
+    const auto attn_policy =
+        attn_disp::AttentionDispatchPolicy::WithEnvDefaults();
+    if (attn_policy.dispatch_enabled &&
+        attn_disp::RouteAttention(din, attn_policy) ==
+            attn_disp::AttentionRoute::kLegacy) {
+      attn_mqb_ran = kernels::AttentionF16MQB(
+          impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+          impl.attn_out, n, start_pos, c.num_heads, c.num_kv_heads, d,
+          stream, score_scale, window);
+    }
+  }
   bool attn_unified_ran = false;
-  if (try_unified) {
+  if (!attn_mqb_ran && try_unified) {
     namespace mb = core::compute::mixed_batch;
     mb::MixedBlk blk{};
     blk.q = impl.qbuf;
@@ -691,41 +756,11 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
           stream);
     }
   }
-  if (!attn_unified_ran) {
-    // Prefill attention consults the shared dispatcher and stays on the F16
-    // legacy route; the multi-query blocking kernel below is that route's
-    // accelerator (same online-softmax math, F16 semantics unchanged).
-    // `false` = unsupported shape (tiny/decode/non-d128) -> legacy runs.
-    bool attn_mqb_ran = false;
-    {
-      namespace attn_disp = core::compute::attention_dispatcher;
-      attn_disp::AttentionDispatchInput din;
-      din.q_len = n;
-      din.kv_len = start_pos + n;
-      din.head_dim = d;
-      din.heads = c.num_heads;
-      din.kv_heads = c.num_kv_heads;
-      din.k_codec = attn_disp::DispatchCodec::kF16;
-      din.v_codec = attn_disp::DispatchCodec::kF16;
-      din.window = window;
-      din.is_verify = false;
-      const auto attn_policy =
-          attn_disp::AttentionDispatchPolicy::WithEnvDefaults();
-      if (attn_policy.dispatch_enabled &&
-          attn_disp::RouteAttention(din, attn_policy) ==
-              attn_disp::AttentionRoute::kLegacy) {
-        attn_mqb_ran = kernels::AttentionF16MQB(
-            impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
-            impl.attn_out, n, start_pos, c.num_heads, c.num_kv_heads, d,
-            stream, score_scale, window);
-      }
-    }
-    if (!attn_mqb_ran) {
-      kernels::AttentionF16(impl.qbuf, impl.buffers.kv_k[il],
-                            impl.buffers.kv_v[il], impl.attn_out, n, start_pos,
-                            c.num_heads, c.num_kv_heads, d, stream,
-                            score_scale, window);
-    }
+  if (!attn_mqb_ran && !attn_unified_ran) {
+    kernels::AttentionF16(impl.qbuf, impl.buffers.kv_k[il],
+                          impl.buffers.kv_v[il], impl.attn_out, n, start_pos,
+                          c.num_heads, c.num_kv_heads, d, stream,
+                          score_scale, window);
   }
 }
 
@@ -1407,8 +1442,11 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
   // replays into O(n) prefix + delta.
   std::size_t start = 0;
   const auto& prev = impl_->synced_;
+  // Length must match the synced prefix exactly: tokens evaluated past
+  // it leave a stale tail that a zero-length delta would never refresh
+  // (stale length and last-row logits), so any drift forces resync.
   if (!prev.empty() && prompt.size() >= prev.size() &&
-      impl_->length >= prev.size() &&
+      impl_->length == prev.size() &&
       std::equal(prev.begin(), prev.end(), prompt.begin())) {
     start = prev.size();
   } else {
