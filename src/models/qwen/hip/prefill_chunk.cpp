@@ -9,6 +9,8 @@
 #include "src/models/qwen/hip/blocked_q8.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/core/compute/attention/attention_dispatcher.hpp"
+#include "src/core/compute/attention/fused_fa_gqa128.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
@@ -79,6 +81,38 @@ bool UseQwen27bFp16Prefill(const models::QwenModelWeights& weights,
       return false;
   }
   return low_bit_ffn;
+}
+
+// Fused GQA flash prefill (core fused_fa_gqa128) for the exact (16Q, 8KV,
+// d=128) dense geometry (e.g. Qwen3-Embedding): route through the shared
+// attention dispatcher; anything the dispatcher does not route (or the
+// launcher refuses) returns false and the caller keeps the existing
+// wmma -> tiled -> baseline chain. GUFO_ATTN_DISPATCH=0 forces legacy.
+bool TryLaunchFusedFaGqa128(
+    const float* q, const float* k, const float* v, const float* gate,
+    float* k_cache, float* v_cache, void* k_cache_f16, void* v_cache_f16,
+    float* out_context, std::uint32_t layer_idx, std::uint32_t start_pos,
+    std::size_t batch_size, std::uint32_t max_context,
+    std::uint32_t num_heads, std::uint32_t num_kv_heads,
+    std::uint32_t head_dim, hipStream_t stream, bool skip_kv_write) {
+  namespace attn_disp = gufo::core::compute::attention_dispatcher;
+  attn_disp::AttentionDispatchInput din;
+  din.q_len = static_cast<std::uint32_t>(batch_size);
+  din.kv_len = start_pos + static_cast<std::uint32_t>(batch_size);
+  din.head_dim = head_dim;
+  din.heads = num_heads;
+  din.kv_heads = num_kv_heads;
+  din.k_codec = attn_disp::DispatchCodec::kF16;
+  din.v_codec = attn_disp::DispatchCodec::kF16;
+  if (attn_disp::RouteAttention(
+          din, attn_disp::AttentionDispatchPolicy::WithEnvDefaults()) !=
+      attn_disp::AttentionRoute::kFusedFaGqa128) {
+    return false;
+  }
+  return gufo::core::compute::fused_fa_gqa128::LaunchFusedFaGqa128(
+      q, k, v, gate, k_cache, v_cache, k_cache_f16, v_cache_f16, out_context,
+      layer_idx, start_pos, batch_size, max_context, num_heads, num_kv_heads,
+      head_dim, stream, skip_kv_write);
 }
 }  // namespace
 
@@ -404,7 +438,18 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // below only applies RoPE in place and never touches the cache, so it
       // still needs the pack.
       const bool kv_already_written = fused_qknorm_rope_kv;
-      const bool wmma_attention = LaunchQwenWmmaAttention(
+      const bool fused_fa_attention = TryLaunchFusedFaGqa128(
+          arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
+          arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
+          arena_.d_attention_kv_f16,
+          OffsetIfPresent(
+              static_cast<std::uint16_t*>(arena_.d_attention_kv_f16), total_k),
+          arena_.d_ssm_out, attn_layer_idx, start_pos, batch_size,
+          arena_.GetMaxContext(), config.num_attention_heads,
+          config.num_key_value_heads, config.head_dim, arena_.stream,
+          kv_already_written);
+      const bool wmma_attention =
+          !fused_fa_attention && LaunchQwenWmmaAttention(
           arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
           arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
           arena_.d_attention_kv_f16,
@@ -416,11 +461,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
           /*lse_out=*/nullptr, /*key_begin=*/0,
           /*skip_kv_write=*/kv_already_written, attention_workspace.gate,
           attention_workspace.up, output_first_row);
+      if (fused_fa_attention) {
+        detail::EmitAttentionDispatch("prefill_fused_fa_gqa128", "");
+      }
       if (wmma_attention) {
         detail::EmitAttentionDispatch("prefill_wmma", "");
       }
 
-      if (!wmma_attention) {
+      if (!fused_fa_attention && !wmma_attention) {
         bool tiled_attention = false;
         detail::DispatchPrefillAttention(
             visible_context,
@@ -1053,7 +1101,18 @@ void QwenGpuExecutor::PrefillAttentionPost(const PrefillChunkCtx& ctx,
     // multiply on a null gate pointer.
     const float* q_gate =
         config.IsDenseQwenAttention() ? nullptr : arena_.d_ssm_gate;
-    const bool wmma_attention = LaunchQwenWmmaAttention(
+    const bool fused_fa_attention = TryLaunchFusedFaGqa128(
+        arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
+        arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
+        arena_.d_attention_kv_f16,
+        OffsetIfPresent(
+            static_cast<std::uint16_t*>(arena_.d_attention_kv_f16), total_k),
+        arena_.d_ssm_out, attn_layer_idx, ctx.start_pos, batch_size,
+        arena_.GetMaxContext(), config.num_attention_heads,
+        config.num_key_value_heads, config.head_dim, arena_.stream,
+        kv_already_written);
+    const bool wmma_attention =
+        !fused_fa_attention && LaunchQwenWmmaAttention(
         arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
         arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
         arena_.d_attention_kv_f16,
@@ -1065,56 +1124,59 @@ void QwenGpuExecutor::PrefillAttentionPost(const PrefillChunkCtx& ctx,
         /*lse_out=*/nullptr, /*key_begin=*/0,
         /*skip_kv_write=*/kv_already_written, ctx.ws_gate, ctx.ws_up,
         ctx.output_first_row);
-    if (wmma_attention) {
-      detail::EmitAttentionDispatch("prefill_wmma", "");
-    }
-    if (!wmma_attention) {
-      bool tiled_attention = false;
-      detail::DispatchPrefillAttention(
-          visible_context,
-          [&] {
-            tiled_attention = LaunchBatchedAttentionTile(
-                arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
-                arena_.d_kv_cache,
-                OffsetIfPresent(arena_.d_kv_cache, total_k),
-                arena_.d_attention_kv_f16,
-                OffsetIfPresent(
-                    static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
-                    total_k),
-                arena_.d_ssm_out, attn_layer_idx, ctx.start_pos, batch_size,
-                arena_.GetMaxContext(), config.num_attention_heads,
-                config.num_key_value_heads, config.head_dim, arena_.stream);
-            return tiled_attention;
-          },
-          [&] {
-            LaunchBatchedAttention(
-                arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
-                arena_.d_kv_cache,
-                OffsetIfPresent(arena_.d_kv_cache, total_k),
-                arena_.d_attention_kv_f16,
-                OffsetIfPresent(
-                    static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
-                    total_k),
-                arena_.d_ssm_out, attn_layer_idx, ctx.start_pos, batch_size,
-                arena_.GetMaxContext(), config.num_attention_heads,
-                config.num_key_value_heads, config.head_dim, arena_.stream,
-                ctx.fuse_qknorm_rope_kv);
-          });
-      if (tiled_attention) {
-        detail::EmitAttentionDispatch("prefill_tiled", "");
-      } else if (!detail::BatchedAttentionScoresFitLds(visible_context)) {
-        detail::EmitAttentionDispatch(
-            arena_.d_kv_cache != nullptr ? "prefill_online_fp32"
-                                         : "prefill_online_fp16",
-            "prefill_baseline: score_rows_exceed_lds");
-      } else {
-        detail::EmitAttentionDispatch(
-            "prefill_baseline",
-            detail::ShouldAttemptOptimizedAttention(visible_context)
-                ? "prefill_tiled: rejected"
-                : "prefill_tiled: below_threshold");
+      if (fused_fa_attention) {
+        detail::EmitAttentionDispatch("prefill_fused_fa_gqa128", "");
       }
-    }
+      if (wmma_attention) {
+        detail::EmitAttentionDispatch("prefill_wmma", "");
+      }
+      if (!fused_fa_attention && !wmma_attention) {
+        bool tiled_attention = false;
+        detail::DispatchPrefillAttention(
+            visible_context,
+            [&] {
+              tiled_attention = LaunchBatchedAttentionTile(
+                  arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
+                  arena_.d_kv_cache,
+                  OffsetIfPresent(arena_.d_kv_cache, total_k),
+                  arena_.d_attention_kv_f16,
+                  OffsetIfPresent(
+                      static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                      total_k),
+                  arena_.d_ssm_out, attn_layer_idx, ctx.start_pos, batch_size,
+                  arena_.GetMaxContext(), config.num_attention_heads,
+                  config.num_key_value_heads, config.head_dim, arena_.stream);
+              return tiled_attention;
+            },
+            [&] {
+              LaunchBatchedAttention(
+                  arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
+                  arena_.d_kv_cache,
+                  OffsetIfPresent(arena_.d_kv_cache, total_k),
+                  arena_.d_attention_kv_f16,
+                  OffsetIfPresent(
+                      static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                      total_k),
+                  arena_.d_ssm_out, attn_layer_idx, ctx.start_pos, batch_size,
+                  arena_.GetMaxContext(), config.num_attention_heads,
+                  config.num_key_value_heads, config.head_dim, arena_.stream,
+                  ctx.fuse_qknorm_rope_kv);
+            });
+        if (tiled_attention) {
+          detail::EmitAttentionDispatch("prefill_tiled", "");
+        } else if (!detail::BatchedAttentionScoresFitLds(visible_context)) {
+          detail::EmitAttentionDispatch(
+              arena_.d_kv_cache != nullptr ? "prefill_online_fp32"
+                                           : "prefill_online_fp16",
+              "prefill_baseline: score_rows_exceed_lds");
+        } else {
+          detail::EmitAttentionDispatch(
+              "prefill_baseline",
+              detail::ShouldAttemptOptimizedAttention(visible_context)
+                  ? "prefill_tiled: rejected"
+                  : "prefill_tiled: below_threshold");
+        }
+      }
   }
 
   if (half_prefill) {
