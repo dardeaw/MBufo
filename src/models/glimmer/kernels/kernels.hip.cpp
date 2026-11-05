@@ -152,6 +152,36 @@ __global__ void RopeKernel(float* __restrict__ x, std::uint32_t heads,
   row[2u * i + 1u] = a * s + b * c;
 }
 
+// NeoX split-half rotation (LLAMA_ROPE_TYPE_NEOX, dflash draft): pair
+// (i, i+head_dim/2) rotates by pos * theta^(-2i/head_dim). Same
+// frequencies as RopeKernel, different pairing; that pairing is what the
+// draft was trained with, and consecutive-pair rotation here collapses
+// its block-diffusion acceptance.
+__global__ void RopeNeoxKernel(float* __restrict__ x,
+                               std::uint32_t heads,
+                               std::uint32_t head_dim,
+                               std::uint32_t start_pos, float theta) {
+  const std::uint32_t t = blockIdx.x;
+  const std::uint32_t h = blockIdx.y;
+  const std::uint32_t i = threadIdx.x;  // 0 .. head_dim/2 (pair index)
+  if (i >= head_dim / 2)
+    return;
+  float* row =
+      x + (static_cast<std::size_t>(t) * heads + h) * head_dim;
+  const float pos = static_cast<float>(start_pos + t);
+  const float inv_freq =
+      1.0f / powf(theta, (2.0f * static_cast<float>(i)) /
+                              static_cast<float>(head_dim));
+  const float ang = pos * inv_freq;
+  const float c = cosf(ang);
+  const float s = sinf(ang);
+  const std::uint32_t j = head_dim / 2u;
+  const float a = row[i];
+  const float b = row[i + j];
+  row[i] = a * c - b * s;
+  row[i + j] = a * s + b * c;
+}
+
 __global__ void SiluMulKernel(const float* __restrict__ gate,
                               const float* __restrict__ up,
                               float* __restrict__ out, std::size_t count) {
@@ -385,6 +415,15 @@ void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
     return;
   hipLaunchKernelGGL(RopeKernel, dim3(n_tokens, heads), dim3(64), 0, stream,
                      x, heads, head_dim, start_pos, theta);
+}
+
+void RopeNeox(float* x, std::uint32_t n_tokens, std::uint32_t heads,
+              std::uint32_t head_dim, std::uint32_t start_pos, float theta,
+              hipStream_t stream) {
+  if (n_tokens == 0)
+    return;
+  hipLaunchKernelGGL(RopeNeoxKernel, dim3(n_tokens, heads), dim3(64), 0,
+                     stream, x, heads, head_dim, start_pos, theta);
 }
 
 void SiluMul(const float* gate, const float* up, float* out, std::size_t count,

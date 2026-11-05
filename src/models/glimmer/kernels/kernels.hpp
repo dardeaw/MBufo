@@ -48,6 +48,14 @@ void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
           std::uint32_t head_dim, std::uint32_t start_pos, float theta,
           hipStream_t stream);
 
+/// NeoX-style RoPE over the full head dim (dflash draft maps to
+/// LLAMA_ROPE_TYPE_NEOX): pair (x[i], x[i+d/2]) rotates by position *
+/// theta^(-2i/d), i in [0, d/2). Same frequencies as Rope, split-half
+/// pairing. The target keeps consecutive-pair Rope above.
+void RopeNeox(float* x, std::uint32_t n_tokens, std::uint32_t heads,
+              std::uint32_t head_dim, std::uint32_t start_pos, float theta,
+              hipStream_t stream);
+
 /// out[i] = silu(gate[i]) * up[i] over `count` elements.
 void SiluMul(const float* gate, const float* up, float* out,
              std::size_t count, hipStream_t stream);
