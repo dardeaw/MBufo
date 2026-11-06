@@ -24,6 +24,11 @@
 // QKV split buffers and the GEMM I/O boundaries stay F32, so the new
 // rounding is one F16 store per activation per layer. Precision gate:
 // HIP-vs-CPU cosine >= 0.999 (leg-1 was ~1.0).
+// Q4 leg: K-quant projection files (Q4_K_M: q/k/out/up Q4_K, v/down Q6_K)
+// run the same math through the shared Fp16 WMMA prefill quant kernel (F16
+// activations, F32 accumulate); token_embd dequantizes once on the host
+// (Q6_K -> F32 mirror -> device F16 table). LayerNorm/GELU/attention are
+// untouched, so the cosine gate still isolates GEMM quantization.
 //
 // Layout note for the remaining hipBLAS calls: column-major, issued as
 //   hipblasSgemm(OP_T, OP_N, N, M, K, &alpha, B, K, A, K, &beta, C, N)
@@ -52,6 +57,7 @@
 
 #include "src/core/compute/attention/flash_f16_dense.hpp"
 #include "src/core/compute/gelu/gelu.hpp"
+#include "src/models/qwen/hip/ops/prefill_fp16.hpp"
 #include "src/models/bge_m3/engine.hpp"
 
 namespace gufo::models::bge_m3 {
@@ -592,6 +598,23 @@ bool BlasLtGemm(hipblasLtHandle_t handle, BlasLtPlanCache& plans,
                          stream) == HIPBLAS_STATUS_SUCCESS;
 }
 
+// Q4 leg: per-projection GEMM dispatch. F16 weights keep the tuned hipBLASLt
+// path bit-identical; K-quants run the shared Fp16 WMMA prefill kernel (F16
+// in, F32 accumulate, K % 256 guaranteed by the loader) -- no
+// model-specific kernel.
+bool ProjGemm(hipblasLtHandle_t handle, BlasLtPlanCache& plans, const void* w,
+              core::GgmlType w_type, const __half* x, float* y, int m, int n,
+              int k, hipStream_t stream) {
+  if (w_type == core::GgmlType::kF16) {
+    return BlasLtGemm(handle, plans, w, x, y, m, n, k, stream);
+  }
+  gufo::hip::LaunchBatchedQuantGEMMFp16(w_type, w, x, y,
+                                        static_cast<std::size_t>(n),
+                                        static_cast<std::size_t>(m),
+                                        static_cast<std::size_t>(k), stream);
+  return true;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------ device state
@@ -611,12 +634,19 @@ struct HipWeights {
   const float* emb_norm_w{nullptr};
   const float* emb_norm_b{nullptr};
   struct HipLayer {
-    // Projection tables stay F16 on device (raw GGUF bytes, no F32 mirror):
+    // Projection tables stay packed on the device (raw GGUF bytes, no F32
+    // mirror): F16 for leg-2 files, K-quants (Q4_K/Q6_K/...) for Q4 files.
     const void *q_w, *k_w, *v_w;
+    core::GgmlType q_type{core::GgmlType::kF16};
+    core::GgmlType k_type{core::GgmlType::kF16};
+    core::GgmlType v_type{core::GgmlType::kF16};
     const float *q_b, *k_b, *v_b;
     const void* out_w;
+    core::GgmlType out_type{core::GgmlType::kF16};
     const float *out_b, *attn_norm_w, *attn_norm_b;
     const void *up_w, *down_w;
+    core::GgmlType up_type{core::GgmlType::kF16};
+    core::GgmlType down_type{core::GgmlType::kF16};
     const float *up_b, *down_b, *out_norm_w, *out_norm_b;
   };
   std::vector<HipLayer> layers;
@@ -755,39 +785,59 @@ void InitHipState(EngineModel& model) {
   HipWeights& w = state->weights;
   w.f32 = &f32;
   std::vector<void*> owned;
-  // Device token table: raw F16 GGUF bytes (step 3 gathers on device).
-  if (raw.token_embd.type != core::GgmlType::kF16) {
-    ok = false;
-  } else {
+  // Device token table: F16 GGUF bytes upload raw (step 3 gathers on
+  // device); a quantized table (Q4_K_M stores it Q6_K) rides the F32 mirror
+  // instead -- dequantized once on the host at load, narrowed on device.
+  if (raw.token_embd.type == core::GgmlType::kF16) {
     w.token_embd = static_cast<const __half*>(UploadRaw(
-        raw.token_embd.data, raw.token_embd.num_elements * sizeof(std::uint16_t),
+        raw.token_embd.data, raw.token_embd.size_bytes,
         owned, state->stream, ok));
+  } else if (raw.token_embd.type == core::GgmlType::kQ4_K ||
+             raw.token_embd.type == core::GgmlType::kQ5_K ||
+             raw.token_embd.type == core::GgmlType::kQ6_K ||
+             raw.token_embd.type == core::GgmlType::kQ8_0) {
+    __half* embd_f16 = AllocHalf(f32.token_embd.size(), owned);
+    const float* embd_f32 = UploadVec(f32.token_embd, owned, state->stream, ok);
+    if (embd_f16 == nullptr || embd_f32 == nullptr) {
+      ok = false;
+    } else {
+      gufo::hip::LaunchFloatToFp16(embd_f32, embd_f16, f32.token_embd.size(),
+                                   state->stream);
+      w.token_embd = embd_f16;
+    }
+  } else {
+    ok = false;
   }
   w.position_embd = UploadVec(f32.position_embd, owned, state->stream, ok);
   w.token_types = UploadVec(f32.token_types, owned, state->stream, ok);
   w.emb_norm_w = UploadVec(f32.emb_norm_w, owned, state->stream, ok);
   w.emb_norm_b = UploadVec(f32.emb_norm_b, owned, state->stream, ok);
-  // Leg-2 step 1 requires raw F16 projection tables; anything else refuses
-  // the F16 path explicitly (never a silent upcast back to F32).
-  const auto upload_f16 = [&](const BgeM3TensorRef& ref, const void*& dst) {
-    if (ref.type != core::GgmlType::kF16) {
-      ok = false;
+  // Q4 leg: F16 projection tables upload raw as before; K-quants upload raw
+  // too (the Fp16 WMMA kernel decodes in-register). Anything else refuses
+  // explicitly, never a silent upcast back to F32.
+  const auto upload_proj = [&](const BgeM3TensorRef& ref, const void*& dst,
+                               core::GgmlType& dst_type) {
+    if (ref.type == core::GgmlType::kF16 || ref.type == core::GgmlType::kQ4_K ||
+        ref.type == core::GgmlType::kQ5_K ||
+        ref.type == core::GgmlType::kQ6_K ||
+        ref.type == core::GgmlType::kQ8_0) {
+      dst = UploadRaw(ref.data, ref.size_bytes, owned, state->stream, ok);
+      dst_type = ref.type;
       return;
     }
-    dst = UploadRaw(ref.data, ref.num_elements * sizeof(std::uint16_t), owned,
-                    state->stream, ok);
+    ok = false;
   };
   w.layers.resize(f32.layers.size());
   for (std::size_t i = 0; i < f32.layers.size() && ok; ++i) {
     const auto& src = f32.layers[i];
     const auto& raw_layer = raw.layers[i];
     auto& dst = w.layers[i];
-    upload_f16(raw_layer.attn_q_weight, dst.q_w);
-    upload_f16(raw_layer.attn_k_weight, dst.k_w);
-    upload_f16(raw_layer.attn_v_weight, dst.v_w);
-    upload_f16(raw_layer.attn_output_weight, dst.out_w);
-    upload_f16(raw_layer.ffn_up_weight, dst.up_w);
-    upload_f16(raw_layer.ffn_down_weight, dst.down_w);
+    upload_proj(raw_layer.attn_q_weight, dst.q_w, dst.q_type);
+    upload_proj(raw_layer.attn_k_weight, dst.k_w, dst.k_type);
+    upload_proj(raw_layer.attn_v_weight, dst.v_w, dst.v_type);
+    upload_proj(raw_layer.attn_output_weight, dst.out_w, dst.out_type);
+    upload_proj(raw_layer.ffn_up_weight, dst.up_w, dst.up_type);
+    upload_proj(raw_layer.ffn_down_weight, dst.down_w, dst.down_type);
     dst.q_b = UploadVec(src.q_b, owned, state->stream, ok);
     dst.k_b = UploadVec(src.k_b, owned, state->stream, ok);
     dst.v_b = UploadVec(src.v_b, owned, state->stream, ok);
@@ -896,16 +946,16 @@ bool EngineModel::RunEncoderBody(HipState& st, const BgeM3Config& config,
   float* v = st.qkv + 2 * nn * hdim;
 
   for (const auto& layer : weights.layers) {
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.q_w, st.hidden, q, hdim, nn,
-                    hdim, st.stream)) {
+    if (!ProjGemm(st.blaslt, st.plans, layer.q_w, layer.q_type, st.hidden, q,
+                  hdim, nn, hdim, st.stream)) {
       { body_error = "attn_q gemm"; return false; };
     }
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.k_w, st.hidden, k, hdim, nn,
-                    hdim, st.stream)) {
+    if (!ProjGemm(st.blaslt, st.plans, layer.k_w, layer.k_type, st.hidden, k,
+                  hdim, nn, hdim, st.stream)) {
       { body_error = "attn_k gemm"; return false; };
     }
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.v_w, st.hidden, v, hdim, nn,
-                    hdim, st.stream)) {
+    if (!ProjGemm(st.blaslt, st.plans, layer.v_w, layer.v_type, st.hidden, v,
+                  hdim, nn, hdim, st.stream)) {
       { body_error = "attn_v gemm"; return false; };
     }
     QkvSplitBiasKernel<<<blocks(3 * nn * hdim), kBlock, 0, st.stream>>>(
@@ -938,21 +988,21 @@ bool EngineModel::RunEncoderBody(HipState& st, const BgeM3Config& config,
     }
     MergeHeadsKernel<<<blocks(hh * nn * hdd), kBlock, 0, st.stream>>>(
         st.context, st.merged, nn, hh, hdd);
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.out_w, st.merged, st.proj,
-                    hdim, nn, hdim, st.stream)) {
+    if (!ProjGemm(st.blaslt, st.plans, layer.out_w, layer.out_type,
+                  st.merged, st.proj, hdim, nn, hdim, st.stream)) {
       { body_error = "attn_output gemm"; return false; };
     }
     ResidualLnKernel<<<static_cast<unsigned>(nn), kBlock, 0, st.stream>>>(
         st.hidden, st.proj, layer.out_b, layer.attn_norm_w,
         layer.attn_norm_b, config.layer_norm_eps, st.normed, nn, hdim);
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.up_w, st.normed,
-                    st.ffn_up_out, ninter, nn, hdim, st.stream)) {
+    if (!ProjGemm(st.blaslt, st.plans, layer.up_w, layer.up_type, st.normed,
+                  st.ffn_up_out, ninter, nn, hdim, st.stream)) {
       { body_error = "ffn_up gemm"; return false; };
     }
     BiasGeluKernel<<<blocks(nn * ninter), kBlock, 0, st.stream>>>(
         st.ffn_up_out, layer.up_b, st.ffn_inter, nn, ninter);
-    if (!BlasLtGemm(st.blaslt, st.plans, layer.down_w, st.ffn_inter,
-                    st.ffn_out, hdim, nn, ninter, st.stream)) {
+    if (!ProjGemm(st.blaslt, st.plans, layer.down_w, layer.down_type,
+                  st.ffn_inter, st.ffn_out, hdim, nn, ninter, st.stream)) {
       { body_error = "ffn_down gemm"; return false; };
     }
     ResidualLnKernel<<<static_cast<unsigned>(nn), kBlock, 0, st.stream>>>(
