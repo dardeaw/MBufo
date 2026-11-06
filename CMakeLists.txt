@@ -273,6 +273,7 @@ add_subdirectory(src/models/qwen)
 add_subdirectory(src/models/qwen_image_21)
 add_subdirectory(src/models/gemma4)
 add_subdirectory(src/models/bge_m3)
+add_subdirectory(src/models/bge_reranker)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)

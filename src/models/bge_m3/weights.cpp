@@ -55,8 +55,9 @@ bool ValidateTensor(const BgeM3TensorRef& tensor, std::size_t expected_elements,
 }  // namespace
 
 std::optional<BgeM3Weights> BgeM3Weights::LoadFromGguf(
-    const core::GgufReader& reader, std::string* error_msg) {
-  auto config_opt = ExtractBgeM3Config(reader, error_msg);
+    const core::GgufReader& reader, std::string* error_msg,
+    BgeM3ConfigOptions options) {
+  auto config_opt = ExtractBgeM3Config(reader, error_msg, options);
   if (!config_opt.has_value()) {
     return std::nullopt;
   }

@@ -864,18 +864,118 @@ void InitHipState(EngineModel& model) {
 EngineModel::EngineModel() = default;
 EngineModel::~EngineModel() = default;
 
-std::optional<EngineSession::SyncResult> HipSync(
-    const EngineModel& model, std::span<const std::uint32_t> ids,
-    std::string* error_msg) {
+// Shared encoder prefill for HipSync (pooled+L2 embedding) and
+// EngineModel::HipClsHidden (raw CLS for rerank heads): autotune once per
+// shape, first-n warmup + timed body, stream sync. On success *ms_out holds
+// the timed body milliseconds.
+bool EngineModel::RunEncoderBody(HipState& st, const BgeM3Config& config,
+                                 int nn, int hh, int hdd, int hdim,
+                                 int ninter, std::string& body_error) {
+  const HipWeights& weights = st.weights;
+  const float kOne = 1.0F;
+  const float kZero = 0.0F;
+  const float kScale =
+      static_cast<float>(1.0 / sqrt(static_cast<double>(hdd)));
+  constexpr unsigned kBlock = 256;
+  const auto blocks = [&](std::size_t total) {
+    return static_cast<unsigned>((total + kBlock - 1) / kBlock);
+  };
+  EmbedGatherKernel<<<static_cast<unsigned>(nn), kBlock, 0, st.stream>>>(
+      st.ids, weights.token_embd, weights.position_embd, weights.token_types,
+      weights.emb_norm_w, weights.emb_norm_b, config.layer_norm_eps,
+      st.hidden, nn, hdim);
+
+  float* qh = st.split;
+  float* kh = st.split + hh * nn * hdd;
+  float* vh = st.split + 2 * hh * nn * hdd;
+  const long long stride_qkv = static_cast<long long>(nn) * hdd;
+  const long long stride_scores = static_cast<long long>(nn) * nn;
+
+  float* q = st.qkv;
+  float* k = st.qkv + nn * hdim;
+  float* v = st.qkv + 2 * nn * hdim;
+
+  for (const auto& layer : weights.layers) {
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.q_w, st.hidden, q, hdim, nn,
+                    hdim, st.stream)) {
+      { body_error = "attn_q gemm"; return false; };
+    }
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.k_w, st.hidden, k, hdim, nn,
+                    hdim, st.stream)) {
+      { body_error = "attn_k gemm"; return false; };
+    }
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.v_w, st.hidden, v, hdim, nn,
+                    hdim, st.stream)) {
+      { body_error = "attn_v gemm"; return false; };
+    }
+    QkvSplitBiasKernel<<<blocks(3 * nn * hdim), kBlock, 0, st.stream>>>(
+        q, k, v, layer.q_b, layer.k_b, layer.v_b, qh, kh, vh, nn, hh, hdd);
+    const bool kUseFlash =
+        std::getenv("GUFO_BGE_FLASH") == nullptr ||
+        std::getenv("GUFO_BGE_FLASH")[0] != '0';
+    if (kUseFlash && nn > kFlashMinTokens) {
+      if (!gufo::core::compute::flash_f16::FlashF16DenseMha(
+              qh, kh, vh, st.context, static_cast<std::uint32_t>(nn),
+              static_cast<std::uint32_t>(hh), static_cast<std::uint32_t>(hdd),
+              kScale, st.stream)) {
+        { body_error = "flash attention"; return false; };
+      }
+    } else {
+      if (hipblasSgemmStridedBatched(
+              st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, nn, nn, hdd, &kScale, kh,
+              hdd, stride_qkv, qh, hdd, stride_qkv, &kZero, st.scores, nn,
+              stride_scores, hh) != HIPBLAS_STATUS_SUCCESS) {
+        { body_error = "attention scores gemm"; return false; };
+      }
+      SoftmaxRowsKernel<<<hh * static_cast<unsigned>(nn), kBlock, 0,
+                          st.stream>>>(st.scores, hh * nn, nn);
+      if (hipblasSgemmStridedBatched(
+              st.blas, HIPBLAS_OP_N, HIPBLAS_OP_N, hdd, nn, nn, &kOne, vh, hdd,
+              stride_qkv, st.scores, nn, stride_scores, &kZero, st.context,
+              hdd, stride_qkv, hh) != HIPBLAS_STATUS_SUCCESS) {
+        { body_error = "attention context gemm"; return false; };
+      }
+    }
+    MergeHeadsKernel<<<blocks(hh * nn * hdd), kBlock, 0, st.stream>>>(
+        st.context, st.merged, nn, hh, hdd);
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.out_w, st.merged, st.proj,
+                    hdim, nn, hdim, st.stream)) {
+      { body_error = "attn_output gemm"; return false; };
+    }
+    ResidualLnKernel<<<static_cast<unsigned>(nn), kBlock, 0, st.stream>>>(
+        st.hidden, st.proj, layer.out_b, layer.attn_norm_w,
+        layer.attn_norm_b, config.layer_norm_eps, st.normed, nn, hdim);
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.up_w, st.normed,
+                    st.ffn_up_out, ninter, nn, hdim, st.stream)) {
+      { body_error = "ffn_up gemm"; return false; };
+    }
+    BiasGeluKernel<<<blocks(nn * ninter), kBlock, 0, st.stream>>>(
+        st.ffn_up_out, layer.up_b, st.ffn_inter, nn, ninter);
+    if (!BlasLtGemm(st.blaslt, st.plans, layer.down_w, st.ffn_inter,
+                    st.ffn_out, hdim, nn, ninter, st.stream)) {
+      { body_error = "ffn_down gemm"; return false; };
+    }
+    ResidualLnKernel<<<static_cast<unsigned>(nn), kBlock, 0, st.stream>>>(
+        st.normed, st.ffn_out, layer.down_b, layer.out_norm_w,
+        layer.out_norm_b, config.layer_norm_eps, st.hidden, nn, hdim);
+  }
+  return true;
+}
+
+bool EngineModel::PrefillToHidden(EngineModel& model,
+                                  std::span<const std::uint32_t> ids,
+                                  double* ms_out, std::string* error_msg) {
   auto refuse = [&](const std::string& message) {
     if (error_msg != nullptr) *error_msg = message;
-    return std::optional<EngineSession::SyncResult>{};
+    return false;
   };
-  EngineModel& mutable_model = const_cast<EngineModel&>(model);
-  if (mutable_model.hip_ == nullptr) {
-    InitHipState(mutable_model);
+  if (ms_out == nullptr) {
+    return refuse("bge-m3 HIP prefill needs a timing output");
   }
-  EngineModel::HipState& st = *mutable_model.hip_;
+  if (model.hip_ == nullptr) {
+    InitHipState(model);
+  }
+  HipState& st = *model.hip_;
   const std::lock_guard<std::mutex> lock(st.mutex);
   if (!st.ok) {
     return refuse(st.error.empty() ? "bge-m3 HIP: device state unavailable"
@@ -888,152 +988,41 @@ std::optional<EngineSession::SyncResult> HipSync(
   const std::size_t hd = h / heads;
   const std::size_t inter = config.intermediate_size;
   if (n == 0 || n > kBgeM3Leg1MaxTokens) {
-    return refuse("bge-m3 HIP Sync: sequence length out of leg-1 window");
+    return refuse("bge-m3 HIP prefill: sequence length out of leg-1 window");
   }
-  const float kOne = 1.0F;
-  const float kZero = 0.0F;
-  const float kScale =
-      static_cast<float>(1.0 / sqrt(static_cast<double>(hd)));
-  // One-time per-shape autotune happens here (outside prefill_ms); the layer
-  // loop below then hits warm plans only.
   if (!BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(h),
-                           static_cast<int>(n), static_cast<int>(h),
-                           st.stream) ||
+                         static_cast<int>(n), static_cast<int>(h),
+                         st.stream) ||
       !BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(inter),
-                           static_cast<int>(n), static_cast<int>(h),
-                           st.stream) ||
+                         static_cast<int>(n), static_cast<int>(h),
+                         st.stream) ||
       !BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(h),
-                           static_cast<int>(n), static_cast<int>(inter),
-                           st.stream)) {
+                         static_cast<int>(n), static_cast<int>(inter),
+                         st.stream)) {
     return refuse("bge-m3 HIP prefill failed at autotune warmup");
   }
   auto start = std::chrono::steady_clock::now();
   auto fail = [&](const std::string& what) {
     return refuse("bge-m3 HIP prefill failed at " + what);
   };
-  const HipWeights& w = st.weights;
   const int nn = static_cast<int>(n);
   const int hh = static_cast<int>(heads);
   const int hdd = static_cast<int>(hd);
   const int hdim = static_cast<int>(h);
   const int ninter = static_cast<int>(inter);
-  constexpr unsigned kBlock = 256;
-  const auto blocks = [&](std::size_t total) {
-    return static_cast<unsigned>((total + kBlock - 1) / kBlock);
-  };
-  // Leg-3 step 3: first-n warmup (see warmed_ns). The sacrificial pass runs
-  // the same kernels on the same buffers, so the timed pass observes
-  // steady-state warmth with zero numeric effect.
-  // Embed: ids upload once per prefill (bounds-checked host-side first),
-  // then the device kernel gathers the F16 word table, adds pos/type, and
-  // normalizes into F16 hidden. No host staging of word rows.
   for (std::size_t t = 0; t < n; ++t) {
     if (ids[t] >= config.vocab_size) {
-      return refuse("bge-m3 HIP Sync: token id out of vocabulary");
+      return refuse("bge-m3 HIP prefill: token id out of vocabulary");
     }
   }
   if (hipMemcpy(st.ids, ids.data(), n * sizeof(std::uint32_t),
                 hipMemcpyHostToDevice) != hipSuccess) {
     return fail("embed ids upload");
   }
-  // Prefill body (kernels only; ids upload + final sync + CLS download stay
-  // outside). Runs once when warm, twice (warmup + timed) on first-n.
   std::string body_error;
-  auto run_body = [&]() -> bool {
-    EmbedGatherKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
-        st.ids, w.token_embd, w.position_embd, w.token_types, w.emb_norm_w,
-        w.emb_norm_b, config.layer_norm_eps, st.hidden, nn, hdim);
-
-    float* qh = st.split;
-    float* kh = st.split + heads * n * hd;
-    float* vh = st.split + 2 * heads * n * hd;
-    const long long stride_qkv = static_cast<long long>(n) * hdd;
-    const long long stride_scores = static_cast<long long>(n) * n;
-
-    float* q = st.qkv;
-    float* k = st.qkv + n * h;
-    float* v = st.qkv + 2 * n * h;
-
-    for (const auto& layer : w.layers) {
-      // QKV: three F16 hipBLASLt projections over the F16 hidden state,
-      // then a single fused split+bias kernel fans all three parts out to
-      // the per-head buffers (bias folded into the split).
-      if (!BlasLtGemm(st.blaslt, st.plans, layer.q_w, st.hidden, q, hdim, nn,
-                      hdim, st.stream)) {
-        { body_error = "attn_q gemm"; return false; };
-      }
-      if (!BlasLtGemm(st.blaslt, st.plans, layer.k_w, st.hidden, k, hdim, nn,
-                      hdim, st.stream)) {
-        { body_error = "attn_k gemm"; return false; };
-      }
-      if (!BlasLtGemm(st.blaslt, st.plans, layer.v_w, st.hidden, v, hdim, nn,
-                      hdim, st.stream)) {
-        { body_error = "attn_v gemm"; return false; };
-      }
-      QkvSplitBiasKernel<<<blocks(3 * n * h), kBlock, 0, st.stream>>>(
-          q, k, v, layer.q_b, layer.k_b, layer.v_b, qh, kh, vh, nn, hh, hdd);
-      // Attention: fused online-softmax WMMA flash above kFlashMinTokens
-      // (no scores materialization), else the legacy batched SGEMM + softmax
-      // path (short-prompt bitwise identity).
-      const bool kUseFlash =
-          std::getenv("GUFO_BGE_FLASH") == nullptr ||
-          std::getenv("GUFO_BGE_FLASH")[0] != '0';
-      if (kUseFlash && nn > kFlashMinTokens) {
-        if (!gufo::core::compute::flash_f16::FlashF16DenseMha(
-                qh, kh, vh, st.context, static_cast<std::uint32_t>(nn),
-                static_cast<std::uint32_t>(hh), static_cast<std::uint32_t>(hdd),
-                kScale, st.stream)) {
-          { body_error = "flash attention"; return false; };
-        }
-      } else {
-        // Batched scores = QK^T, in-place softmax, strided-batched context,
-        // merge straight into F16 (the out-proj GEMM consumes it directly).
-        if (hipblasSgemmStridedBatched(
-                st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, nn, nn, hdd, &kScale, kh,
-                hdd, stride_qkv, qh, hdd, stride_qkv, &kZero, st.scores, nn,
-                stride_scores, hh) != HIPBLAS_STATUS_SUCCESS) {
-          { body_error = "attention scores gemm"; return false; };
-        }
-        SoftmaxRowsKernel<<<hh * static_cast<unsigned>(nn), kBlock, 0,
-                            st.stream>>>(st.scores, hh * nn, nn);
-        if (hipblasSgemmStridedBatched(
-                st.blas, HIPBLAS_OP_N, HIPBLAS_OP_N, hdd, nn, nn, &kOne, vh, hdd,
-                stride_qkv, st.scores, nn, stride_scores, &kZero, st.context,
-                hdd, stride_qkv, hh) != HIPBLAS_STATUS_SUCCESS) {
-          { body_error = "attention context gemm"; return false; };
-        }
-      }
-      MergeHeadsKernel<<<blocks(heads * n * hd), kBlock, 0, st.stream>>>(
-          st.context, st.merged, nn, hh, hdd);
-      // Output projection, then residual (+bias) + post-attention LayerNorm
-      // into F16.
-      if (!BlasLtGemm(st.blaslt, st.plans, layer.out_w, st.merged, st.proj,
-                      hdim, nn, hdim, st.stream)) {
-        { body_error = "attn_output gemm"; return false; };
-      }
-      ResidualLnKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
-          st.hidden, st.proj, layer.out_b, layer.attn_norm_w,
-          layer.attn_norm_b, config.layer_norm_eps, st.normed, nn, hdim);
-      // FFN: up + bias + exact GELU into F16, down, residual (+bias) +
-      // LayerNorm into F16 hidden.
-      if (!BlasLtGemm(st.blaslt, st.plans, layer.up_w, st.normed,
-                      st.ffn_up_out, ninter, nn, hdim, st.stream)) {
-        { body_error = "ffn_up gemm"; return false; };
-      }
-      BiasGeluKernel<<<blocks(n * inter), kBlock, 0, st.stream>>>(
-          st.ffn_up_out, layer.up_b, st.ffn_inter, nn, ninter);
-      if (!BlasLtGemm(st.blaslt, st.plans, layer.down_w, st.ffn_inter,
-                      st.ffn_out, hdim, nn, ninter, st.stream)) {
-        { body_error = "ffn_down gemm"; return false; };
-      }
-      ResidualLnKernel<<<static_cast<unsigned>(n), kBlock, 0, st.stream>>>(
-          st.normed, st.ffn_out, layer.down_b, layer.out_norm_w,
-          layer.out_norm_b, config.layer_norm_eps, st.hidden, nn, hdim);
-    }
-    return true;
-  };
   if (st.warmed_ns.count(nn) == 0) {
-    if (!run_body()) {
+    if (!RunEncoderBody(st, config, nn, hh, hdd, hdim, ninter,
+                        body_error)) {
       return fail(body_error);
     }
     if (hipStreamSynchronize(st.stream) != hipSuccess) {
@@ -1042,23 +1031,39 @@ std::optional<EngineSession::SyncResult> HipSync(
     st.warmed_ns.emplace(nn);
     start = std::chrono::steady_clock::now();
   }
-  if (!run_body()) {
+  if (!RunEncoderBody(st, config, nn, hh, hdd, hdim, ninter, body_error)) {
     return fail(body_error);
   }
-
   if (hipStreamSynchronize(st.stream) != hipSuccess) {
     return fail("stream sync");
   }
-  const double prefill_ms =
-      std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() - start)
-          .count();
+  *ms_out = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start)
+                .count();
+  return true;
+}
+
+std::optional<EngineSession::SyncResult> HipSync(
+    const EngineModel& model, std::span<const std::uint32_t> ids,
+    std::string* error_msg) {
+  auto refuse = [&](const std::string& message) {
+    if (error_msg != nullptr) *error_msg = message;
+    return std::optional<EngineSession::SyncResult>{};
+  };
+  double prefill_ms = 0.0;
+  if (!EngineModel::PrefillToHidden(const_cast<EngineModel&>(model), ids,
+                                    &prefill_ms, error_msg)) {
+    return std::nullopt;
+  }
+  EngineModel& mutable_model = const_cast<EngineModel&>(model);
+  const std::lock_guard<std::mutex> lock(mutable_model.hip_->mutex);
+  const std::size_t h = mutable_model.Config().hidden_size;
   // CLS row (row 0) to host; hidden is F16 on device, upcast on receipt.
   // Pooling + L2 stay on the shared core path.
   std::vector<__half> cls_h(h);
-  if (hipMemcpy(cls_h.data(), st.hidden, h * sizeof(__half),
+  if (hipMemcpy(cls_h.data(), mutable_model.hip_->hidden, h * sizeof(__half),
                 hipMemcpyDeviceToHost) != hipSuccess) {
-    return fail("cls download");
+    return refuse("bge-m3 HIP prefill failed at cls download");
   }
   std::vector<float> cls(h);
   for (std::size_t d = 0; d < h; ++d) {
@@ -1081,6 +1086,35 @@ std::optional<EngineSession::SyncResult> HipSync(
     const float inv = static_cast<float>(1.0 / result.pre_norm);
     for (float& x : result.values) x *= inv;
   }
+  return result;
+}
+
+std::optional<ClsHiddenResult> HipClsHidden(
+    const EngineModel& model, std::span<const std::uint32_t> ids,
+    std::string* error_msg) {
+  auto refuse = [&](const std::string& message) {
+    if (error_msg != nullptr) *error_msg = message;
+    return std::optional<ClsHiddenResult>{};
+  };
+  double prefill_ms = 0.0;
+  if (!EngineModel::PrefillToHidden(const_cast<EngineModel&>(model), ids, &prefill_ms,
+                       error_msg)) {
+    return std::nullopt;
+  }
+  EngineModel& mutable_model = const_cast<EngineModel&>(model);
+  const std::lock_guard<std::mutex> lock(mutable_model.hip_->mutex);
+  const std::size_t h = mutable_model.Config().hidden_size;
+  std::vector<__half> cls_h(h);
+  if (hipMemcpy(cls_h.data(), mutable_model.hip_->hidden, h * sizeof(__half),
+                hipMemcpyDeviceToHost) != hipSuccess) {
+    return refuse("bge-m3 HIP prefill failed at cls download");
+  }
+  ClsHiddenResult result;
+  result.cls.resize(h);
+  for (std::size_t d = 0; d < h; ++d) {
+    result.cls[d] = __half2float(cls_h[d]);
+  }
+  result.prefill_ms = prefill_ms;
   return result;
 }
 

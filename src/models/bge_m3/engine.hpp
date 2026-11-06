@@ -31,6 +31,17 @@
 
 namespace gufo::models::bge_m3 {
 
+#ifdef ENGINE_ENABLE_HIP
+/// Raw CLS hidden row for rerank heads (hip/session.hip): the same
+/// full-sequence encoder prefill as HipSync, but the row-0 hidden
+/// states are returned unpooled and unnormalized for the caller's
+/// classification head. Same failure contract as HipSync.
+struct ClsHiddenResult {
+  std::vector<float> cls;  // row 0, NOT normalized
+  double prefill_ms{0.0};
+};
+#endif
+
 class EngineModel;
 
 /// One embedding session: caller-owned scratch, synchronous full-sequence
@@ -73,7 +84,8 @@ class EngineModel {
   /// Loads a `bert` GGUF artifact (weights + tokenizer + F32 upcast).
   /// Returns nullptr with *error_msg set on any refusal.
   [[nodiscard]] static std::unique_ptr<EngineModel> Create(
-      const std::string& model_path, std::string* error_msg = nullptr);
+      const std::string& model_path, std::string* error_msg = nullptr,
+      BgeM3ConfigOptions options = {});
 
   [[nodiscard]] const BgeM3Config& Config() const noexcept {
     return weights_.config;
@@ -82,6 +94,9 @@ class EngineModel {
     return *tokenizer_;
   }
   [[nodiscard]] const BgeM3F32Weights& F32() const noexcept { return f32_; }
+  [[nodiscard]] const core::GgufReader& GetReader() const noexcept {
+    return *reader_;
+  }
   [[nodiscard]] const BgeM3Weights& Weights() const noexcept {
     return weights_;
   }
@@ -95,6 +110,15 @@ class EngineModel {
 #ifdef ENGINE_ENABLE_HIP
   struct HipState;
   std::unique_ptr<HipState> hip_;
+  // Shared encoder prefill for HipSync and HipClsHidden (defined in
+  // hip/session.hip).
+  [[nodiscard]] static bool PrefillToHidden(EngineModel& model,
+                                            std::span<const std::uint32_t> ids,
+                                            double* ms_out,
+                                            std::string* error_msg);
+  [[nodiscard]] static bool RunEncoderBody(
+      HipState& st, const BgeM3Config& config, int nn, int hh, int hdd,
+      int hdim, int ninter, std::string& body_error);
 #endif
 
   friend class EngineSession;
@@ -103,6 +127,9 @@ class EngineModel {
   // keeps the members private to every other TU.
   friend void InitHipState(EngineModel& model);
   friend std::optional<EngineSession::SyncResult> HipSync(
+      const EngineModel& model, std::span<const std::uint32_t> ids,
+      std::string* error_msg);
+  friend std::optional<ClsHiddenResult> HipClsHidden(
       const EngineModel& model, std::span<const std::uint32_t> ids,
       std::string* error_msg);
 #endif
@@ -129,6 +156,10 @@ class ModelRegistry {
 };
 
 #ifdef ENGINE_ENABLE_HIP
+[[nodiscard]] std::optional<ClsHiddenResult> HipClsHidden(
+    const EngineModel& model, std::span<const std::uint32_t> ids,
+    std::string* error_msg = nullptr);
+
 /// Device prefill twin of the CPU Sync path (hip/session.hip): the same
 /// full-sequence encoder math via hipBLASLt F16 projections (F32 accumulate)
 /// plus F32 batched attention and elementwise kernels, returning the

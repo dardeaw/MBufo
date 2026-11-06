@@ -99,7 +99,8 @@ struct BgeM3Weights {
   std::vector<BgeM3LayerWeights> layers;
 
   [[nodiscard]] static std::optional<BgeM3Weights> LoadFromGguf(
-      const core::GgufReader& reader, std::string* error_msg = nullptr);
+      const core::GgufReader& reader, std::string* error_msg = nullptr,
+      BgeM3ConfigOptions options = {});
 };
 
 }  // namespace gufo::models::bge_m3
