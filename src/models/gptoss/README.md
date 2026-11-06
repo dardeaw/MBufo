@@ -27,10 +27,11 @@ them too. `output.weight` is standalone Q8_0 (not tied).
 
 | Item | Shared layer | Contract |
 |---|---|---|
-| dense GEMM decode | narrow prequant (`DecideNarrowDecodePrequantRoute` + `LaunchNarrowQ80Prequant`) | Q8_0 (converted), K % 32 == 0, 1..8 tokens; falls back to `GemvBatched` |
+| dense GEMM decode | narrow prequant (`DecideNarrowDecodePrequantRoute` + `LaunchNarrowQ80Prequant`); fused QKV (`LaunchNarrowQ80QkvDecode`, one prequant + one launch) and fused wo row-add (`LaunchNarrowQ80PrequantRowAdd`, GEMV+bias+residual in one launch) | Q8_0 (converted), K % 32 == 0, 1..8 tokens; falls back to `GemvBatched` / the three-launch sequence |
 | dense GEMM prefill | `DenseF16Gemm` | Q8_0 (converted), F16 activations |
-| MoE routing | `RouterTopK` (shared) | softmax over SELECTED top-k (= llama SOFTMAX_WEIGHT); verified against `llama-graph.cpp` |
-| MoE GEMM | `MoeVecGateUpMxfp4` + `GemvQSlotMxfp4` + `MoeSlotEpilogueOverwrite` (new shared core kernels, this branch) | native MXFP4 experts, merged gate_up slab; activation is model-local SwiGLU-OAI |
+| MoE routing | `RouterTopK` (shared) + `SmallGemm` F32 projection | softmax over SELECTED top-k (= llama SOFTMAX_WEIGHT); verified against `llama-graph.cpp` |
+| MoE GEMM decode | `MoeDecodeGateUpActMxfp4` + `MoeDecodeDownEpiMxfp4` (fused core decode pair: gate+up+act, then down+bias+epilogue; two launches replace five) | native MXFP4 experts, merged gate_up slab, slots <= 64; routed/vec sequence is the contract fallback (`GPTOSS_NO_FUSED*` forces legacy for A/B) |
+| MoE GEMM prefill | compact routed GEMM (`RoutedCompact` + `RoutedF16Gemm` over native MXFP4 slabs, model-local `MoeCompactSplitBiasAct`) | grouped buckets (16-row padded), `GPTOSS_MOE_TILE` tunable; vec path is the fallback |
 | KV store | `blocked_kv::QuantizeKvRows` | post-RoPE rows, per-32-block f16 scale, generic over d |
 | KV read (q8) | `blocked_kv::DequantizeKvRows` into F16 staging | generic over d |
 | attention | model-local dense F16 kernel | sinks + sliding window have no shared kernel |

@@ -1,11 +1,12 @@
 // GPT-OSS runtime: GGUF load, chunked prefill, single-token decode, greedy
 // sampling. Dense GEMM rides the shared core (narrow-prequant decode,
-// DenseF16Gemm prefill); prefill MoE rides the shared compact routed GEMM
-// (RoutedCompact/RoutedF16Gemm over native MXFP4 slabs, model-local
-// SwiGLU-OAI split) while decode keeps the shared vec path (MoeVecGateUp /
-// GemvQSlot / MoeSlotEpilogueOverwrite) with a model-local SwiGLU-OAI
-// activation; attention is a model-local dense F16 kernel (per-head sinks +
-// sliding window) over f16 KV or over shared blocked-Q8 KV dequantized with
+// DenseF16Gemm prefill, fused QKV/wo narrow variants for decode); prefill
+// MoE rides the shared compact routed GEMM (RoutedCompact/RoutedF16Gemm over
+// native MXFP4 slabs, model-local SwiGLU-OAI split) while decode takes the
+// fused core MoE pair (MoeDecodeGateUpActMxfp4 + MoeDecodeDownEpiMxfp4, one
+// wave per output row) with the routed/vec sequence as contract fallback;
+// attention is a model-local dense F16 kernel (per-head sinks + sliding
+// window) over f16 KV or over shared blocked-Q8 KV dequantized with
 // blocked_kv::DequantizeKvRows.
 #include "src/models/gptoss/engine.hpp"
 
@@ -27,6 +28,112 @@ namespace gufo::models::gptoss {
 namespace {
 
 constexpr std::uint32_t kMaxChunk = 256;
+
+// Env-gated per-section timing (GPTOSS_LAYER_TIME=1). Zero cost when unset
+// (one cached getenv). Accumulates hipEvent deltas per ForwardLayer section,
+// split by decode (n == 1) vs prefill (n > 1), plus ForwardFinish, and dumps
+// averages at exit. Diag only; never affects numerics or launch order.
+enum class LayerSection : std::uint32_t {
+  kQkv = 0,
+  kRopeKv,
+  kAttn,
+  kWo,
+  kRouter,
+  kMoe,
+  kTail,
+  kFinish,
+  kCount
+};
+
+struct LayerTiming {
+  bool ready{false};
+  bool enabled{false};
+  hipEvent_t ev[static_cast<std::size_t>(LayerSection::kCount) + 1]{};
+  double decode_ms[static_cast<std::size_t>(LayerSection::kCount)]{};
+  double prefill_ms[static_cast<std::size_t>(LayerSection::kCount)]{};
+  std::uint64_t decode_calls{0};
+  std::uint64_t prefill_calls{0};
+};
+
+inline LayerTiming& TimingState() {
+  static LayerTiming state;
+  return state;
+}
+
+inline void TimingDump() {
+  LayerTiming& t = TimingState();
+  if (!t.enabled) return;
+  static const char* kNames[] = {"qkv",   "ropekv", "attn", "wo",
+                                 "router", "moe",   "tail", "finish"};
+  std::fprintf(stderr, "[gptoss-time] layer calls: decode=%llu prefill=%llu\n",
+               static_cast<unsigned long long>(t.decode_calls),
+               static_cast<unsigned long long>(t.prefill_calls));
+  for (std::size_t i = 0;
+       i < static_cast<std::size_t>(LayerSection::kCount); ++i) {
+    const double d =
+        t.decode_calls != 0 ? t.decode_ms[i] / t.decode_calls : 0.0;
+    const double p =
+        t.prefill_calls != 0 ? t.prefill_ms[i] / t.prefill_calls : 0.0;
+    std::fprintf(stderr,
+                 "[gptoss-time] %-6s decode_avg=%7.3fms prefill_avg=%7.3fms\n",
+                 kNames[i], d, p);
+  }
+}
+
+inline void TimingEnsure() {
+  LayerTiming& t = TimingState();
+  if (t.ready) return;
+  t.ready = true;
+  t.enabled = std::getenv("GPTOSS_LAYER_TIME") != nullptr;
+  if (!t.enabled) return;
+  for (auto& e : t.ev) {
+    if (hipEventCreate(&e) != hipSuccess) {
+      t.enabled = false;
+      return;
+    }
+  }
+  (void)std::atexit(TimingDump);
+}
+
+inline void TimingMark(LayerSection s) {
+  LayerTiming& t = TimingState();
+  if (t.enabled) {
+    (void)hipEventRecord(t.ev[static_cast<std::size_t>(s)], 0);
+  }
+}
+
+// Ends a ForwardLayer call: syncs (diag only), accumulates the 7 section
+// deltas ev[0..7] into the decode/prefill bucket selected by n.
+inline void TimingEndLayer(std::uint32_t n) {
+  LayerTiming& t = TimingState();
+  if (!t.enabled) return;
+  (void)hipStreamSynchronize(0);
+  double* bucket = (n == 1) ? t.decode_ms : t.prefill_ms;
+  for (std::size_t i = 0; i < 7; ++i) {
+    float ms = 0.0F;
+    (void)hipEventElapsedTime(&ms, t.ev[i], t.ev[i + 1]);
+    bucket[i] += ms;
+  }
+  if (n == 1) {
+    ++t.decode_calls;
+  } else {
+    ++t.prefill_calls;
+  }
+}
+
+// Ends a ForwardFinish call: accumulates ev[0]->ev[1] into kFinish.
+inline void TimingEndFinish(std::uint32_t n) {
+  LayerTiming& t = TimingState();
+  if (!t.enabled) return;
+  (void)hipStreamSynchronize(0);
+  float ms = 0.0F;
+  (void)hipEventElapsedTime(&ms, t.ev[0], t.ev[1]);
+  if (n == 1) {
+    t.decode_ms[static_cast<std::size_t>(LayerSection::kFinish)] += ms;
+  } else {
+    t.prefill_ms[static_cast<std::size_t>(LayerSection::kFinish)] += ms;
+  }
+}
 
 bool Check(hipError_t err, std::string* error_msg, const char* what) {
   if (err == hipSuccess)
@@ -530,21 +637,58 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
 
   float* hidden_buf = impl.hidden;
   // Attention block.
+  TimingEnsure();
+  TimingMark(LayerSection::kQkv);
   kernels::RmsNorm(hidden_buf,
                    static_cast<const float*>(l.attn_norm.device),
                    impl.normed, n, hidden, c.rms_eps, stream);
-  GptossGemm(l.wq, impl.normed, impl.x16, impl.qbuf, n, qdim, hidden, stream,
-             impl.preq_scratch, impl.preq_bytes);
-  GptossGemm(l.wk, impl.normed, impl.x16, impl.kbuf, n, kvdim, hidden, stream,
-             impl.preq_scratch, impl.preq_bytes);
-  GptossGemm(l.wv, impl.normed, impl.x16, impl.vbuf, n, kvdim, hidden, stream,
-             impl.preq_scratch, impl.preq_bytes);
+  // Fused QKV narrow decode: one prequant + one launch for wq/wk/wv when the
+  // narrow-QKV contract holds (decode, all-Q8_0, shared activation row and
+  // K). GPTOSS_NO_FUSED forces the three legacy GptossGemm calls for A/B.
+  const bool no_fused = std::getenv("GPTOSS_NO_FUSED") != nullptr;
+  const bool no_fused_qkv =
+      no_fused || std::getenv("GPTOSS_NO_FUSED_QKV") != nullptr;
+  const bool no_fused_moe =
+      no_fused || std::getenv("GPTOSS_NO_FUSED_MOE") != nullptr;
+  const bool no_fused_router =
+      no_fused || std::getenv("GPTOSS_NO_FUSED_ROUTER") != nullptr;
+  const bool no_fused_wo =
+      no_fused || std::getenv("GPTOSS_NO_FUSED_WO") != nullptr;
+  bool qkv_done = false;
+  if (!no_fused_qkv &&
+      gemm::DecideNarrowQkvPrequantRoute(
+          l.wq.type == core::GgmlType::kQ8_0 &&
+              l.wk.type == core::GgmlType::kQ8_0 &&
+              l.wv.type == core::GgmlType::kQ8_0,
+          n, hidden, qdim, kvdim) ==
+          gemm::NarrowDecodeRoute::kNarrowQ80Prequant) {
+    const void* wqd = l.wq.device != nullptr ? l.wq.device : l.wq.data;
+    const void* wkd = l.wk.device != nullptr ? l.wk.device : l.wk.data;
+    const void* wvd = l.wv.device != nullptr ? l.wv.device : l.wv.data;
+    if (gemm::PrequantizeQ8_1(impl.normed, impl.preq_scratch, n, hidden,
+                              stream) == 0) {
+      qkv_done = gemm::LaunchNarrowQ80QkvDecode(
+          wqd, wkd, wvd, impl.preq_scratch, impl.qbuf, impl.kbuf, impl.vbuf,
+          hidden, qdim, kvdim, n,
+          gemm::NarrowQ80PrequantStrideBlocks(hidden), stream);
+    }
+  }
+  if (!qkv_done) {
+    GptossGemm(l.wq, impl.normed, impl.x16, impl.qbuf, n, qdim, hidden, stream,
+               impl.preq_scratch, impl.preq_bytes);
+    GptossGemm(l.wk, impl.normed, impl.x16, impl.kbuf, n, kvdim, hidden, stream,
+               impl.preq_scratch, impl.preq_bytes);
+    GptossGemm(l.wv, impl.normed, impl.x16, impl.vbuf, n, kvdim, hidden, stream,
+               impl.preq_scratch, impl.preq_bytes);
+  }
+  TimingMark(LayerSection::kRopeKv);
   kernels::RopeYarn(impl.qbuf, n, c.num_heads, d, start_pos, c.rope_theta,
                     c.yarn.low, c.yarn.high, c.yarn.inv_factor, c.yarn.mscale,
                     stream);
   kernels::RopeYarn(impl.kbuf, n, c.num_kv_heads, d, start_pos, c.rope_theta,
                     c.yarn.low, c.yarn.high, c.yarn.inv_factor, c.yarn.mscale,
                     stream);
+  TimingMark(LayerSection::kAttn);
   if (use_blocked) {
     namespace blocked = core::compute::blocked_kv;
     (void)blocked::QuantizeKvRows(
@@ -632,32 +776,58 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
           score_scale);
     }
   }
-  GptossGemm(l.wo, impl.attn_out, impl.x16, impl.ffn_out, n, hidden, qdim,
-             stream, impl.preq_scratch, impl.preq_bytes);
-  // Attention output bias (gpt-oss wo_b) then residual add.
-  kernels::AddRowBias(impl.ffn_out, static_cast<const float*>(l.wo_b.device),
-                      n, hidden, stream);
-  kernels::ResidualAdd(impl.ffn_out, hidden_buf,
-                       static_cast<std::size_t>(n) * hidden, stream);
+  TimingMark(LayerSection::kWo);
+  // Fused wo narrow decode: prequant + GEMV + wo bias + residual add in one
+  // core launch (bitwise-identical store order). Falls back to the
+  // three-launch sequence out of contract or under GPTOSS_NO_FUSED.
+  bool wo_done = false;
+  if (!no_fused_wo &&
+      gemm::DecideNarrowDecodePrequantRoute(
+          l.wo.type == core::GgmlType::kQ8_0, /*gated=*/false, n, qdim,
+          hidden) == gemm::NarrowDecodeRoute::kNarrowQ80Prequant) {
+    const void* wod = l.wo.device != nullptr ? l.wo.device : l.wo.data;
+    wo_done = gemm::LaunchNarrowQ80PrequantRowAdd(
+        wod, impl.attn_out,
+        static_cast<const float*>(l.wo_b.device), hidden_buf, qdim, hidden, n,
+        impl.preq_scratch, impl.preq_bytes, stream);
+  }
+  if (!wo_done) {
+    GptossGemm(l.wo, impl.attn_out, impl.x16, impl.ffn_out, n, hidden, qdim,
+               stream, impl.preq_scratch, impl.preq_bytes);
+    // Attention output bias (gpt-oss wo_b) then residual add.
+    kernels::AddRowBias(impl.ffn_out, static_cast<const float*>(l.wo_b.device),
+                        n, hidden, stream);
+    kernels::ResidualAdd(impl.ffn_out, hidden_buf,
+                         static_cast<std::size_t>(n) * hidden, stream);
+  }
 
   // MoE block: post-attention norm, router, shared vec MoE.
+  TimingMark(LayerSection::kRouter);
   kernels::RmsNorm(hidden_buf,
                    static_cast<const float*>(l.post_norm.device),
                    impl.normed, n, hidden, c.rms_eps, stream);
-  // Router GEMM (F32) in <= 8-row pieces; bias folded in after.
-  for (std::uint32_t off = 0; off < n; off += 8) {
-    const std::uint32_t nr = std::min<std::uint32_t>(8, n - off);
-    gemm::GemvBatched(l.router.device, static_cast<int>(l.router.type),
-                      l.router.RowBytes(), hidden,
-                      impl.normed + static_cast<std::size_t>(off) * hidden,
-                      impl.router_logits + static_cast<std::size_t>(off) * nex,
-                      nr, nex, 0.0F, stream);
+  // Router GEMM (F32): shared SmallGemm narrow projection covers any n in
+  // one launch; bias folded in after. GPTOSS_NO_FUSED(_ROUTER) keeps the
+  // legacy wave32 GemvBatched path for A/B.
+  if (!no_fused_router) {
+    gemm::fn_compat::SmallGemm(l.router.device, 0, impl.normed,
+                               impl.router_logits, n, nex, hidden, stream);
+  } else {
+    for (std::uint32_t off = 0; off < n; off += 8) {
+      const std::uint32_t nr = std::min<std::uint32_t>(8, n - off);
+      gemm::GemvBatched(l.router.device, static_cast<int>(l.router.type),
+                        l.router.RowBytes(), hidden,
+                        impl.normed + static_cast<std::size_t>(off) * hidden,
+                        impl.router_logits + static_cast<std::size_t>(off) * nex,
+                        nr, nex, 0.0F, stream);
+    }
   }
   kernels::AddRowBias(impl.router_logits,
                       static_cast<const float*>(l.router_b.device), n, nex,
                       stream);
   gemm::RouterTopK(impl.router_logits, nex, impl.expert_ids,
                    impl.expert_weights, n, nex, used, stream);
+  TimingMark(LayerSection::kMoe);
   const std::uint32_t slots = n * used;
   const void* gu_dev = l.gate_up_exps.device != nullptr
                            ? l.gate_up_exps.device
@@ -669,6 +839,30 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
       static_cast<std::uint64_t>(2) * ff * l.gate_up_exps.RowBytes();
   const std::uint64_t dn_stride =
       static_cast<std::uint64_t>(hidden) * l.down_exps.RowBytes();
+  // Fused MoE decode (core, two launches): gate+up GEMV + SwiGLU-OAI in one
+  // wave-per-row kernel, down GEMV + bias + weighted epilogue in a second.
+  // Takes precedence over the routed/vec sequence when the fused-MXFP4
+  // contract holds; GPTOSS_NO_FUSED forces the legacy sequence for A/B.
+  bool moe_done = false;
+  if (!no_fused_moe &&
+      gemm::DecideMoeDecodeFusedRoute(
+          gu_dev != nullptr && dn_dev != nullptr &&
+              l.gate_up_exps.type == core::GgmlType::kMXFP4 &&
+              l.down_exps.type == core::GgmlType::kMXFP4,
+          n, used, ff, hidden) == gemm::MoeDecodeFusedRoute::kFusedMxfp4) {
+    moe_done =
+        gemm::MoeDecodeGateUpActMxfp4(
+            gu_dev, l.gate_up_exps.RowBytes(), gu_stride, impl.normed,
+            impl.expert_ids,
+            static_cast<const float*>(l.gate_b.device),
+            static_cast<const float*>(l.up_b.device), impl.moe_act, slots,
+            used, ff, hidden, stream) &&
+        gemm::MoeDecodeDownEpiMxfp4(
+            dn_dev, l.down_exps.RowBytes(), dn_stride, impl.moe_act,
+            impl.expert_ids, impl.expert_weights,
+            static_cast<const float*>(l.down_b.device), impl.ffn_out, n,
+            used, hidden, ff, stream);
+  }
   // Prefill AND decode MoE ride the shared compact routed GEMM over the
   // native MXFP4 slabs (one grouped GEMM per projection instead of one
   // GEMV per slot); any contract rejection falls back to the vec path.
@@ -679,7 +873,7 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
     if (v == 16ul || v == 48ul || v == 64ul)
       tile_rows = static_cast<std::uint32_t>(v);
   }
-  bool routed = getenv("GPTOSS_NO_ROUTED") == nullptr &&
+  bool routed = getenv("GPTOSS_NO_ROUTED") == nullptr && !moe_done &&
                 impl.routed_gateup != nullptr && gu_dev != nullptr &&
                 dn_dev != nullptr;
   if (routed) {
@@ -755,7 +949,7 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
       }
     }
   }
-  if (!routed) {
+  if (!moe_done && !routed) {
     gemm::MoeVecGateUpMxfp4(gu_dev, l.gate_up_exps.RowBytes(), gu_stride,
                        impl.normed, impl.expert_ids, impl.moe_gate,
                        impl.moe_up, slots, used, ff, hidden, stream);
@@ -767,14 +961,19 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                     impl.moe_act, impl.expert_ids, impl.moe_down, slots,
                     hidden, ff, stream);
   }
-  kernels::DownBiasAdd(impl.moe_down, impl.expert_ids,
-                       static_cast<const float*>(l.down_b.device), slots,
-                       hidden, stream);
-  gemm::MoeSlotEpilogueOverwrite(
-      impl.moe_down, impl.expert_ids, impl.expert_weights,
-      /*dscale=*/nullptr, impl.ffn_out, n, used, hidden, stream);
+  if (!moe_done) {
+    kernels::DownBiasAdd(impl.moe_down, impl.expert_ids,
+                         static_cast<const float*>(l.down_b.device), slots,
+                         hidden, stream);
+    gemm::MoeSlotEpilogueOverwrite(
+        impl.moe_down, impl.expert_ids, impl.expert_weights,
+        /*dscale=*/nullptr, impl.ffn_out, n, used, hidden, stream);
+  }
+  TimingMark(LayerSection::kTail);
   kernels::ResidualAdd(impl.ffn_out, hidden_buf,
                        static_cast<std::size_t>(n) * hidden, stream);
+  TimingMark(LayerSection::kFinish);  // layer-end edge ev[6] -> ev[7]
+  TimingEndLayer(n);
 }
 void Session::ForwardFinish(Session& s, std::uint32_t n,
                             std::uint32_t start_pos, hipStream_t stream) {
@@ -782,6 +981,8 @@ void Session::ForwardFinish(Session& s, std::uint32_t n,
   const auto& c = w.config;
   const std::uint32_t hidden = c.hidden_size;
   auto& impl = *s.impl_;
+  TimingEnsure();
+  TimingMark(LayerSection::kQkv);
   kernels::RmsNorm(impl.hidden,
                    static_cast<const float*>(w.output_norm.device),
                    impl.normed, n, hidden, c.rms_eps, stream);
@@ -793,6 +994,8 @@ void Session::ForwardFinish(Session& s, std::uint32_t n,
                        impl.host_logits.size() * sizeof(float),
                        hipMemcpyDeviceToHost, stream);
   impl.length = start_pos + n;
+  TimingMark(LayerSection::kRopeKv);  // finish delta = ev[0] -> ev[1]
+  TimingEndFinish(n);
 }
 
 bool Session::Forward(std::span<const std::int32_t> tokens,
