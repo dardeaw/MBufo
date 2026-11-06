@@ -2,6 +2,7 @@
 // (Evaluate) separately and prints tok/s. Temperature is 0 by construction
 // (SampleGreedy only). Usage:
 //   gptoss_bench_test MODEL.gguf [PROMPT_TOKENS=256] [GEN_TOKENS=32]
+// Env PROMPT_TEXT overrides the repeated prompt sentence (default fox).
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -48,9 +49,13 @@ int main(int argc, char** argv) {
   if (!session) return Fail("session: " + error);
 
   // Build a prompt of exactly prompt_tokens ids by repeating one sentence.
-  const std::string sentence =
+  std::string sentence =
       "The quick brown fox jumps over the lazy dog. Pack my box with five "
       "dozen liquor jugs. ";
+  if (const char* e = std::getenv("PROMPT_TEXT")) {
+    if (*e != '\0')
+      sentence = e;
+  }
   const auto piece = model->Tokenize(sentence, /*add_bos=*/false);
   if (piece.empty()) return Fail("empty sentence tokenization");
   std::vector<std::int32_t> prompt;

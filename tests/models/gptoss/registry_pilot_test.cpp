@@ -2,7 +2,10 @@
 // direct GptossEngineModel adapter (L0 surface) and (b)
 // EngineRegistry::Create("gptoss"), plus the DecodeStep plain fallback.
 // Token ids and decoded text must match exactly.
-// Usage: gptoss_registry_pilot_test MODEL.gguf [MAX_TOKENS=16]
+// Usage: gptoss_registry_pilot_test MODEL.gguf [MAX_TOKENS=16] [PROMPT]
+// Env: GPTOSS_PILOT_SEQUENTIAL=1 releases each model before loading the
+// next (single 120B-class model resident at a time); GPTOSS_PILOT_CTX=N
+// overrides max_context (default 2048).
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -56,6 +59,17 @@ int main(int argc, char** argv) {
   if (max_tokens <= 0 || max_tokens > 256) return Fail("MAX_TOKENS 1..256");
   std::string prompt_text = "The quick brown fox jumps over the lazy dog.";
   if (argc == 4) prompt_text = argv[3];
+  // Sequential mode: at most one model resident (120B cannot co-reside
+  // direct + registry on one gfx1151). Same token math, same checks.
+  const bool sequential = std::getenv("GPTOSS_PILOT_SEQUENTIAL") != nullptr;
+  std::uint32_t pilot_ctx = 2048;
+  if (const char* e = std::getenv("GPTOSS_PILOT_CTX")) {
+    const long v = std::strtol(e, nullptr, 10);
+    if (v >= 512 && v <= 131072)
+      pilot_ctx = static_cast<std::uint32_t>(v);
+  }
+  std::fprintf(stderr, "[gptoss-pilot] sequential=%d ctx=%u\n",
+               sequential ? 1 : 0, pilot_ctx);
 
   if (!e::EngineRegistry::Instance().Contains("gptoss")) {
     // The adapter TU also defines the registrar; referencing
@@ -64,7 +78,7 @@ int main(int argc, char** argv) {
 
   const std::string model_path = argv[1];
   g::ModelOptions options;
-  options.max_context = 2048;
+  options.max_context = pilot_ctx;
 
   // (a) Direct adapter path.
   std::string error;
@@ -83,11 +97,16 @@ int main(int argc, char** argv) {
   PrintIds("direct", direct_ids);
   const std::string direct_text =
       direct->Decode(std::span<const std::int32_t>(direct_ids));
+  const std::uint32_t direct_vocab = direct->VocabSize();
+  if (sequential) {
+    direct_session.reset();
+    direct.reset();
+  }
 
   // (b) Registry path with identical options.
   e::EngineLoadRequest request;
   request.model_path = model_path;
-  request.max_context = 2048;
+  request.max_context = pilot_ctx;
   auto via_registry =
       e::CreateEngineModel("gptoss", request, &error);
   if (!via_registry) return Fail("registry create: " + error);
@@ -95,7 +114,7 @@ int main(int argc, char** argv) {
   if (!registry_session) return Fail("registry session: " + error);
   const auto reg_prompt = via_registry->Tokenize(prompt_text, false);
   if (reg_prompt != prompt) return Fail("registry Tokenize mismatch");
-  if (via_registry->VocabSize() != direct->VocabSize()) {
+  if (via_registry->VocabSize() != direct_vocab) {
     return Fail("registry VocabSize mismatch");
   }
   const auto registry_ids =
@@ -135,14 +154,27 @@ int main(int argc, char** argv) {
         "The quick brown fox jumps over the lazy dog. "
         "Pack my box with five dozen liquor jugs. "
         "How vexingly quick daft zebras jump!";
-    const auto long_ids = direct->Tokenize(long_prompt, false);
+    const std::vector<std::int32_t> long_ids =
+        sequential ? via_registry->Tokenize(long_prompt, false)
+                   : direct->Tokenize(long_prompt, false);
     if (long_ids.size() < 16 || long_ids.size() > 128) {
       return Fail("long prompt token count out of range");
     }
     auto sess_a = via_registry->CreateSession(&error);
     auto sess_b = via_registry->CreateSession(&error);
     if (!sess_a || !sess_b) return Fail("chunk session: " + error);
+    if (sequential)
+      sess_b.reset();
     if (!sess_a->Sync(long_ids, &error)) return Fail("whole sync: " + error);
+    const std::int32_t tok_a = sess_a->SampleGreedy();
+    const std::vector<float> logits_a(sess_a->Logits().begin(),
+                                      sess_a->Logits().end());
+    if (sequential) {
+      sess_a.reset();
+      sess_b = via_registry->CreateSession(&error);
+      if (!sess_b)
+        return Fail("chunk session b: " + error);
+    }
     for (std::size_t off = 0; off < long_ids.size(); off += 8) {
       const std::size_t len =
           std::min<std::size_t>(8, long_ids.size() - off);
@@ -152,10 +184,9 @@ int main(int argc, char** argv) {
         return Fail("chunk forward: " + error);
       }
     }
-    const std::int32_t tok_a = sess_a->SampleGreedy();
     const std::int32_t tok_b = sess_b->SampleGreedy();
-    const auto logits_a = sess_a->Logits();
-    const auto logits_b = sess_b->Logits();
+    const std::vector<float> logits_b(sess_b->Logits().begin(),
+                                      sess_b->Logits().end());
     float max_diff = 0.0F;
     if (logits_a.size() == logits_b.size()) {
       for (std::size_t i = 0; i < logits_a.size(); ++i) {
