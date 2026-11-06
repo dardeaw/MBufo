@@ -27,12 +27,23 @@ struct ModelOptions {
 
 class Session;
 
+/// One hipHostRegister-pinned GGUF mapping for zero-copy weight access
+/// (GPTOSS_ZERO_COPY=1). The Model owns the reader (mmap) plus one
+/// registration per region; tensors resolve device pointers into these
+/// mappings instead of taking a hipMalloc + H2D mirror copy.
+struct ZeroCopyMap {
+  const void* host{nullptr};
+  void* device{nullptr};
+  void* handle{nullptr};  ///< base passed to hipHostRegister, for unregister
+  std::size_t size{0};
+};
+
 /// Minimal single-model runtime for `gpt-oss` GGUF artifacts (GPT-OSS MoE:
 /// 20B probe; 120B shares the code path). GEMM rides the shared core
-/// (narrow-prequant decode / DenseF16Gemm prefill); the MoE decode rides the
-/// shared vec path (MoeVecGateUp / GemvQSlot / MoeSlotEpilogueOverwrite)
-/// with a model-local SwiGLU-OAI activation; attention is a model-local
-/// dense F16 kernel (sinks + sliding window) over f16 or dequantized-q8 KV.
+/// (narrow-prequant decode / DenseF16Gemm prefill, fused decode variants);
+/// MoE decode takes the fused core pair with the routed/vec sequence as
+/// fallback; attention is a model-local dense F16 kernel (sinks + sliding
+/// window) over f16 or dequantized-q8 KV.
 class Model final : public std::enable_shared_from_this<Model> {
  public:
   ~Model();
@@ -72,8 +83,15 @@ class Model final : public std::enable_shared_from_this<Model> {
   std::shared_ptr<core::GgufReader> reader_;
   std::unique_ptr<ModelWeights> weights_;
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
-  // Engine-owned device mirrors of every weight tensor (freed in ~Model).
+  // Engine-owned device mirrors of converted weight tensors plus merged
+  // MoE slabs (freed in ~Model). Tensors served zero-copy from the pinned
+  // GGUF mappings (zc_maps_) never enter this list.
   std::vector<void*> device_allocations_;
+  // Pinned GGUF mappings for zero-copy weight access (empty unless
+  // GPTOSS_ZERO_COPY=1); unregistered in ~Model before the reader dies.
+  // Mapping lifetime is held by reader_ above, so device pointers derived
+  // from these maps stay valid for the Model lifetime.
+  std::vector<ZeroCopyMap> zc_maps_;
   // rocBLAS handle for batched-GEMM attention (null when unavailable).
   // rocBLAS handle for batched-GEMM attention (null when unavailable).
   hipblasHandle_t blas_handle_{nullptr};

@@ -44,8 +44,7 @@ struct TensorRef {
   }
 };
 
-struct LayerWeights {
-  TensorRef attn_norm;      ///< [hidden] F32
+struct LayerWeights {  TensorRef attn_norm;      ///< [hidden] F32
   TensorRef wq;             ///< [hidden -> 4096] Q8_0 (converted)
   TensorRef wk;             ///< [hidden -> 512] Q8_0 (converted)
   TensorRef wv;             ///< [hidden -> 512] Q8_0 (converted)
@@ -70,6 +69,24 @@ struct ModelWeights {
   TensorRef token_embd;   ///< [hidden -> vocab] Q8_0 (converted)
   TensorRef output_norm;  ///< [hidden] F32
   TensorRef output;       ///< [hidden -> vocab] Q8_0, tied to token_embd
+  /// Per-layer gate/up merge plans (parallel to `layers`). The merged
+  /// gate_up slab is uploaded by the engine straight from the file
+  /// mapping through a per-layer streaming temp (no persistent 40GB
+  /// arena on 120B); TensorRef `data` keeps the gate file base for
+  /// provenance while `device` holds the merged slab post-upload.
+  struct GateUpMergePlan {
+    const void* gate_base{nullptr};  ///< file ptr, reader-owned
+    const void* up_base{nullptr};    ///< file ptr, reader-owned
+    std::size_t slab_bytes{0};       ///< per-expert gate (== up) bytes
+    std::uint64_t experts{0};
+    bool valid{false};
+  };
+  std::vector<GateUpMergePlan> gate_up_plans;
+  /// GGUF file mappings backing the tensors (borrowed pointers, reader
+  /// lifetime). Used to tell file-backed tensors (safe for MADV_DONTNEED
+  /// streaming) from arena-backed conversions (anonymous heap: never
+  /// DONTNEED).
+  std::vector<std::pair<const void*, std::size_t>> file_regions;
 
   /// Binds and validates the artifact. Dense K-quants convert to Q8_0 on
   /// the host; experts stay native MXFP4. Converted payloads are owned

@@ -17,6 +17,8 @@
 #include <cstring>
 #include <vector>
 
+#include <sys/mman.h>
+
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/core/compute/attention/flash_blas.hpp"
@@ -143,6 +145,61 @@ bool Check(hipError_t err, std::string* error_msg, const char* what) {
   return false;
 }
 
+// Zero-copy weight mapping (GPTOSS_ZERO_COPY=1). GGUF tensor payloads stay
+// in their file mmap; each mapped region is hipHostRegister-pinned once and
+// tensors resolve to device pointers via hipHostGetDevicePointer, so a 59GB
+// 120B artifact occupies its ~59GB once (unified memory) instead of mmap +
+// arena + device mirror. Converted tensors (host arenas, e.g. dense Q8_0)
+// miss every region and keep the MirrorTensor path. XNACK-off safe:
+// registered host memory is directly addressable by the GPU without page
+// faults. Lifetime: Model owns the reader (mmap) plus one registration per
+// region (see ZeroCopyMap in engine.hpp); unregister (reverse order) runs
+// before the reader dies, and zero-copy tensors are never added to the
+// owned (hipFree) list.
+inline bool ZeroCopyEnabled() {
+  static const bool enabled = std::getenv("GPTOSS_ZERO_COPY") != nullptr;
+  return enabled;
+}
+
+[[nodiscard]] inline const void* ZeroCopyResolve(
+    const std::vector<ZeroCopyMap>& maps, const void* ptr, std::size_t size) {
+  if (ptr == nullptr || size == 0) return nullptr;
+  const auto* p = static_cast<const char*>(ptr);
+  for (const auto& m : maps) {
+    const auto* base = static_cast<const char*>(m.host);
+    if (p >= base && p + size <= base + m.size) {
+      return static_cast<const char*>(m.device) + (p - base);
+    }
+  }
+  return nullptr;
+}
+
+// True when [ptr, ptr+size) lies fully inside one GGUF file mapping.
+[[nodiscard]] inline bool InFileRegions(
+    const std::vector<std::pair<const void*, std::size_t>>& regions,
+    const void* ptr, std::size_t size) {
+  if (ptr == nullptr || size == 0) return false;
+  const auto* p = static_cast<const char*>(ptr);
+  for (const auto& r : regions) {
+    const auto* base = static_cast<const char*>(r.first);
+    if (p >= base && p + size <= base + r.second) return true;
+  }
+  return false;
+}
+
+// Drops clean file pages never needed again after their H2D copy (see
+// MirrorTensor). Aligned conservatively; failure is non-fatal.
+inline void DropFilePages(const void* ptr, std::size_t size) {
+  const std::uintptr_t base =
+      reinterpret_cast<std::uintptr_t>(ptr) & ~std::uintptr_t(4095);
+  const std::uintptr_t end =
+      (reinterpret_cast<std::uintptr_t>(ptr) + size + 4095) &
+      ~std::uintptr_t(4095);
+  if (end > base) {
+    (void)madvise(reinterpret_cast<void*>(base), end - base, MADV_DONTNEED);
+  }
+}
+
 // Mirrors one weight tensor to device; converted tensors stay packed (the
 // shared launchers dequantize on the fly). The H2D copy is chunked to
 // <=256MB per hipMemcpy so one multi-GB tensor (e.g. merged 128-expert MoE
@@ -150,9 +207,36 @@ bool Check(hipError_t err, std::string* error_msg, const char* what) {
 // svm_range_cpu_invalidate_pagetables (a single 59GB H2D wedged the box in
 // D-state). Sync-copy semantics unchanged: same bytes, same order.
 bool MirrorTensor(TensorRef& t, std::vector<void*>& owned,
+                  const std::vector<ZeroCopyMap>& zc_maps,
+                  const std::vector<std::pair<const void*, std::size_t>>&
+                      file_regions,
                   std::string* error_msg) {
   if (t.empty())
     return true;
+  if (!zc_maps.empty()) {
+    // Already-merged device slabs (gate_up streaming upload) carry their
+    // device pointer; file-backed tensors resolve into the registered
+    // mapping; arena-backed conversions fall through to the copy below.
+    if (t.device != nullptr)
+      return true;
+    if (const void* dev = ZeroCopyResolve(zc_maps, t.data, t.size_bytes)) {
+      t.device = dev;
+      // Env-gated self-check (GPTOSS_VERIFY_ZC=1): read back through the
+      // device pointer and compare with the file bytes. Diag only.
+      if (std::getenv("GPTOSS_VERIFY_ZC") != nullptr) {
+        std::vector<std::uint8_t> actual(t.size_bytes);
+        if (hipMemcpy(actual.data(), dev, t.size_bytes,
+                      hipMemcpyDeviceToHost) != hipSuccess ||
+            std::memcmp(actual.data(), t.data, t.size_bytes) != 0) {
+          t.device = nullptr;
+          if (error_msg != nullptr && error_msg->empty())
+            *error_msg = "zero-copy verify: device readback mismatch";
+          return false;
+        }
+      }
+      return true;
+    }
+  }
   void* dev = nullptr;
   if (!Check(hipMalloc(&dev, t.size_bytes), error_msg, "weight mirror alloc"))
     return false;
@@ -169,47 +253,148 @@ bool MirrorTensor(TensorRef& t, std::vector<void*>& owned,
   }
   t.device = dev;
   owned.push_back(dev);
+  // Streaming upload: the file page is never touched again once its bytes
+  // sit on the device, so drop it from page cache immediately. This keeps
+  // single occupancy (device only) instead of mmap + device double
+  // residency — the 120B artifact would otherwise peak past RAM. Only
+  // file-backed tensors qualify: converted-tensor arenas live on the
+  // anonymous heap and must never see MADV_DONTNEED (it would discard live
+  // heap pages and corrupt malloc metadata). Clean file pages only: always
+  // safe, worst case a re-read.
+  if (InFileRegions(file_regions, t.data, t.size_bytes)) {
+    DropFilePages(t.data, t.size_bytes);
+  }
+  return true;
+}
+
+// Streams one layer's merged gate_up slab to device: gate/up stay in the
+
+// Streams one layer's merged gate_up slab to device: gate/up stay in the
+// file mapping and merge through a per-layer host temp that is freed before
+// return (peak one layer, no persistent arena). H2D is chunked like
+// MirrorTensor; sync-copy semantics unchanged.
+bool UploadMergedGateUp(TensorRef& t,
+                        const ModelWeights::GateUpMergePlan& plan,
+                        std::vector<void*>& owned, std::string* error_msg) {
+  if (t.device != nullptr)
+    return true;
+  if (!plan.valid || plan.gate_base == nullptr || plan.up_base == nullptr ||
+      plan.slab_bytes == 0 || plan.experts == 0) {
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = "gate_up merge plan is missing";
+    return false;
+  }
+  const std::size_t total = 2 * plan.slab_bytes * plan.experts;
+  if (t.size_bytes != total) {
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = "gate_up merge plan size mismatch";
+    return false;
+  }
+  std::vector<std::uint8_t> temp(total);
+  const auto* g = static_cast<const std::uint8_t*>(plan.gate_base);
+  const auto* u = static_cast<const std::uint8_t*>(plan.up_base);
+  for (std::uint64_t e = 0; e < plan.experts; ++e) {
+    std::memcpy(temp.data() + e * 2 * plan.slab_bytes,
+                g + e * plan.slab_bytes, plan.slab_bytes);
+    std::memcpy(temp.data() + e * 2 * plan.slab_bytes + plan.slab_bytes,
+                u + e * plan.slab_bytes, plan.slab_bytes);
+  }
+  void* dev = nullptr;
+  if (!Check(hipMalloc(&dev, total), error_msg, "merged gate_up alloc"))
+    return false;
+  constexpr std::size_t kMergeChunkBytes = 256u * 1024u * 1024u;
+  auto* dst = static_cast<char*>(dev);
+  const auto* src = reinterpret_cast<const char*>(temp.data());
+  for (std::size_t off = 0; off < total; off += kMergeChunkBytes) {
+    const std::size_t n = std::min(kMergeChunkBytes, total - off);
+    if (!Check(hipMemcpy(dst + off, src + off, n, hipMemcpyHostToDevice),
+               error_msg, "merged gate_up copy")) {
+      (void)hipFree(dev);
+      return false;
+    }
+  }
+  t.device = dev;
+  owned.push_back(dev);
+  // Streaming upload: drop the merged file ranges from page cache now that
+  // the device slab holds them (single occupancy; gate/up are file-backed
+  // by construction, unlike converted arenas).
+  DropFilePages(plan.gate_base, plan.slab_bytes * plan.experts);
+  DropFilePages(plan.up_base, plan.slab_bytes * plan.experts);
+  // Env-gated self-check (GPTOSS_VERIFY_MERGE=1): read the device slab
+  // back and compare against a fresh host merge. Diag only.
+  if (std::getenv("GPTOSS_VERIFY_MERGE") != nullptr) {
+    std::vector<std::uint8_t> expect(total);
+    for (std::uint64_t e = 0; e < plan.experts; ++e) {
+      std::memcpy(expect.data() + e * 2 * plan.slab_bytes,
+                  g + e * plan.slab_bytes, plan.slab_bytes);
+      std::memcpy(expect.data() + e * 2 * plan.slab_bytes + plan.slab_bytes,
+                  u + e * plan.slab_bytes, plan.slab_bytes);
+    }
+    std::vector<std::uint8_t> actual(total);
+    if (hipMemcpy(actual.data(), dev, total, hipMemcpyDeviceToHost) !=
+        hipSuccess) {
+      if (error_msg != nullptr && error_msg->empty())
+        *error_msg = "merge verify: device readback failed";
+      return false;
+    }
+    if (std::memcmp(expect.data(), actual.data(), total) != 0) {
+      if (error_msg != nullptr && error_msg->empty())
+        *error_msg = "merge verify: device slab differs from host merge";
+      return false;
+    }
+    std::fprintf(stderr, "[gptoss] merge verify OK (%zu bytes)\n", total);
+  }
   return true;
 }
 
 bool UploadWeights(ModelWeights& w, std::vector<void*>& owned,
+                   const std::vector<ZeroCopyMap>& zc_maps,
                    std::string* error_msg) {
-  if (!MirrorTensor(w.token_embd, owned, error_msg))
+  auto mirror = [&](TensorRef& t) {
+    return MirrorTensor(t, owned, zc_maps, w.file_regions, error_msg);
+  };
+  if (!mirror(w.token_embd))
     return false;
-  if (!MirrorTensor(w.output_norm, owned, error_msg))
+  if (!mirror(w.output_norm))
     return false;
-  if (!MirrorTensor(w.output, owned, error_msg))
+  if (!mirror(w.output))
     return false;
-  for (auto& l : w.layers) {
-    if (!MirrorTensor(l.attn_norm, owned, error_msg))
+  for (std::uint32_t il = 0; il < w.layers.size(); ++il) {
+    auto& l = w.layers[il];
+    if (!mirror(l.attn_norm))
       return false;
-    if (!MirrorTensor(l.wq, owned, error_msg))
+    if (!mirror(l.wq))
       return false;
-    if (!MirrorTensor(l.wk, owned, error_msg))
+    if (!mirror(l.wk))
       return false;
-    if (!MirrorTensor(l.wv, owned, error_msg))
+    if (!mirror(l.wv))
       return false;
-    if (!MirrorTensor(l.wo, owned, error_msg))
+    if (!mirror(l.wo))
       return false;
-    if (!MirrorTensor(l.wo_b, owned, error_msg))
+    if (!mirror(l.wo_b))
       return false;
-    if (!MirrorTensor(l.attn_sinks, owned, error_msg))
+    if (!mirror(l.attn_sinks))
       return false;
-    if (!MirrorTensor(l.post_norm, owned, error_msg))
+    if (!mirror(l.post_norm))
       return false;
-    if (!MirrorTensor(l.router, owned, error_msg))
+    if (!mirror(l.router))
       return false;
-    if (!MirrorTensor(l.router_b, owned, error_msg))
+    if (!mirror(l.router_b))
       return false;
-    if (!MirrorTensor(l.gate_b, owned, error_msg))
+    if (!mirror(l.gate_b))
       return false;
-    if (!MirrorTensor(l.up_b, owned, error_msg))
+    if (!mirror(l.up_b))
       return false;
-    if (!MirrorTensor(l.down_b, owned, error_msg))
+    if (!mirror(l.down_b))
       return false;
-    if (!MirrorTensor(l.gate_up_exps, owned, error_msg))
+    if (il < w.gate_up_plans.size() && w.gate_up_plans[il].valid) {
+      if (!UploadMergedGateUp(l.gate_up_exps, w.gate_up_plans[il], owned,
+                              error_msg))
+        return false;
+    } else if (!mirror(l.gate_up_exps)) {
       return false;
-    if (!MirrorTensor(l.down_exps, owned, error_msg))
+    }
+    if (!mirror(l.down_exps))
       return false;
   }
   return true;
@@ -430,6 +615,10 @@ struct Session::Impl {
 };
 
 Model::~Model() {
+  for (auto it = zc_maps_.rbegin(); it != zc_maps_.rend(); ++it) {
+    (void)hipHostUnregister(it->handle);
+  }
+  zc_maps_.clear();
   for (void* p : device_allocations_) {
     (void)hipFree(p);
   }
@@ -470,8 +659,50 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   model_owner->options_ = options;
   model_owner->reader_ = std::move(reader);
   model_owner->weights_ = std::make_unique<ModelWeights>(std::move(*weights));
+  // Zero-copy setup (GPTOSS_ZERO_COPY=1): pin each GGUF mapping once and
+  // resolve a device pointer per region. Converted (arena-backed) tensors
+  // miss every region and keep the mirror path below. Registration failure
+  // fails the load loudly (falling back to a 59GB mirror copy would wedge
+  // the box, which is exactly what this path replaces).
+  if (ZeroCopyEnabled()) {
+    bool zc_ok = true;
+    for (const auto& region : model_owner->reader_->GetMappedRegions()) {
+      if (region.data == nullptr || region.size == 0) {
+        zc_ok = false;
+        load_error = "zero-copy: empty mapped region";
+        break;
+      }
+      void* base = const_cast<void*>(region.data);
+      // Round up to the page: the file tail shares its last page with
+      // zeros, and the driver pins whole pages.
+      const std::size_t len = (region.size + 4095) & ~static_cast<std::size_t>(4095);
+      void* dev = nullptr;
+      if (hipHostRegister(base, len, hipHostRegisterDefault) != hipSuccess ||
+          hipHostGetDevicePointer(&dev, base, 0) != hipSuccess || dev == nullptr) {
+        zc_ok = false;
+        load_error = "zero-copy: hipHostRegister/GetDevicePointer failed";
+        break;
+      }
+      ZeroCopyMap m;
+      m.host = region.data;
+      m.device = dev;
+      m.handle = base;
+      m.size = region.size;
+      model_owner->zc_maps_.push_back(m);
+    }
+    if (!zc_ok) {
+      for (auto it = model_owner->zc_maps_.rbegin();
+           it != model_owner->zc_maps_.rend(); ++it) {
+        (void)hipHostUnregister(it->handle);
+      }
+      model_owner->zc_maps_.clear();
+      if (error_msg != nullptr)
+        *error_msg = "Failed to set up gptoss zero-copy weights: " + load_error;
+      return nullptr;
+    }
+  }
   if (!UploadWeights(*model_owner->weights_, model_owner->device_allocations_,
-                     &load_error)) {
+                     model_owner->zc_maps_, &load_error)) {
     if (error_msg != nullptr)
       *error_msg = "Failed to mirror gptoss weights to device: " + load_error;
     return nullptr;

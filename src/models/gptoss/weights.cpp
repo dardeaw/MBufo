@@ -266,6 +266,9 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   ModelWeights w;
   b.out = &w;
   w.config = *config;
+  for (const auto& r : reader.GetMappedRegions()) {
+    w.file_regions.emplace_back(r.data, r.size);
+  }
   const std::uint64_t hidden = config->hidden_size;
   const std::uint64_t vocab = config->vocab_size;
   const std::uint64_t qdim =
@@ -333,21 +336,24 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     constexpr std::size_t kMxfp4RowElems = 32;
     constexpr std::size_t kMxfp4BlockBytes = 17;
     const std::size_t mx_row = (hidden / kMxfp4RowElems) * kMxfp4BlockBytes;
-    const std::size_t dmx_row = (ff / kMxfp4RowElems) * kMxfp4BlockBytes;
     const std::size_t slab = ff * mx_row;
-    // Merged gate_up: [2*ff][hidden] per expert, MXFP4.
-    auto* gu_arena = b.Arena(2 * slab * nex);
-    for (std::uint64_t e = 0; e < nex && b.ok; ++e) {
-      const std::uint8_t* gsrc =
-          static_cast<const std::uint8_t*>(gate_info->data) + e * slab;
-      const std::uint8_t* usrc =
-          static_cast<const std::uint8_t*>(up_info->data) + e * slab;
-      std::uint8_t* gdst = gu_arena->data() + e * 2 * slab;
-      std::memcpy(gdst, gsrc, slab);
-      std::memcpy(gdst + slab, usrc, slab);
-    }
-    l.gate_up_exps.data = gu_arena->data();
-    l.gate_up_exps.size_bytes = gu_arena->size();
+    // Merged gate_up: [2*ff][hidden] per expert, MXFP4. No persistent host
+    // arena (a 120B merge would pin 40GB): Bind records the merge plan and
+    // the engine streams gate/up straight from the file mapping through a
+    // per-layer temp into the device slab at upload time. `data` keeps the
+    // gate file base (stable, reader-owned) for provenance; the runtime
+    // uses `device` once set and never dereferences `data` for merged
+    // content (verified: only MirrorTensor/GptossGemm touch it, both
+    // prefer `device`).
+    ModelWeights::GateUpMergePlan plan;
+    plan.gate_base = gate_info->data;
+    plan.up_base = up_info->data;
+    plan.slab_bytes = slab;
+    plan.experts = nex;
+    plan.valid = true;
+    w.gate_up_plans.push_back(plan);
+    l.gate_up_exps.data = gate_info->data;
+    l.gate_up_exps.size_bytes = 2 * slab * nex;
     l.gate_up_exps.type = core::GgmlType::kMXFP4;
     l.gate_up_exps.cols = hidden;
     l.gate_up_exps.rows = 2 * ff;
@@ -416,7 +422,8 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     dump("l0_wq.q8", w.layers[0].wq);
     dump("l0_wk.q8", w.layers[0].wk);
     dump("l0_wo.q8", w.layers[0].wo);
-    dump("l0_gateup.mxfp4", w.layers[0].gate_up_exps);
+    // gate_up merged content lives on device post-upload; file bases are
+    // covered by the raw artifact itself, so no host dump here.
     dump("l0_down.mxfp4", w.layers[0].down_exps);
   }
   std::fprintf(stderr, "[gptoss] bound %u layers, %zu arenas\n",
