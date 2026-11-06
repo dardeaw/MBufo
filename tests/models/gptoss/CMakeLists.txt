@@ -5,4 +5,8 @@ if (ENGINE_ENABLE_HIP)
     registry_pilot_test.cpp)
   target_link_libraries(gptoss_registry_pilot_test PRIVATE gufo_gptoss gufo_core
     hip::host)
+  add_executable(gptoss_bench_test EXCLUDE_FROM_ALL
+    bench_test.cpp)
+  target_link_libraries(gptoss_bench_test PRIVATE gufo_gptoss gufo_core
+    hip::host)
 endif()
