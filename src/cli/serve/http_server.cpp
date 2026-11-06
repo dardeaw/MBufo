@@ -55,6 +55,7 @@
 #include "src/core/platform/shutdown_signal.hpp"
 #include "src/core/utf8.hpp"
 #include "src/models/qwen/chat_template.hpp"
+#include "src/core/rerank_score.hpp"
 
 namespace gufo::server {
 namespace {
@@ -1250,6 +1251,96 @@ HttpResponse HandleOpenAiEmbeddings(const HttpRequest& req,
              "invalid_prompt");
 }
 
+// OpenAI-compatible reranking: one query against N documents, scored by the
+// loaded reranker model (BERT cross-encoder or Qwen yes/no head). Scores are
+// normalized to (0, 1); `top_n` keeps the top documents sorted by descending
+// score, otherwise input order is preserved. Shape mirrors llama-server:
+// {object:"list", results:[{index, relevance_score}], ...}.
+HttpResponse HandleOpenAiReranking(const HttpRequest& req,
+                                   TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+  if (!body.is_object())
+    return InvalidCompatibilityRequest("request body must be an object");
+  const auto* query = body.find("query");
+  if (query == nullptr || !query->is_string() || query->str().empty()) {
+    return InvalidCompatibilityRequest("'query' must be a non-empty string");
+  }
+  const auto* documents = body.find("documents");
+  if (documents == nullptr || !documents->is_array()) {
+    return InvalidCompatibilityRequest(
+        "'documents' must be an array of strings");
+  }
+  std::vector<std::string> docs;
+  for (const auto& item : documents->items()) {
+    if (!item.is_string() || item.str().empty()) {
+      return InvalidCompatibilityRequest(
+          "'documents' must contain non-empty strings");
+    }
+    docs.push_back(item.str());
+  }
+  if (docs.empty()) {
+    return InvalidCompatibilityRequest("'documents' must not be empty");
+  }
+  std::size_t top_n = 0;
+  if (const auto* top = body.find("top_n");
+      top != nullptr && !top->is_null()) {
+    if (!top->is_number()) {
+      return InvalidCompatibilityRequest("'top_n' must be a number");
+    }
+    const double top_value = top->as_double(0.0);
+    if (!(top_value >= 1.0)) {
+      return InvalidCompatibilityRequest(
+          "'top_n' must be a positive integer");
+    }
+    top_n = static_cast<std::size_t>(top_value);
+  }
+  std::string rerank_error;
+  auto result = b.Rerank(query->str(), docs, &rerank_error);
+  if (!result.has_value()) {
+    return Err(400, "Bad Request", rerank_error.c_str(),
+               "invalid_request_error", "rerank_failed");
+  }
+  const std::vector<std::size_t> order =
+      core::rerank::RankIndices(result->scores, top_n);
+  // Without top_n the input order is preserved; top_n returns the top
+  // documents sorted by descending score.
+  const bool ranked = top_n != 0 && top_n < docs.size();
+  json::Value results = json::Value::array();
+  const auto emit = [&](std::size_t index) {
+    json::Value item = json::Value::object();
+    item["index"] = index;
+    item["relevance_score"] =
+        json::Value(static_cast<double>(result->scores[index]));
+    results.push_back(std::move(item));
+  };
+  if (ranked) {
+    for (const std::size_t index : order) emit(index);
+  } else {
+    for (std::size_t i = 0; i < docs.size(); ++i) emit(i);
+  }
+  json::Value resp = json::Value::object();
+  resp["object"] = "list";
+  resp["results"] = std::move(results);
+  resp["model"] = RequestedModel(body, b);
+  json::Value usage = json::Value::object();
+  usage["prompt_tokens"] = result->prompt_tokens;
+  usage["total_tokens"] = result->prompt_tokens;
+  resp["usage"] = std::move(usage);
+  return Ok(resp);
+} catch (const std::length_error& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "context_length_exceeded");
+} catch (const std::invalid_argument& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "invalid_prompt");
+}
+
 HttpResponse OpenAiResponses(const HttpRequest& req,
                              TextGenerationBackend& b) try {
   json::Value body;
@@ -1995,7 +2086,7 @@ void HttpServer::register_routes() {
 
   // ---- llama-server ----
   add("POST", "/v1/rerank", NotImplemented);
-  add("POST", "/v1/reranking", NotImplemented);
+  add("POST", "/v1/reranking", HandleOpenAiReranking);
   add("POST", "/rerank", NotImplemented);
   add("POST", "/infill", NotImplemented);
   add("POST", "/completion", LlamaCompletion);

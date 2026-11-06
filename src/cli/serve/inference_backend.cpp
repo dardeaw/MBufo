@@ -52,6 +52,8 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/bge_reranker/engine.hpp"
+#include "src/models/qwen_reranker/engine.hpp"
 #endif
 
 namespace gufo::server {
@@ -3795,6 +3797,13 @@ struct InferenceBackend::Impl {
   std::shared_ptr<const hip::QwenGpuModel> embed_model;
   std::unique_ptr<hip::QwenGpuExecutor> embed_executor;
   std::uint32_t embed_context{0};
+  // Rerank state: one cached session per loaded reranker kind (sessions are
+  // not thread-safe; rerank_mutex serializes use, mirroring embed_mutex).
+  mutable std::mutex rerank_mutex;
+  std::unique_ptr<models::bge_reranker::EngineModel> bge_rerank_model;
+  std::unique_ptr<models::bge_reranker::EngineSession> bge_rerank_session;
+  std::unique_ptr<models::qwen_reranker::EngineModel> qwen_rerank_model;
+  std::unique_ptr<models::qwen_reranker::EngineSession> qwen_rerank_session;
 #endif
 };
 
@@ -4044,6 +4053,58 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
+  if (architecture == "bert") {
+    // Rerank-only encoder model: no text runner, no scheduler, no disk
+    // cache. chat/complete refuse explicitly; Rerank + /v1/reranking serve
+    // it. served_model_names/build_info are set by the caller as usual.
+    if (!vision_model_path.empty()) {
+      SetError(error, "BERT reranker models do not support --mmproj");
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config)) {
+      SetError(error,
+               "BERT reranker models do not support the persistent disk "
+               "cache");
+      return false;
+    }
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error,
+               "BERT reranker models do not support speculative decoding");
+      return false;
+    }
+    std::string rerank_error;
+    auto rerank_model =
+        models::bge_reranker::EngineModel::Create(model_path, &rerank_error);
+    if (rerank_model == nullptr) {
+      SetError(error,
+               "Failed to create BERT reranker model: " + rerank_error);
+      return false;
+    }
+    const std::uint32_t native_context =
+        rerank_model->Config().max_position_embeddings;
+    if (max_context == 0) {
+      max_context = native_context;
+    }
+    if (max_context < 2 || max_context > native_context) {
+      SetError(error, "HTTP context exceeds the BERT reranker context");
+      return false;
+    }
+    {
+      auto new_state = std::make_shared<Impl::State>();
+      new_state->model_id = rerank_model->Config().model_name;
+      new_state->max_context = max_context;
+      new_state->model_path = model_path;
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    {
+      const std::lock_guard<std::mutex> lock(impl_->rerank_mutex);
+      impl_->bge_rerank_model = std::move(rerank_model);
+      impl_->bge_rerank_session.reset();
+    }
+    return true;
+  }
+
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
     if (reader->GetMetadataUint64("qwen35.embedding_length") == 5120) {
@@ -4549,7 +4610,8 @@ bool InferenceBackend::ready() const {
 bool InferenceBackend::device_lost() const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
-  return state != nullptr && state->scheduler->device_lost();
+  return state != nullptr && state->scheduler != nullptr &&
+         state->scheduler->device_lost();
 #else
   return false;
 #endif
@@ -4577,8 +4639,9 @@ std::vector<InferenceBackend::SessionState> InferenceBackend::session_states()
     const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
-  return state != nullptr ? state->scheduler->SessionStates()
-                          : std::vector<SessionState>{};
+  return state != nullptr && state->scheduler != nullptr
+             ? state->scheduler->SessionStates()
+             : std::vector<SessionState>{};
 #else
   return {};
 #endif
@@ -4606,9 +4669,10 @@ InferenceBackend::InitialOutputState InferenceBackend::initial_output_state(
     const ChatRequest& request) const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
-  return state != nullptr
-             ? state->scheduler->runner().InitialOutputState(request)
-             : InitialOutputState::kAuto;
+  if (state == nullptr || state->scheduler == nullptr) {
+    return InitialOutputState::kContent;
+  }
+  return state->scheduler->runner().InitialOutputState(request);
 #else
   (void)request;
   return InitialOutputState::kAuto;
@@ -4718,6 +4782,10 @@ InferenceBackend::Result InferenceBackend::complete(
   if (state == nullptr) {
     return {};
   }
+  if (state->scheduler == nullptr) {
+    throw std::invalid_argument(
+        "this model serves rerank requests only (no text generation)");
+  }
   auto prompt_tokens = state->scheduler->runner().Tokenize(prompt);
   return impl_->GenerateScheduled(
       state, std::move(prompt_tokens), request_start, max_tokens,
@@ -4745,6 +4813,10 @@ InferenceBackend::Result InferenceBackend::chat(
   const auto state = impl_->Snapshot();
   if (state == nullptr) {
     return {};
+  }
+  if (state->scheduler == nullptr) {
+    throw std::invalid_argument(
+        "this model serves rerank requests only (no text generation)");
   }
   auto effective_sampling = sampling_config;
   auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
@@ -4786,7 +4858,7 @@ InferenceBackend::start_complete(
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
-  if (state == nullptr) {
+  if (state == nullptr || state->scheduler == nullptr) {
     return TextGenerationBackend::start_complete(
         prompt, max_tokens, sampling_config, is_cancelled, stream_output,
         ignore_eos, client_id, stop_sequences, return_progress, cache_prompt);
@@ -4823,7 +4895,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
-  if (state == nullptr) {
+  if (state == nullptr || state->scheduler == nullptr) {
     return TextGenerationBackend::start_chat(
         request, max_tokens, sampling_config, is_cancelled, stream_output);
   }
@@ -4879,7 +4951,7 @@ InferenceBackend::Result InferenceBackend::chat(
 std::size_t InferenceBackend::count_tokens(std::string_view text) const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
-  if (state == nullptr) {
+  if (state == nullptr || state->scheduler == nullptr) {
     return 0;
   }
   return state->scheduler->runner().Tokenize(text).size();
@@ -4893,7 +4965,7 @@ std::optional<std::size_t> InferenceBackend::count_chat_tokens(
     const ChatRequest& request) const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
-  if (state == nullptr) {
+  if (state == nullptr || state->scheduler == nullptr) {
     return std::nullopt;
   }
   // The same preparation as chat(): constrained tool or format requests add
@@ -4909,6 +4981,86 @@ std::optional<std::size_t> InferenceBackend::count_chat_tokens(
 #endif
 }
 
+
+// Rerank dispatch: BERT cross-encoder when a bert artifact is loaded,
+// Qwen yes/no head for Qwen dense artifacts.
+std::optional<RerankResult> InferenceBackend::Rerank(
+    const std::string& query, const std::vector<std::string>& documents,
+    std::string* error) {
+#if defined(ENGINE_ENABLE_HIP)
+  auto refuse = [&](const std::string& message) {
+    if (error != nullptr) *error = message;
+    return std::optional<RerankResult>{};
+  };
+  const auto current = impl_->Snapshot();
+  if (current == nullptr) return refuse("no model is loaded");
+  if (query.empty()) return refuse("rerank query must not be empty");
+  if (documents.empty()) return refuse("rerank documents must not be empty");
+  // BERT cross-encoder path (rerank-only state, no text runner).
+  {
+    const std::lock_guard<std::mutex> lock(impl_->rerank_mutex);
+    if (impl_->bge_rerank_model != nullptr) {
+      if (impl_->bge_rerank_session == nullptr) {
+        impl_->bge_rerank_session =
+            std::make_unique<models::bge_reranker::EngineSession>(
+                impl_->bge_rerank_model.get());
+      }
+      double total_ms = 0.0;
+      std::size_t prompt_tokens = 0;
+      auto scores = impl_->bge_rerank_session->ScoreBatch(
+          query, documents, true, &total_ms, &prompt_tokens, error);
+      if (!scores.has_value()) return std::nullopt;
+      RerankResult result;
+      result.scores = std::move(*scores);
+      result.prompt_tokens = prompt_tokens;
+      result.prefill_ms = total_ms;
+      return result;
+    }
+  }
+  // Qwen yes/no path: share the loaded Qwen weights, add only the readout.
+  if (current->scheduler == nullptr) {
+    return refuse("rerank is not supported by this model");
+  }
+  const auto* qwen = dynamic_cast<const QwenTextRunner*>(
+      &current->scheduler->runner());
+  if (qwen == nullptr) {
+    return refuse(
+        "rerank requires a Qwen dense or BERT reranker model; this backend "
+        "serves a different model kind");
+  }
+  const std::lock_guard<std::mutex> lock(impl_->rerank_mutex);
+  if (impl_->qwen_rerank_model == nullptr) {
+    std::string wrap_error;
+    impl_->qwen_rerank_model =
+        models::qwen_reranker::EngineModel::Wrap(qwen->QwenModel(),
+                                                 &wrap_error);
+    if (impl_->qwen_rerank_model == nullptr) {
+      return refuse("qwen-reranker wrap failed: " + wrap_error);
+    }
+    impl_->qwen_rerank_model->SetPolicy(qwen->ExecutionPolicy());
+  }
+  if (impl_->qwen_rerank_session == nullptr) {
+    impl_->qwen_rerank_session =
+        std::make_unique<models::qwen_reranker::EngineSession>(
+            impl_->qwen_rerank_model.get());
+  }
+  double total_ms = 0.0;
+  std::size_t prompt_tokens = 0;
+  auto scores = impl_->qwen_rerank_session->ScoreBatch(
+      query, documents, std::string_view{}, &total_ms, &prompt_tokens, error);
+  if (!scores.has_value()) return std::nullopt;
+  RerankResult result;
+  result.scores = std::move(*scores);
+  result.prompt_tokens = prompt_tokens;
+  result.prefill_ms = total_ms;
+  return result;
+#else
+  (void)query;
+  (void)documents;
+  if (error != nullptr) *error = "reranking requires the HIP backend";
+  return std::nullopt;
+#endif
+}
 // Leg-2 single-prefill embedding: tokenize, run one prefill on the cached
 // executor with hidden capture and no lm_head, pool to one vector,
 // L2-normalize, release. No decode runs; the cached executor is Reset() to a
@@ -4921,8 +5073,12 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
     return std::optional<EmbeddingResult>{};
   };
   const auto current = impl_->Snapshot();
-  if (current == nullptr || current->scheduler == nullptr)
-    return refuse("no model is loaded");
+  if (current == nullptr) return refuse("no model is loaded");
+  if (current->scheduler == nullptr) {
+    return refuse(
+        "embeddings require a Qwen dense model; this backend serves a "
+        "reranker-only model kind");
+  }
   const auto* qwen =
       dynamic_cast<const QwenTextRunner*>(&current->scheduler->runner());
   if (qwen == nullptr) {

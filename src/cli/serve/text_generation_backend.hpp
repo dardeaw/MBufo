@@ -135,6 +135,15 @@ struct EmbeddingResult {
   double prefill_ms{0.0};
 };
 
+/// Relevance scores for one query against N documents, from one prefill
+/// per pair and no decode. Served by POST /v1/reranking; every backend
+/// refuses by default and reranker model kinds opt in.
+struct RerankResult {
+  std::vector<float> scores;  // input-document order, sigmoid (0, 1)
+  std::size_t prompt_tokens{0};
+  double prefill_ms{0.0};
+};
+
 /// Model-agnostic text generation boundary used by the HTTP transport.
 ///
 /// Implementations retain ownership of tokenization, templates, complete
@@ -416,6 +425,19 @@ public:
       const std::string& text, std::string* error) {
     (void)text;
     if (error != nullptr) *error = "embedding is not supported by this model";
+    return std::nullopt;
+  }
+
+  /// Scores each document against the query with a single relevance value.
+  /// Exactly one prefill runs per (query, document) pair (no decode, no KV
+  /// retention). Returning nullopt must always carry a human-readable reason
+  /// in `error` -- never a silent score.
+  [[nodiscard]] virtual std::optional<RerankResult> Rerank(
+      const std::string& query, const std::vector<std::string>& documents,
+      std::string* error) {
+    (void)query;
+    (void)documents;
+    if (error != nullptr) *error = "reranking is not supported by this model";
     return std::nullopt;
   }
 };
