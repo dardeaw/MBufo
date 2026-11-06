@@ -449,6 +449,248 @@ bool LaunchNarrowQ80Decode(const void* weights, const void* input,
   return true;
 }
 
+// ---- Fused QKV narrow decode (Q8_0 x prequantized-Q8_1, ungated) ----
+namespace narrow_q8 {
+
+template <int ncols_dst, bool scatter = false>
+__launch_bounds__(32, 1) __global__
+void mul_mat_vec_q8_qkv(const void* __restrict__ wq,
+                        const void* __restrict__ wk,
+                        const void* __restrict__ wv,
+                        const block_q8_1* __restrict__ input,
+                        float* __restrict__ out_q, float* __restrict__ out_k,
+                        float* __restrict__ out_v, const uint32_t ncols_x,
+                        const uint32_t qrows, const uint32_t kvrows,
+                        const uint32_t stride_col_y) {
+  constexpr int qi = QI8_0;
+  constexpr int vdr = VDR_Q8_0_Q8_1_MMVQ;
+  constexpr int blocks_per_iter = vdr * 32 / qi;
+  const int lane = threadIdx.x;
+  const uint32_t row = blockIdx.x;
+  const void* weights = wq;
+  float* output = out_q;
+  uint32_t rrow = row;
+  uint32_t nrows_out = qrows;
+  if (row >= qrows + kvrows) {
+    weights = wv;
+    output = out_v;
+    rrow = row - qrows - kvrows;
+    nrows_out = kvrows;
+  } else if (row >= qrows) {
+    weights = wk;
+    output = out_k;
+    rrow = row - qrows;
+    nrows_out = kvrows;
+  }
+  const int blocks_per_row = static_cast<int>(ncols_x / QK8_0);
+  const int row_offset = static_cast<int>(rrow) * blocks_per_row;
+  const int kqs = vdr * (lane % (qi / vdr));
+  float sum[ncols_dst] = {};
+  for (int kbx = lane / (qi / vdr); kbx < blocks_per_row;
+       kbx += blocks_per_iter) {
+#pragma unroll
+    for (int j = 0; j < ncols_dst; ++j) {
+      sum[j] += vec_dot_q8_0_q8_1(
+          weights, input + static_cast<std::size_t>(j) * stride_col_y + kbx,
+          row_offset + kbx, kqs);
+    }
+  }
+  if constexpr (scatter) {
+    constexpr int shift = 5 - ScatterLevels(ncols_dst);
+    const float value = scatter_reduce_sum(sum, lane);
+    const int token = lane >> shift;
+    if ((lane & ((1 << shift) - 1)) == 0 && token < ncols_dst) {
+      output[static_cast<std::size_t>(token) * nrows_out + rrow] = value;
+    }
+    return;
+  }
+#pragma unroll
+  for (int j = 0; j < ncols_dst; ++j) {
+    sum[j] = warp_reduce_sum<32>(sum[j]);
+    if (lane == 0) {
+      output[static_cast<std::size_t>(j) * nrows_out + rrow] = sum[j];
+    }
+  }
+}
+
+}  // namespace narrow_q8
+
+bool LaunchNarrowQ80QkvDecode(const void* wq, const void* wk, const void* wv,
+                             const void* input, float* out_q, float* out_k,
+                             float* out_v, std::size_t k, std::size_t qrows,
+                             std::size_t kvrows, std::size_t tokens,
+                             std::size_t input_stride_blocks,
+                             hipStream_t stream) {
+  namespace nq = narrow_q8;
+  if (wq == nullptr || wk == nullptr || wv == nullptr || input == nullptr ||
+      out_q == nullptr || out_k == nullptr || out_v == nullptr)
+    return false;
+  if (tokens < 1 || tokens > 8) return false;
+  if (k == 0 || k % 32 != 0) return false;
+  if (qrows == 0 || kvrows == 0) return false;
+  if (input_stride_blocks < k / 32) return false;
+  const std::size_t total_rows = qrows + 2 * kvrows;
+  if (total_rows == 0 ||
+      total_rows > static_cast<std::size_t>(0xFFFFFFFFu))
+    return false;
+  if (tokens == 1 && total_rows <= 64 && k % 5120 == 0) return false;
+  if (total_rows == 320 && k == 10240) return false;
+  const auto* q8_input = static_cast<const nq::block_q8_1*>(input);
+  const auto ncols = static_cast<std::uint32_t>(k);
+  const auto nqrows = static_cast<std::uint32_t>(qrows);
+  const auto nkvrows = static_cast<std::uint32_t>(kvrows);
+  const auto stride = static_cast<std::uint32_t>(input_stride_blocks);
+  const auto grid = static_cast<unsigned>(total_rows);
+  switch (tokens) {
+#define NARROW_Q8_QKV_LAUNCH(N)                                              \
+  case N:                                                                    \
+    nq::mul_mat_vec_q8_qkv<N, false>                                          \
+        <<<grid, 32, 0, stream>>>(wq, wk, wv, q8_input, out_q, out_k, out_v,  \
+                                  ncols, nqrows, nkvrows, stride);            \
+    break
+    NARROW_Q8_QKV_LAUNCH(1);
+#undef NARROW_Q8_QKV_LAUNCH
+#define NARROW_Q8_QKV_LAUNCH_SCATTER(N)                                      \
+  case N:                                                                    \
+    nq::mul_mat_vec_q8_qkv<N, true>                                           \
+        <<<grid, 32, 0, stream>>>(wq, wk, wv, q8_input, out_q, out_k, out_v,  \
+                                  ncols, nqrows, nkvrows, stride);            \
+    break
+    NARROW_Q8_QKV_LAUNCH_SCATTER(2);
+    NARROW_Q8_QKV_LAUNCH_SCATTER(3);
+    NARROW_Q8_QKV_LAUNCH_SCATTER(4);
+    NARROW_Q8_QKV_LAUNCH_SCATTER(5);
+    NARROW_Q8_QKV_LAUNCH_SCATTER(6);
+    NARROW_Q8_QKV_LAUNCH_SCATTER(7);
+    NARROW_Q8_QKV_LAUNCH_SCATTER(8);
+#undef NARROW_Q8_QKV_LAUNCH_SCATTER
+    default:
+      return false;
+  }
+  return true;
+}
+
+// ---- Narrow decode with fused row-bias + residual add (Q8_0, ungated) ----
+// Same per-row arithmetic as mul_mat_vec_q8; the store folds the epilogue
+// that callers otherwise run as two extra launches (AddRowBias then
+// ResidualAdd): inout[token*nrows+row] += value + bias[row]. The addition
+// order matches the unfused sequence bit-for-bit ((dot + bias) + resid),
+// so engaging this path never changes numerics. Same contract as
+// LaunchNarrowQ80Decode; out of contract the launcher returns false and
+// the caller keeps its three-launch sequence.
+namespace narrow_q8 {
+
+template <int ncols_dst, bool scatter = false>
+__launch_bounds__(32, 1) __global__
+void mul_mat_vec_q8_rowadd(const void* __restrict__ weights,
+                           const block_q8_1* __restrict__ input,
+                           const float* __restrict__ bias,
+                           float* __restrict__ inout, const uint32_t ncols_x,
+                           const uint32_t nrows_x,
+                           const uint32_t stride_col_y) {
+  constexpr int qi = QI8_0;
+  constexpr int vdr = VDR_Q8_0_Q8_1_MMVQ;
+  constexpr int blocks_per_iter = vdr * 32 / qi;
+  const int lane = threadIdx.x;
+  const uint32_t row = blockIdx.x;
+  const int blocks_per_row = static_cast<int>(ncols_x / QK8_0);
+  const int row_offset = static_cast<int>(row) * blocks_per_row;
+  const int kqs = vdr * (lane % (qi / vdr));
+  float sum[ncols_dst] = {};
+  for (int kbx = lane / (qi / vdr); kbx < blocks_per_row;
+       kbx += blocks_per_iter) {
+#pragma unroll
+    for (int j = 0; j < ncols_dst; ++j) {
+      sum[j] += vec_dot_q8_0_q8_1(
+          weights, input + static_cast<std::size_t>(j) * stride_col_y + kbx,
+          row_offset + kbx, kqs);
+    }
+  }
+  if constexpr (scatter) {
+    constexpr int shift = 5 - ScatterLevels(ncols_dst);
+    const float value = scatter_reduce_sum(sum, lane);
+    const int token = lane >> shift;
+    if ((lane & ((1 << shift) - 1)) == 0 && token < ncols_dst) {
+      float* dst = inout + static_cast<std::size_t>(token) * nrows_x + row;
+      *dst += value + bias[row];
+    }
+    return;
+  }
+#pragma unroll
+  for (int j = 0; j < ncols_dst; ++j) {
+    sum[j] = warp_reduce_sum<32>(sum[j]);
+    if (lane == 0) {
+      float* dst = inout + static_cast<std::size_t>(j) * nrows_x + row;
+      *dst += sum[j] + bias[row];
+    }
+  }
+}
+
+}  // namespace narrow_q8
+
+// Prequant helpers live in quantize_q8_1.hip (same static lib); forward
+// declarations keep this TU free of the model-facing gemm.hpp. Already
+// inside namespace gufo::core::compute::gemm here.
+std::size_t PreqQ81RowPad(std::size_t k);
+std::size_t PreqQ81Bytes(std::size_t n, std::size_t k);
+int PrequantizeQ8_1(const float* x_f32, void* x_q8, std::size_t n,
+                    std::size_t k, hipStream_t stream);
+std::size_t NarrowQ80PrequantScratchBytes(std::size_t max_k);
+std::size_t NarrowQ80PrequantBytes(std::size_t tokens, std::size_t k);
+std::size_t NarrowQ80PrequantStrideBlocks(std::size_t k);
+
+bool LaunchNarrowQ80PrequantRowAdd(const void* weights, const float* x_f32,
+                                   const float* bias, float* inout,
+                                   std::size_t k, std::size_t rows,
+                                   std::size_t tokens, void* scratch,
+                                   std::size_t scratch_bytes,
+                                   hipStream_t stream) {
+  namespace nq = narrow_q8;
+  if (weights == nullptr || x_f32 == nullptr || bias == nullptr ||
+      inout == nullptr)
+    return false;
+  if (tokens < 1 || tokens > 8 || k == 0 || k % 32 != 0 || rows == 0)
+    return false;
+  if (scratch == nullptr || scratch_bytes < NarrowQ80PrequantBytes(tokens, k))
+    return false;
+  if (tokens == 1 && rows <= 64 && k % 5120 == 0) return false;
+  if (rows == 320 && k == 10240) return false;
+  if (PrequantizeQ8_1(x_f32, scratch, tokens, k, stream) != 0) return false;
+  const auto* q8_input = static_cast<const nq::block_q8_1*>(scratch);
+  const auto ncols = static_cast<std::uint32_t>(k);
+  const auto nrows = static_cast<std::uint32_t>(rows);
+  const auto stride =
+      static_cast<std::uint32_t>(NarrowQ80PrequantStrideBlocks(k));
+  const auto grid = static_cast<unsigned>(rows);
+  switch (tokens) {
+#define NARROW_Q8_ROWADD_LAUNCH(N)                                           \
+  case N:                                                                    \
+    nq::mul_mat_vec_q8_rowadd<N, false>                                       \
+        <<<grid, 32, 0, stream>>>(weights, q8_input, bias, inout, ncols,      \
+                                  nrows, stride);                            \
+    break
+    NARROW_Q8_ROWADD_LAUNCH(1);
+#undef NARROW_Q8_ROWADD_LAUNCH
+#define NARROW_Q8_ROWADD_LAUNCH_SCATTER(N)                                   \
+  case N:                                                                    \
+    nq::mul_mat_vec_q8_rowadd<N, true>                                        \
+        <<<grid, 32, 0, stream>>>(weights, q8_input, bias, inout, ncols,      \
+                                  nrows, stride);                            \
+    break
+    NARROW_Q8_ROWADD_LAUNCH_SCATTER(2);
+    NARROW_Q8_ROWADD_LAUNCH_SCATTER(3);
+    NARROW_Q8_ROWADD_LAUNCH_SCATTER(4);
+    NARROW_Q8_ROWADD_LAUNCH_SCATTER(5);
+    NARROW_Q8_ROWADD_LAUNCH_SCATTER(6);
+    NARROW_Q8_ROWADD_LAUNCH_SCATTER(7);
+    NARROW_Q8_ROWADD_LAUNCH_SCATTER(8);
+#undef NARROW_Q8_ROWADD_LAUNCH_SCATTER
+    default:
+      return false;
+  }
+  return true;
+}
+
 }  // namespace gufo::core::compute::gemm
 
 #undef QK8_0

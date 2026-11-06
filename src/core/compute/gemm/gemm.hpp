@@ -119,6 +119,26 @@ bool LaunchNarrowQ80Prequant(const void* weights, const float* x_f32,
                              float* output, std::size_t k, std::size_t rows,
                              std::size_t tokens, void* scratch,
                              std::size_t scratch_bytes, hipStream_t stream);
+// ---- Fused QKV narrow decode (Q8_0 x prequantized-Q8_1, ungated) ----
+// Same per-row arithmetic as the narrow decode kernel; the three projections
+// share one activation row, so one launch covers qrows + kvrows + kvrows
+// rows. Returns false out of contract (caller keeps three narrow launches).
+bool LaunchNarrowQ80QkvDecode(const void* wq, const void* wk, const void* wv,
+                             const void* input, float* out_q, float* out_k,
+                             float* out_v, std::size_t k, std::size_t qrows,
+                             std::size_t kvrows, std::size_t tokens,
+                             std::size_t input_stride_blocks,
+                             hipStream_t stream);
+// ---- Narrow decode with fused row-bias + residual add (Q8_0, ungated) ----
+// Bitwise-identical epilogue to AddRowBias + ResidualAdd after the plain
+// narrow kernel (inout[t*M+row] += dot + bias[row]). One launch replaces
+// three. Returns false out of contract (caller keeps its sequence).
+bool LaunchNarrowQ80PrequantRowAdd(const void* weights, const float* x_f32,
+                                   const float* bias, float* inout,
+                                   std::size_t k, std::size_t rows,
+                                   std::size_t tokens, void* scratch,
+                                   std::size_t scratch_bytes,
+                                   hipStream_t stream);
 
 // ---- flash-next decode SmallGemm (F32/F16/BF16 narrow projections) ----
 namespace fn_compat {
@@ -158,6 +178,24 @@ void GemvQSlotMxfp4(const void* down_dev, std::uint64_t row_bytes,
                     const std::int32_t* ids, float* out, std::uint32_t slots,
                     std::uint32_t hidden, std::uint32_t ff,
                     hipStream_t stream);
+// ---- Fused MoE decode (native MXFP4, small-slot specialization) ----
+// Gate+up GEMV + SwiGLU-OAI biases/activation in one launch; down GEMV +
+// down bias + router-weighted overwrite epilogue in a second launch.
+// Model-agnostic (MXFP4 slabs, SwiGLU-OAI scalar math). Return false out of
+// contract; the caller keeps its routed/vec path.
+bool MoeDecodeGateUpActMxfp4(const void* gate_up_dev, std::uint64_t row_bytes,
+                             std::uint64_t expert_stride_bytes, const float* x,
+                             const std::int32_t* ids, const float* gate_b,
+                             const float* up_b, float* act, std::uint32_t slots,
+                             std::uint32_t used, std::uint32_t ff,
+                             std::uint32_t hidden, hipStream_t stream);
+bool MoeDecodeDownEpiMxfp4(const void* down_dev, std::uint64_t row_bytes,
+                           std::uint64_t expert_stride_bytes, const float* act,
+                           const std::int32_t* ids, const float* wts,
+                           const float* down_b, float* out,
+                           std::uint32_t n_tokens, std::uint32_t used,
+                           std::uint32_t hidden, std::uint32_t ff,
+                           hipStream_t stream);
 void GemvQSlot(const void* down_dev, std::uint64_t row_bytes,
                std::uint64_t expert_stride_bytes, const float* act,
                const std::int32_t* ids, float* out, std::uint32_t slots,
