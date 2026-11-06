@@ -10,15 +10,12 @@
 namespace gufo::models::bge_m3 {
 namespace {
 
-void UpcastInto(const BgeM3TensorRef& ref, std::vector<float>& out) {
-  out.resize(ref.num_elements);
-  if (const auto span = ref.AsFloatSpan(); !span.empty()) {
-    std::copy(span.begin(), span.end(), out.begin());
-    return;
-  }
-  for (std::size_t i = 0; i < ref.num_elements; ++i) {
-    out[i] = ref.GetFloat(i);
-  }
+void UpcastInto(const BgeM3TensorRef& ref, std::vector<float>& out,
+                std::size_t row_elems) {
+  // Geometry was validated at load; failure here is unreachable. A refused
+  // upcast yields an empty vector, which fails loudly at the first shape
+  // check downstream (never silent wrong math).
+  (void)UpcastTensorToF32(ref, out, row_elems, nullptr);
 }
 
 // out[t, m] = bias[m] + sum_k x[t, k] * w[m, k]; w row-major [m, k].
@@ -45,32 +42,33 @@ BgeM3F32Weights UpcastAll(const BgeM3Weights& weights) {
   BgeM3F32Weights out;
   out.config = weights.config;
   const std::size_t hidden = weights.config.hidden_size;
-  UpcastInto(weights.token_embd, out.token_embd);
-  UpcastInto(weights.position_embd, out.position_embd);
+  const std::size_t inter = weights.config.intermediate_size;
+  UpcastInto(weights.token_embd, out.token_embd, hidden);
+  UpcastInto(weights.position_embd, out.position_embd, hidden);
   out.position_rows = hidden == 0 ? 0 : out.position_embd.size() / hidden;
-  UpcastInto(weights.token_types, out.token_types);
-  UpcastInto(weights.token_embd_norm_weight, out.emb_norm_w);
-  UpcastInto(weights.token_embd_norm_bias, out.emb_norm_b);
+  UpcastInto(weights.token_types, out.token_types, hidden);
+  UpcastInto(weights.token_embd_norm_weight, out.emb_norm_w, hidden);
+  UpcastInto(weights.token_embd_norm_bias, out.emb_norm_b, hidden);
   out.layers.resize(weights.layers.size());
   for (std::size_t i = 0; i < weights.layers.size(); ++i) {
     const auto& src = weights.layers[i];
     auto& dst = out.layers[i];
-    UpcastInto(src.attn_q_weight, dst.q_w);
-    UpcastInto(src.attn_q_bias, dst.q_b);
-    UpcastInto(src.attn_k_weight, dst.k_w);
-    UpcastInto(src.attn_k_bias, dst.k_b);
-    UpcastInto(src.attn_v_weight, dst.v_w);
-    UpcastInto(src.attn_v_bias, dst.v_b);
-    UpcastInto(src.attn_output_weight, dst.out_w);
-    UpcastInto(src.attn_output_bias, dst.out_b);
-    UpcastInto(src.attn_output_norm_weight, dst.attn_norm_w);
-    UpcastInto(src.attn_output_norm_bias, dst.attn_norm_b);
-    UpcastInto(src.ffn_up_weight, dst.up_w);
-    UpcastInto(src.ffn_up_bias, dst.up_b);
-    UpcastInto(src.ffn_down_weight, dst.down_w);
-    UpcastInto(src.ffn_down_bias, dst.down_b);
-    UpcastInto(src.layer_output_norm_weight, dst.out_norm_w);
-    UpcastInto(src.layer_output_norm_bias, dst.out_norm_b);
+    UpcastInto(src.attn_q_weight, dst.q_w, hidden);
+    UpcastInto(src.attn_q_bias, dst.q_b, hidden);
+    UpcastInto(src.attn_k_weight, dst.k_w, hidden);
+    UpcastInto(src.attn_k_bias, dst.k_b, hidden);
+    UpcastInto(src.attn_v_weight, dst.v_w, hidden);
+    UpcastInto(src.attn_v_bias, dst.v_b, hidden);
+    UpcastInto(src.attn_output_weight, dst.out_w, hidden);
+    UpcastInto(src.attn_output_bias, dst.out_b, hidden);
+    UpcastInto(src.attn_output_norm_weight, dst.attn_norm_w, hidden);
+    UpcastInto(src.attn_output_norm_bias, dst.attn_norm_b, hidden);
+    UpcastInto(src.ffn_up_weight, dst.up_w, hidden);
+    UpcastInto(src.ffn_up_bias, dst.up_b, inter);
+    UpcastInto(src.ffn_down_weight, dst.down_w, inter);
+    UpcastInto(src.ffn_down_bias, dst.down_b, hidden);
+    UpcastInto(src.layer_output_norm_weight, dst.out_norm_w, hidden);
+    UpcastInto(src.layer_output_norm_bias, dst.out_norm_b, hidden);
   }
   return out;
 }

@@ -13,8 +13,17 @@ namespace {
          type == core::GgmlType::kBF16;
 }
 
+// Q4 leg: the classifier matrices accept the shared prefill quant set
+// (Q4_K_M stores cls.weight Q4_K); 1D biases stay dense (always F32).
+[[nodiscard]] bool IsHeadWeightType(core::GgmlType type) noexcept {
+  return IsStorageType(type) || type == core::GgmlType::kQ4_K ||
+         type == core::GgmlType::kQ5_K || type == core::GgmlType::kQ6_K ||
+         type == core::GgmlType::kQ8_0;
+}
+
 [[nodiscard]] bool UpcastToF32(const bge_m3::BgeM3TensorRef& tensor,
-                               std::vector<float>& out, std::string_view name,
+                               std::vector<float>& out, std::size_t row_elems,
+                               std::string_view name, bool allow_quant,
                                std::string* error_msg) {
   if (tensor.empty()) {
     if (error_msg != nullptr) {
@@ -22,18 +31,16 @@ namespace {
     }
     return false;
   }
-  if (!IsStorageType(tensor.type)) {
+  const bool ok_type =
+      allow_quant ? IsHeadWeightType(tensor.type) : IsStorageType(tensor.type);
+  if (!ok_type) {
     if (error_msg != nullptr) {
       *error_msg = "Unsupported bge-reranker tensor type for " +
-                   std::string(name) + ": F32/F16/BF16 only";
+                   std::string(name);
     }
     return false;
   }
-  out.resize(tensor.num_elements);
-  for (std::size_t i = 0; i < tensor.num_elements; ++i) {
-    out[i] = tensor.GetFloat(i);
-  }
-  return true;
+  return bge_m3::UpcastTensorToF32(tensor, out, row_elems, error_msg);
 }
 
 bge_m3::BgeM3TensorRef ExtractTensorRef(const core::GgufReader& reader,
@@ -86,9 +93,12 @@ std::optional<BgeRerankerHeadF32> LoadRerankHead(const core::GgufReader& reader,
   }
   BgeRerankerHeadF32 head;
   head.hidden_size = hidden_size;
-  if (!UpcastToF32(dense_w, head.dense_w, "cls.weight", error_msg) ||
-      !UpcastToF32(dense_b, head.dense_b, "cls.bias", error_msg) ||
-      !UpcastToF32(out_w, head.out_w, "cls.output.weight", error_msg)) {
+  if (!UpcastToF32(dense_w, head.dense_w, hidden, "cls.weight", true,
+                   error_msg) ||
+      !UpcastToF32(dense_b, head.dense_b, dense_b.num_elements, "cls.bias",
+                   false, error_msg) ||
+      !UpcastToF32(out_w, head.out_w, hidden, "cls.output.weight", true,
+                   error_msg)) {
     return std::nullopt;
   }
   if (!IsStorageType(out_b.type)) {

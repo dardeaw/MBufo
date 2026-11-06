@@ -12,9 +12,10 @@
 //   blk.N.ffn_down.{weight F16 [inter, hidden], bias F32} (output)
 //   blk.N.layer_output_norm.{weight,bias} F32 (post-FFN LayerNorm)
 //
-// Precision-first leg-1 policy: only F32/F16/BF16 storage is accepted.
-// Quantized tensors are refused explicitly (no silent dequant); quantization
-// is a later leg, not this one. There is no pooler (unused for CLS pooling),
+// Storage policy: dense F32/F16/BF16 everywhere; the six projection tables
+// plus token_embd additionally accept the shared prefill quant set
+// (Q4_K/Q5_K/Q6_K/Q8_0, Q4 leg). Anything else refuses explicitly (no silent
+// dequant). There is no pooler (unused for CLS pooling),
 // no lm_head (encoder-only, never decodes), no KV (no decode at all).
 #ifndef GUFO_MODELS_BGE_M3_WEIGHTS_HPP_
 #define GUFO_MODELS_BGE_M3_WEIGHTS_HPP_
@@ -37,6 +38,8 @@ struct BgeM3TensorRef {
   const void* data = nullptr;
   core::GgmlType type = core::GgmlType::kF32;
   std::size_t num_elements = 0;
+  // Raw GGUF byte size (K-quant device uploads use this, not num_elements).
+  std::size_t size_bytes = 0;
 
   [[nodiscard]] bool empty() const noexcept {
     return data == nullptr || num_elements == 0;
@@ -102,6 +105,17 @@ struct BgeM3Weights {
       const core::GgufReader& reader, std::string* error_msg = nullptr,
       BgeM3ConfigOptions options = {});
 };
+
+/// Quant-aware bulk upcast of one tensor to F32 (load-time only).
+/// F32 copies; F16/BF16 upcast exactly; K-quants (Q4_K/Q5_K/Q6_K/Q8_0)
+/// dequantize row by row with K width `row_elems` (num_elements must be a
+/// multiple of row_elems, row_elems a multiple of the quant block).
+/// Anything else refuses. LoadFromGguf validates geometry first, so UpcastAll
+/// treats failure as unreachable (empty vector, fails loudly downstream).
+[[nodiscard]] bool UpcastTensorToF32(const BgeM3TensorRef& ref,
+                                     std::vector<float>& out,
+                                     std::size_t row_elems,
+                                     std::string* error_msg = nullptr);
 
 }  // namespace gufo::models::bge_m3
 
