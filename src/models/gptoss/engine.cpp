@@ -1,26 +1,32 @@
 // GPT-OSS runtime: GGUF load, chunked prefill, single-token decode, greedy
 // sampling. Dense GEMM rides the shared core (narrow-prequant decode,
-// DenseF16Gemm prefill); the MoE rides the shared vec path (MoeVecGateUp /
-// GemvQSlot / MoeSlotEpilogueOverwrite over merged Q4_0 expert slabs) with a
-// model-local SwiGLU-OAI activation; attention is a model-local dense F16
-// kernel (per-head sinks + sliding window) over f16 KV or over shared
-// blocked-Q8 KV dequantized with blocked_kv::DequantizeKvRows.
+// DenseF16Gemm prefill); prefill MoE rides the shared compact routed GEMM
+// (RoutedCompact/RoutedF16Gemm over native MXFP4 slabs, model-local
+// SwiGLU-OAI split) while decode keeps the shared vec path (MoeVecGateUp /
+// GemvQSlot / MoeSlotEpilogueOverwrite) with a model-local SwiGLU-OAI
+// activation; attention is a model-local dense F16 kernel (per-head sinks +
+// sliding window) over f16 KV or over shared blocked-Q8 KV dequantized with
+// blocked_kv::DequantizeKvRows.
 #include "src/models/gptoss/engine.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/blocked_kv.hpp"
+#include "src/core/compute/attention/flash_blas.hpp"
+#include "src/core/compute/attention/flash_sink.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/gptoss/kernels/kernels.hpp"
 
 namespace gufo::models::gptoss {
 namespace {
 
-constexpr std::uint32_t kMaxChunk = 128;
+constexpr std::uint32_t kMaxChunk = 256;
 
 bool Check(hipError_t err, std::string* error_msg, const char* what) {
   if (err == hipSuccess)
@@ -31,7 +37,11 @@ bool Check(hipError_t err, std::string* error_msg, const char* what) {
 }
 
 // Mirrors one weight tensor to device; converted tensors stay packed (the
-// shared launchers dequantize on the fly).
+// shared launchers dequantize on the fly). The H2D copy is chunked to
+// <=256MB per hipMemcpy so one multi-GB tensor (e.g. merged 128-expert MoE
+// slabs in 120B) never pins a giant range inside
+// svm_range_cpu_invalidate_pagetables (a single 59GB H2D wedged the box in
+// D-state). Sync-copy semantics unchanged: same bytes, same order.
 bool MirrorTensor(TensorRef& t, std::vector<void*>& owned,
                   std::string* error_msg) {
   if (t.empty())
@@ -39,10 +49,16 @@ bool MirrorTensor(TensorRef& t, std::vector<void*>& owned,
   void* dev = nullptr;
   if (!Check(hipMalloc(&dev, t.size_bytes), error_msg, "weight mirror alloc"))
     return false;
-  if (!Check(hipMemcpy(dev, t.data, t.size_bytes, hipMemcpyHostToDevice),
-             error_msg, "weight mirror copy")) {
-    (void)hipFree(dev);
-    return false;
+  constexpr std::size_t kMirrorChunkBytes = 256u * 1024u * 1024u;
+  const auto* src = static_cast<const char*>(t.data);
+  auto* dst = static_cast<char*>(dev);
+  for (std::size_t off = 0; off < t.size_bytes; off += kMirrorChunkBytes) {
+    const std::size_t n = std::min(kMirrorChunkBytes, t.size_bytes - off);
+    if (!Check(hipMemcpy(dst + off, src + off, n, hipMemcpyHostToDevice),
+               error_msg, "weight mirror copy")) {
+      (void)hipFree(dev);
+      return false;
+    }
   }
   t.device = dev;
   owned.push_back(dev);
@@ -180,8 +196,27 @@ struct Session::Impl {
   float* moe_up{nullptr};
   float* moe_act{nullptr};
   float* moe_down{nullptr};
+  // Compact routed-MoE prefill scratch (shared RoutedCompact/F16Gemm over
+  // native MXFP4 slabs). Sized by RoutedCompactRows(chunk*used, experts).
+  std::uint32_t* routed_counts{nullptr};
+  std::int32_t* routed_bounds{nullptr};
+  std::int32_t* routed_cursors{nullptr};
+  std::int32_t* routed_rows_token{nullptr};
+  std::int32_t* routed_rows_slot{nullptr};
+  std::int32_t* routed_rows_expert{nullptr};
+  std::int32_t* routed_tiles{nullptr};
+  std::int32_t* routed_identity{nullptr};
+  float* routed_gateup{nullptr};
+  __half* routed_act{nullptr};
+  std::vector<std::int32_t> routed_bounds_host;
+  std::vector<std::int32_t> routed_tiles_host;
+  std::vector<std::int32_t> routed_expert_host;
   float* ffn_out{nullptr};
   float* logits{nullptr};
+  float* flash_partials{nullptr};
+  std::size_t flash_partials_bytes{0};
+  void* flash_blas_scratch{nullptr};
+  std::size_t flash_blas_bytes{0};
   __half* x16{nullptr};
   std::int32_t* d_tokens{nullptr};
   std::uint32_t* d_pos{nullptr};
@@ -218,8 +253,47 @@ struct Session::Impl {
     moe_up = buffers.Alloc<float>(slots * ff, error);
     moe_act = buffers.Alloc<float>(slots * ff, error);
     moe_down = buffers.Alloc<float>(slots * hidden_dim, error);
+    const std::size_t compact_cap =
+        gemm::RoutedCompactRows(slots, w.config.num_experts);
+    routed_counts = buffers.Alloc<std::uint32_t>(w.config.num_experts, error);
+    routed_bounds =
+        buffers.Alloc<std::int32_t>(w.config.num_experts + 1, error);
+    routed_cursors =
+        buffers.Alloc<std::int32_t>(w.config.num_experts, error);
+    routed_rows_token = buffers.Alloc<std::int32_t>(compact_cap, error);
+    routed_rows_slot = buffers.Alloc<std::int32_t>(compact_cap, error);
+    routed_rows_expert = buffers.Alloc<std::int32_t>(compact_cap, error);
+    routed_tiles = buffers.Alloc<std::int32_t>(compact_cap, error);
+    routed_identity = buffers.Alloc<std::int32_t>(compact_cap, error);
+    routed_gateup = buffers.Alloc<float>(compact_cap * 2 * ff, error);
+    routed_act = buffers.Alloc<__half>(compact_cap * ff, error);
+    routed_bounds_host.assign(w.config.num_experts + 1, 0);
+    routed_tiles_host.reserve(compact_cap);
+    routed_expert_host.assign(compact_cap, -1);
+    {
+      // Identity rows for the compact down-GEMM gather (one per session).
+      std::vector<std::int32_t> ident(compact_cap);
+      for (std::size_t i = 0; i < compact_cap; ++i)
+        ident[i] = static_cast<std::int32_t>(i);
+      if (hipMemcpy(routed_identity, ident.data(),
+                    compact_cap * sizeof(std::int32_t),
+                    hipMemcpyHostToDevice) != hipSuccess) {
+        if (error != nullptr && error->empty())
+          *error = "gptoss routed identity upload failed";
+        return false;
+      }
+    }
     ffn_out = buffers.Alloc<float>(chunk * hidden_dim, error);
     logits = buffers.Alloc<float>(w.config.vocab_size, error);
+    flash_partials_bytes =
+        core::compute::flash_sink::FlashSinkDecodeScratchBytes(
+            core::compute::flash_sink::kFlashSinkMaxTokens,
+            w.config.num_heads);
+    flash_partials =
+        buffers.Alloc<float>(flash_partials_bytes / sizeof(float), error);
+    flash_blas_bytes =
+        core::compute::flash_blas::FlashBlasScratchBytes(chunk);
+    flash_blas_scratch = buffers.Alloc<std::uint8_t>(flash_blas_bytes, error);
     const std::uint32_t max_k =
         hidden_dim > qdim ? hidden_dim : qdim;
     x16 = buffers.Alloc<__half>(chunk * max_k, error);
@@ -236,16 +310,25 @@ struct Session::Impl {
            router_logits != nullptr && expert_ids != nullptr &&
            expert_weights != nullptr && moe_gate != nullptr &&
            moe_up != nullptr && moe_act != nullptr && moe_down != nullptr &&
-           ffn_out != nullptr && logits != nullptr && x16 != nullptr &&
-           d_tokens != nullptr && d_pos != nullptr &&
-           preq_scratch != nullptr && argmax_scratch != nullptr &&
-           argmax_out != nullptr;
+           routed_counts != nullptr && routed_bounds != nullptr &&
+           routed_cursors != nullptr && routed_rows_token != nullptr &&
+           routed_rows_slot != nullptr && routed_rows_expert != nullptr &&
+           routed_tiles != nullptr && routed_identity != nullptr &&
+           routed_gateup != nullptr && routed_act != nullptr &&
+           ffn_out != nullptr && flash_partials != nullptr &&
+           flash_blas_scratch != nullptr && logits != nullptr &&
+           x16 != nullptr && d_tokens != nullptr && d_pos != nullptr && preq_scratch != nullptr &&
+           argmax_scratch != nullptr && argmax_out != nullptr;
   }
 };
 
 Model::~Model() {
   for (void* p : device_allocations_) {
     (void)hipFree(p);
+  }
+  if (blas_handle_ != nullptr) {
+    (void)hipblasDestroy(blas_handle_);
+    blas_handle_ = nullptr;
   }
 }
 
@@ -295,6 +378,11 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   model_owner->tokenizer_ = std::move(tokenizer);
+  // rocBLAS handle for batched-GEMM attention (best effort; null disables).
+  hipblasHandle_t blas_handle = nullptr;
+  if (hipblasCreate(&blas_handle) == HIPBLAS_STATUS_SUCCESS) {
+    model_owner->blas_handle_ = blas_handle;
+  }
   return model_owner;
 }
 
@@ -504,11 +592,45 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                         start_pos, stream);
     kernels::StoreKvF16(impl.vbuf, impl.buffers.kv_v[il], n, kvdim,
                         start_pos, stream);
-    kernels::AttentionF16Sink(
-        impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
-        static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
-        start_pos, c.num_heads, c.num_kv_heads, d, window, stream,
-        score_scale);
+    // F16 KV: shared flash-sink (tiled prefill / split-K decode) when the
+    // d == 64 contract holds; GPTOSS_NO_FLASH forces the local kernel.
+    // kv_len is start_pos + n (caches hold exactly the valid prefix).
+    namespace flash = core::compute::flash_sink;
+    namespace blas = core::compute::flash_blas;
+    bool flashed = false;
+    if (d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr) {
+      if (n == 1) {
+        flashed = flash::FlashSinkDecode(
+            impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+            static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
+            start_pos, start_pos + n, c.num_heads, c.num_kv_heads, d, window,
+            score_scale, stream, impl.flash_partials,
+            impl.flash_partials_bytes);
+      } else if (s.model_->blas_handle_ != nullptr &&
+                 getenv("GPTOSS_NO_BLAS") == nullptr) {
+        flashed = blas::FlashBlasPrefill(
+            impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+            static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
+            start_pos, start_pos + n, c.num_heads, c.num_kv_heads, d, window,
+            score_scale, stream, s.model_->blas_handle_,
+            impl.flash_blas_scratch, impl.flash_blas_bytes);
+      }
+      if (!flashed && n > 1) {
+        // Fallback: naive single-query kernel (proven bitwise vs legacy).
+        flashed = flash::FlashSinkPrefill(
+            impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+            static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
+            start_pos, start_pos + n, c.num_heads, c.num_kv_heads, d, window,
+            score_scale, stream);
+      }
+    }
+    if (!flashed) {
+      kernels::AttentionF16Sink(
+          impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+          static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
+          start_pos, c.num_heads, c.num_kv_heads, d, window, stream,
+          score_scale);
+    }
   }
   GptossGemm(l.wo, impl.attn_out, impl.x16, impl.ffn_out, n, hidden, qdim,
              stream, impl.preq_scratch, impl.preq_bytes);
@@ -547,15 +669,104 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
       static_cast<std::uint64_t>(2) * ff * l.gate_up_exps.RowBytes();
   const std::uint64_t dn_stride =
       static_cast<std::uint64_t>(hidden) * l.down_exps.RowBytes();
-  gemm::MoeVecGateUpMxfp4(gu_dev, l.gate_up_exps.RowBytes(), gu_stride,
-                     impl.normed, impl.expert_ids, impl.moe_gate, impl.moe_up,
-                     slots, used, ff, hidden, stream);
-  kernels::SwigluOaiBias(impl.moe_gate, impl.moe_up, impl.expert_ids,
-                         static_cast<const float*>(l.gate_b.device),
-                         static_cast<const float*>(l.up_b.device),
-                         impl.moe_act, slots, ff, stream);
-  gemm::GemvQSlotMxfp4(dn_dev, l.down_exps.RowBytes(), dn_stride, impl.moe_act,
-                  impl.expert_ids, impl.moe_down, slots, hidden, ff, stream);
+  // Prefill AND decode MoE ride the shared compact routed GEMM over the
+  // native MXFP4 slabs (one grouped GEMM per projection instead of one
+  // GEMV per slot); any contract rejection falls back to the vec path.
+  // GPTOSS_NO_ROUTED forces the vec path for A/B comparisons.
+  std::uint32_t tile_rows = 64;
+  if (const char* tr_env = getenv("GPTOSS_MOE_TILE")) {
+    const unsigned long v = std::strtoul(tr_env, nullptr, 10);
+    if (v == 16ul || v == 48ul || v == 64ul)
+      tile_rows = static_cast<std::uint32_t>(v);
+  }
+  bool routed = getenv("GPTOSS_NO_ROUTED") == nullptr &&
+                impl.routed_gateup != nullptr && gu_dev != nullptr &&
+                dn_dev != nullptr;
+  if (routed) {
+    // F16 staging reuses x16 (chunk x max_k, max_k >= hidden); the dense
+    // projections above are done with it.
+    kernels::F32ToF16(impl.normed, impl.x16,
+                      static_cast<std::size_t>(n) * hidden, stream);
+    gemm::ExpertCounts(impl.expert_ids, impl.routed_counts, n, nex, used,
+                       stream);
+    gemm::RoutedCompact(impl.expert_ids, impl.routed_counts,
+                        impl.routed_bounds, impl.routed_cursors,
+                        impl.routed_rows_token, impl.routed_rows_slot, n, used,
+                        nex, stream);
+    // One (expert | tile<<16) entry per bucket tile (host loop over the
+      // compact bounds, same contract as the gemma4 Q4-direct path).
+      if (hipMemcpy(impl.routed_bounds_host.data(), impl.routed_bounds,
+                  static_cast<std::size_t>(nex + 1) * sizeof(std::int32_t),
+                  hipMemcpyDeviceToHost) != hipSuccess) {
+        routed = false;
+      } else {
+        auto& tiles_host = impl.routed_tiles_host;
+        tiles_host.clear();
+        auto& expert_host = impl.routed_expert_host;
+        for (std::uint32_t e = 0; e < nex; ++e) {
+          const std::uint32_t row_begin = static_cast<std::uint32_t>(
+              impl.routed_bounds_host[e]);
+          const std::uint32_t rows_e = static_cast<std::uint32_t>(
+              impl.routed_bounds_host[e + 1]) - row_begin;
+          const std::uint32_t n_e_tiles =
+              (rows_e + tile_rows - 1) / tile_rows;
+          for (std::uint32_t j = 0; j < n_e_tiles; ++j)
+            tiles_host.push_back(static_cast<std::int32_t>(e | (j << 16)));
+          for (std::uint32_t r = 0; r < rows_e; ++r)
+            expert_host[row_begin + r] = static_cast<std::int32_t>(e);
+        }
+      const std::uint32_t n_tiles =
+          static_cast<std::uint32_t>(tiles_host.size());
+      const std::uint32_t q4_rows =
+          static_cast<std::uint32_t>(impl.routed_bounds_host[nex]);
+      if (n_tiles == 0 || q4_rows == 0) {
+        routed = false;
+      } else if (hipMemcpyAsync(impl.routed_tiles, tiles_host.data(),
+                                static_cast<std::size_t>(n_tiles) *
+                                    sizeof(std::int32_t),
+                                hipMemcpyHostToDevice,
+                                stream) != hipSuccess ||
+                 hipMemcpyAsync(impl.routed_rows_expert,
+                                expert_host.data(),
+                                static_cast<std::size_t>(q4_rows) *
+                                    sizeof(std::int32_t),
+                                hipMemcpyHostToDevice,
+                                stream) != hipSuccess) {
+        routed = false;
+      } else {
+        routed = gemm::RoutedF16Gemm(
+            gu_dev, gemm::WeightType::kMXFP4, impl.x16, impl.routed_tiles,
+            n_tiles, tile_rows, impl.routed_bounds, impl.routed_rows_token,
+            impl.routed_identity, nullptr, impl.routed_gateup, nullptr,
+            static_cast<std::size_t>(2) * ff, hidden, stream);
+          if (routed) {
+            kernels::MoeCompactSplitBiasAct(
+                impl.routed_gateup, impl.routed_rows_token,
+                impl.routed_rows_expert,
+                static_cast<const float*>(l.gate_b.device),
+                static_cast<const float*>(l.up_b.device), impl.routed_act,
+                q4_rows, ff, stream);
+            routed = gemm::RoutedF16Gemm(
+                dn_dev, gemm::WeightType::kMXFP4, impl.routed_act,
+                impl.routed_tiles, n_tiles, tile_rows, impl.routed_bounds,
+                impl.routed_identity, impl.routed_rows_slot, nullptr,
+                impl.moe_down, nullptr, hidden, ff, stream);
+          }
+      }
+    }
+  }
+  if (!routed) {
+    gemm::MoeVecGateUpMxfp4(gu_dev, l.gate_up_exps.RowBytes(), gu_stride,
+                       impl.normed, impl.expert_ids, impl.moe_gate,
+                       impl.moe_up, slots, used, ff, hidden, stream);
+    kernels::SwigluOaiBias(impl.moe_gate, impl.moe_up, impl.expert_ids,
+                           static_cast<const float*>(l.gate_b.device),
+                           static_cast<const float*>(l.up_b.device),
+                           impl.moe_act, slots, ff, stream);
+    gemm::GemvQSlotMxfp4(dn_dev, l.down_exps.RowBytes(), dn_stride,
+                    impl.moe_act, impl.expert_ids, impl.moe_down, slots,
+                    hidden, ff, stream);
+  }
   kernels::DownBiasAdd(impl.moe_down, impl.expert_ids,
                        static_cast<const float*>(l.down_b.device), slots,
                        hidden, stream);
@@ -591,7 +802,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   const std::uint32_t n = static_cast<std::uint32_t>(tokens.size());
   if (n == 0 || n > kMaxChunk) {
     if (error_msg != nullptr)
-      *error_msg = "gptoss Forward needs 1..128 tokens";
+      *error_msg = "gptoss Forward needs 1..256 tokens";
     return false;
   }
   if (start_pos + n > model_->options_.max_context) {

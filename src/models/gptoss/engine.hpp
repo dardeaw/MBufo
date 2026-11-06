@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <hip/hip_runtime.h>
+#include <hipblas/hipblas.h>
 
 #include "src/core/gguf_reader.hpp"
 #include "src/models/gptoss/weights.hpp"
@@ -73,6 +74,9 @@ class Model final : public std::enable_shared_from_this<Model> {
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
   // Engine-owned device mirrors of every weight tensor (freed in ~Model).
   std::vector<void*> device_allocations_;
+  // rocBLAS handle for batched-GEMM attention (null when unavailable).
+  // rocBLAS handle for batched-GEMM attention (null when unavailable).
+  hipblasHandle_t blas_handle_{nullptr};
 
   friend class Session;
 };

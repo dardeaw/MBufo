@@ -401,4 +401,48 @@ void DownBiasAdd(float* out, const std::int32_t* ids, const float* down_b,
                      dim3(bs), 0, stream, out, ids, down_b, slots, hidden);
 }
 
+__global__ void MoeCompactSplitBiasActKernel(
+    const float* __restrict__ gateup, const std::int32_t* __restrict__ rows_token,
+    const std::int32_t* __restrict__ rows_expert,
+    const float* __restrict__ gate_b, const float* __restrict__ up_b,
+    __half* __restrict__ act, std::uint32_t rows, std::uint32_t ff) {
+  const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
+                        threadIdx.x;
+  const std::size_t count = static_cast<std::size_t>(rows) * ff;
+  if (i >= count)
+    return;
+  const std::uint32_t c = static_cast<std::uint32_t>(i / ff);
+  const std::uint32_t j = static_cast<std::uint32_t>(i % ff);
+  if (rows_token[c] < 0) {
+    act[i] = __float2half(0.0F);
+    return;
+  }
+  const std::int32_t e = rows_expert[c];
+  const std::size_t boff = static_cast<std::size_t>(e) * ff + j;
+  const float g = gateup[static_cast<std::size_t>(c) * 2 * ff + j] + gate_b[boff];
+  const float u =
+      gateup[static_cast<std::size_t>(c) * 2 * ff + ff + j] + up_b[boff];
+  // ggml_swiglu_oai, alpha=1.702, limit=7 (same as SwigluOaiBiasKernel).
+  const float x = g < 7.0F ? g : 7.0F;
+  const float y = u < -7.0F ? -7.0F : (u > 7.0F ? 7.0F : u);
+  const float gated = x / (1.0F + expf(-1.702F * x));
+  act[i] = __float2half(gated * (y + 1.0F));
+}
+
+void MoeCompactSplitBiasAct(const float* gateup,
+                            const std::int32_t* rows_token,
+                            const std::int32_t* rows_expert,
+                            const float* gate_b, const float* up_b,
+                            __half* act, std::uint32_t rows, std::uint32_t ff,
+                            hipStream_t stream) {
+  if (rows == 0 || ff == 0)
+    return;
+  const std::size_t count = static_cast<std::size_t>(rows) * ff;
+  const std::uint32_t bs = 256;
+  hipLaunchKernelGGL(MoeCompactSplitBiasActKernel,
+                     dim3(static_cast<std::uint32_t>((count + bs - 1) / bs)),
+                     dim3(bs), 0, stream, gateup, rows_token, rows_expert,
+                     gate_b, up_b, act, rows, ff);
+}
+
 }  // namespace gufo::models::gptoss::kernels

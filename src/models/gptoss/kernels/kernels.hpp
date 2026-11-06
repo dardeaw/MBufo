@@ -76,6 +76,17 @@ void SwigluOaiBias(const float* gate, const float* up,
                    const float* up_b, float* out, std::uint32_t slots,
                    std::uint32_t ff, hipStream_t stream);
 
+/// Compact SwiGLU-OAI split over routed rows: act[c][j] = oai(gu[c][j] +
+/// gate_b[e][j], gu[c][ff+j] + up_b[e][j]) with the same clamp/alpha as
+/// SwigluOaiBias, e = rows_expert[c] when rows_token[c] >= 0 (padding rows
+/// write zeros). gateup is [rows][2*ff] F32, act is [rows][ff] F16.
+void MoeCompactSplitBiasAct(const float* gateup,
+                            const std::int32_t* rows_token,
+                            const std::int32_t* rows_expert,
+                            const float* gate_b, const float* up_b,
+                            __half* act, std::uint32_t rows, std::uint32_t ff,
+                            hipStream_t stream);
+
 /// Expert down-projection bias add: out[s][i] += down_b[e][i], e = ids[s].
 /// down_b is [hidden][experts] row-major per expert.
 void DownBiasAdd(float* out, const std::int32_t* ids, const float* down_b,
