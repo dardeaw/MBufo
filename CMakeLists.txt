@@ -519,6 +519,11 @@ if (BUILD_TESTING)
   add_test(NAME pooling_norm_test COMMAND pooling_norm_test)
   set_tests_properties(pooling_norm_test PROPERTIES LABELS "cpu;core;embedding")
 
+  add_executable(rerank_score_test tests/core/rerank_score_test.cpp)
+  target_link_libraries(rerank_score_test PRIVATE gufo_core)
+  add_test(NAME rerank_score_test COMMAND rerank_score_test)
+  set_tests_properties(rerank_score_test PROPERTIES LABELS "cpu;core;rerank")
+
   add_executable(layernorm_gelu_test tests/core/layernorm_gelu_test.cpp)
   target_link_libraries(layernorm_gelu_test PRIVATE gufo_core)
   add_test(NAME layernorm_gelu_test COMMAND layernorm_gelu_test)
