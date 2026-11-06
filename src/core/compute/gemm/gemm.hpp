@@ -211,6 +211,7 @@ enum class WeightType : std::uint32_t {
   kQ5_K = 13,
   kBF16 = 30,
   kQ4_0_ROCMFP4_FAST = 101,
+  kMXFP4 = 102,
 };
 
 inline constexpr std::uint32_t kArgmaxParts = 64;

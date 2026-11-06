@@ -127,12 +127,16 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/blocked_wmma.hip.cpp
     src/core/compute/attention/blocked_splitk.hip.cpp
     src/core/compute/attention/mixed_batch_attn.hip.cpp
+    src/core/compute/attention/flash_sink.hip.cpp
+    src/core/compute/attention/flash_blas.hip.cpp
     src/core/compute/attention/attention_dispatcher.hpp)
   set_source_files_properties(
     src/core/compute/attention/blocked_kv.hip.cpp
     src/core/compute/attention/blocked_wmma.hip.cpp
     src/core/compute/attention/blocked_splitk.hip.cpp
-    src/core/compute/attention/mixed_batch_attn.hip.cpp PROPERTIES LANGUAGE HIP)
+    src/core/compute/attention/mixed_batch_attn.hip.cpp
+    src/core/compute/attention/flash_sink.hip.cpp
+    src/core/compute/attention/flash_blas.hip.cpp PROPERTIES LANGUAGE HIP)
   set_target_properties(gufo_core_blocked_kv PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
@@ -145,7 +149,7 @@ if (ENGINE_ENABLE_HIP)
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
-  target_link_libraries(gufo_core_blocked_kv PUBLIC hip::host)
+  target_link_libraries(gufo_core_blocked_kv PUBLIC hip::host roc::hipblas)
 endif()
 
 if (ENGINE_ENABLE_HIP)
