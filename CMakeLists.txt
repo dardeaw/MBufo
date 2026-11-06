@@ -128,13 +128,16 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/blocked_splitk.hip.cpp
     src/core/compute/attention/mixed_batch_attn.hip.cpp
     src/core/compute/attention/fused_fa_gqa128.hip.cpp
-    src/core/compute/attention/attention_dispatcher.hpp)
+    src/core/compute/attention/flash_f16_dense.hip.cpp
+    src/core/compute/attention/attention_dispatcher.hpp
+    src/core/compute/attention/flash_f16_dense.hpp)
   set_source_files_properties(
     src/core/compute/attention/blocked_kv.hip.cpp
     src/core/compute/attention/blocked_wmma.hip.cpp
     src/core/compute/attention/blocked_splitk.hip.cpp
     src/core/compute/attention/mixed_batch_attn.hip.cpp
-    src/core/compute/attention/fused_fa_gqa128.hip.cpp PROPERTIES LANGUAGE HIP)
+    src/core/compute/attention/fused_fa_gqa128.hip.cpp
+    src/core/compute/attention/flash_f16_dense.hip.cpp PROPERTIES LANGUAGE HIP)
   set_target_properties(gufo_core_blocked_kv PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
@@ -269,6 +272,7 @@ target_link_libraries(gufo_core PUBLIC ICU::uc ICU::i18n Threads::Threads
 add_subdirectory(src/models/qwen)
 add_subdirectory(src/models/qwen_image_21)
 add_subdirectory(src/models/gemma4)
+add_subdirectory(src/models/bge_m3)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
@@ -445,6 +449,7 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
   add_subdirectory(tests/models/gemma4)
+  add_subdirectory(tests/models/bge_m3)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
 
@@ -513,6 +518,11 @@ if (BUILD_TESTING)
   target_link_libraries(pooling_norm_test PRIVATE gufo_core)
   add_test(NAME pooling_norm_test COMMAND pooling_norm_test)
   set_tests_properties(pooling_norm_test PROPERTIES LABELS "cpu;core;embedding")
+
+  add_executable(layernorm_gelu_test tests/core/layernorm_gelu_test.cpp)
+  target_link_libraries(layernorm_gelu_test PRIVATE gufo_core)
+  add_test(NAME layernorm_gelu_test COMMAND layernorm_gelu_test)
+  set_tests_properties(layernorm_gelu_test PROPERTIES LABELS "cpu;core;embedding")
 
   add_executable(heap_placement_test tests/core/heap_placement_test.cpp)
   target_link_libraries(heap_placement_test PRIVATE gufo_core)
