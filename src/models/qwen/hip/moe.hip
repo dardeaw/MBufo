@@ -142,10 +142,28 @@ bool MoeForwardHip(const core::ModelConfig& config,
     AssignError(error_msg, "MoE down type misses the routed contract");
     return false;
   }
+  const bool gate_kquant = gate_type == gemm::WeightType::kQ4_K ||
+                           gate_type == gemm::WeightType::kQ5_K;
+  const bool down_supported = down_type == gemm::WeightType::kQ5_K ||
+                              down_type == gemm::WeightType::kQ8_0;
+  // Decode fast-path route, decided once per invocation (weight types and
+  // batch size are static within a capture). The router, the routed GEMMs
+  // and the epilogue all key off it; any launcher refusal falls back to
+  // the legacy launch for that stage only.
+  const bool route_kq =
+      gemm::DecideDecodeMoeRoute(gate_kquant, down_supported, n_tokens, top_k,
+                                 hidden, expert_ff) ==
+      gemm::DecodeMoeRoute::kDecodeKQuant;
 
   HIPBLAS_CHECK(hipblasSetStream(blas, stream));
 
   // 1. Router logits: [T x N] = X[T x H] * W^T, W = gate_inp [N x H].
+  // NOTE (q36): a skinny custom router GEMV (moe_decode_kq, ~10 us vs
+  // hipblas ~96 us) was tried here and reverted: it reached tg 50.4 but
+  // flipped one greedy token on the arithmetic short prompt (F32
+  // accumulation order differs from hipblas SGEMM, and a top-8 margin was
+  // tighter than the rounding delta). The hipblas SGEMM below stays as the
+  // bit-stable router; token equality beats the 3 ms saving.
   {
     const float alpha = 1.0F, beta = 0.0F;
     HIPBLAS_CHECK(hipblasSgemm(
@@ -163,6 +181,23 @@ bool MoeForwardHip(const core::ModelConfig& config,
                    static_cast<std::uint32_t>(num_experts),
                    static_cast<std::uint32_t>(top_k), stream);
 
+  // 2b. Decode fast path: fused per-slot K-quant x SwiGLU (moe_decode_kq).
+  // One block per live slot (fixed 64-slot grid with a slot>=live mask
+  // under capture, exact live-slot grid when eager), so this stays
+  // capture-compatible like the small-batch routed path. It skips
+  // compaction, tile maps, F16 narrowing and the gate/up intermediates
+  // entirely; only the slot-ordered down vectors are written for the
+  // combine below. The launcher revalidates its contract, so a false
+  // return (like a kLegacy route) falls through to the routed WMMA path
+  // unchanged.
+  const bool use_decode_kq =
+      route_kq &&
+      gemm::LaunchDecodeMoeKQuant(
+          layer.ffn_gate_exps.data, gate_type, layer.ffn_up_exps.data,
+          layer.ffn_down_exps.data, down_type, x, scratch.ids.data(),
+          scratch.down_e.data(), n_tokens, static_cast<std::uint32_t>(top_k),
+          hidden, expert_ff, stream);
+  if (!use_decode_kq) {
   // 3. Compact slots by expert into 16-row padded buckets.
   gemm::ExpertCounts(scratch.ids.data(), scratch.counts.data(), n_tokens,
                      static_cast<std::uint32_t>(num_experts),
@@ -262,6 +297,7 @@ bool MoeForwardHip(const core::ModelConfig& config,
     AssignError(error_msg, "MoE routed down GEMM failed");
     return false;
   }
+  }  // !use_decode_kq: routed WMMA legacy path ends; down_e is ready either way.
 
   // 8. Shared expert: Q8_0 SwiGLU dense + sigmoid gate scale.
   // Decode (<= 8 tokens) rides the shared narrow-Q8 core; larger batches
@@ -334,6 +370,22 @@ bool MoeForwardHip(const core::ModelConfig& config,
         layer.ffn_down_shexp.type, layer.ffn_down_shexp.data,
         scratch.x_q8.data(), scratch.shexp_out.data(), n_tokens, hidden,
         shexp_ff, stream);
+  }
+
+  // 9-10. Combine. On the decode fast path the shared-gate dot rides a
+  // fused epilogue (one launch instead of a hipblas 1xH SGEMM plus the
+  // shared epilogue); the legacy path keeps both launches bit-identical.
+  if (use_decode_kq) {
+    if (!gemm::LaunchDecodeMoeEpilogue(
+            scratch.down_e.data(), scratch.weights.data(),
+            scratch.shexp_out.data(),
+            static_cast<const float*>(layer.ffn_gate_inp_shexp.data), x, out,
+            n_tokens, static_cast<std::uint32_t>(top_k),
+            static_cast<std::uint32_t>(hidden), stream)) {
+      AssignError(error_msg, "MoE fused glogit epilogue failed");
+      return false;
+    }
+    return true;
   }
 
   // 9. Shared gate logit: glogit[t] = shexp_glogit_vec . x[t].
