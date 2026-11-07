@@ -3,7 +3,9 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -1424,29 +1426,48 @@ int RunPrompt(std::span<const char* const> args) {
 
 #if defined(ENGINE_ENABLE_HIP)
   if (reader->GetMetadataString("general.architecture") == "gpt-oss") {
-    // GPT-OSS harmony framing (manual template: <|start|>role<|message|>
-    // turns closed by <|end|>; the tokenizer maps the bracket tokens to
-    // special ids). --raw skips framing so prompt tokens match bench direct.
+    // GPT-OSS harmony framing, mirroring the artifact's embedded
+    // tokenizer.chat_template: an always-present system block (identity,
+    // cutoff, current date, reasoning effort, valid channels), an optional
+    // developer block ("# Instructions" + --system), the user turn, then the
+    // bare generation prompt "<|start|>assistant" (the model opens its own
+    // channel). --raw skips framing so prompt tokens match bench direct.
     std::string gptoss_prompt;
     if (!opt.use_chat_template) {
       gptoss_prompt = opt.prompt_text;
     } else {
-      // Matches the artifact's embedded harmony template: a developer block
-      // (only when non-empty), the user turn, then the bare generation
-      // prompt "<|start|>assistant" (no <|message|> suffix). The default
-      // developer preamble names the valid channels; without it the model
-      // emits invalid channel tags.
+      const std::string effort =
+          (opt.reasoning_effort.empty() || opt.reasoning_effort == "auto")
+              ? "medium"
+              : opt.reasoning_effort;
+      const std::time_t now = std::time(nullptr);
+      std::tm date{};
+#if defined(_WIN32)
+      localtime_s(&date, &now);
+#else
+      localtime_r(&now, &date);
+#endif
+      const int year = date.tm_year + 1900;
+      const int mon = date.tm_mon + 1;
+      const int mday = date.tm_mday;
+      const std::string date_str =
+          std::to_string(year) + "-" + (mon < 10 ? "0" : "") +
+          std::to_string(mon) + "-" + (mday < 10 ? "0" : "") +
+          std::to_string(mday);
+      gptoss_prompt = "<|start|>system<|message|>";
+      gptoss_prompt +=
+          "You are ChatGPT, a large language model trained by OpenAI.\n";
+      gptoss_prompt += "Knowledge cutoff: 2024-06\n";
+      gptoss_prompt += "Current date: ";
+      gptoss_prompt += date_str;
+      gptoss_prompt += "\n\nReasoning: ";
+      gptoss_prompt += effort;
+      gptoss_prompt += "\n\n# Valid channels: analysis, commentary, final. "
+                       "Channel must be included for every message.<|end|>";
       if (!opt.system_prompt.empty()) {
-        gptoss_prompt = "<|start|>developer<|message|># Instructions\n\n";
+        gptoss_prompt += "<|start|>developer<|message|># Instructions\n\n";
         gptoss_prompt += opt.system_prompt;
         gptoss_prompt += "<|end|>";
-      } else {
-        gptoss_prompt = "<|start|>developer<|message|># Instructions\n\n"
-                        "You are ChatGPT, a large language model trained by "
-                        "OpenAI.\n"
-                        "Knowledge cutoff: 2024-06-01\n"
-                        "Reasoning: medium\n"
-                        "# Valid channels: analysis, commentary, final.<|end|>";
       }
       gptoss_prompt += "<|start|>user<|message|>";
       gptoss_prompt += opt.prompt_text;
