@@ -9,7 +9,7 @@ namespace gufo::hip {
 
 bool ValidateQwenBlockedQ8Config(const core::ModelConfig& config,
                                  std::string* error) {
-  if (!config.IsValidQwen()) {
+  if (!config.IsValidQwen() && !config.IsValidQwenMoe()) {
     if (error != nullptr)
       *error = "blocked-Q8 attention requires a valid Qwen3.5/3.8 config";
     return false;

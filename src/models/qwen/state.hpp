@@ -155,6 +155,19 @@ struct QwenLayerWeights {
   QwenTensorRef ffn_gate;
   QwenTensorRef ffn_up;
   QwenTensorRef ffn_down;
+
+  // Routed MoE (qwen35moe): N experts top-k + shared expert. Empty on dense
+  // layers (ffn_gate/up/down above). Expert stacks are expert-major:
+  // gate/up [expert_ff, hidden, n_exp], down [hidden, expert_ff, n_exp].
+  bool is_moe = false;
+  QwenTensorRef ffn_gate_exps;
+  QwenTensorRef ffn_up_exps;
+  QwenTensorRef ffn_down_exps;
+  QwenTensorRef ffn_gate_inp;
+  QwenTensorRef ffn_gate_shexp;
+  QwenTensorRef ffn_up_shexp;
+  QwenTensorRef ffn_down_shexp;
+  QwenTensorRef ffn_gate_inp_shexp;
 };
 
 /// Full model tensor references mapped directly from GGUF storage.

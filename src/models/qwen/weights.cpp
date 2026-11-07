@@ -249,9 +249,23 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
       l.ssm_out = ExtractTensorRef(reader, prefix + "ssm_out.weight");
     }
 
-    l.ffn_gate = ExtractTensorRef(reader, prefix + "ffn_gate.weight");
-    l.ffn_up = ExtractTensorRef(reader, prefix + "ffn_up.weight");
-    l.ffn_down = ExtractTensorRef(reader, prefix + "ffn_down.weight");
+    l.ffn_gate_exps = ExtractTensorRef(reader, prefix + "ffn_gate_exps.weight");
+    l.ffn_up_exps = ExtractTensorRef(reader, prefix + "ffn_up_exps.weight");
+    l.ffn_down_exps = ExtractTensorRef(reader, prefix + "ffn_down_exps.weight");
+    l.ffn_gate_inp = ExtractTensorRef(reader, prefix + "ffn_gate_inp.weight");
+    l.ffn_gate_shexp =
+        ExtractTensorRef(reader, prefix + "ffn_gate_shexp.weight");
+    l.ffn_up_shexp = ExtractTensorRef(reader, prefix + "ffn_up_shexp.weight");
+    l.ffn_down_shexp =
+        ExtractTensorRef(reader, prefix + "ffn_down_shexp.weight");
+    l.ffn_gate_inp_shexp =
+        ExtractTensorRef(reader, prefix + "ffn_gate_inp_shexp.weight");
+    l.is_moe = !l.ffn_gate_exps.empty();
+    if (!l.is_moe) {
+      l.ffn_gate = ExtractTensorRef(reader, prefix + "ffn_gate.weight");
+      l.ffn_up = ExtractTensorRef(reader, prefix + "ffn_up.weight");
+      l.ffn_down = ExtractTensorRef(reader, prefix + "ffn_down.weight");
+    }
 
     const bool expected_full_attention =
         ((i + 1) % weights.config.full_attention_interval) == 0;
@@ -269,16 +283,60 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
     if (!ValidateTensor(l.attn_norm, hidden_size, TensorRole::kNorm,
                         prefix + "attn_norm.weight", error_msg) ||
         !ValidateTensor(l.ffn_norm, hidden_size, TensorRole::kNorm,
-                        prefix + "post_attention_norm.weight", error_msg) ||
-        !ValidateTensor(l.ffn_gate, intermediate_size * hidden_size,
-                        TensorRole::kProjection, prefix + "ffn_gate.weight",
-                        error_msg, hidden_size) ||
-        !ValidateTensor(l.ffn_up, intermediate_size * hidden_size,
-                        TensorRole::kProjection, prefix + "ffn_up.weight",
-                        error_msg, hidden_size) ||
-        !ValidateTensor(l.ffn_down, hidden_size * intermediate_size,
-                        TensorRole::kProjection, prefix + "ffn_down.weight",
-                        error_msg, intermediate_size)) {
+                        prefix + "post_attention_norm.weight", error_msg)) {
+      return std::nullopt;
+    }
+    if (l.is_moe) {
+      const std::size_t num_experts = weights.config.expert_count;
+      const std::size_t expert_ff = weights.config.expert_ffn_size;
+      const std::size_t shexp_ff = weights.config.shared_expert_ffn_size;
+      if (!ValidateTensor(l.ffn_gate_exps,
+                          expert_ff * hidden_size * num_experts,
+                          TensorRole::kProjection,
+                          prefix + "ffn_gate_exps.weight", error_msg,
+                          hidden_size) ||
+          !ValidateTensor(l.ffn_up_exps,
+                          expert_ff * hidden_size * num_experts,
+                          TensorRole::kProjection,
+                          prefix + "ffn_up_exps.weight", error_msg,
+                          hidden_size) ||
+          !ValidateTensor(l.ffn_down_exps,
+                          hidden_size * expert_ff * num_experts,
+                          TensorRole::kProjection,
+                          prefix + "ffn_down_exps.weight", error_msg,
+                          expert_ff) ||
+          !ValidateTensor(l.ffn_gate_inp, hidden_size * num_experts,
+                          TensorRole::kProjection,
+                          prefix + "ffn_gate_inp.weight", error_msg,
+                          hidden_size) ||
+          !ValidateTensor(l.ffn_gate_shexp, hidden_size * shexp_ff,
+                          TensorRole::kProjection,
+                          prefix + "ffn_gate_shexp.weight", error_msg,
+                          hidden_size) ||
+          !ValidateTensor(l.ffn_up_shexp, hidden_size * shexp_ff,
+                          TensorRole::kProjection,
+                          prefix + "ffn_up_shexp.weight", error_msg,
+                          hidden_size) ||
+          !ValidateTensor(l.ffn_down_shexp, shexp_ff * hidden_size,
+                          TensorRole::kProjection,
+                          prefix + "ffn_down_shexp.weight", error_msg,
+                          shexp_ff) ||
+          !ValidateTensor(l.ffn_gate_inp_shexp, hidden_size, TensorRole::kNorm,
+                          prefix + "ffn_gate_inp_shexp.weight", error_msg)) {
+        return std::nullopt;
+      }
+    } else if (!ValidateTensor(l.ffn_gate, intermediate_size * hidden_size,
+                               TensorRole::kProjection,
+                               prefix + "ffn_gate.weight", error_msg,
+                               hidden_size) ||
+               !ValidateTensor(l.ffn_up, intermediate_size * hidden_size,
+                               TensorRole::kProjection,
+                               prefix + "ffn_up.weight", error_msg,
+                               hidden_size) ||
+               !ValidateTensor(l.ffn_down, hidden_size * intermediate_size,
+                               TensorRole::kProjection,
+                               prefix + "ffn_down.weight", error_msg,
+                               intermediate_size)) {
       return std::nullopt;
     }
 
