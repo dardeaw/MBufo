@@ -16,12 +16,13 @@ file changes when 120B weights land.
 | sliding window | 128, even layers only (llama.cpp SWA period 2, dense-first=false) |
 | rope | NeoX, theta 150000, YaRN factor 32, orig ctx 4096, ctx 131072 |
 | norms / eps | RMSNorm everywhere, 1e-5 |
-| extras | per-head attention sinks, wo + router + expert biases |
+| extras | per-head attention sinks, Q/K/V + wo + router + expert biases |
 
 Tensor types in the Q4_K_M file: dense Q5_0/Q4_K/Q8_0/F32, experts MXFP4,
-all biases/norms/sinks F32. Q/K/V biases exist in the file but llama.cpp
-ignores them (no `wq_b/wk_b/wv_b` tensors in `openai-moe.cpp`); gufo skips
-them too. `output.weight` is standalone Q8_0 (not tied).
+all biases/norms/sinks F32. Q/K/V biases are applied right after projection,
+before RoPE (matching llama.cpp `build_qkv`, which adds `wq_b`/`wk_b`/`wv_b`
+when the artifact carries them). `output.weight` is standalone Q8_0
+(not tied).
 
 ## Runtime mapping
 

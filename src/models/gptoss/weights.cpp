@@ -293,6 +293,9 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     l.wq = b.ConvertQ8(p + "attn_q.weight", hidden, qdim);
     l.wk = b.ConvertQ8(p + "attn_k.weight", hidden, kvdim);
     l.wv = b.ConvertQ8(p + "attn_v.weight", hidden, kvdim);
+    l.wq_b = b.GetRaw(p + "attn_q.bias", qdim);
+    l.wk_b = b.GetRaw(p + "attn_k.bias", kvdim);
+    l.wv_b = b.GetRaw(p + "attn_v.bias", kvdim);
     l.wo = b.ConvertQ8(p + "attn_output.weight", qdim, hidden);
     l.wo_b = b.GetRaw(p + "attn_output.bias", hidden);
     l.attn_sinks =
@@ -388,6 +391,9 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     require(l.wq, p + "attn_q.weight");
     require(l.wk, p + "attn_k.weight");
     require(l.wv, p + "attn_v.weight");
+    require(l.wq_b, p + "attn_q.bias");
+    require(l.wk_b, p + "attn_k.bias");
+    require(l.wv_b, p + "attn_v.bias");
     require(l.wo, p + "attn_output.weight");
     require(l.wo_b, p + "attn_output.bias");
     require(l.attn_sinks, p + "attn_sinks.weight");

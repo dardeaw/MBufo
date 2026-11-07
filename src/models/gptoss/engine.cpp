@@ -369,6 +369,12 @@ bool UploadWeights(ModelWeights& w, std::vector<void*>& owned,
       return false;
     if (!mirror(l.wv))
       return false;
+    if (!mirror(l.wq_b))
+      return false;
+    if (!mirror(l.wk_b))
+      return false;
+    if (!mirror(l.wv_b))
+      return false;
     if (!mirror(l.wo))
       return false;
     if (!mirror(l.wo_b))
@@ -765,6 +771,9 @@ std::size_t Model::ResidentBytes() const noexcept {
     add(l.wq);
     add(l.wk);
     add(l.wv);
+    add(l.wq_b);
+    add(l.wk_b);
+    add(l.wv_b);
     add(l.wo);
     add(l.wo_b);
     add(l.attn_sinks);
@@ -912,6 +921,14 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
     GptossGemm(l.wv, impl.normed, impl.x16, impl.vbuf, n, kvdim, hidden, stream,
                impl.preq_scratch, impl.preq_bytes);
   }
+  // Q/K/V biases: llama.cpp adds wq_b/wk_b/wv_b right after projection,
+  // before RoPE; the artifact carries them as F32.
+  kernels::AddRowBias(impl.qbuf, static_cast<const float*>(l.wq_b.device), n,
+                      qdim, stream);
+  kernels::AddRowBias(impl.kbuf, static_cast<const float*>(l.wk_b.device), n,
+                      kvdim, stream);
+  kernels::AddRowBias(impl.vbuf, static_cast<const float*>(l.wv_b.device), n,
+                      kvdim, stream);
   TimingMark(LayerSection::kRopeKv);
   kernels::RopeYarn(impl.qbuf, n, c.num_heads, d, start_pos, c.rope_theta,
                     c.yarn.low, c.yarn.high, c.yarn.inv_factor, c.yarn.mscale,

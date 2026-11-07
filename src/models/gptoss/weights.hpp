@@ -48,6 +48,9 @@ struct LayerWeights {  TensorRef attn_norm;      ///< [hidden] F32
   TensorRef wq;             ///< [hidden -> 4096] Q8_0 (converted)
   TensorRef wk;             ///< [hidden -> 512] Q8_0 (converted)
   TensorRef wv;             ///< [hidden -> 512] Q8_0 (converted)
+  TensorRef wq_b;           ///< [4096] F32 attention q bias
+  TensorRef wk_b;           ///< [512] F32 attention k bias
+  TensorRef wv_b;           ///< [512] F32 attention v bias
   TensorRef wo;             ///< [4096 -> hidden] Q8_0 (converted)
   TensorRef wo_b;           ///< [hidden] F32 attention out bias
   TensorRef attn_sinks;     ///< [64] F32 attention sinks
