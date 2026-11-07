@@ -13,6 +13,7 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/moe.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 
@@ -410,11 +411,25 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                          scratch.decode.normed.data(), nullptr, batch_size,
                          hidden_size, 1e-6F, arena.stream);
 
-    LaunchFfnActivation(layer, scratch, batch_size, intermediate_size,
-                        hidden_size, arena.stream);
-    LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
-                     scratch.ffn.out.data(), batch_size, hidden_size,
-                     intermediate_size, arena.stream, scratch);
+    if (layer.is_moe) {
+      // Routed MoE (qwen35moe) via the shared routed core; the residual
+      // link below is shared with the dense path.
+      std::string moe_error;
+      if (!MoeForwardHip(config, layer, scratch.decode.normed.data(), nullptr,
+                         scratch.ffn.out.data(),
+                         static_cast<std::uint32_t>(batch_size),
+                         arena.GetMoeScratchView(), arena.stream,
+                         arena.hipblas_handle, scratch.decode.preq_q81.data(),
+                         scratch.decode.preq_q81.size_bytes(), &moe_error)) {
+        throw std::runtime_error("Qwen MoE batch decode failed: " + moe_error);
+      }
+    } else {
+      LaunchFfnActivation(layer, scratch, batch_size, intermediate_size,
+                          hidden_size, arena.stream);
+      LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
+                       scratch.ffn.out.data(), batch_size, hidden_size,
+                       intermediate_size, arena.stream, scratch);
+    }
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.ffn.out.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena.stream);
