@@ -74,6 +74,28 @@ struct BgeM3Scratch {
                               BgeM3Scratch& scratch,
                               std::span<float> hidden_out) noexcept;
 
+/// Padded multi-sequence encoder forward (the ScoreBatch fast path: one
+/// pass over N documents with the projection weights read once).
+///
+/// `batch` holds B non-empty id sequences; short rows are padded with
+/// `pad_id` to Lmax (the longest row) and `hidden_out` receives the
+/// [B, Lmax, hidden] last-layer states in row-major order. Attention applies
+/// an exact key mask: positions j >= len_b read as -1e30 in every query row
+/// (real and pad rows alike, so no all-masked row can form NaN), while real
+/// entries add exactly 0.0. Real-query math therefore keeps the single
+/// sequence summation order (real keys first, pad keys contribute +0.0) and
+/// is bit-identical to CpuForward on the unpadded row; only pad-row states
+/// are meaningless (callers must read row b*Lmax + i for i < len_b).
+///
+/// Returns false on an empty batch, any empty row, `pad_id` outside the
+/// vocabulary, Lmax == 0, B * Lmax > scratch.max_seq (buffer capacity -- the
+/// caller falls back to the sequential path), or a wrong-size `hidden_out`.
+[[nodiscard]] bool CpuForwardBatch(
+    const BgeM3F32Weights& weights,
+    const std::vector<std::vector<std::uint32_t>>& batch,
+    std::uint32_t pad_id, BgeM3Scratch& scratch,
+    std::span<float> hidden_out) noexcept;
+
 }  // namespace gufo::models::bge_m3
 
 #endif  // GUFO_MODELS_BGE_M3_FORWARD_HPP_

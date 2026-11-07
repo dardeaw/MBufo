@@ -40,6 +40,18 @@ struct ClsHiddenResult {
   std::vector<float> cls;  // row 0, NOT normalized
   double prefill_ms{0.0};
 };
+
+/// Padded multi-sequence twin of ClsHiddenResult (hip/session.hip): one
+/// encoder forward over the [B, Lmax] padded batch with an exact key mask,
+/// returning the B unpooled CLS rows in input order plus the single timed
+/// body milliseconds. Covers F16 and K-quant weights through the same
+/// ProjGemm dispatch as the single-sequence path (no model-specific kernel).
+/// Failure is an explicit nullopt, never a silent sequential fallback --
+/// the caller decides between fallback (capacity gate) and refusal.
+struct ClsHiddenBatchResult {
+  std::vector<std::vector<float>> cls;  // B rows, each hidden_size
+  double prefill_ms{0.0};
+};
 #endif
 
 class EngineModel;
@@ -119,6 +131,16 @@ class EngineModel {
   [[nodiscard]] static bool RunEncoderBody(
       HipState& st, const BgeM3Config& config, int nn, int hh, int hdd,
       int hdim, int ninter, std::string& body_error);
+  // Padded multi-sequence prefill for HipClsHiddenBatch: B rows of Lmax
+  // tokens with the per-row lengths on the device (device state owns the
+  // lens buffer). Same failure contract as PrefillToHidden.
+  [[nodiscard]] static bool PrefillBatchToHidden(
+      EngineModel& model,
+      const std::vector<std::vector<std::uint32_t>>& batch,
+      std::uint32_t pad_id, double* ms_out, std::string* error_msg);
+  [[nodiscard]] static bool RunEncoderBatchBody(
+      HipState& st, const BgeM3Config& config, int bb, int ll, int hh, int hdd,
+      int hdim, int ninter, std::string& body_error);
 #endif
 
   friend class EngineSession;
@@ -132,6 +154,10 @@ class EngineModel {
   friend std::optional<ClsHiddenResult> HipClsHidden(
       const EngineModel& model, std::span<const std::uint32_t> ids,
       std::string* error_msg);
+  friend std::optional<ClsHiddenBatchResult> HipClsHiddenBatch(
+      const EngineModel& model,
+      const std::vector<std::vector<std::uint32_t>>& batch,
+      std::uint32_t pad_id, std::string* error_msg);
 #endif
 };
 
@@ -159,6 +185,11 @@ class ModelRegistry {
 [[nodiscard]] std::optional<ClsHiddenResult> HipClsHidden(
     const EngineModel& model, std::span<const std::uint32_t> ids,
     std::string* error_msg = nullptr);
+
+[[nodiscard]] std::optional<ClsHiddenBatchResult> HipClsHiddenBatch(
+    const EngineModel& model,
+    const std::vector<std::vector<std::uint32_t>>& batch,
+    std::uint32_t pad_id, std::string* error_msg = nullptr);
 
 /// Device prefill twin of the CPU Sync path (hip/session.hip): the same
 /// full-sequence encoder math via hipBLASLt F16 projections (F32 accumulate)

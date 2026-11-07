@@ -241,6 +241,133 @@ __global__ void MergeHeadsKernel(const float* __restrict__ in,
           in[(static_cast<std::size_t>(hh) * seq + i) * head_dim + d]);
 }
 
+// Padded-batch kernels (the ScoreBatch fast path): rows are [B, L]
+// flattened, the position index restarts at every row (col = row % L), and
+// attention carries an exact key mask from the per-row lengths.
+//
+// out[row] = LayerNorm(word[row] + pos[col] + ttype) stored as F16, with
+// col = row % L. Real tokens embed exactly as in EmbedGatherKernel; pad
+// rows gather too and are discarded by the caller.
+__global__ void BatchEmbedGatherKernel(
+    const std::uint32_t* __restrict__ ids,
+    const __half* __restrict__ tok, const float* __restrict__ pos,
+    const float* __restrict__ ttype, const float* __restrict__ norm_w,
+    const float* __restrict__ norm_b, float eps, __half* __restrict__ out,
+    int n, int L, int hidden) {
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= n) return;
+  const int col = (L > 0) ? (row % L) : row;
+  __half* orow = out + static_cast<std::size_t>(row) * hidden;
+  const __half* wrow =
+      tok + static_cast<std::size_t>(ids[row]) * hidden;
+  const float* prow = pos + static_cast<std::size_t>(col) * hidden;
+  const int bd = static_cast<int>(blockDim.x);
+  double sum = 0.0, sumsq = 0.0;
+  for (int d = static_cast<int>(threadIdx.x); d < hidden; d += bd) {
+    const double v = static_cast<double>(__half2float(wrow[d])) +
+                     static_cast<double>(prow[d]) +
+                     static_cast<double>(ttype[d]);
+    orow[d] = __half(static_cast<float>(v));
+    sum += v;
+    sumsq += v * v;
+  }
+  __shared__ double sh_sum[256];
+  __shared__ double sh_sq[256];
+  const int tid = static_cast<int>(threadIdx.x);
+  sh_sum[tid] = sum;
+  sh_sq[tid] = sumsq;
+  __syncthreads();
+  for (int stride = 128; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      sh_sum[tid] += sh_sum[tid + stride];
+      sh_sq[tid] += sh_sq[tid + stride];
+    }
+    __syncthreads();
+  }
+  const double mean = sh_sum[0] / hidden;
+  double var = sh_sq[0] / hidden - mean * mean;
+  if (var < 0 && var > -1e-12) var = 0;
+  const float inv =
+      static_cast<float>(1.0 / sqrt(var + static_cast<double>(eps)));
+  const float mean_f = static_cast<float>(mean);
+  for (int d = tid; d < hidden; d += bd) {
+    orow[d] = __half((__half2float(orow[d]) - mean_f) * inv * norm_w[d] +
+                     norm_b[d]);
+  }
+}
+
+// Fused split + bias over the [B * L, h] projection outputs into the
+// per-(batch, head) buffers: out[(b, hh, i), d] = in[(b, i), hh*hd + d]
+// + bias_part[hh*hd + d]. Bit-exact vs the split-then-add order.
+__global__ void BatchQkvSplitBiasKernel(
+    const float* __restrict__ q, const float* __restrict__ k,
+    const float* __restrict__ v, const float* __restrict__ q_b,
+    const float* __restrict__ k_b, const float* __restrict__ v_b,
+    float* __restrict__ qh, float* __restrict__ kh, float* __restrict__ vh,
+    int B, int L, int heads, int hd) {
+  const std::size_t idx =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int h = heads * hd;
+  const std::size_t total =
+      static_cast<std::size_t>(B) * L * h;
+  if (idx >= total * 3) return;
+  const int part = static_cast<int>(idx / total);
+  const std::size_t rem = idx % total;
+  const int row = static_cast<int>(rem / static_cast<std::size_t>(h));
+  const int dh = static_cast<int>(rem % static_cast<std::size_t>(h));
+  const int b = (L > 0) ? (row / L) : 0;
+  const int i = (L > 0) ? (row % L) : row;
+  const int hh = dh / hd;
+  const int d = dh % hd;
+  const float* in = (part == 0 ? q : (part == 1 ? k : v));
+  const float bias = (part == 0 ? q_b : (part == 1 ? k_b : v_b))[dh];
+  float* out = (part == 0 ? qh : (part == 1 ? kh : vh));
+  out[(static_cast<std::size_t>(b) * heads + hh) * L * hd +
+      static_cast<std::size_t>(i) * hd + d] =
+      in[static_cast<std::size_t>(row) * h + dh] + bias;
+}
+
+// Exact key mask over the [(B * heads), L, L] scores: pad keys
+// (j >= lens[b]) read as -1e30 in every query row, real and pad rows alike,
+// so no all-masked row can form NaN. Real entries add exactly 0.0f, keeping
+// the single-sequence softmax values bit-identical (same order: real keys
+// first, pad keys contribute exp(-1e30) = 0.0).
+__global__ void BatchMaskScoresKernel(float* __restrict__ scores,
+                                      const std::uint32_t* __restrict__ lens,
+                                      int B, int heads, int L) {
+  const std::size_t idx =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t per_b =
+      static_cast<std::size_t>(heads) * L * L;
+  if (idx >= static_cast<std::size_t>(B) * per_b) return;
+  const int b = static_cast<int>(idx / per_b);
+  const std::size_t rem = idx % per_b;
+  const int j = static_cast<int>(rem % static_cast<std::size_t>(L));
+  if (j >= static_cast<int>(lens[b])) {
+    scores[idx] += -1e30F;
+  }
+}
+
+__global__ void BatchMergeHeadsKernel(const float* __restrict__ in,
+                                      __half* __restrict__ out, int B, int L,
+                                      int heads, int head_dim) {
+  const std::size_t idx =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t total = static_cast<std::size_t>(B) * L * heads * head_dim;
+  if (idx >= total) return;
+  const int d = static_cast<int>(idx % static_cast<std::size_t>(head_dim));
+  const std::size_t tmp = idx / static_cast<std::size_t>(head_dim);
+  const int i = static_cast<int>(tmp % static_cast<std::size_t>(L));
+  const std::size_t tmp2 = tmp / static_cast<std::size_t>(L);
+  const int hh = static_cast<int>(tmp2 % static_cast<std::size_t>(heads));
+  const int b = static_cast<int>(tmp2 / static_cast<std::size_t>(heads));
+  const int hidden = heads * head_dim;
+  out[(static_cast<std::size_t>(b) * L + i) * hidden +
+      static_cast<std::size_t>(hh) * head_dim + d] =
+      __half(in[(static_cast<std::size_t>(b) * heads + hh) * L * head_dim +
+                static_cast<std::size_t>(i) * head_dim + d]);
+}
+
 // out[row] = LayerNorm(upcast(x[row]) + y[row] + bias[row % hidden]),
 // stored as F16. Step 3 folds the output/down projection biases into the
 // residual add (one addition per element, no extra pass) and stores F16
@@ -677,6 +804,10 @@ struct EngineModel::HipState {
   float* ffn_up_out{nullptr};  // up-proj GEMM output [n*inter]
   float *ffn_out{nullptr};     // down-proj GEMM output [n*h]
   std::uint32_t* ids{nullptr};  // per-prefill token ids (H2D, then gather)
+  std::uint32_t* lens{nullptr};  // per-row lengths for the padded batch mask
+  // Padded-batch warmup ledger, keyed (B << 32) | L: same sacrificial-first
+  // policy as warmed_ns but tracked per batch shape.
+  std::set<std::int64_t> warmed_batch;
   bool ok{false};
   std::string error;
   ~HipState() {
@@ -870,12 +1001,16 @@ void InitHipState(EngineModel& model) {
   state->ffn_up_out = AllocScratch(max_seq * inter, owned);
   state->ffn_out = AllocScratch(max_seq * h, owned);
   state->ids = AllocU32(max_seq, owned);
+  // Batch lens buffer: one u32 per row, B * L <= max_seq so max_seq entries
+  // always suffice (8 KiB, allocated once with everything else).
+  state->lens = AllocU32(max_seq, owned);
   ok = ok && state->hidden != nullptr && state->normed != nullptr &&
        state->merged != nullptr && state->ffn_inter != nullptr &&
        state->qkv != nullptr && state->split != nullptr &&
        state->scores != nullptr && state->context != nullptr &&
        state->proj != nullptr && state->ffn_up_out != nullptr &&
-       state->ffn_out != nullptr && state->ids != nullptr;
+       state->ffn_out != nullptr && state->ids != nullptr &&
+       state->lens != nullptr;
   if (!ok && state->error.empty()) {
     state->error = "bge-m3 HIP: device allocation or upload failed";
   }
@@ -1163,6 +1298,267 @@ std::optional<ClsHiddenResult> HipClsHidden(
   result.cls.resize(h);
   for (std::size_t d = 0; d < h; ++d) {
     result.cls[d] = __half2float(cls_h[d]);
+  }
+  result.prefill_ms = prefill_ms;
+  return result;
+}
+
+// Padded multi-sequence encoder body: one forward over the [B, L] batch.
+// The QKV/out/up/down projections run as single GEMMs over all N = B * L
+// rows (weights read once for the whole batch -- the win over N independent
+// single-sequence prefills); the attention path is strided-batched over
+// B * heads tiles of [L, L] with the BatchMaskScoresKernel key mask applied
+// after the QK GEMM. No new device buffers: the layers reuse the
+// single-sequence arenas, which fit exactly when N <= max_seq (then
+// B * L * L <= max_seq * max_seq follows, so the scores tiles fit too).
+// Flash attention stays off on this path (FlashF16DenseMha takes no mask);
+// the SGEMM + rowwise-softmax math is the same exact softmax the short
+// single-sequence path runs, so determinism holds per (B, L) shape.
+bool EngineModel::RunEncoderBatchBody(HipState& st, const BgeM3Config& config,
+                                     int bb, int ll, int hh, int hdd,
+                                     int hdim, int ninter,
+                                     std::string& body_error) {
+  const HipWeights& weights = st.weights;
+  const float kOne = 1.0F;
+  const float kZero = 0.0F;
+  const float kScale =
+      static_cast<float>(1.0 / sqrt(static_cast<double>(hdd)));
+  constexpr unsigned kBlock = 256;
+  const auto blocks = [&](std::size_t total) {
+    return static_cast<unsigned>((total + kBlock - 1) / kBlock);
+  };
+  const int nn = bb * ll;
+  BatchEmbedGatherKernel<<<static_cast<unsigned>(nn), kBlock, 0, st.stream>>>(
+      st.ids, weights.token_embd, weights.position_embd, weights.token_types,
+      weights.emb_norm_w, weights.emb_norm_b, config.layer_norm_eps,
+      st.hidden, nn, ll, hdim);
+
+  const std::size_t tiles = static_cast<std::size_t>(bb) * hh;
+  float* qh = st.split;
+  float* kh = st.split + tiles * ll * hdd;
+  float* vh = st.split + 2 * tiles * ll * hdd;
+  const long long stride_qkv = static_cast<long long>(ll) * hdd;
+  const long long stride_scores = static_cast<long long>(ll) * ll;
+
+  float* q = st.qkv;
+  float* k = st.qkv + nn * hdim;
+  float* v = st.qkv + 2 * nn * hdim;
+
+  for (const auto& layer : weights.layers) {
+    if (!ProjGemm(st.blaslt, st.plans, layer.q_w, layer.q_type, st.hidden, q,
+                  hdim, nn, hdim, st.stream)) {
+      { body_error = "batch attn_q gemm"; return false; };
+    }
+    if (!ProjGemm(st.blaslt, st.plans, layer.k_w, layer.k_type, st.hidden, k,
+                  hdim, nn, hdim, st.stream)) {
+      { body_error = "batch attn_k gemm"; return false; };
+    }
+    if (!ProjGemm(st.blaslt, st.plans, layer.v_w, layer.v_type, st.hidden, v,
+                  hdim, nn, hdim, st.stream)) {
+      { body_error = "batch attn_v gemm"; return false; };
+    }
+    BatchQkvSplitBiasKernel<<<blocks(3 * nn * hdim), kBlock, 0, st.stream>>>(
+        q, k, v, layer.q_b, layer.k_b, layer.v_b, qh, kh, vh, bb, ll, hh, hdd);
+    if (hipblasSgemmStridedBatched(
+            st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, ll, ll, hdd, &kScale, kh,
+            hdd, stride_qkv, qh, hdd, stride_qkv, &kZero, st.scores, ll,
+            stride_scores,
+            static_cast<int>(tiles)) != HIPBLAS_STATUS_SUCCESS) {
+      { body_error = "batch attention scores gemm"; return false; };
+    }
+    BatchMaskScoresKernel<<<blocks(tiles * ll * ll), kBlock, 0, st.stream>>>(
+        st.scores, st.lens, bb, hh, ll);
+    SoftmaxRowsKernel<<<tiles * static_cast<unsigned>(ll), kBlock, 0,
+                        st.stream>>>(st.scores, tiles * ll, ll);
+    if (hipblasSgemmStridedBatched(
+            st.blas, HIPBLAS_OP_N, HIPBLAS_OP_N, hdd, ll, ll, &kOne, vh, hdd,
+            stride_qkv, st.scores, ll, stride_scores, &kZero, st.context,
+            hdd, stride_qkv,
+            static_cast<int>(tiles)) != HIPBLAS_STATUS_SUCCESS) {
+      { body_error = "batch attention context gemm"; return false; };
+    }
+    BatchMergeHeadsKernel<<<blocks(bb * ll * hdim), kBlock, 0, st.stream>>>(
+        st.context, st.merged, bb, ll, hh, hdd);
+    if (!ProjGemm(st.blaslt, st.plans, layer.out_w, layer.out_type,
+                  st.merged, st.proj, hdim, nn, hdim, st.stream)) {
+      { body_error = "batch attn_output gemm"; return false; };
+    }
+    ResidualLnKernel<<<static_cast<unsigned>(nn), kBlock, 0, st.stream>>>(
+        st.hidden, st.proj, layer.out_b, layer.attn_norm_w,
+        layer.attn_norm_b, config.layer_norm_eps, st.normed, nn, hdim);
+    if (!ProjGemm(st.blaslt, st.plans, layer.up_w, layer.up_type, st.normed,
+                  st.ffn_up_out, ninter, nn, hdim, st.stream)) {
+      { body_error = "batch ffn_up gemm"; return false; };
+    }
+    BiasGeluKernel<<<blocks(nn * ninter), kBlock, 0, st.stream>>>(
+        st.ffn_up_out, layer.up_b, st.ffn_inter, nn, ninter);
+    if (!ProjGemm(st.blaslt, st.plans, layer.down_w, layer.down_type,
+                  st.ffn_inter, st.ffn_out, hdim, nn, ninter, st.stream)) {
+      { body_error = "batch ffn_down gemm"; return false; };
+    }
+    ResidualLnKernel<<<static_cast<unsigned>(nn), kBlock, 0, st.stream>>>(
+        st.normed, st.ffn_out, layer.down_b, layer.out_norm_w,
+        layer.out_norm_b, config.layer_norm_eps, st.hidden, nn, hdim);
+  }
+  return true;
+}
+
+bool EngineModel::PrefillBatchToHidden(
+    EngineModel& model,
+    const std::vector<std::vector<std::uint32_t>>& batch,
+    std::uint32_t pad_id, double* ms_out, std::string* error_msg) {
+  auto refuse = [&](const std::string& message) {
+    if (error_msg != nullptr) *error_msg = message;
+    return false;
+  };
+  if (ms_out == nullptr) {
+    return refuse("bge-m3 HIP batch prefill needs a timing output");
+  }
+  if (model.hip_ == nullptr) {
+    InitHipState(model);
+  }
+  HipState& st = *model.hip_;
+  const std::lock_guard<std::mutex> lock(st.mutex);
+  if (!st.ok) {
+    return refuse(st.error.empty() ? "bge-m3 HIP: device state unavailable"
+                                    : st.error);
+  }
+  const BgeM3Config& config = model.Config();
+  const std::size_t B = batch.size();
+  if (B == 0) {
+    return refuse("bge-m3 HIP batch prefill: empty batch");
+  }
+  if (pad_id >= config.vocab_size) {
+    return refuse("bge-m3 HIP batch prefill: pad id out of vocabulary");
+  }
+  std::size_t L = 0;
+  for (const auto& row : batch) {
+    if (row.empty()) {
+      return refuse("bge-m3 HIP batch prefill: empty row in batch");
+    }
+    if (row.size() > L) {
+      L = row.size();
+    }
+  }
+  const std::size_t N = B * L;
+  const std::size_t h = config.hidden_size;
+  const std::size_t heads = config.num_attention_heads;
+  const std::size_t hd = h / heads;
+  const std::size_t inter = config.intermediate_size;
+  // Buffer capacity: row arenas hold max_seq rows and the scores tiles need
+  // B * L * L <= max_seq * max_seq; both hold when N <= max_seq. Larger
+  // batches are the caller's sequential-fallback case, never grown here.
+  if (L == 0 || L > kBgeM3Leg1MaxTokens || N > kBgeM3Leg1MaxTokens ||
+      B * L * L > kBgeM3Leg1MaxTokens * kBgeM3Leg1MaxTokens) {
+    return refuse("bge-m3 HIP batch prefill: batch exceeds the device arena");
+  }
+  if (!BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(h),
+                         static_cast<int>(N), static_cast<int>(h),
+                         st.stream) ||
+      !BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(inter),
+                         static_cast<int>(N), static_cast<int>(h),
+                         st.stream) ||
+      !BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(h),
+                         static_cast<int>(N), static_cast<int>(inter),
+                         st.stream)) {
+    return refuse("bge-m3 HIP batch prefill failed at autotune warmup");
+  }
+  auto start = std::chrono::steady_clock::now();
+  auto fail = [&](const std::string& what) {
+    return refuse("bge-m3 HIP batch prefill failed at " + what);
+  };
+  const int bb = static_cast<int>(B);
+  const int ll = static_cast<int>(L);
+  const int hh = static_cast<int>(heads);
+  const int hdd = static_cast<int>(hd);
+  const int hdim = static_cast<int>(h);
+  const int ninter = static_cast<int>(inter);
+  std::vector<std::uint32_t> flat_ids(N, pad_id);
+  std::vector<std::uint32_t> lens(B, 0);
+  for (std::size_t b = 0; b < B; ++b) {
+    const auto& row = batch[b];
+    lens[b] = static_cast<std::uint32_t>(row.size());
+    for (std::size_t i = 0; i < row.size(); ++i) {
+      if (row[i] >= config.vocab_size) {
+        return refuse("bge-m3 HIP batch prefill: token id out of vocabulary");
+      }
+      flat_ids[b * L + i] = row[i];
+    }
+  }
+  if (hipMemcpy(st.ids, flat_ids.data(), N * sizeof(std::uint32_t),
+                hipMemcpyHostToDevice) != hipSuccess) {
+    return fail("embed ids upload");
+  }
+  if (hipMemcpy(st.lens, lens.data(), B * sizeof(std::uint32_t),
+                hipMemcpyHostToDevice) != hipSuccess) {
+    return fail("batch lens upload");
+  }
+  const std::int64_t batch_key =
+      (static_cast<std::int64_t>(bb) << 32) | static_cast<std::int64_t>(ll);
+  std::string body_error;
+  if (st.warmed_batch.count(batch_key) == 0) {
+    if (!RunEncoderBatchBody(st, config, bb, ll, hh, hdd, hdim, ninter,
+                             body_error)) {
+      return fail(body_error);
+    }
+    if (hipStreamSynchronize(st.stream) != hipSuccess) {
+      return fail("stream sync");
+    }
+    st.warmed_batch.emplace(batch_key);
+    start = std::chrono::steady_clock::now();
+  }
+  if (!RunEncoderBatchBody(st, config, bb, ll, hh, hdd, hdim, ninter,
+                           body_error)) {
+    return fail(body_error);
+  }
+  if (hipStreamSynchronize(st.stream) != hipSuccess) {
+    return fail("stream sync");
+  }
+  *ms_out = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start)
+                .count();
+  return true;
+}
+
+std::optional<ClsHiddenBatchResult> HipClsHiddenBatch(
+    const EngineModel& model,
+    const std::vector<std::vector<std::uint32_t>>& batch,
+    std::uint32_t pad_id, std::string* error_msg) {
+  auto refuse = [&](const std::string& message) {
+    if (error_msg != nullptr) *error_msg = message;
+    return std::optional<ClsHiddenBatchResult>{};
+  };
+  double prefill_ms = 0.0;
+  if (!EngineModel::PrefillBatchToHidden(const_cast<EngineModel&>(model),
+                                         batch, pad_id, &prefill_ms,
+                                         error_msg)) {
+    return std::nullopt;
+  }
+  EngineModel& mutable_model = const_cast<EngineModel&>(model);
+  const std::lock_guard<std::mutex> lock(mutable_model.hip_->mutex);
+  const std::size_t h = mutable_model.Config().hidden_size;
+  const std::size_t B = batch.size();
+  std::size_t L = 0;
+  for (const auto& row : batch) {
+    if (row.size() > L) {
+      L = row.size();
+    }
+  }
+  // One download of the [B, L, h] F16 hidden block; the B CLS rows
+  // (row b * L + 0) upcast on receipt.
+  std::vector<__half> hidden_h(B * L * h);
+  if (hipMemcpy(hidden_h.data(), mutable_model.hip_->hidden,
+                B * L * h * sizeof(__half),
+                hipMemcpyDeviceToHost) != hipSuccess) {
+    return refuse("bge-m3 HIP batch prefill failed at hidden download");
+  }
+  ClsHiddenBatchResult result;
+  result.cls.resize(B, std::vector<float>(h));
+  for (std::size_t b = 0; b < B; ++b) {
+    const __half* cls_h = hidden_h.data() + (b * L) * h;
+    for (std::size_t d = 0; d < h; ++d) {
+      result.cls[b][d] = __half2float(cls_h[d]);
+    }
   }
   result.prefill_ms = prefill_ms;
   return result;

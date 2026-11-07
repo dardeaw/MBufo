@@ -1,7 +1,9 @@
 // bge-reranker EngineModel / EngineSession / ModelRegistry implementation.
 #include "src/models/bge_reranker/engine.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <utility>
@@ -190,6 +192,88 @@ std::optional<std::vector<float>> EngineSession::ScoreBatch(
     tokens += ids->size();
     batch.push_back(std::move(*ids));
   }
+  // Padded multi-sequence fast path: one encoder forward over the [B, Lmax]
+  // batch with an exact key mask, then the shared head per CLS row. The
+  // request-level A/B switch is GUFO_BGE_BATCH=0 (legacy per-pair loop).
+  // Capacity gate: B * Lmax must fit the scorer arenas (device: the HIP
+  // max_seq rows; host: scratch_.max_seq); over-long batches keep the legacy
+  // loop, never grow buffers mid-request. A selected batch that fails on
+  // device/host is an explicit refusal, never a silent fallback.
+  const bool batch_disabled = [] {
+    const char* env = std::getenv("GUFO_BGE_BATCH");
+    return env != nullptr && env[0] == '0';
+  }();
+  std::size_t lmax = 0;
+  for (const auto& ids : batch) {
+    lmax = std::max(lmax, ids.size());
+  }
+  const auto& encoder = model_->Encoder();
+  const std::size_t hidden = model_->Head().hidden_size;
+#ifdef ENGINE_ENABLE_HIP
+  if (use_hip && !batch_disabled && !batch.empty() &&
+      batch.size() * lmax <= bge_m3::kBgeM3Leg1MaxTokens) {
+    // Device fast path (F16 and K-quant weights share the ProjGemm dispatch,
+    // so the Q4 file and the F16 file both batch here).
+    auto cls = bge_m3::HipClsHiddenBatch(encoder, batch,
+                                         model_->Config().pad_token_id,
+                                         error_msg);
+    if (!cls.has_value()) {
+      return std::nullopt;
+    }
+    if (cls->cls.size() != batch.size()) {
+      return refuse("bge-reranker ScoreBatch: batch CLS count mismatch");
+    }
+    std::vector<float> scores;
+    scores.reserve(batch.size());
+    for (const auto& cls_row : cls->cls) {
+      if (cls_row.size() != hidden) {
+        return refuse("bge-reranker ScoreBatch: CLS hidden size mismatch");
+      }
+      const float logit = core::rerank::SequenceHeadLogit(
+          std::span<const float>(cls_row.data(), cls_row.size()),
+          model_->Head().dense_w, model_->Head().dense_b,
+          model_->Head().out_w, model_->Head().out_b);
+      scores.push_back(core::rerank::Sigmoid(logit));
+    }
+    if (total_prefill_ms != nullptr)
+      *total_prefill_ms = cls->prefill_ms;
+    if (prompt_tokens != nullptr)
+      *prompt_tokens = tokens;
+    return scores;
+  }
+#endif
+  if (!batch_disabled && !batch.empty() &&
+      batch.size() * lmax <= scratch_.max_seq) {
+    // Host fast path (F32 reference): same padded batch + mask math as the
+    // device twin, then the shared head per row-0 CLS.
+    std::vector<float> last_hidden(batch.size() * lmax * hidden);
+    const auto start = std::chrono::steady_clock::now();
+    if (!bge_m3::CpuForwardBatch(encoder.F32(), batch,
+                                 model_->Config().pad_token_id, scratch_,
+                                 last_hidden)) {
+      return refuse(
+          "bge-reranker ScoreBatch: CPU batch forward shape/id failure");
+    }
+    const double batch_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - start)
+                                .count();
+    std::vector<float> scores;
+    scores.reserve(batch.size());
+    for (std::size_t b = 0; b < batch.size(); ++b) {
+      const float logit = core::rerank::SequenceHeadLogit(
+          std::span<const float>(last_hidden.data() + (b * lmax) * hidden,
+                                 hidden),
+          model_->Head().dense_w, model_->Head().dense_b,
+          model_->Head().out_w, model_->Head().out_b);
+      scores.push_back(core::rerank::Sigmoid(logit));
+    }
+    if (total_prefill_ms != nullptr)
+      *total_prefill_ms = batch_ms;
+    if (prompt_tokens != nullptr)
+      *prompt_tokens = tokens;
+    return scores;
+  }
+  // Legacy per-pair loop (also the over-capacity fallback).
   std::vector<float> scores;
   scores.reserve(batch.size());
   double total_ms = 0.0;
