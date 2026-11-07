@@ -279,6 +279,15 @@ bool LaunchDecodeMoeEpilogue(const float* expert_out, const float* weights,
                              float* out, std::uint32_t n_tokens,
                              std::uint32_t top_k, std::size_t hidden,
                              hipStream_t stream);
+// Order-preserving skinny router GEMV (q36, router_gemv.hip): F32
+// [n_tokens x hidden] x [hidden x n_experts] for the 256-expert /
+// 2048-hidden router shape, replaying the hipblas SGEMM StaggerU order
+// (32-row M-tiles start K at tile*64, single FMA chain per output) so
+// logits are bitwise identical to the SGEMM path. n_tokens 1..8 only;
+// returns false for any other shape and the caller keeps hipblas.
+bool LaunchRouterStaggerGemv(const float* x, const float* w, float* out,
+                             std::uint32_t n_tokens, std::uint32_t n_experts,
+                             std::size_t hidden, hipStream_t stream);
 /// Full-vocabulary greedy argmax; scratch holds n_tokens * kArgmaxParts.
 void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
             std::uint32_t n_tokens, std::uint32_t vocab, hipStream_t stream);

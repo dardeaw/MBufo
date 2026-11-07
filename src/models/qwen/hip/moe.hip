@@ -158,13 +158,17 @@ bool MoeForwardHip(const core::ModelConfig& config,
   HIPBLAS_CHECK(hipblasSetStream(blas, stream));
 
   // 1. Router logits: [T x N] = X[T x H] * W^T, W = gate_inp [N x H].
-  // NOTE (q36): a skinny custom router GEMV (moe_decode_kq, ~10 us vs
-  // hipblas ~96 us) was tried here and reverted: it reached tg 50.4 but
-  // flipped one greedy token on the arithmetic short prompt (F32
-  // accumulation order differs from hipblas SGEMM, and a top-8 margin was
-  // tighter than the rounding delta). The hipblas SGEMM below stays as the
-  // bit-stable router; token equality beats the 3 ms saving.
-  {
+  // Order-preserving skinny router GEMV (q36): hipBLAS SGEMM order
+  // forensics (rocprofv3 Tensile MT32x32x8/TT2_2/WG16_16_1 on gfx1151)
+  // shows a sequential-FMA MAC loop with StaggerU rotating each 32-row
+  // M-tile's K start by tile*64 (bitwise-verified vs hipblasSgemm for
+  // 256xTx2048, T = 1..8). The custom kernel replays that rotation with
+  // a single FMA chain per output, so logits are bitwise identical to
+  // the SGEMM path. Out-of-contract shapes fall back to hipblas below.
+  if (!gemm::LaunchRouterStaggerGemv(
+          x, static_cast<const float*>(layer.ffn_gate_inp.data),
+          scratch.router.data(), n_tokens,
+          static_cast<std::uint32_t>(num_experts), hidden, stream)) {
     const float alpha = 1.0F, beta = 0.0F;
     HIPBLAS_CHECK(hipblasSgemm(
         blas, HIPBLAS_OP_T, HIPBLAS_OP_N, static_cast<int>(num_experts),

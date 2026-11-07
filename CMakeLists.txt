@@ -164,6 +164,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/routed_moe.hip
     src/core/compute/gemm/moe_decode_kq.hip
+    src/core/compute/gemm/router_gemv.hip
     src/core/compute/gemm/argmax.hip
     src/core/compute/gemm/gemm.hpp
     src/core/compute/gemm/gemm_device.cuh
@@ -180,6 +181,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/routed_moe.hip
     src/core/compute/gemm/moe_decode_kq.hip
+    src/core/compute/gemm/router_gemv.hip
     src/core/compute/gemm/argmax.hip PROPERTIES LANGUAGE HIP)
   # The Wave64 WMMA instantiation needs wavefrontsize64 (the same per-file
   # flag the model libs use for their WMMA TUs); this file holds no wave32
