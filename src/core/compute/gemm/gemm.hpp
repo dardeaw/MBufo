@@ -216,6 +216,10 @@ void QuantizeQ8Tiled(const float* x, void* out, std::size_t batch,
 bool W8A8Gemm(const void* w, const void* x_tiled, float* out,
               std::size_t batch, std::size_t m, std::size_t k,
               hipStream_t stream);
+/// Bulk F32 -> F16 narrowing (round-to-nearest-even) for routed-expert and
+/// shared-expert F16 GEMM inputs. Model-agnostic; returns false on nulls.
+bool ConvertF32ToF16(const float* in, __half* out, std::size_t n,
+                     hipStream_t stream);
 /// F16 activation rows, F16/unquantized weights, F32 accumulation.
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,

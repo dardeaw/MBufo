@@ -31,6 +31,15 @@ struct ModelConfig {
   std::uint32_t rotary_dim{64};
   float rope_theta{10000000.0F};
   float rope_scale{1.0F};
+  // mRoPE dimension sections (qwen35moe text: [11, 11, 10, 0]); all zeros
+  // selects the legacy single-section rotary path.
+  std::uint32_t rope_sections[4]{0, 0, 0, 0};
+  // Routed-MoE geometry (qwen35moe: 256 experts, top-8, expert_ff 512,
+  // shared expert 512). Zero expert_count selects the dense FFN path.
+  std::uint32_t expert_count{0};
+  std::uint32_t expert_used_count{0};
+  std::uint32_t expert_ffn_size{0};
+  std::uint32_t shared_expert_ffn_size{0};
   bool is_text_only{true};
 
   [[nodiscard]] constexpr std::uint32_t AttentionSize() const noexcept {
@@ -76,6 +85,29 @@ struct ModelConfig {
            ssm_group_count > 0 && ssm_time_step_rank > 0 &&
            ssm_inner_size > 0 && (ssm_inner_size % ssm_time_step_rank) == 0 &&
            SsmValueSize() == 128 && is_text_only;
+  }
+
+  /// True when the FFN block is a routed MoE (experts + shared expert).
+  [[nodiscard]] constexpr bool IsMoE() const noexcept {
+    return expert_count > 0;
+  }
+
+  /// MoE twin of IsValidQwen: the same hybrid attention/SSM block rules,
+  /// plus routed-expert geometry. Dense `intermediate_size` is unused on
+  /// MoE layers (no feed_forward_length key in qwen35moe GGUFs).
+  [[nodiscard]] constexpr bool IsValidQwenMoe() const noexcept {
+    return head_dim > 0 && num_layers > 0 && hidden_size > 0 &&
+           num_attention_heads > 0 && num_key_value_heads > 0 &&
+           vocab_size > 0 && full_attention_interval == 4 &&
+           (num_layers % full_attention_interval) == 0 && rotary_dim > 0 &&
+           rotary_dim <= head_dim && (rotary_dim % 2) == 0 &&
+           ssm_conv_kernel == 4 && ssm_state_size == 128 &&
+           ssm_group_count > 0 && ssm_time_step_rank > 0 &&
+           ssm_inner_size > 0 && (ssm_inner_size % ssm_time_step_rank) == 0 &&
+           SsmValueSize() == 128 && is_text_only && expert_count > 0 &&
+           expert_count <= 1024 && expert_used_count > 0 &&
+           expert_used_count <= expert_count && expert_used_count <= 32 &&
+           expert_ffn_size > 0 && shared_expert_ffn_size > 0;
   }
 };
 

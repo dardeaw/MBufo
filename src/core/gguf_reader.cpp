@@ -969,6 +969,38 @@ std::optional<ModelConfig> GgufReader::ExtractModelConfig(
   } else {
     config.rotary_dim = config.head_dim;
   }
+  if (const auto* sections_meta =
+          FindMetadata(prefix + "rope.dimension_sections");
+      sections_meta != nullptr) {
+    if (const auto* ints =
+            std::get_if<std::vector<std::int64_t>>(&sections_meta->value);
+        ints != nullptr && ints->size() == 4) {
+      for (int i = 0; i < 4; ++i) {
+        config.rope_sections[i] =
+            (*ints)[i] < 0 ? 0 : static_cast<std::uint32_t>((*ints)[i]);
+      }
+    } else if (const auto* uints =
+                   std::get_if<std::vector<std::uint64_t>>(
+                       &sections_meta->value);
+               uints != nullptr && uints->size() == 4) {
+      for (int i = 0; i < 4; ++i) {
+        config.rope_sections[i] = static_cast<std::uint32_t>((*uints)[i]);
+      }
+    }
+  }
+  if (auto val = GetMetadataUint32(prefix + "expert_count")) {
+    config.expert_count = *val;
+  }
+  if (auto val = GetMetadataUint32(prefix + "expert_used_count")) {
+    config.expert_used_count = *val;
+  }
+  if (auto val = GetMetadataUint32(prefix + "expert_feed_forward_length")) {
+    config.expert_ffn_size = *val;
+  }
+  if (auto val =
+          GetMetadataUint32(prefix + "expert_shared_feed_forward_length")) {
+    config.shared_expert_ffn_size = *val;
+  }
 
   // 3. MTP speculative layers are included in qwen35.block_count but are not
   // part of the main autoregressive transformer stack.
@@ -1009,8 +1041,11 @@ std::optional<ModelConfig> GgufReader::ExtractModelConfig(
     }
   }
 
-  // 6. Validate configuration against Qwen3.5/3.8 structural rules
-  if (!config.IsValidQwen()) {
+  // 6. Validate configuration against Qwen3.5/3.8 structural rules (MoE
+  // twins for qwen35moe: routed experts replace the dense intermediate).
+  const bool valid =
+      config.IsMoE() ? config.IsValidQwenMoe() : config.IsValidQwen();
+  if (!valid) {
     if (error_msg != nullptr) {
       *error_msg = "Model config failed Qwen structural validation (head_dim=" +
                    std::to_string(config.head_dim) +
