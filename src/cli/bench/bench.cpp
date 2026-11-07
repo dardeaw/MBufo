@@ -1323,6 +1323,13 @@ int RunBench(std::span<const char* const> args) {
   if (IsQwen38FlashNext(*reader)) {
     return RunQwen38FlashNextBenchmark(opt, reader, model_load_start);
   }
+  if (reader->GetMetadataString("general.architecture") == "gpt-oss") {
+    std::cerr << "Error: gpt-oss models are not supported by the Qwen GPU "
+                 "executor benchmark; use the direct gptoss bench "
+                 "(tests/models/gptoss/bench_test) instead\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
 
   if (opt.concurrency != std::vector<std::size_t>{1}) {
     std::cerr << "Error: concurrent model benchmarks currently support DS4 "

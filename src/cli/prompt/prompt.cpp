@@ -35,6 +35,7 @@
 #include "src/models/gemma4/engine.hpp"
 #include "src/models/llama/engine.hpp"
 #include "src/models/glimmer/engine.hpp"
+#include "src/models/gptoss/engine.hpp"
 #endif
 
 namespace gufo::cli {
@@ -1422,6 +1423,110 @@ int RunPrompt(std::span<const char* const> args) {
 #endif
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (reader->GetMetadataString("general.architecture") == "gpt-oss") {
+    // GPT-OSS harmony framing (manual template: <|start|>role<|message|>
+    // turns closed by <|end|>; the tokenizer maps the bracket tokens to
+    // special ids). --raw skips framing so prompt tokens match bench direct.
+    std::string gptoss_prompt;
+    if (!opt.use_chat_template) {
+      gptoss_prompt = opt.prompt_text;
+    } else {
+      // Matches the artifact's embedded harmony template: a developer block
+      // (only when non-empty), the user turn, then the bare generation
+      // prompt "<|start|>assistant" (no <|message|> suffix). The default
+      // developer preamble names the valid channels; without it the model
+      // emits invalid channel tags.
+      if (!opt.system_prompt.empty()) {
+        gptoss_prompt = "<|start|>developer<|message|># Instructions\n\n";
+        gptoss_prompt += opt.system_prompt;
+        gptoss_prompt += "<|end|>";
+      } else {
+        gptoss_prompt = "<|start|>developer<|message|># Instructions\n\n"
+                        "You are ChatGPT, a large language model trained by "
+                        "OpenAI.\n"
+                        "Knowledge cutoff: 2024-06-01\n"
+                        "Reasoning: medium\n"
+                        "# Valid channels: analysis, commentary, final.<|end|>";
+      }
+      gptoss_prompt += "<|start|>user<|message|>";
+      gptoss_prompt += opt.prompt_text;
+      gptoss_prompt += "<|end|><|start|>assistant";
+    }
+    models::gptoss::ModelOptions gopt;
+    gopt.max_context = 4096;
+    if (const char* kv_quant = getenv("GPTOSS_KV_QUANT")) {
+      const std::string value = kv_quant;
+      if (value != "f16" && value != "q8") {
+        std::cerr << "GPTOSS_KV_QUANT must be f16 or q8\n";
+        return 1;
+      }
+      gopt.kv_cache_quant = value;
+    }
+    if (const char* e = getenv("GPTOSS_CTX")) {
+      const long v = std::strtol(e, nullptr, 10);
+      if (v >= 1024)
+        gopt.max_context = static_cast<std::uint32_t>(v);
+    }
+    std::fprintf(stderr, "[gpt-oss] kv_cache_quant=%s context=%u\n",
+                 gopt.kv_cache_quant.c_str(), gopt.max_context);
+    auto gmodel = models::gptoss::Model::Load(opt.model_path, gopt, &err);
+    if (!gmodel) {
+      std::cerr << "GPT-OSS load failed: " << err << '\n';
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    PrintModelLoadTime(model_load_start, true);
+    auto gsession = gmodel->CreateSession(&err);
+    if (!gsession) {
+      std::cerr << "GPT-OSS session failed: " << err << '\n';
+      return 1;
+    }
+    const auto gids = gmodel->Tokenize(gptoss_prompt, /*add_bos=*/false);
+    std::fprintf(stderr, "[gpt-oss] prompt tokens: %zu\n", gids.size());
+    std::vector<std::int32_t> prompt(gids.begin(), gids.end());
+    const auto gstart = std::chrono::steady_clock::now();
+    if (!gsession->Sync(prompt, &err)) {
+      std::cerr << "GPT-OSS prefill failed: " << err << '\n';
+      return 1;
+    }
+    const double prefill_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      gstart)
+            .count();
+    const auto dstart = std::chrono::steady_clock::now();
+    std::vector<std::int32_t> generated;
+    while (generated.size() < opt.max_tokens) {
+      const std::int32_t token = gsession->SampleGreedy();
+      std::cout << gmodel->Decode(std::span<const std::int32_t>(&token, 1))
+                << std::flush;
+      generated.push_back(token);
+      if (gmodel->IsStopToken(token))
+        break;
+      if (!gsession->Evaluate(token, &err)) {
+        std::cerr << "GPT-OSS decode failed: " << err << '\n';
+        return 1;
+      }
+    }
+    std::cout << '\n';
+    if (opt.verbose) {
+      const double dseconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        dstart)
+              .count();
+      std::cerr << "\nprefill: " << prompt.size() << " tokens in "
+                << prefill_seconds << "s ("
+                << (prefill_seconds > 0
+                        ? static_cast<double>(prompt.size()) / prefill_seconds
+                        : 0.0)
+                << " tok/s)\ndecode: " << generated.size() << " tokens in "
+                << dseconds << "s ("
+                << (dseconds > 0 ? static_cast<double>(generated.size()) /
+                                       dseconds
+                                 : 0.0)
+                << " tok/s)\n";
+    }
+    return 0;
+  }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     auto model = LoadFlashNextModel(opt, *reader, model_load_start);
     if (!model)
