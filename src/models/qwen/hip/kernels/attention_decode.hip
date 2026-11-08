@@ -784,6 +784,157 @@ __launch_bounds__(32) __global__ void QwenDecodeSplitKAttentionReduceKernel(
   }
 }
 
+// Query-tiled split-K partials for 8:1 GQA, d == 256, f16 KV. One block
+// covers RQ query rows x 8 heads x one KV split. Each KV tile (TILE_T tokens)
+// is staged once in LDS and shared by all RQ rows and all 8 heads; per
+// (row, head) online-softmax state lives in registers. Split order, tile
+// order and token order are fixed and match the scalar split-K path, so the
+// deterministic merge is bit-identical to it.
+template<unsigned RQ = 8, unsigned TILE_T = 32>
+__launch_bounds__(256) __global__
+void QwenDecodeSplitKQTileHalfPartialsKernel(
+    const float* __restrict__ q, const __half* __restrict__ k_cache,
+    const __half* __restrict__ v_cache, float* __restrict__ scratch,
+    std::uint32_t layer_idx, std::uint32_t start_pos, std::uint32_t rows,
+    std::uint32_t max_context, std::uint32_t num_heads,
+    std::uint32_t num_kv_heads, std::uint32_t split_count) {
+  constexpr std::uint32_t lanes = 32;
+  constexpr std::uint32_t heads_per_block = 8;
+  constexpr std::uint32_t head_dim = 256;
+  constexpr std::uint32_t vector_width = head_dim / 4;
+  constexpr std::uint32_t vectors_per_lane = vector_width / lanes;
+  using Head = detail::SplitKAttentionHead<lanes, false>;
+  constexpr std::size_t max_splits = detail::kSplitKDecodeAttentionMaxSplits;
+
+  const std::uint32_t kvh = blockIdx.x;
+  const std::uint32_t group = blockIdx.y;
+  const std::uint32_t split = blockIdx.z;
+  const std::uint32_t head_in_block = threadIdx.x / lanes;
+  const std::uint32_t lane = threadIdx.x % lanes;
+  const std::uint32_t head = kvh * heads_per_block + head_in_block;
+  if (head >= num_heads || split >= split_count) {
+    return;
+  }
+  const std::uint32_t base_row = group * RQ;
+  const std::size_t width = static_cast<std::size_t>(num_heads) * head_dim;
+  const std::size_t kv_width = static_cast<std::size_t>(num_kv_heads) * head_dim;
+  const std::size_t cache_head_offset =
+      (static_cast<std::size_t>(layer_idx) * max_context * kv_width) +
+      (static_cast<std::size_t>(kvh) * head_dim);
+  const float scale = rsqrtf(static_cast<float>(head_dim));
+
+  float running_max[RQ];
+  float running_sum[RQ];
+  float4 output_values[RQ][vectors_per_lane];
+#pragma unroll
+  for (unsigned r = 0; r < RQ; ++r) {
+    running_max[r] = -INFINITY;
+    running_sum[r] = 0.0F;
+#pragma unroll
+    for (std::uint32_t v = 0; v < vectors_per_lane; ++v) {
+      output_values[r][v] = make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+    }
+  }
+
+  // Partition over the group's last row; earlier rows clamp to their own
+  // causal endpoint below.
+  const std::uint32_t last_row =
+      base_row + (min(static_cast<std::size_t>(RQ),
+                      static_cast<std::size_t>(rows) - base_row) -
+                  1);
+  const auto [partition_begin, partition_end] =
+      detail::SplitKDecodePartition(start_pos + last_row, split, split_count);
+
+  __shared__ __align__(16) __half ktile[TILE_T][head_dim];
+  __shared__ __align__(16) __half vtile[TILE_T][head_dim];
+  for (std::size_t begin = partition_begin; begin < partition_end;
+       begin += TILE_T) {
+    const unsigned count =
+        static_cast<unsigned>(min(std::size_t{TILE_T}, partition_end - begin));
+    for (unsigned u = threadIdx.x; u < count * 32u; u += 256u) {
+      const unsigned t = u / 32u;
+      const unsigned d = (u % 32u) * 8u;
+      const std::size_t off = cache_head_offset + (begin + t) * kv_width + d;
+      *reinterpret_cast<uint4*>(ktile[t] + d) =
+          *reinterpret_cast<const uint4*>(k_cache + off);
+      *reinterpret_cast<uint4*>(vtile[t] + d) =
+          *reinterpret_cast<const uint4*>(v_cache + off);
+    }
+    __syncthreads();
+#pragma unroll 1
+    for (unsigned r = 0; r < RQ; ++r) {
+      const std::uint32_t grow = base_row + r;
+      if (grow >= rows) {
+        continue;
+      }
+      const std::size_t row_end =
+          static_cast<std::size_t>(start_pos) + grow + 1;
+      const auto* query = reinterpret_cast<const float4*>(
+          q + (static_cast<std::size_t>(grow) * width) +
+          (static_cast<std::size_t>(head) * head_dim));
+      float4 query_values[vectors_per_lane];
+#pragma unroll
+      for (std::uint32_t v = 0; v < vectors_per_lane; ++v) {
+        query_values[v] = query[Head::Vector(lane, v)];
+      }
+      for (unsigned t = 0; t < count; ++t) {
+        const std::size_t p = begin + t;
+        if (p >= row_end) {
+          break;
+        }
+        float score = 0.0F;
+#pragma unroll
+        for (std::uint32_t v = 0; v < vectors_per_lane; ++v) {
+          score += detail::DotHalf4<false>(
+              query_values[v], ktile[t] + Head::Vector(lane, v) * 4, -0.0F);
+        }
+        score += __shfl_down(score, 16);
+        score = detail::RowSumDpp(score);
+        score = __shfl(score, 0) * scale;
+        const float new_max = fmaxf(running_max[r], score);
+        const float previous_scale = expf(running_max[r] - new_max);
+        const float value_scale = expf(score - new_max);
+        running_sum[r] = running_sum[r] * previous_scale + value_scale;
+        running_max[r] = new_max;
+#pragma unroll
+        for (std::uint32_t v = 0; v < vectors_per_lane; ++v) {
+          detail::UpdateHalf4<false>(output_values[r][v],
+                                     vtile[t] + Head::Vector(lane, v) * 4,
+                                     previous_scale, value_scale, -0.0F);
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  // Store in the per-row layout the existing reduce kernel reads.
+  const std::size_t row_stride =
+      static_cast<std::size_t>(num_heads) * max_splits * (head_dim + 2);
+  const std::size_t stats_elements =
+      static_cast<std::size_t>(num_heads) * max_splits * 2;
+#pragma unroll 1
+  for (unsigned r = 0; r < RQ; ++r) {
+    const std::uint32_t grow = base_row + r;
+    if (grow >= rows) {
+      continue;
+    }
+    float* sbase = scratch + static_cast<std::size_t>(grow) * row_stride;
+    const std::size_t partition_index =
+        (static_cast<std::size_t>(head) * max_splits) + split;
+    if (lane == 0) {
+      sbase[(partition_index * 2) + 0] = running_max[r];
+      sbase[(partition_index * 2) + 1] = running_sum[r];
+    }
+    auto* partial_outputs = reinterpret_cast<float4*>(sbase + stats_elements);
+    auto* partial_output =
+        partial_outputs + (partition_index * vector_width);
+#pragma unroll
+    for (std::uint32_t v = 0; v < vectors_per_lane; ++v) {
+      partial_output[Head::Vector(lane, v)] = output_values[r][v];
+    }
+  }
+}
+
 static void LaunchSplitKAttentionHalfPartials(
     const float* q, const __half* k_cache, const __half* v_cache,
     float* scratch, std::uint32_t layer_idx, std::uint32_t start_pos,
@@ -977,13 +1128,51 @@ void LaunchCausalDecodeAttention(
     return;
   }
   const std::size_t width = static_cast<std::size_t>(num_heads) * head_dim;
-  for (std::size_t row = 0; row < batch_size; ++row) {
-    LaunchAttention(
-        q + row * width, nullptr, nullptr,
-        gate == nullptr ? nullptr : gate + row * width, k_cache, v_cache,
-        k_cache_f16, v_cache_f16, out_context + row * width, layer_idx,
-        start_pos + static_cast<std::uint32_t>(row), max_context, num_heads,
-        num_kv_heads, head_dim, stream, split_k_scratch, true);
+  // Query-tiled groups of eight rows share each staged KV tile across
+  // rows and heads (8:1 GQA, f16 KV). Falls back per row for short or
+  // partial groups and non-8:1 shapes.
+  const bool qtile_allowed = [] {
+    const char* e = std::getenv("GUFO_QWEN_SPLITK_QTILE");
+    return e == nullptr || !(e[0] == '0' && e[1] == '\0');
+  }();
+  const bool qtile_shape =
+      qtile_allowed && head_dim == 256 && num_heads == 8 * num_kv_heads &&
+      k_cache == nullptr && v_cache == nullptr && k_cache_f16 != nullptr;
+  const bool qtile_scratch =
+      split_k_scratch != nullptr &&
+      scratch.size() >= 8 * row_scratch;
+  for (std::size_t row = 0; row < batch_size;) {
+    const std::size_t rows_left = batch_size - row;
+    const std::size_t group_last_seq =
+        static_cast<std::size_t>(start_pos) + row +
+        (rows_left < 8 ? rows_left : 8);
+    if (qtile_shape && qtile_scratch && rows_left >= 8 &&
+        group_last_seq >=
+            static_cast<std::size_t>(
+                detail::kSplitKDecodeAttentionMinContext)) {
+      const std::uint32_t splits = detail::SelectDecodeAttentionSplitCount(
+          group_last_seq);
+      QwenDecodeSplitKQTileHalfPartialsKernel<8, 32>
+          <<<dim3(num_kv_heads, 1, splits), 256, 0, stream>>>(
+              q + row * width,
+              static_cast<const __half*>(k_cache_f16),
+              static_cast<const __half*>(v_cache_f16), split_k_scratch,
+              layer_idx, start_pos + static_cast<std::uint32_t>(row), 8,
+              max_context, num_heads, num_kv_heads, splits);
+      QwenDecodeSplitKAttentionReduceKernel<<<dim3(num_heads, 8), 32, 0,
+                                             stream>>>(
+          gate == nullptr ? nullptr : gate + row * width, split_k_scratch,
+          out_context + row * width, num_heads, splits);
+      row += 8;
+    } else {
+      LaunchAttention(
+          q + row * width, nullptr, nullptr,
+          gate == nullptr ? nullptr : gate + row * width, k_cache, v_cache,
+          k_cache_f16, v_cache_f16, out_context + row * width, layer_idx,
+          start_pos + static_cast<std::uint32_t>(row), max_context, num_heads,
+          num_kv_heads, head_dim, stream, split_k_scratch, true);
+      ++row;
+    }
   }
 }
 

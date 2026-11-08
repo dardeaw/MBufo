@@ -486,6 +486,7 @@ public:
   std::unique_ptr<HipblasLtGemm> hipblaslt_gemm;
   void* d_scratch_bf16{nullptr};
   float* d_split_k_attention{nullptr};
+  float* d_split_k_qtile{nullptr};
   void* d_preq_q81{nullptr};
   std::size_t preq_q81_bytes{0};
   hip_bfloat16* d_weights_bf16{nullptr};

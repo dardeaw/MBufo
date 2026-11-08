@@ -500,8 +500,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                   arena_.GetMaxContext(), config.num_attention_heads,
                   config.num_key_value_heads, config.head_dim, arena_.stream,
                   fused_qknorm_rope_kv, nullptr,
-                  {arena_.d_split_k_attention,
-                      detail::DecodeAttentionScratchElements(
+                  {arena_.d_split_k_qtile,
+                      8 * detail::DecodeAttentionScratchElements(
                           config.num_attention_heads, config.head_dim)});
             });
         if (tiled_attention) {
@@ -1191,8 +1191,8 @@ void QwenGpuExecutor::PrefillAttentionPost(const PrefillChunkCtx& ctx,
                   arena_.GetMaxContext(), config.num_attention_heads,
                   config.num_key_value_heads, config.head_dim, arena_.stream,
                   ctx.fuse_qknorm_rope_kv, nullptr,
-                  {arena_.d_split_k_attention,
-                      detail::DecodeAttentionScratchElements(
+                  {arena_.d_split_k_qtile,
+                      8 * detail::DecodeAttentionScratchElements(
                           config.num_attention_heads, config.head_dim)});
             });
         if (tiled_attention) {

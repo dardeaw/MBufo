@@ -268,24 +268,22 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
   }
 
   if (online) {
-    // The FP32 reference layout cannot use the FP16 tiled kernels. When
-    // the caller supplies one row of split-K scratch, run the verified
-    // split-K partials+merge per row instead of one full-KV online sweep
-    // per (head, row): same online-softmax math, KV cut into parallel
-    // tiles with a deterministic fixed-order merge. Shapes split-K does
-    // not serve (or no scratch) keep the scalar online sweep.
-    const std::size_t row_scratch =
-        detail::DecodeAttentionScratchElements(num_heads, head_dim);
-    std::span<float> row_view;
-    if (split_k_scratch.size() >= row_scratch &&
+    // The FP32 reference layout cannot use the FP16 tiled kernels. Forward
+    // the caller's scratch untouched: one row keeps the per-row split-K
+    // route, eight rows additionally unlock query-tiled groups (8:1 GQA).
+    // Shapes split-K does not serve keep the scalar online sweep via the
+    // empty-span fallback inside LaunchCausalDecodeAttention.
+    std::span<float> fwd_view;
+    if (split_k_scratch.size() >=
+            detail::DecodeAttentionScratchElements(num_heads, head_dim) &&
         detail::IsSplitKDecodeAttentionSupported(
             max_seq_len, num_heads, num_kv_heads, head_dim)) {
-      row_view = split_k_scratch.first(row_scratch);
+      fwd_view = split_k_scratch;
     }
     LaunchCausalDecodeAttention(q, gate, k_cache, v_cache, k_cache_f16,
                                 v_cache_f16, out_context, layer_idx, start_pos,
                                 batch_size, max_context, num_heads,
-                                num_kv_heads, head_dim, stream, row_view);
+                                num_kv_heads, head_dim, stream, fwd_view);
     if (out_context_bf16 != nullptr)
       LaunchFloatToBfloat16(out_context, out_context_bf16,
                             batch_size * num_heads * head_dim, stream);
