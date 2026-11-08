@@ -261,6 +261,7 @@ add_library(gufo_core STATIC
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
+  src/core/engine/engine_registry.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_definitions(gufo_core PRIVATE
@@ -275,6 +276,8 @@ add_subdirectory(src/models/gemma4)
 add_subdirectory(src/models/bge_m3)
 add_subdirectory(src/models/bge_reranker)
 add_subdirectory(src/models/qwen_reranker)
+add_subdirectory(src/models/llama)
+add_subdirectory(src/models/glimmer)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
@@ -316,7 +319,7 @@ add_library(gufo_llm_cli STATIC
   src/cli/prompt/prompt.cpp)
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next)
 if(ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash gufo_gemma4)
+  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash gufo_gemma4 gufo_llama gufo_glimmer)
 endif()
 
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
@@ -452,6 +455,8 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/qwen27b)
   add_subdirectory(tests/models/gemma4)
   add_subdirectory(tests/models/bge_m3)
+  add_subdirectory(tests/models/glimmer)
+  add_subdirectory(tests/models/llama)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
 

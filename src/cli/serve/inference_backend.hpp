@@ -26,6 +26,10 @@ namespace gufo::models::gemma4 {
 class Model;
 }
 
+namespace gufo::models::glimmer {
+class Model;
+}
+
 namespace gufo::models::qwen38_flash_next {
 class Model;
 }
@@ -128,6 +132,19 @@ public:
   /// and exposes no continuation snapshots, so the persistent disk cache is
   /// rejected and only the process-local RAM pool is used.
   bool load(std::shared_ptr<models::gemma4::Model> model,
+            std::string* error, std::uint32_t max_context = 0,
+            std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {});
+  /// Installs a previously loaded Muse Glimmer model with request-owned
+  /// Sync/Evaluate sessions. Glimmer prefills incrementally over the
+  /// retained prefix and exposes no continuation snapshots, so the
+  /// persistent disk cache is rejected and only the process-local RAM
+  /// pool is used.
+  bool load(std::shared_ptr<models::glimmer::Model> model,
             std::string* error, std::uint32_t max_context = 0,
             std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},

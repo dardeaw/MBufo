@@ -335,6 +335,101 @@ bool IsGemma4Vocabulary(std::string_view architecture) {
   return architecture == "gemma4";
 }
 
+// llama-bpe (tiktoken) ordered split, mirroring the reference regex:
+// '(?:[sdmt]|ll|ve|re) | [^\r\n\p{L}\p{N}]?\p{L}+ | \p{N}{1,3}
+// | ?[^\s\p{L}\p{N}]+[\r\n]* | \s*[\r\n]+ | \s+(?!\S) | \s+
+// ICU categories stand in for \p{}/\s; contraction folding matches
+// Qwen35ContractionEnd (u_foldCase, same 7 suffixes).
+std::size_t LlamaPieceEnd(std::string_view text, std::size_t offset) {
+  if (const std::size_t contraction = Qwen35ContractionEnd(text, offset);
+      contraction != offset) {
+    return contraction;
+  }
+  const Utf8CodePoint first = DecodeUtf8(text, offset);
+  // [^\r\n\p{L}\p{N}]?\p{L}+
+  std::size_t probe = offset;
+  if (!IsNewline(first.value) && !IsUnicodeLetter(first.value) &&
+      !IsUnicodeNumber(first.value)) {
+    probe += first.length;
+  }
+  if (probe < text.size()) {
+    const Utf8CodePoint letter = DecodeUtf8(text, probe);
+    if (IsUnicodeLetterOrMark(letter.value)) {
+      std::size_t end = probe + letter.length;
+      while (end < text.size()) {
+        const Utf8CodePoint next = DecodeUtf8(text, end);
+        if (!IsUnicodeLetterOrMark(next.value)) {
+          break;
+        }
+        end += next.length;
+      }
+      return end;
+    }
+  }
+  // \p{N}{1,3}
+  if (IsUnicodeNumber(first.value)) {
+    std::size_t end = offset + first.length;
+    for (int k = 1; k < 3 && end < text.size(); ++k) {
+      const Utf8CodePoint digit = DecodeUtf8(text, end);
+      if (!IsUnicodeNumber(digit.value)) {
+        break;
+      }
+      end += digit.length;
+    }
+    return end;
+  }
+  // ?[^\s\p{L}\p{N}]+[\r\n]*
+  std::size_t punct = offset;
+  if (first.value == ' ') {
+    punct += first.length;
+  }
+  if (punct < text.size()) {
+    const Utf8CodePoint p0 = DecodeUtf8(text, punct);
+    if (!IsUnicodeWhitespace(p0.value) && !IsUnicodeLetterOrMark(p0.value) &&
+        !IsUnicodeNumber(p0.value)) {
+      std::size_t end = punct;
+      while (end < text.size()) {
+        const Utf8CodePoint next = DecodeUtf8(text, end);
+        if (IsUnicodeWhitespace(next.value) ||
+            IsUnicodeLetterOrMark(next.value) ||
+            IsUnicodeNumber(next.value)) {
+          break;
+        }
+        end += next.length;
+      }
+      while (end < text.size() && IsNewline(DecodeUtf8(text, end).value)) {
+        end += DecodeUtf8(text, end).length;
+      }
+      return end;
+    }
+  }
+  // \s*[\r\n]+ | \s+(?!\S) | \s+
+  if (IsUnicodeWhitespace(first.value)) {
+    std::size_t end = offset;
+    std::size_t last_nl = offset;
+    std::size_t before_last = offset;
+    while (end < text.size()) {
+      const Utf8CodePoint next = DecodeUtf8(text, end);
+      if (!IsUnicodeWhitespace(next.value)) {
+        break;
+      }
+      before_last = end;
+      end += next.length;
+      if (IsNewline(next.value)) {
+        last_nl = end;
+      }
+    }
+    if (last_nl != offset) {
+      return last_nl;
+    }
+    if (end < text.size() && before_last > offset) {
+      return before_last;
+    }
+    return end;
+  }
+  return offset + first.length;
+}
+
 std::string Gemma4NormalizeSpaces(std::string_view text) {
   // Sentencepiece word-start rule: every maximal space run carries one
   // leading U+2581 marker (the word boundary), plus one per remaining space.
@@ -441,6 +536,14 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
   if (reader.GetMetadataString("tokenizer.ggml.pre") ==
       std::optional<std::string_view>{"qwen35"}) {
     tokenizer->pre_tokenizer_ = PreTokenizer::kQwen35;
+  }
+  if (reader.GetMetadataString("tokenizer.ggml.pre") ==
+      std::optional<std::string_view>{"llama-bpe"}) {
+    tokenizer->pre_tokenizer_ = PreTokenizer::kLlama;
+  }
+  if (reader.GetMetadataString("tokenizer.ggml.pre") ==
+      std::optional<std::string_view>{"llama4"}) {
+    tokenizer->pre_tokenizer_ = PreTokenizer::kLlama4;
   }
 
   if (auto eos = reader.GetMetadataUint32("tokenizer.ggml.eos_token_id")) {
@@ -701,6 +804,10 @@ std::vector<TokenId> QwenTokenizer::BpeMergeChunk(
 }
 
 std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
+  // llama-bpe (tiktoken) and llama4 do not NFC-normalize; skip the Qwen
+  // conversion for both.
+  const bool normalize = pre_tokenizer_ != PreTokenizer::kLlama &&
+                         pre_tokenizer_ != PreTokenizer::kLlama4;
   if (pre_tokenizer_ == PreTokenizer::kGemma4) {
     // Sentencepiece-style BPE: normalize spaces to U+2581, then merge whole
     // newline-delimited chunks without word splitting (newline-only chunks
@@ -721,14 +828,17 @@ std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
     }
     return tokens;
   }
-  if (pre_tokenizer_ != PreTokenizer::kQwen35) {
+  if (pre_tokenizer_ != PreTokenizer::kQwen35 &&
+      pre_tokenizer_ != PreTokenizer::kLlama &&
+      pre_tokenizer_ != PreTokenizer::kLlama4) {
     return BpeMergeChunk(text);
   }
 
   // Qwen's tokenizer.json normalizes each non-special span before applying
   // its Unicode split regex. ASCII needs neither conversion nor allocation.
   std::string normalized;
-  if (std::ranges::any_of(text,
+  if (normalize &&
+      std::ranges::any_of(text,
                           [](unsigned char byte) { return byte >= 0x80; })) {
     UErrorCode status = U_ZERO_ERROR;
     const auto* nfc = icu::Normalizer2::getNFCInstance(status);
@@ -750,7 +860,10 @@ std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
     pieces.reserve(128);
   std::size_t offset = 0;
   while (offset < text.size()) {
-    const std::size_t end = Qwen35PieceEnd(text, offset);
+    const std::size_t end = (pre_tokenizer_ == PreTokenizer::kLlama ||
+                               pre_tokenizer_ == PreTokenizer::kLlama4)
+                                  ? LlamaPieceEnd(text, offset)
+                                  : Qwen35PieceEnd(text, offset);
     const auto piece = text.substr(offset, end - offset);
     if (text.size() >= 1024 && piece.size() > 1 && piece.size() <= 64) {
       if (const auto found = pieces.find(piece); found != pieces.end()) {

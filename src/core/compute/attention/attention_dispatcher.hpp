@@ -25,9 +25,13 @@
 // kernel properties, not tunable policy):
 //   WMMA   supports <Q8,256> + Q4 nibble loads, SWA geometry only
 //          (heads == 16, kv_heads == 8, d == 256; static_assert in
-//          blocked_wmma.hip.cpp). No Fp8 trait exists.
-//   SplitK supports <Q8,256> + Q4 nibble loads, heads <= 16, d == 256
-//          (static_assert in blocked_splitk.hip.cpp). No Fp8 trait exists.
+//          blocked_wmma.hip.cpp). d == 128 prefill is tile-locked out
+//          (kOTilesPerWave == 2*kRowBlocks needs KSteps == 16, i.e.
+//          d == 256); those calls run the scalar direct read instead.
+//          No Fp8 trait exists.
+//   SplitK supports <Q8,256> (heads <= 16) and <Q8,128> (heads <= 32)
+//          + Q4 nibble loads (static_assert in blocked_splitk.hip.cpp).
+//          No Fp8 trait exists.
 //   Scalar (blocked_kv::AttentionKv) serves d == 256 and d == 128
 //          (d%32 == 0 required for the 32-elem block addressing), Q8/Fp8
 //          codecs plus Q4 nibble rows; anything else is refused by the
@@ -180,11 +184,13 @@ inline AttentionRoute RouteAttention(
   if (in.k_codec == DispatchCodec::kFp8)
     return AttentionRoute::kLegacy;
   // Q8/Q4 from here. Geometry support per kernel TU (see header comment):
-  // WMMA/Split-K are d == 256 SWA-geometry only; the scalar direct read
+  // WMMA is d == 256 SWA-geometry only; Split-K covers d == 256
+  // (heads <= 16) and d == 128 (heads <= 32); the scalar direct read
   // serves d == 256 and d == 128 (32-elem block addressing).
   const bool wmma_geom =
       in.head_dim == 256 && in.heads == 16 && in.kv_heads == 8;
-  const bool splitk_geom = in.head_dim == 256 && in.heads <= 16;
+  const bool splitk_geom = (in.head_dim == 256 && in.heads <= 16) ||
+                           (in.head_dim == 128 && in.heads <= 32);
   const bool scalar_geom = in.head_dim == 256 || in.head_dim == 128;
   if (in.window != 0) {
     // Only WMMA absorbs the SWA shift internally. Anything else needs the
@@ -195,10 +201,14 @@ inline AttentionRoute RouteAttention(
     return AttentionRoute::kLegacy;
   }
   if (in.q_len >= policy.wmma_min_tokens) {
-    // Prefill-shaped: WMMA when the geometry exists (SWA layers). d == 512
-    // full layers and non-SWA geometries have no WMMA kernel and stay on
-    // the caller's F16 path via kLegacy.
-    return wmma_geom ? AttentionRoute::kBlockedWmma : AttentionRoute::kLegacy;
+    // Prefill-shaped: WMMA when the geometry exists (SWA layers). Other
+    // servable blocked geometries (e.g. d == 128 dense) run the scalar
+    // direct read (fused dequant, same math); only unservable shapes stay
+    // on kLegacy.
+    if (wmma_geom)
+      return AttentionRoute::kBlockedWmma;
+    return scalar_geom ? AttentionRoute::kScalarBlocked
+                       : AttentionRoute::kLegacy;
   }
   if (in.q_len <= policy.splitk_max_tokens &&
       in.kv_len >= policy.splitk_min_kv) {

@@ -68,6 +68,14 @@ std::optional<ChatRequest> ConstrainChatRequest(
           "call|>. "
           "Tool arguments must follow the chosen function's schema; do not "
           "wrap the call in anything else.";
+    if (format == sampling::JsonConstraint::ToolFormat::kAtem)
+      instruction +=
+          "\nIf a tool is needed, respond using the ATEM tool-call form "
+          "<atem:function_calls><atem:invoke name=\"function_name\">"
+          "<atem:parameter name=\"arg1\">value1</atem:parameter>..."
+          "</atem:invoke></atem:function_calls>. "
+          "Tool arguments must follow the chosen function's schema; do not "
+          "wrap the call in anything else.";
     if (request.response_format)
       instruction += " The JSON response schema applies to the final answer.";
   }

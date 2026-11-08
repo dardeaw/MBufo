@@ -3127,8 +3127,9 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // decode step at depth fills the device.
   // Phase C-2: decode-side attention consults the shared dispatcher. Q8/Q4
   // blocked KV resolves to the scalar direct read (the AttentionKv call
-  // below, unchanged); F16, verify and the rest stay legacy (mandated by
-  // the dispatcher: d == 128 has no Split-K/WMMA instantiation yet).
+  // below, unchanged); F16, verify and the rest stay legacy. Split-K now
+  // instantiates <Q8,128> (heads <= 32), but this geometry (24/2/256)
+  // still routes below, so behavior is unchanged.
   namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
   attn_disp::AttentionDispatchPolicy attn_policy =
       attn_disp::AttentionDispatchPolicy::WithEnvDefaults();

@@ -98,3 +98,14 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(qwen38_flash_next_engine_mixed_test PRIVATE
     gufo_qwen38_flash_next)
 endif()
+
+# Flash-next registry pilot (direct adapter vs registry, DecodeStep
+# draft-verify path, adapter DecodeBatch/EvaluateBatch translation, snapshot
+# round-trip, SyncThrough smoke, MTP wiring, q8 smoke; needs weights + GPU).
+# Explicit-only, not part of the default or CI check sets.
+if (ENGINE_ENABLE_HIP)
+  add_executable(qwen38_flash_next_registry_pilot_test EXCLUDE_FROM_ALL
+    registry_pilot_test.cpp)
+  target_link_libraries(qwen38_flash_next_registry_pilot_test PRIVATE
+    gufo_qwen38_flash_next gufo_core hip::host)
+endif()

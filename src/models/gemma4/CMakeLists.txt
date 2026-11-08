@@ -29,3 +29,8 @@ if (ENGINE_ENABLE_HIP)
     gufo_core_gemm
     hip::host roc::hipblas)
 endif()
+# L1 registry adapter (EngineModel/SpeculativeSession over gemma4
+# Model/Session); HIP-only like the rest of the package.
+if (ENGINE_ENABLE_HIP)
+  target_sources(gufo_gemma4 PRIVATE engine_adapter.cpp)
+endif()

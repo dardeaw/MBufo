@@ -1778,9 +1778,10 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
-  // Gemma constrains only the call envelope (see WithTools); per-tool
-  // argument grammars are unused, so any valid grammar object suffices.
-  if (format == ToolFormat::kGemma) {
+  // Gemma and ATEM constrain only the call envelope (see WithTools);
+  // per-tool argument grammars are unused, so any valid grammar object
+  // suffices.
+  if (format == ToolFormat::kGemma || format == ToolFormat::kAtem) {
     auto object = Object();
     const std::lock_guard lock(mutex);
     if (cache.size() >= 16)
@@ -1872,7 +1873,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
     ToolFormat format) {
-  if (format == ToolFormat::kJson || format == ToolFormat::kGemma)
+  if (format == ToolFormat::kJson || format == ToolFormat::kGemma ||
+      format == ToolFormat::kAtem)
     return Object();
   static const auto qwen = [] {
     const auto schema = json::Value::object();
@@ -2007,11 +2009,12 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   };
   const bool deepseek = format == ToolFormat::kDeepSeek;
   const bool gemma = format == ToolFormat::kGemma;
+  const bool atem = format == ToolFormat::kAtem;
   const std::string_view marker =
-      gemma ? "<|tool_call>"
+      (gemma || atem) ? (gemma ? "<|tool_call>" : "<atem:function_calls>")
             : deepseek ? "<｜DSML｜tool_calls>" : "<tool_call>";
   const auto end = literal(format == ToolFormat::kJson ? "}</tool_call>"
-                            : gemma ? "}<tool_call|>"
+                            : (gemma || atem) ? (gemma ? "}<tool_call|>" : "</atem:function_calls>")
                             : deepseek ? "</｜DSML｜invoke>"
                                        : "</function>\n</tool_call>");
   const auto calls = static_cast<std::uint32_t>(grammar->rules_.size());
@@ -2060,7 +2063,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   // each other, and no text may follow them. Text after a call is where
   // echoed framing used to leak into content (#383, #438).
   const bool qwen = format == ToolFormat::kQwen;
-  const bool ends_output = deepseek || qwen || gemma || !plain_answer;
+  const bool ends_output =
+      deepseek || qwen || gemma || atem || !plain_answer;
   auto after = ends_output ? static_cast<std::uint32_t>(grammar->rules_.size())
                : parallel  ? prose
                            : text(UINT32_MAX);
@@ -2093,7 +2097,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
       grammar->rules_[after] = {{space}};
       if (parallel)
         grammar->rules_[after].push_back({space, literal(marker), calls});
-    } else if (parallel && !deepseek && !gemma) {
+    } else if (parallel && !deepseek && !gemma && !atem) {
       // Gemma's template interleaves a tool_response between calls, so
       // consecutive parallel calls are off-distribution; the envelope
       // always ends the turn after one call.
@@ -2125,15 +2129,25 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   // arguments against the schema. One shared span automaton serves every tool.
   const std::uint32_t gemma_args =
       gemma ? text_until("}<tool_call|>", after) : UINT32_MAX;
+  const std::uint32_t atem_tail =
+      atem ? text_until("</atem:function_calls>", after) : UINT32_MAX;
+  const std::uint32_t atem_args =
+      atem ? text_until("</atem:invoke>", atem_tail) : UINT32_MAX;
   for (const auto& [name, arguments] : tools) {
     const auto begin = literal(
         format == ToolFormat::kJson
             ? "{\"name\":" + json::Value(name).dump() + ",\"arguments\":"
-        : gemma    ? "call:" + name + "{"
+        : (gemma || atem)
+            ? (gemma ? "call:" + name + "{"
+                       : "<atem:invoke name=\"" + name + "\">")
         : deepseek ? "\n<｜DSML｜invoke name=\"" + name + "\">\n"
                    : "\n<function=" + name + ">\n");
     if (gemma) {
       grammar->rules_[calls].push_back({begin, gemma_args, after});
+      continue;
+    }
+    if (atem) {
+      grammar->rules_[calls].push_back({begin, atem_args, after});
       continue;
     }
     if (const auto found = imported.find(arguments.get());

@@ -79,3 +79,10 @@ if (ENGINE_ENABLE_HIP)
     mixed_batch_test.cpp)
   target_link_libraries(qwen27b_mixed_batch_test PRIVATE gufo_core hip::host)
 endif()
+
+# 27B registry pilot (explicit-only: needs weights + GPU).
+if (ENGINE_ENABLE_HIP)
+  add_executable(qwen27b_registry_pilot_test EXCLUDE_FROM_ALL
+    registry_pilot_test.cpp)
+  target_link_libraries(qwen27b_registry_pilot_test PRIVATE gufo_core hip::host)
+endif()

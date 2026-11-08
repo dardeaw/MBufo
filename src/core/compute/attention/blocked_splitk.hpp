@@ -1,7 +1,8 @@
 #ifndef GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_SPLITK_HPP_
 #define GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_SPLITK_HPP_
 
-// Blocked-Q8 Split-K decode attention for SWA (d == 256) layers: the same
+// Blocked-Q8 Split-K decode attention for d == 256 (SWA) and d == 128
+// (dense) layers: the same
 // shared 34-byte blocked KV caches as the scalar direct read (32x int8 codes
 // + f16 per-32-block scale, dequantized in registers), but the visible KV
 // range is cut into K chunks scanned by parallel blocks with per-chunk
@@ -48,16 +49,18 @@ inline constexpr std::uint32_t kBlockedSplitKMinKv = 1024;
 /// Maximum KV splits (matches the F16 Split-K cap).
 inline constexpr std::uint32_t kBlockedSplitKMaxSplits = 64;
 
-/// Device scratch for the split-K partials: MaxTokens x 16 heads x
-/// 64 splits x (d+2) floats. The launcher takes it from the caller arena
+/// Device scratch for the split-K partials: MaxTokens x 32 heads x
+/// 64 splits x (256+2) floats, which also covers 32 heads x (128+2)
+/// (32*130 < 32*258). The launcher takes it from the caller arena
 /// (§4.2 Slot-concurrency iron rule: no `static` buffers inside operators);
 /// null or short scratch refuses cleanly so the caller falls back.
 [[nodiscard]] inline constexpr std::size_t
 AttentionBlockedSplitKScratchBytes() noexcept {
-  return 8ull * 16ull * 64ull * (256ull + 2ull) * sizeof(float);
+  return 8ull * 32ull * 64ull * (256ull + 2ull) * sizeof(float);
 }
 
-/// Split-K decode over blocked Q8 caches (SWA geometry only). `k_cache` /
+/// Split-K decode over blocked Q8 caches (d == 256 SWA, heads <= 16;
+/// d == 128 dense, heads <= 32). `k_cache` /
 /// `v_cache` and `start_pos` must already carry the SWA window
 /// pointer-shift/rebase (identical to the AttentionBlocked call: keys are
 /// dense-causal [0, *start_pos]). `kv_len` is the host-visible key count
@@ -67,9 +70,9 @@ AttentionBlockedSplitKScratchBytes() noexcept {
 /// `key_block_bytes` / `value_block_bytes` select each side's block layout
 /// (34 = 8-bit codes, 18 = packed 4-bit codes for the GUFO_KV_Q4/V4 grids).
 /// `partials` is caller-owned device scratch of at least
-/// AttentionBlockedSplitKScratchBytes() (§4.2). First version instantiates
-/// <KvCodecQ8, 256>; other shapes return false so the caller falls back to
-/// the scalar direct read. Never launches an empty grid. The merge folds
+/// AttentionBlockedSplitKScratchBytes() (§4.2). Instantiates <KvCodecQ8, 256>
+/// and <KvCodecQ8, 128>; other shapes return false so the caller falls back
+/// to the scalar direct read. Never launches an empty grid. The merge folds
 /// chunks in fixed order, so reruns are deterministic.
 template <typename Codec, std::uint32_t kHeadDim>
 bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
