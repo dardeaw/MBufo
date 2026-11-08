@@ -119,6 +119,16 @@ bool LaunchNarrowQ80Prequant(const void* weights, const float* x_f32,
                              float* output, std::size_t k, std::size_t rows,
                              std::size_t tokens, void* scratch,
                              std::size_t scratch_bytes, hipStream_t stream);
+// ---- Fused gated narrow decode (shared-expert gate/up + SwiGLU) ----
+// Single-token decode only: silu(gate*x)*(up*x) with one prequant pass.
+// Replaces the gate/up Prequant pair plus the SwiGLU kernel; the has_gate
+// core evaluates the same dots in the same order. Returns false out of
+// contract (caller keeps the trio).
+bool LaunchNarrowQ80GatedPrequant(const void* up_w, const void* gate_w,
+                                 const float* x_f32, float* output,
+                                 std::size_t k, std::size_t rows, void* scratch,
+                                 std::size_t scratch_bytes,
+                                 hipStream_t stream);
 // ---- Fused QKV narrow decode (Q8_0 x prequantized-Q8_1, ungated) ----
 // Same per-row arithmetic as the narrow decode kernel; the three projections
 // share one activation row, so one launch covers qrows + kvrows + kvrows
