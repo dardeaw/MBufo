@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
@@ -249,7 +250,8 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
                             std::uint32_t max_context, std::uint32_t num_heads,
                             std::uint32_t num_kv_heads, std::uint32_t head_dim,
                             hipStream_t stream, bool skip_kv_write,
-                            void* out_context_bf16) {
+                            void* out_context_bf16,
+                            std::span<float> split_k_scratch) {
   const std::size_t max_seq_len =
       static_cast<std::size_t>(start_pos) + batch_size;
   const bool online = !detail::BatchedAttentionScoresFitLds(max_seq_len);
@@ -266,12 +268,22 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
   }
 
   if (online) {
-    // The FP32 reference layout cannot use the FP16 tiled kernels. Reuse
-    // scalar online arithmetic without context-sized LDS or new scratch.
+    // The FP32 reference layout cannot use the FP16 tiled kernels. Forward
+    // the caller's scratch untouched: one row keeps the per-row split-K
+    // route, eight rows additionally unlock query-tiled groups (8:1 GQA).
+    // Shapes split-K does not serve keep the scalar online sweep via the
+    // empty-span fallback inside LaunchCausalDecodeAttention.
+    std::span<float> fwd_view;
+    if (split_k_scratch.size() >=
+            detail::DecodeAttentionScratchElements(num_heads, head_dim) &&
+        detail::IsSplitKDecodeAttentionSupported(
+            max_seq_len, num_heads, num_kv_heads, head_dim)) {
+      fwd_view = split_k_scratch;
+    }
     LaunchCausalDecodeAttention(q, gate, k_cache, v_cache, k_cache_f16,
                                 v_cache_f16, out_context, layer_idx, start_pos,
                                 batch_size, max_context, num_heads,
-                                num_kv_heads, head_dim, stream);
+                                num_kv_heads, head_dim, stream, fwd_view);
     if (out_context_bf16 != nullptr)
       LaunchFloatToBfloat16(out_context, out_context_bf16,
                             batch_size * num_heads * head_dim, stream);

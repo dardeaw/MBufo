@@ -318,20 +318,38 @@ bool MoeForwardHip(const core::ModelConfig& config,
           /*weight_q8_0=*/true, /*gated=*/false, n_tokens, shexp_ff, hidden) ==
           gemm::NarrowDecodeRoute::kNarrowQ80Prequant &&
       preq_bytes >= gemm::NarrowQ80PrequantBytes(n_tokens, hidden);
+  // Single-token decode fuses the shared gate/up pair (one prequant, one
+  // gated GEMV with SwiGLU inside) instead of the trio below.
+  const bool use_gated =
+      use_narrow &&
+      gemm::DecideNarrowGatedPrequantRoute(
+          /*weights_q8_0=*/true, n_tokens, hidden, shexp_ff) ==
+          gemm::NarrowDecodeRoute::kNarrowQ80Prequant;
   if (use_narrow) {
-    if (!gemm::LaunchNarrowQ80Prequant(
-            layer.ffn_gate_shexp.data, x, scratch.shexp_gate.data(), hidden,
-            shexp_ff, n_tokens, preq_scratch, preq_bytes, stream) ||
-        !gemm::LaunchNarrowQ80Prequant(
-            layer.ffn_up_shexp.data, x, scratch.shexp_up.data(), hidden,
-            shexp_ff, n_tokens, preq_scratch, preq_bytes, stream)) {
+    if (use_gated) {
+      if (!gemm::LaunchNarrowQ80GatedPrequant(
+              layer.ffn_up_shexp.data, layer.ffn_gate_shexp.data, x,
+              scratch.shexp_act.data(), hidden, shexp_ff, preq_scratch,
+              preq_bytes, stream)) {
+        AssignError(error_msg, "MoE shared-expert gated narrow GEMM failed");
+        return false;
+      }
+    } else if (!gemm::LaunchNarrowQ80Prequant(
+                   layer.ffn_gate_shexp.data, x, scratch.shexp_gate.data(),
+                   hidden, shexp_ff, n_tokens, preq_scratch, preq_bytes,
+                   stream) ||
+               !gemm::LaunchNarrowQ80Prequant(
+                   layer.ffn_up_shexp.data, x, scratch.shexp_up.data(), hidden,
+                   shexp_ff, n_tokens, preq_scratch, preq_bytes, stream)) {
       AssignError(error_msg, "MoE shared-expert narrow GEMM failed");
       return false;
     }
-    LaunchBatchedSwiGLUActivation(
-        scratch.shexp_gate.data(), scratch.shexp_up.data(),
-        scratch.shexp_act.data(), nullptr,
-        static_cast<std::size_t>(n_tokens) * shexp_ff, stream);
+    if (!use_gated) {
+      LaunchBatchedSwiGLUActivation(
+          scratch.shexp_gate.data(), scratch.shexp_up.data(),
+          scratch.shexp_act.data(), nullptr,
+          static_cast<std::size_t>(n_tokens) * shexp_ff, stream);
+    }
     if (!gemm::LaunchNarrowQ80Prequant(
             layer.ffn_down_shexp.data, scratch.shexp_act.data(),
             scratch.shexp_out.data(), shexp_ff, hidden, n_tokens, preq_scratch,

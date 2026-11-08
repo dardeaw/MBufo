@@ -39,6 +39,8 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
+#include "src/core/compute/gemm/gemm.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -446,6 +448,41 @@ bool LaunchNarrowQ80Decode(const void* weights, const void* input,
     default:
       return false;
   }
+  return true;
+}
+
+// ---- Fused gated narrow decode (shared-expert gate/up + SwiGLU) ----
+//
+// Single-token decode only: one PrequantizeQ8_1 pass over x, then the
+// has_gate narrow core reads the up weights (weights) and gate weights
+// (gate) and writes silu(gate*x)*(up*x) in the same element order as the
+// gate-GEMV + up-GEMV + SwiGLU trio. Replaces five launches (two
+// quantizes, two GEMVs, one SwiGLU) with two on the shared-expert path.
+// Contract mirrors DecideNarrowDecodePrequantRoute plus tokens == 1;
+// anything else returns false and the caller keeps the trio bit-identical.
+bool LaunchNarrowQ80GatedPrequant(const void* up_w, const void* gate_w,
+                                 const float* x_f32, float* output,
+                                 std::size_t k, std::size_t rows, void* scratch,
+                                 std::size_t scratch_bytes,
+                                 hipStream_t stream) {
+  namespace nq = narrow_q8;
+  if (up_w == nullptr || gate_w == nullptr || x_f32 == nullptr ||
+      output == nullptr)
+    return false;
+  if (k == 0 || k % 32 != 0 || rows == 0) return false;
+  if (rows > static_cast<std::size_t>(0xFFFFFFFFu)) return false;
+  if (scratch == nullptr || scratch_bytes < NarrowQ80PrequantBytes(1, k))
+    return false;
+  if (PrequantizeQ8_1(x_f32, scratch, 1, k, stream) != 0) return false;
+  const auto* q8_input = static_cast<const nq::block_q8_1*>(scratch);
+  const auto ncols = static_cast<std::uint32_t>(k);
+  const auto nrows = static_cast<std::uint32_t>(rows);
+  const auto stride =
+      static_cast<std::uint32_t>(NarrowQ80PrequantStrideBlocks(k));
+  const auto grid = static_cast<unsigned>(rows);
+  nq::mul_mat_vec_q8<1, true>
+      <<<grid, 32, 0, stream>>>(up_w, gate_w, q8_input, output, ncols, nrows,
+                                stride);
   return true;
 }
 

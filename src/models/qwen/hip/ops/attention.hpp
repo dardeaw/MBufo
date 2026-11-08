@@ -91,7 +91,8 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
                             std::uint32_t num_kv_heads, std::uint32_t head_dim,
                             hipStream_t stream = nullptr,
                             bool skip_kv_write = false,
-                            void* out_context_bf16 = nullptr);
+                            void* out_context_bf16 = nullptr,
+                            std::span<float> split_k_scratch = {});
 
 /// Batched fuse of per-head Q/K RMSNorm, RoPE, and the KV-cache write across B
 /// tokens into one launch (opt-c010-qk-rope-kv). Writes the normed+roped Q into

@@ -45,6 +45,20 @@ bool MirrorTensor(TensorRef& t, std::vector<void*>& owned,
   }
   t.device = dev;
   owned.push_back(dev);
+  if (t.type == core::GgmlType::kBF16) {
+    // The dense runtime is F16-native (Embed, UnquantizedF16Gemm,
+    // GemvBatched): narrow BF16 weights to F16 once at upload.
+    // Same footprint (2 bytes/elem); converted in place on the
+    // default stream, which also orders all later runtime use.
+    kernels::ConvertBf16ToF16(static_cast<const std::uint16_t*>(dev),
+                             static_cast<__half*>(dev),
+                             t.size_bytes / 2, nullptr);
+    if (!Check(hipStreamSynchronize(nullptr), error_msg,
+             "bf16 upload convert")) {
+      return false;
+    }
+    t.type = core::GgmlType::kF16;
+  }
   return true;
 }
 
@@ -198,7 +212,12 @@ struct Session::Impl {
     up_out = buffers.Alloc<float>(chunk * ff, error);
     ffn_out = buffers.Alloc<float>(chunk * hidden_dim, error);
     logits = buffers.Alloc<float>(w.config.vocab_size, error);
-    x16 = buffers.Alloc<__half>(chunk * hidden_dim, error);
+    // ffn_down stages n * intermediate rows through x16 (not n *
+    // hidden); size it for the widest GEMM K or long prefills
+    // overflow the heap (faulted at n >= 147 for hidden=4096).
+    const std::uint32_t x16_width =
+        ff > hidden_dim ? ff : hidden_dim;
+    x16 = buffers.Alloc<__half>(chunk * x16_width, error);
     d_tokens = buffers.Alloc<std::int32_t>(chunk, error);
     d_pos = buffers.Alloc<std::uint32_t>(1, error);
     splitk_partials = buffers.Alloc<float>(

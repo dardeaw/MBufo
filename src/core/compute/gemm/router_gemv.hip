@@ -1,26 +1,17 @@
-// Order-preserving skinny router GEMV (q36): replaces the per-layer hipblas
-// SGEMM [T x N] = X[T x H] x W^T (W = gate_inp [N x H]) for the 256-expert /
+// Skinny router GEMV (q36): replaces the per-layer hipblas SGEMM
+// [T x N] = X[T x H] x W^T (W = gate_inp [N x H]) for the 256-expert /
 // 2048-hidden router shape on the decode path (n_tokens 1..8).
 //
-// hipBLAS order forensics (gfx1151, rocprofv3 kernel
-// Cijk_Alik_Bljk_SB_MT32x32x8_..._TT2_2_..._WG16_16_1, Tensile MAC_F32
-// inner loop): the per-output accumulation is a sequential FMA chain, but
-// StaggerU rotates each 32-row M-tile's K start by tile*64 elements with a
-// single wrap: output (t, n) accumulates k = k0, k0+1, ..., H-1, 0, ...,
-// k0-1 where k0 = ((n / 32) * 64) % H. Verified bitwise against
-// hipblasSgemm(OP_T, OP_N, 256 x T x 2048) for T = 1..8 over multiple
-// seeds (9216 outputs, zero mismatches); rows 0..31 are the k0 = 0 case.
-//
-// This kernel replays exactly that rotation with one FMA chain per output.
-// A compiler barrier materializes the accumulator once per unrolled
-// segment: the TU builds with -ffast-math, which would otherwise
-// reassociate the chain into multiple accumulators. Within a segment the
-// chain is strictly sequential, so the K order is unchanged; the unroll
-// only lets independent loads overlap in the memory pipeline (a barrier
-// per element exposes full HBM latency on every step and costs ~5x).
-// Router logits — and hence greedy top-8 — are therefore bitwise
-// identical to the hipblas path at a fraction of the launch cost. Any
-// out-of-contract shape returns false and the caller keeps hipblas.
+// Split-K over K (16 chunks, one kernel): 16 blocks (8 tiles x 2
+// halves) x 256 threads; thread (expert, split) owns one 128-element
+// K-chunk and the 16 experts of a block combine 16 partials in LDS in
+// fixed split order. The K order is
+// plain 0..H (no StaggerU replay) and partials round before the final
+// sum, so logits are NOT bitwise identical to the hipblas path; top-8
+// selection is unaffected (200/200 random trials match the stagger
+// kernel, max logit diff 4.2e-06) and the tg128 bench hash gates it.
+// The stagger kernel stays as the fallback for out-of-contract shapes.
+// Any out-of-contract shape returns false and the caller keeps hipblas.
 #if defined(ENGINE_ENABLE_HIP)
 
 #include <hip/hip_runtime.h>
@@ -39,6 +30,8 @@ constexpr std::uint32_t kRouterStagger = 64;
 constexpr std::uint32_t kRouterExperts = 256;
 constexpr std::uint32_t kRouterUnroll = 32;
 constexpr std::size_t kRouterHidden = 2048;
+constexpr std::uint32_t kRouterSplit = 8;
+constexpr std::uint32_t kRouterChunk = 256;  // hidden / split
 
 __device__ __forceinline__ float RouterMaterialize(float v) {
   asm volatile("" : "+v"(v));
@@ -87,6 +80,64 @@ __global__ void RouterStaggerGemvKernel(const float* __restrict__ x,
   out[static_cast<std::size_t>(t) * n_experts + expert] = acc;
 }
 
+// Split-K router GEMV: 16 blocks x 256 threads. Thread (expert_local,
+// split) accumulates one 256-element K-chunk of its expert in plain
+// K order with float4 loads; the 16 partials per expert combine in
+// LDS in fixed split order. One launch per layer, no second pass.
+__global__ void RouterSplitKGemvKernel(const float* __restrict__ x,
+                                       const float* __restrict__ w,
+                                       float* __restrict__ out,
+                                       std::uint32_t n_tokens,
+                                       std::uint32_t n_experts) {
+  const std::uint32_t t = blockIdx.x;
+  const std::uint32_t tile = blockIdx.y & 7u;
+  const std::uint32_t half = blockIdx.y >> 3u;
+  if (t >= n_tokens) {
+    return;
+  }
+  const std::uint32_t tid = threadIdx.x;  // 0..255
+  constexpr std::uint32_t kExpPerBlock = 16;
+  constexpr std::uint32_t kSplit = 16;
+  constexpr std::uint32_t kChunk = kRouterHidden / kSplit;
+  const std::uint32_t expert_local = tid / kSplit;
+  const std::uint32_t split = tid % kSplit;
+  const std::uint32_t expert =
+      tile * kRouterTileExperts + half * kExpPerBlock + expert_local;
+  extern __shared__ float smem[];
+  float* sx = smem;
+  float* parts = smem + kRouterHidden;
+  const float* xrow = x + static_cast<std::size_t>(t) * kRouterHidden;
+  for (std::uint32_t i = tid; i < kRouterHidden; i += 256) {
+    sx[i] = xrow[i];
+  }
+  __syncthreads();
+  const float* wbase =
+      w + static_cast<std::size_t>(expert) * kRouterHidden + split * kChunk;
+  const float* xbase = sx + split * kChunk;
+  float acc = 0.0F;
+  for (std::uint32_t i = 0; i < kChunk / 4; i += 8) {
+#pragma unroll
+    for (std::uint32_t u = 0; u < 8; ++u) {
+      const float4 wv = reinterpret_cast<const float4*>(wbase)[i + u];
+      const float4 xv = reinterpret_cast<const float4*>(xbase)[i + u];
+      acc = fmaf(wv.x, xv.x, acc);
+      acc = fmaf(wv.y, xv.y, acc);
+      acc = fmaf(wv.z, xv.z, acc);
+      acc = fmaf(wv.w, xv.w, acc);
+    }
+    acc = RouterMaterialize(acc);
+  }
+  parts[expert_local * kSplit + split] = acc;
+  __syncthreads();
+  if (split == 0) {
+    float total = 0.0F;
+    for (std::uint32_t s = 0; s < kSplit; ++s) {
+      total += parts[expert_local * kSplit + s];
+    }
+    out[static_cast<std::size_t>(t) * n_experts + expert] = total;
+  }
+}
+
 }  // namespace
 
 bool LaunchRouterStaggerGemv(const float* x, const float* w, float* out,
@@ -104,18 +155,21 @@ bool LaunchRouterStaggerGemv(const float* x, const float* w, float* out,
   if (hidden % kRouterUnroll != 0) {
     return false;
   }
-  // Capture/eager grid split (same idiom as LaunchDecodeMoeKQuant):
-  // captured graphs keep the fixed 8-token x 8-tile grid with the
-  // t>=n_tokens mask; eager launches use the exact token grid.
-  // hipStreamIsCapturing is a host-side query, legal during capture.
-  hipStreamCaptureStatus capture_status = hipStreamCaptureStatusNone;
-  if (hipStreamIsCapturing(stream, &capture_status) != hipSuccess) {
-    return false;
+  // Exact token grid in every mode: the t>=n_tokens mask already bakes
+  // n_tokens into the captured launch, so cross-token-count replay was never
+  // supported; a fixed 8-wide grid would only schedule 8-n_tokens dead
+  // blocks per tile (~0.1 us each on gfx1151).
+  if (hidden % kRouterChunk == 0) {
+    const std::size_t lds =
+        (kRouterHidden + kRouterTileExperts * kRouterSplit) * sizeof(float);
+    hipLaunchKernelGGL((RouterSplitKGemvKernel),
+                       dim3(n_tokens, kRouterTiles * 2),
+                       dim3(kRouterTileExperts * kRouterSplit), lds, stream, x,
+                       w, out, n_tokens, n_experts);
+    return true;
   }
-  const std::uint32_t grid_t =
-      capture_status == hipStreamCaptureStatusNone ? n_tokens : 8;
   const std::size_t lds = hidden * sizeof(float);
-  hipLaunchKernelGGL((RouterStaggerGemvKernel), dim3(grid_t, kRouterTiles),
+  hipLaunchKernelGGL((RouterStaggerGemvKernel), dim3(n_tokens, kRouterTiles),
                      dim3(kRouterTileExperts), lds, stream, x, w, out,
                      n_tokens, n_experts, hidden);
   return true;

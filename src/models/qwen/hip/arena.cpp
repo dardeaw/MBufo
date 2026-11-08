@@ -798,6 +798,8 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
         config_.num_attention_heads, config_.head_dim);
     HIP_CHECK(
         hipMalloc(&d_split_k_attention, split_k_elements * sizeof(float)));
+    HIP_CHECK(hipMalloc(&d_split_k_qtile,
+                        8 * split_k_elements * sizeof(float)));
 
     // Shared Q8_1 prequant scratch (§4.2: caller-owned, no statics inside
     // operators): 8-token ceiling over the widest decode projection input
@@ -1010,6 +1012,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   d_scratch_bf16 = other.d_scratch_bf16;
   d_scratch_q8_act = other.d_scratch_q8_act;
   d_split_k_attention = other.d_split_k_attention;
+  d_split_k_qtile = other.d_split_k_qtile;
   d_preq_q81 = other.d_preq_q81;
   preq_q81_bytes = other.preq_q81_bytes;
   d_moe_scratch = other.d_moe_scratch;
@@ -1063,6 +1066,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   other.d_scratch_bf16 = nullptr;
   other.d_scratch_q8_act = nullptr;
   other.d_split_k_attention = nullptr;
+  other.d_split_k_qtile = nullptr;
   other.d_preq_q81 = nullptr;
   other.d_moe_scratch = nullptr;
   other.moe_scratch_bytes_ = 0;
@@ -1123,6 +1127,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     d_scratch_bf16 = other.d_scratch_bf16;
     d_scratch_q8_act = other.d_scratch_q8_act;
     d_split_k_attention = other.d_split_k_attention;
+    d_split_k_qtile = other.d_split_k_qtile;
   d_preq_q81 = other.d_preq_q81;
   preq_q81_bytes = other.preq_q81_bytes;
   d_moe_scratch = other.d_moe_scratch;
@@ -1173,6 +1178,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     other.d_scratch_bf16 = nullptr;
     other.d_scratch_q8_act = nullptr;
     other.d_split_k_attention = nullptr;
+    other.d_split_k_qtile = nullptr;
   other.d_preq_q81 = nullptr;
   other.d_moe_scratch = nullptr;
   other.moe_scratch_bytes_ = 0;
@@ -1304,6 +1310,8 @@ void QwenGpuArena::FreeAll() noexcept {
     LogCleanupError(hipFree(d_scratch_q8_act));
   if (d_split_k_attention != nullptr)
     LogCleanupError(hipFree(d_split_k_attention));
+  if (d_split_k_qtile != nullptr)
+    LogCleanupError(hipFree(d_split_k_qtile));
   if (d_preq_q81 != nullptr)
     LogCleanupError(hipFree(d_preq_q81));
   if (d_weights_bf16 != nullptr)
@@ -1352,6 +1360,7 @@ void QwenGpuArena::FreeAll() noexcept {
   d_scratch_bf16 = nullptr;
   d_scratch_q8_act = nullptr;
   d_split_k_attention = nullptr;
+  d_split_k_qtile = nullptr;
   d_preq_q81 = nullptr;
   preq_q81_bytes = 0;
   d_weights_bf16 = nullptr;

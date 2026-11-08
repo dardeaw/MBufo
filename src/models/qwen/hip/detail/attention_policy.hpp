@@ -14,7 +14,7 @@ inline constexpr std::uint32_t kTiledAttentionQueryHeads{24};
 inline constexpr std::uint32_t kTiledAttentionKvHeads{4};
 inline constexpr std::uint32_t kTiledAttentionHeadDim{256};
 inline constexpr std::size_t kSplitKDecodeAttentionMinContext{128};
-inline constexpr std::uint32_t kSplitKDecodeAttentionMaxSplits{32};
+inline constexpr std::uint32_t kSplitKDecodeAttentionMaxSplits{256};
 inline constexpr std::uint32_t kFusedQkNormMaxHeadDim{256};
 
 // gfx1151 has 64 KiB LDS per workgroup. The baseline also reserves one

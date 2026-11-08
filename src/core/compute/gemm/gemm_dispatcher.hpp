@@ -120,6 +120,35 @@ enum class NarrowDecodeRoute { kLegacy, kNarrowQ80, kNarrowQ80Prequant };
   return NarrowDecodeRoute::kNarrowQ80Prequant;
 }
 
+// Fused gated prequant route (shared-expert gate/up + SwiGLU): same shape
+// exclusions as the prequant route, single-token decode only. Returns
+// kNarrowQ80Prequant when the caller should run
+// LaunchNarrowQ80GatedPrequant; otherwise kLegacy and the caller keeps the
+// gate/up/SwiGLU trio.
+[[nodiscard]] inline NarrowDecodeRoute DecideNarrowGatedPrequantRoute(
+    bool weights_q8_0, std::size_t n_tokens, std::size_t k,
+    std::size_t rows) {
+  if (!weights_q8_0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (n_tokens != 1) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (k == 0 || k % 32 != 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (rows == 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (rows <= 64 && k % 5120 == 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (rows == 320 && k == 10240) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  return NarrowDecodeRoute::kNarrowQ80Prequant;
+}
+
 // Lightweight decode MoE route (moe_decode_kq): the fused per-slot K-quant
 // x SwiGLU kernel owns 1..8-token decode batches with top-k sparsity, Q4_K
 // or Q5_K gate/up weights, and Q5_K or load-converted Q8_0 down weights.
