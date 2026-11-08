@@ -4655,6 +4655,13 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
 
+  if (reader->GetMetadataString("general.architecture") == "gpt-oss") {
+    SetError(error,
+             "gpt-oss models are not supported by the serve text backend "
+             "(Qwen executor only); serve gpt-oss via the direct gptoss "
+             "engine instead");
+    return false;
+  }
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
     if (reader->GetMetadataUint64("qwen35.embedding_length") == 5120) {

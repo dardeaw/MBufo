@@ -833,6 +833,122 @@ void MoeSlotEpilogueOverwrite(const float* slot_down, const std::int32_t* ids,
                      used, dim);
 }
 
+
+// ---- native MXFP4 vec MoE (gpt-oss experts, GGML type 39) ----
+// OCP microscaling: 32 e2m1 values sharing one e8m0 scale (1 scale byte +
+// 16 value bytes = 17 bytes/block). Low nibbles give elements 0..15, high
+// nibbles 16..31. The codebook is 2xE2M1 with a halved scale, matching
+// llama.cpp (kvalues_mxfp4 x GGML_E8M0_TO_FP32_HALF) bit-for-bit.
+__constant__ std::int8_t kMxfp4VecValues[16] = {0, 1, 2,  3,  4,  6,  8,  12,
+                                                0, -1, -2, -3, -4, -6, -8, -12};
+
+// One MXFP4 block (17 bytes) dotted with 32 F32 activations.
+__device__ __forceinline__ float Mxfp4BlockDot(
+    const std::uint8_t* __restrict__ blk, const float* __restrict__ xv) {
+  const float d = exp2f(static_cast<float>(blk[0]) - 128.0F);
+  float sum = 0.0F;
+#pragma unroll
+  for (int j = 0; j < 16; ++j) {
+    const std::uint8_t b = blk[1 + j];
+    sum += static_cast<float>(kMxfp4VecValues[b & 0x0F]) * xv[j];
+    sum += static_cast<float>(kMxfp4VecValues[b >> 4]) * xv[j + 16];
+  }
+  return d * sum;
+}
+
+__global__ void MoeVecGateUpMxfp4Kernel(
+    const void* __restrict__ gate_up, std::uint64_t row_bytes,
+    std::uint64_t expert_stride_bytes, const float* __restrict__ x,
+    const std::int32_t* __restrict__ ids, float* __restrict__ gout,
+    float* __restrict__ uout, std::uint32_t used, std::uint32_t ff,
+    std::uint32_t hidden) {
+  const std::uint32_t row = blockIdx.x;  // token*used + slot
+  const std::uint32_t r = blockIdx.y;    // 0..2*ff-1 (first ff = gate rows)
+  const std::int32_t e = ids[row];
+  if (e < 0) return;
+  const bool is_up = r >= ff;
+  const std::uint32_t out_row = is_up ? r - ff : r;
+  const auto* wrow = static_cast<const std::uint8_t*>(gate_up) +
+                     static_cast<std::size_t>(e) * expert_stride_bytes +
+                     static_cast<std::size_t>(r) * row_bytes;
+  const float* xr = x + static_cast<std::size_t>(row / used) * hidden;
+  float sum = 0.0F;
+  const std::uint64_t nblk = hidden / 32;
+  for (std::uint64_t b = threadIdx.x; b < nblk;
+       b += static_cast<std::uint64_t>(blockDim.x)) {
+    sum += Mxfp4BlockDot(wrow + b * 17, xr + b * 32);
+  }
+  for (std::uint32_t off = 16; off > 0; off >>= 1)
+    sum += __shfl_down_sync(0xffffffffffffffffull, sum, off);
+  __shared__ float shared[kThreads / 32];
+  if ((threadIdx.x & 31) == 0) shared[threadIdx.x / 32] = sum;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float v = threadIdx.x < blockDim.x / 32 ? shared[threadIdx.x] : 0.0F;
+    for (std::uint32_t off = 16; off > 0; off >>= 1)
+      v += __shfl_down_sync(0xffffffffffffffffull, v, off);
+    if (threadIdx.x == 0)
+      (is_up ? uout : gout)[static_cast<std::size_t>(row) * ff + out_row] = v;
+  }
+}
+
+__global__ void GemvQSlotMxfp4Kernel(
+    const void* __restrict__ down, std::uint64_t row_bytes,
+    std::uint64_t expert_stride_bytes, const float* __restrict__ act,
+    const std::int32_t* __restrict__ ids, float* __restrict__ out,
+    std::uint32_t hidden, std::uint32_t ff) {
+  const std::uint32_t slot = blockIdx.x;
+  const std::uint32_t h = blockIdx.y;
+  const std::size_t orow = static_cast<std::size_t>(slot) * hidden + h;
+  const std::int32_t e = ids[slot];
+  if (e < 0) {
+    if (threadIdx.x == 0) out[orow] = 0.0F;
+    return;
+  }
+  const auto* wrow = static_cast<const std::uint8_t*>(down) +
+                     static_cast<std::size_t>(e) * expert_stride_bytes +
+                     static_cast<std::size_t>(h) * row_bytes;
+  const float* ar = act + static_cast<std::size_t>(slot) * ff;
+  float sum = 0.0F;
+  const std::uint64_t nblk = ff / 32;
+  for (std::uint64_t b = threadIdx.x; b < nblk;
+       b += static_cast<std::uint64_t>(blockDim.x)) {
+    sum += Mxfp4BlockDot(wrow + b * 17, ar + b * 32);
+  }
+  __shared__ float red[256];
+  red[threadIdx.x] = sum;
+  __syncthreads();
+  for (std::uint32_t s = 128; s > 0; s >>= 1) {
+    if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) out[orow] = red[0];
+}
+
+void MoeVecGateUpMxfp4(const void* gate_up_dev, std::uint64_t row_bytes,
+                       std::uint64_t expert_stride_bytes, const float* x,
+                       const std::int32_t* ids, float* gout, float* uout,
+                       std::uint32_t slots, std::uint32_t used,
+                       std::uint32_t ff, std::uint32_t hidden,
+                       hipStream_t stream) {
+  if (slots == 0) return;
+  hipLaunchKernelGGL(MoeVecGateUpMxfp4Kernel, dim3(slots, 2 * ff),
+                     dim3(kThreads), 0, stream, gate_up_dev, row_bytes,
+                     expert_stride_bytes, x, ids, gout, uout, used, ff,
+                     hidden);
+}
+
+void GemvQSlotMxfp4(const void* down_dev, std::uint64_t row_bytes,
+                    std::uint64_t expert_stride_bytes, const float* act,
+                    const std::int32_t* ids, float* out, std::uint32_t slots,
+                    std::uint32_t hidden, std::uint32_t ff,
+                    hipStream_t stream) {
+  if (slots == 0 || hidden == 0) return;
+  hipLaunchKernelGGL(GemvQSlotMxfp4Kernel, dim3(slots, hidden), dim3(kThreads),
+                     0, stream, down_dev, row_bytes, expert_stride_bytes,
+                     act, ids, out, hidden, ff);
+}
+
 void GemvQSlot(const void* down_dev, std::uint64_t row_bytes,
                std::uint64_t expert_stride_bytes, const float* act,
                const std::int32_t* ids, float* out, std::uint32_t slots,
@@ -1536,6 +1652,170 @@ void MoeEpilogue(const float* expert_out, const float* weights,
 }
 
 }  // namespace fn_compat
+
+// ---- Fused MoE decode (native MXFP4, small-slot specialization) ----
+// Decode GEMVs are tiny (slots = n_tokens * used <= 64, one token typical)
+// while the vec path launches one 256-thread block per output element
+// (gate+up: slots x 2*ff blocks; down: slots x hidden blocks) plus three
+// elementwise epilogue launches. The fused pair below replaces those five
+// launches with two single-wave-per-output launches:
+//
+//  * GateUpAct: one wave per (slot, ff-row) dots the gate row AND the up
+//    row over the shared input (OCP microscaling dequant, same per-block
+//    math and block order as Mxfp4BlockDot), folds the per-expert gate/up
+//    biases, and writes the SwiGLU-OAI activation directly (same scalar
+//    math as the model-local SwiGLU-OAI kernels: min(g,7)/(1+exp(-1.702g))
+//    on gate, clamp(u,-7,7)+1 on up).
+//  * DownEpi: one wave per (token, hidden) dots every live slot's down row
+//    over its activation row, adds the per-expert down bias, and accumulates
+//    the router-weighted sum straight into the output (overwrite, matching
+//    MoeSlotEpilogueOverwrite).
+//
+// Only the final cross-lane reduction is reassociated (32-wide warp shuffle
+// instead of the vec path's 256-wide two-stage shared-memory reduction), so
+// results agree with the vec path up to fp reassociation noise; token-level
+// outputs are verified exact on the reference short sentences.
+// Contract: MXFP4 rows on both slabs, K(cols) % 32 == 0, ff % 32 == 0,
+// hidden % 32 == 0, 1 <= n_tokens <= 8, slots = n_tokens*used <= 64,
+// ff/hidden <= 8192 (grid headroom). Out of contract the launchers return
+// false and the caller keeps its routed/vec path.
+__device__ __forceinline__ void Mxfp4DualBlockDotAcc(
+    const std::uint8_t* __restrict__ gblk, const std::uint8_t* __restrict__ ublk,
+    const float* __restrict__ xv, float* sg, float* su) {
+  const float dg = exp2f(static_cast<float>(gblk[0]) - 128.0F);
+  const float du = exp2f(static_cast<float>(ublk[0]) - 128.0F);
+  float tg = 0.0F, tu = 0.0F;
+#pragma unroll
+  for (int j = 0; j < 16; ++j) {
+    const std::uint8_t gb = gblk[1 + j];
+    const std::uint8_t ub = ublk[1 + j];
+    const float x0 = xv[j];
+    const float x1 = xv[j + 16];
+    tg += static_cast<float>(kMxfp4VecValues[gb & 0x0F]) * x0 +
+          static_cast<float>(kMxfp4VecValues[gb >> 4]) * x1;
+    tu += static_cast<float>(kMxfp4VecValues[ub & 0x0F]) * x0 +
+          static_cast<float>(kMxfp4VecValues[ub >> 4]) * x1;
+  }
+  *sg += dg * tg;
+  *su += du * tu;
+}
+
+__device__ __forceinline__ float SwigluOaiScalar(float g, float u) {
+  const float x = g < 7.0F ? g : 7.0F;
+  const float y = u < -7.0F ? -7.0F : (u > 7.0F ? 7.0F : u);
+  return (x / (1.0F + expf(-1.702F * x))) * (y + 1.0F);
+}
+
+__global__ void MoeDecodeGateUpActMxfp4Kernel(
+    const void* __restrict__ gate_up, std::uint64_t row_bytes,
+    std::uint64_t expert_stride_bytes, const float* __restrict__ x,
+    const std::int32_t* __restrict__ ids, const float* __restrict__ gate_b,
+    const float* __restrict__ up_b, float* __restrict__ act,
+    std::uint32_t slots, std::uint32_t used, std::uint32_t ff,
+    std::uint32_t hidden) {
+  const std::uint32_t slot = blockIdx.x;
+  const std::uint32_t j = blockIdx.y;  // ff row
+  const std::uint32_t lane = threadIdx.x;
+  if (slot >= slots || j >= ff) return;
+  float* out_ptr = act + static_cast<std::size_t>(slot) * ff + j;
+  const std::int32_t e = ids[slot];
+  if (e < 0) {
+    if (lane == 0) *out_ptr = 0.0F;
+    return;
+  }
+  const auto* expert = static_cast<const std::uint8_t*>(gate_up) +
+                       static_cast<std::size_t>(e) * expert_stride_bytes;
+  const std::uint8_t* grow = expert + static_cast<std::size_t>(j) * row_bytes;
+  const std::uint8_t* urow =
+      expert + (static_cast<std::size_t>(ff) + j) * row_bytes;
+  const float* xr = x + static_cast<std::size_t>(slot / used) * hidden;
+  const std::uint64_t nblk = hidden / 32;
+  float sg = 0.0F, su = 0.0F;
+  for (std::uint64_t b = lane; b < nblk; b += 32) {
+    Mxfp4DualBlockDotAcc(grow + b * 17, urow + b * 17, xr + b * 32, &sg, &su);
+  }
+  sg = WaveSum(sg);
+  su = WaveSum(su);
+  if (lane == 0) {
+    const std::size_t boff = static_cast<std::size_t>(e) * ff + j;
+    *out_ptr = SwigluOaiScalar(sg + gate_b[boff], su + up_b[boff]);
+  }
+}
+
+bool MoeDecodeGateUpActMxfp4(const void* gate_up_dev, std::uint64_t row_bytes,
+                             std::uint64_t expert_stride_bytes, const float* x,
+                             const std::int32_t* ids, const float* gate_b,
+                             const float* up_b, float* act, std::uint32_t slots,
+                             std::uint32_t used, std::uint32_t ff,
+                             std::uint32_t hidden, hipStream_t stream) {
+  if (gate_up_dev == nullptr || x == nullptr || ids == nullptr ||
+      gate_b == nullptr || up_b == nullptr || act == nullptr)
+    return false;
+  if (slots == 0 || used == 0 || slots > 64 || ff == 0 || hidden == 0 ||
+      (ff % 32) != 0 || (hidden % 32) != 0 || ff > 8192 || hidden > 8192)
+    return false;
+  hipLaunchKernelGGL(MoeDecodeGateUpActMxfp4Kernel, dim3(slots, ff), dim3(32),
+                     0, stream, gate_up_dev, row_bytes, expert_stride_bytes, x,
+                     ids, gate_b, up_b, act, slots, used, ff, hidden);
+  return hipGetLastError() == hipSuccess;
+}
+
+__global__ void MoeDecodeDownEpiMxfp4Kernel(
+    const void* __restrict__ down, std::uint64_t row_bytes,
+    std::uint64_t expert_stride_bytes, const float* __restrict__ act,
+    const std::int32_t* __restrict__ ids, const float* __restrict__ wts,
+    const float* __restrict__ down_b, float* __restrict__ out,
+    std::uint32_t n_tokens, std::uint32_t used, std::uint32_t hidden,
+    std::uint32_t ff) {
+  const std::uint32_t h = blockIdx.x;
+  const std::uint32_t t = blockIdx.y;
+  const std::uint32_t lane = threadIdx.x;
+  if (h >= hidden || t >= n_tokens) return;
+  float acc = 0.0F;
+  const std::uint64_t nblk = ff / 32;
+  for (std::uint32_t s = 0; s < used; ++s) {
+    const std::uint32_t slot = t * used + s;
+    const std::int32_t e = ids[slot];
+    if (e < 0) continue;
+    const float w = wts[slot];
+    if (w == 0.0F) continue;
+    const auto* wrow = static_cast<const std::uint8_t*>(down) +
+                       static_cast<std::size_t>(e) * expert_stride_bytes +
+                       static_cast<std::size_t>(h) * row_bytes;
+    const float* ar = act + static_cast<std::size_t>(slot) * ff;
+    float sum = 0.0F;
+    for (std::uint64_t b = lane; b < nblk; b += 32) {
+      sum += Mxfp4BlockDot(wrow + b * 17, ar + b * 32);
+    }
+    sum = WaveSum(sum);
+    if (lane == 0) {
+      acc += w * (sum + down_b[static_cast<std::size_t>(e) * hidden + h]);
+    }
+  }
+  if (lane == 0) {
+    out[static_cast<std::size_t>(t) * hidden + h] = acc;
+  }
+}
+
+bool MoeDecodeDownEpiMxfp4(const void* down_dev, std::uint64_t row_bytes,
+                           std::uint64_t expert_stride_bytes, const float* act,
+                           const std::int32_t* ids, const float* wts,
+                           const float* down_b, float* out,
+                           std::uint32_t n_tokens, std::uint32_t used,
+                           std::uint32_t hidden, std::uint32_t ff,
+                           hipStream_t stream) {
+  if (down_dev == nullptr || act == nullptr || ids == nullptr ||
+      wts == nullptr || down_b == nullptr || out == nullptr)
+    return false;
+  if (n_tokens == 0 || n_tokens > 8 || used == 0 || used > 32 || hidden == 0 ||
+      hidden > 8192 || ff == 0 || (ff % 32) != 0)
+    return false;
+  hipLaunchKernelGGL(MoeDecodeDownEpiMxfp4Kernel, dim3(hidden, n_tokens),
+                     dim3(32), 0, stream, down_dev, row_bytes,
+                     expert_stride_bytes, act, ids, wts, down_b, out, n_tokens,
+                     used, hidden, ff);
+  return hipGetLastError() == hipSuccess;
+}
 
 }  // namespace gufo::core::compute::gemm
 

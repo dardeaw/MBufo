@@ -112,6 +112,13 @@ struct block_q3_0_rocmfpx {
   std::uint8_t qs[12];
   std::uint8_t e[2];
 };
+
+// MXFP4 (OCP microscaling, GGML type 39): 32 e2m1 values sharing one e8m0
+// scale. Low nibbles give elements 0..15, high nibbles 16..31.
+struct block_mxfp4 {
+  std::uint8_t e;
+  std::uint8_t qs[16];
+};
 #pragma pack(pop)
 
 static_assert(sizeof(block_q4_K) == 144, "block_q4_K must be 144 bytes");
@@ -129,6 +136,8 @@ static_assert(sizeof(block_q4_0_rocmfp4_fast) == 17,
               "block_q4_0_rocmfp4_fast must be 17 bytes");
 static_assert(sizeof(block_q3_0_rocmfpx) == 14,
               "block_q3_0_rocmfpx must be 14 bytes");
+static_assert(sizeof(block_mxfp4) == 17,
+              "block_mxfp4 must be 17 bytes");
 
 /// Non-linear 4-bit codebook shared by IQ4_NL and IQ4_XS.
 inline constexpr std::int8_t kValuesIq4Nl[16] = {
@@ -149,6 +158,7 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kQ4_0_ROCMFP4:
     case core::GgmlType::kQ4_0_ROCMFP4_FAST:
     case core::GgmlType::kQ3_0_ROCMFPX:
+    case core::GgmlType::kMXFP4:
       return 32;
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:

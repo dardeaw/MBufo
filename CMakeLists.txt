@@ -129,6 +129,8 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/mixed_batch_attn.hip.cpp
     src/core/compute/attention/fused_fa_gqa128.hip.cpp
     src/core/compute/attention/flash_f16_dense.hip.cpp
+    src/core/compute/attention/flash_sink.hip.cpp
+    src/core/compute/attention/flash_blas.hip.cpp
     src/core/compute/attention/attention_dispatcher.hpp
     src/core/compute/attention/flash_f16_dense.hpp)
   set_source_files_properties(
@@ -137,7 +139,9 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/blocked_splitk.hip.cpp
     src/core/compute/attention/mixed_batch_attn.hip.cpp
     src/core/compute/attention/fused_fa_gqa128.hip.cpp
-    src/core/compute/attention/flash_f16_dense.hip.cpp PROPERTIES LANGUAGE HIP)
+    src/core/compute/attention/flash_f16_dense.hip.cpp
+    src/core/compute/attention/flash_sink.hip.cpp
+    src/core/compute/attention/flash_blas.hip.cpp PROPERTIES LANGUAGE HIP)
   set_target_properties(gufo_core_blocked_kv PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
@@ -150,7 +154,7 @@ if (ENGINE_ENABLE_HIP)
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
-  target_link_libraries(gufo_core_blocked_kv PUBLIC hip::host)
+  target_link_libraries(gufo_core_blocked_kv PUBLIC hip::host roc::hipblas)
 endif()
 
 if (ENGINE_ENABLE_HIP)
@@ -282,6 +286,7 @@ add_subdirectory(src/models/bge_reranker)
 add_subdirectory(src/models/qwen_reranker)
 add_subdirectory(src/models/llama)
 add_subdirectory(src/models/glimmer)
+add_subdirectory(src/models/gptoss)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
@@ -323,7 +328,7 @@ add_library(gufo_llm_cli STATIC
   src/cli/prompt/prompt.cpp)
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next)
 if(ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash gufo_gemma4 gufo_llama gufo_glimmer)
+  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash gufo_gemma4 gufo_llama gufo_glimmer gufo_gptoss)
 endif()
 
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
@@ -460,6 +465,7 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/gemma4)
   add_subdirectory(tests/models/bge_m3)
   add_subdirectory(tests/models/glimmer)
+  add_subdirectory(tests/models/gptoss)
   add_subdirectory(tests/models/llama)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()

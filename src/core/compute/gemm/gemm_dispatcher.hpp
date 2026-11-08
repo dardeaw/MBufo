@@ -120,7 +120,6 @@ enum class NarrowDecodeRoute { kLegacy, kNarrowQ80, kNarrowQ80Prequant };
   return NarrowDecodeRoute::kNarrowQ80Prequant;
 }
 
-
 // Lightweight decode MoE route (moe_decode_kq): the fused per-slot K-quant
 // x SwiGLU kernel owns 1..8-token decode batches with top-k sparsity, Q4_K
 // or Q5_K gate/up weights, and Q5_K or load-converted Q8_0 down weights.
@@ -164,6 +163,64 @@ constexpr std::size_t kDecodeMoeMaxSlots = 64;
     return DecodeMoeRoute::kLegacy;
   }
   return DecodeMoeRoute::kDecodeKQuant;
+}
+
+// Fused QKV narrow decode: three Q8_0 projections sharing one activation
+// row and one prequant pass. Same exclusions as the prequant route, applied
+// to the combined row count (qrows + 2 * kvrows). Returns
+// kNarrowQ80Prequant when the caller should run PrequantizeQ8_1 once +
+// LaunchNarrowQ80QkvDecode; otherwise kLegacy and the caller keeps its
+// three separate narrow launches bit-identical.
+[[nodiscard]] inline NarrowDecodeRoute DecideNarrowQkvPrequantRoute(
+    bool weights_q8_0, std::size_t n_tokens, std::size_t k,
+    std::size_t qrows, std::size_t kvrows) {
+  if (!weights_q8_0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (n_tokens < 1 || n_tokens > 8) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (k == 0 || k % 32 != 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  const std::size_t rows = qrows + 2 * kvrows;
+  if (qrows == 0 || kvrows == 0 || rows == 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (n_tokens == 1 && rows <= 64 && k % 5120 == 0) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  if (rows == 320 && k == 10240) {
+    return NarrowDecodeRoute::kLegacy;
+  }
+  return NarrowDecodeRoute::kNarrowQ80Prequant;
+}
+
+// Fused MoE decode (MXFP4 gate+up / down slab pair with SwiGLU-OAI and the
+// overwrite epilogue fused into two launches). Type-free on purpose: the
+// dispatcher is a pure shape/codec decision, the caller passes its own
+// type check as weights_mxfp4.
+enum class MoeDecodeFusedRoute { kLegacy, kFusedMxfp4 };
+
+[[nodiscard]] inline MoeDecodeFusedRoute DecideMoeDecodeFusedRoute(
+    bool weights_mxfp4, std::size_t n_tokens, std::size_t used,
+    std::size_t ff, std::size_t hidden) noexcept {
+  if (!weights_mxfp4) {
+    return MoeDecodeFusedRoute::kLegacy;
+  }
+  if (n_tokens < 1 || n_tokens > 8 || used == 0) {
+    return MoeDecodeFusedRoute::kLegacy;
+  }
+  if (n_tokens * used > 64) {
+    return MoeDecodeFusedRoute::kLegacy;
+  }
+  if (ff == 0 || hidden == 0 || ff % 32 != 0 || hidden % 32 != 0) {
+    return MoeDecodeFusedRoute::kLegacy;
+  }
+  if (ff > 8192 || hidden > 8192) {
+    return MoeDecodeFusedRoute::kLegacy;
+  }
+  return MoeDecodeFusedRoute::kFusedMxfp4;
 }
 
 }  // namespace gufo::core::compute::gemm

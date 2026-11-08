@@ -40,6 +40,7 @@ enum class GgmlType : std::uint16_t {
   kIQ4_XS = 23,
   kI32 = 26,
   kBF16 = 30,
+  kMXFP4 = 39,
   // ROCmFPx family (agentionai/llama.cpp, MIT): AMD E2M1-derived FP4 with
   // UE4M3 scales (100 dual-scale, 101 single-scale fast) and 3-bit FP3.
   kQ4_0_ROCMFP4 = 100,
@@ -89,6 +90,8 @@ enum class GgmlType : std::uint16_t {
       return "I32";
     case GgmlType::kBF16:
       return "BF16";
+    case GgmlType::kMXFP4:
+      return "MXFP4";
     case GgmlType::kQ4_0_ROCMFP4:
       return "Q4_0_ROCMFP4";
     case GgmlType::kQ4_0_ROCMFP4_FAST:

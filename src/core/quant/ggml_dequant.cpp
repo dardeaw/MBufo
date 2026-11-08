@@ -225,6 +225,9 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kQ3_0_ROCMFPX:
       block_bytes = sizeof(block_q3_0_rocmfpx);
       break;
+    case core::GgmlType::kMXFP4:
+      block_bytes = sizeof(block_mxfp4);
+      break;
     default:
       return 0;
   }
