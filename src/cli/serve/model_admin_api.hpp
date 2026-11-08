@@ -24,6 +24,7 @@ struct AdminLoadRequest {
   std::uint32_t max_context{0};
   std::size_t session_count{1};
   std::string kv_cache_quant{"q8"};
+  bool kv_cache_quant_supplied{false};
   std::string vision_model_path;
   bool enable_yarn{false};
 };

@@ -101,6 +101,7 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
       static_cast<std::uint32_t>(body.member_size("max_context", 0));
   request.session_count = body.member_size("session_count", 1);
   request.kv_cache_quant = body.member_str("kv_cache_quant", "q8");
+  request.kv_cache_quant_supplied = body.find("kv_cache_quant") != nullptr;
   request.vision_model_path = body.member_str("vision_model_path");
   request.enable_yarn = body.find("enable_yarn") != nullptr &&
                         body.find("enable_yarn")->as_bool(false);

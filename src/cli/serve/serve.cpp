@@ -1509,7 +1509,8 @@ int RunServe(std::span<const char* const> args) {
         },
         vision_model_path,
         server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes},
-        kv_cache_quant, enable_yarn);
+        kv_cache_quant, enable_yarn,
+        llm_parser.WasSupplied("--kv-quant"));
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
@@ -1624,7 +1625,8 @@ int RunServe(std::span<const char* const> args) {
                 spec.vision_model_path,
                 server::TextRunnerRamCacheOptions{
                     .capacity_bytes = cache_ram_bytes},
-                spec.kv_cache_quant, spec.enable_yarn)) {
+                spec.kv_cache_quant, spec.enable_yarn,
+                spec.kv_cache_quant_supplied)) {
           return nullptr;
         }
         // Advertise the registry id so the handler's serves_model() check

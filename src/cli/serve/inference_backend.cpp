@@ -4337,7 +4337,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const std::string& vision_model_path,
                             TextRunnerRamCacheOptions ram_cache_config,
                             const std::string& kv_cache_quant,
-                            bool enable_yarn) {
+                            bool enable_yarn,
+                            bool kv_cache_quant_supplied) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -4692,7 +4693,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
   return load(std::move(model), error, max_context, session_count,
               prefill_policy, scheduler_policy, speculative_config,
-              std::move(resolved_disk_cache_config), ram_cache_config);
+              std::move(resolved_disk_cache_config), ram_cache_config,
+              kv_cache_quant, kv_cache_quant_supplied);
 #else
   (void)model_path;
   (void)max_context;
@@ -4704,6 +4706,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   (void)vision_model_path;
   (void)ram_cache_config;
   (void)enable_yarn;
+  (void)kv_cache_quant_supplied;
   SetError(error, "HTTP inference requires the HIP backend");
   return false;
 #endif
@@ -4717,7 +4720,9 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
                             TextSchedulerPolicy scheduler_policy,
                             TextSpeculativeConfig speculative_config,
                             TextDiskCacheConfig disk_cache_config,
-                            TextRunnerRamCacheOptions ram_cache_config) {
+                            TextRunnerRamCacheOptions ram_cache_config,
+                            const std::string& kv_cache_quant,
+                            bool kv_cache_quant_supplied) {
   if (model == nullptr) {
     SetError(error, "Qwen GPU model must not be null");
     return false;
@@ -4763,27 +4768,33 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
              "--draft-tokens");
     return false;
   }
-  // Blocked-Q8 attention KV for Qwen3.8-27B-class models, mirrored from
-  // `gufo prompt` (QWEN_KV_QUANT). The --kv-quant flag only feeds
-  // Flash-Next/DeepSeek, so the Qwen fallthrough reads the prompt env switch.
+  // Blocked-Q8 attention KV for Qwen3.8-27B-class models. An explicit
+  // --kv-quant flag (or admin kv_cache_quant field) wins over the `gufo
+  // prompt` env switch (QWEN_KV_QUANT); with neither, f16 stays the default.
   // QwenGpuModel::CreateFromGguf needs no policy parameter: the policy
   // applies at executor/adapter level, not weight loading.
   auto qwen_policy = hip::QwenExecutionPolicy::Production();
-  if (const char* kv_quant = std::getenv("QWEN_KV_QUANT")) {
-    const std::string value = kv_quant;
-    if (value != "f16" && value != "q8") {
-      SetError(error, "QWEN_KV_QUANT must be f16 or q8");
-      return false;
-    }
-    qwen_policy.blocked_q8_attention = (value == "q8");
+  std::string qwen_kv_quant = "f16";
+  const char* qwen_kv_source = "default";
+  if (kv_cache_quant_supplied) {
+    qwen_kv_quant = kv_cache_quant;
+    qwen_kv_source = "flag";
+  } else if (const char* kv_quant = std::getenv("QWEN_KV_QUANT")) {
+    qwen_kv_quant = kv_quant;
+    qwen_kv_source = "env";
   }
-  std::cerr << "[qwen] kv_cache_quant="
-            << (qwen_policy.blocked_q8_attention ? "q8" : "f16") << '\n';
+  if (qwen_kv_quant != "f16" && qwen_kv_quant != "q8") {
+    SetError(error, "kv_cache_quant must be f16 or q8 (flag or QWEN_KV_QUANT)");
+    return false;
+  }
+  qwen_policy.blocked_q8_attention = (qwen_kv_quant == "q8");
+  std::cerr << "[qwen] kv_cache_quant=" << qwen_kv_quant
+            << " source=" << qwen_kv_source << '\n';
   if (qwen_policy.blocked_q8_attention &&
       speculative_config.backend != TextSpeculativeBackend::kDisabled &&
       speculative_config.backend != TextSpeculativeBackend::kDFlash) {
     SetError(error,
-             "QWEN_KV_QUANT=q8 supports only --speculative dflash2 "
+             "q8 KV cache supports only --speculative dflash2 "
              "(MTP has no blocked-KV path); pass --speculative dflash2 or off");
     return false;
   }

@@ -93,7 +93,8 @@ public:
             const std::string& vision_model_path = {},
             TextRunnerRamCacheOptions ram_cache_config = {},
             const std::string& kv_cache_quant = "f16",
-            bool enable_yarn = false);
+            bool enable_yarn = false,
+            bool kv_cache_quant_supplied = false);
 
 #if defined(ENGINE_ENABLE_HIP)
   /// Installs a previously loaded model without duplicating mapped weights.
@@ -103,7 +104,9 @@ public:
             TextSchedulerPolicy scheduler_policy = {},
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
-            TextRunnerRamCacheOptions ram_cache_config = {});
+            TextRunnerRamCacheOptions ram_cache_config = {},
+            const std::string& kv_cache_quant = {},
+            bool kv_cache_quant_supplied = false);
 
   /// Installs a previously loaded DeepSeek model with request-owned sessions.
   bool load(std::shared_ptr<models::deepseek_v4_flash::Model> model,
