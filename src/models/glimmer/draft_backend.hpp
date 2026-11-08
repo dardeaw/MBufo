@@ -1,22 +1,25 @@
 #ifndef GUFO_MODELS_GLIMMER_DRAFT_BACKEND_HPP_
 #define GUFO_MODELS_GLIMMER_DRAFT_BACKEND_HPP_
 
-// Glimmer DFlash draft backend: EAGLE-style target-bound feature draft.
+// Glimmer DFlash draft backend: block-diffusion target-bound feature draft.
 //
 // The muse-glimmer companion draft (dflash-kquant, depth-pruned dense
 // decoder) consumes FUSED TARGET hidden states — `fc.weight` maps the
 // concatenated tapped-layer features [n_taps * hidden] to the model width
 // — and predicts with the TARGET's output head, so temperature-0 greedy
 // proposals only. Draft KV lives on the shared blocked-Q8 grid (see
-// draft_engine.hpp); no F16 mirror is kept.
+// draft_engine.hpp); no F16 mirror is kept. Reference: llama.cpp
+// draft-dflash (fused features injected as draft KV, non-causal block
+// decode over [id_last, mask * k]).
 //
 // Lifecycle mapping onto IDraftBackend:
 //   TargetHiddenLayerIds() -> zero-based tapped target layer outputs
 //                             (artifact 1-based layer-input numbering
 //                             normalized with the 27B N-1 convention).
 //   PrimeTargetContext(...)   -> prompt-first priming: fuses every prompt
-//                             row and runs the draft transformer over them,
-//                             building the draft KV for positions [0, P).
+//                             row (fc + enc norm) and injects it as draft
+//                             KV at [0, P) (the draft transformer never
+//                             runs over fused rows).
 //   AppendTargetContext(...)  -> commit path: rewinds past the last
 //                             speculative chain, then encodes the accepted
 //                             rows plus the bonus row (positions must extend
@@ -27,11 +30,12 @@
 //                             from the current draft logits, so no per-step
 //                             anchor injection is needed; history arrives
 //                             via Prime/Append.
-//   Propose(...)              -> samples the current draft head (position
-//                             P), then chains self-loop rows
-//                             (input = previous draft output hidden) for
-//                             the remaining drafts. Empty when not primed,
-//                             out of room, or max_tokens == 0.
+//   Propose(...)              -> embeds [id_last, mask * k] with the
+//                             target embedding and decodes the block once
+//                             (non-causal, full prefix+block visibility),
+//                             sampling each mask position greedily. Empty
+//                             when not primed, out of room, or
+//                             max_tokens == 0.
 //   AcceptFeedback(...)       -> records drafted/accepted counters only
 //                             (positioning already happened in Append).
 //   Rollback semantics        -> the Append rewind; no target KV touched.
@@ -52,11 +56,12 @@
 
 namespace gufo::models::glimmer {
 
-/// Target-bound EAGLE-style DFlash draft backend (greedy only).
+/// Target-bound block-diffusion DFlash draft backend (greedy only).
 class GlimmerDflashDraftBackend final : public speculative::IDraftBackend {
  public:
   /// Creates the backend: loads the draft artifact, normalizes the tap
-  /// list, binds the target output head and opens a draft session.
+  /// list, binds the target output head and embedding, and opens a draft
+  /// session.
   /// Returns nullptr and sets *error_msg on failure.
   [[nodiscard]] static std::unique_ptr<GlimmerDflashDraftBackend> Create(
       std::shared_ptr<const Model> target,
@@ -128,6 +133,11 @@ class GlimmerDflashDraftBackend final : public speculative::IDraftBackend {
   bool primed_{false};
   std::uint64_t drafted_{0};
   std::uint64_t accepted_{0};
+  // Last committed fused-feature row (host, [n_taps * hidden]): the block
+  // anchor overwrites it and the next commit restores it, mirroring the
+  // reference verify re-injection of the anchor position.
+  std::vector<float> tail_feats_;
+  bool has_tail_{false};
 };
 
 }  // namespace gufo::models::glimmer

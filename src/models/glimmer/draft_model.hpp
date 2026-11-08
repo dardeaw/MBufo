@@ -36,6 +36,9 @@ struct DraftConfig {
   // GGUF layer-INPUT numbering (1-based); the backend normalizes these to
   // zero-based tapped layer outputs (27B DFlash2 convention).
   std::vector<std::uint32_t> target_layer_ids;
+  // Block-diffusion mask token (`tokenizer.ggml.mask_token_id` in the
+  // artifact): proposals decode [id_last, mask * k] in one block.
+  std::uint32_t mask_token_id{0};
 
   [[nodiscard]] static std::optional<DraftConfig> FromGguf(
       const core::GgufReader& gguf, std::string* error_msg = nullptr);

@@ -2,18 +2,23 @@
 #define GUFO_MODELS_GLIMMER_DRAFT_ENGINE_HPP_
 
 // DFlash draft runtime (muse-glimmer companion draft, e.g. dflash-kquant):
-// an EAGLE-style feature draft. A depth-pruned dense decoder (5 layers,
+// a block-diffusion feature draft. A depth-pruned dense decoder (5 layers,
 // same width/dim as the target) consumes FUSED TARGET hidden states —
 // `fc.weight` maps the concatenated tapped-layer features [n_taps*hidden]
 // to the model width — and predicts with the TARGET's output head, so the
 // artifact carries no embedding and no vocabulary of its own.
 //
-// Per-round flow (temperature-0, greedy only):
-//   PrimeRows  prompt fused features (prompt-first) build the draft KV;
-//   ExtendRow  fuses one anchor row, self-loop rows chain autoregressively;
-//   ScoreLast  scores the last row through the target head for sampling.
-// The backend drives propose/verify/commit through these primitives plus
-// the shared blocked-Q8 draft KV (core blocked_kv); no F16 mirror is kept.
+// Reference (llama.cpp draft-dflash, 96.3% accept @ temp 0):
+//   PrimeRows  prompt fused features (prompt-first) are encoded (fc + enc
+//              norm) and INJECTED as the draft KV (K = qk-norm(wk(enc)) +
+//              RoPE @ target pos, V = wv(enc)); the draft transformer never
+//              runs over fused rows.
+//   Propose    one NON-CAUSAL block decode over embedded
+//              [id_last, <mask> * k] (target tok_embd, raw, no embd norm),
+//              greedy argmax per mask position (llama top_k=10/p_min=0
+//              equivalent at temp 0).
+// The backend drives prime/append/propose through these primitives plus
+// the shared blocked-Q8 draft KV; no F16 mirror is kept.
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -41,6 +46,14 @@ struct TargetHead {
   std::uint32_t vocab_size{0};
 };
 
+/// Target token embedding bound by the backend (non-owning view into the
+/// target model; the draft embeds [id_last, mask...] blocks raw, without
+/// the target's embd_norm, mirroring the reference decoder).
+struct TargetEmbed {
+  const void* device{nullptr};
+  core::GgmlType type{core::GgmlType::kF32};
+};
+
 class DraftSession;
 
 class DraftModel final : public std::enable_shared_from_this<DraftModel> {
@@ -57,6 +70,9 @@ class DraftModel final : public std::enable_shared_from_this<DraftModel> {
   /// Binds the target output head (logits live in the target vocabulary).
   /// Must be called once before CreateSession.
   void SetTargetHead(TargetHead head) { target_head_ = head; }
+  /// Binds the target token embedding (block input rows).
+  /// Must be called once before CreateSession.
+  void SetTargetEmbed(TargetEmbed embed) { target_embed_ = embed; }
 
   [[nodiscard]] std::unique_ptr<DraftSession> CreateSession(
       std::string* error_msg = nullptr);
@@ -67,11 +83,16 @@ class DraftModel final : public std::enable_shared_from_this<DraftModel> {
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
+  [[nodiscard]] std::uint32_t HiddenSize() const noexcept;
+  [[nodiscard]] std::uint32_t MaskTokenId() const noexcept;
   [[nodiscard]] const std::vector<std::uint32_t>& TargetLayerIds() const noexcept {
     return target_layer_ids_;
   }
   [[nodiscard]] const TargetHead& target_head() const noexcept {
     return target_head_;
+  }
+  [[nodiscard]] const TargetEmbed& target_embed() const noexcept {
+    return target_embed_;
   }
 
  private:
@@ -81,6 +102,7 @@ class DraftModel final : public std::enable_shared_from_this<DraftModel> {
   std::shared_ptr<core::GgufReader> reader_;
   std::unique_ptr<DraftModelWeights> weights_;
   TargetHead target_head_;
+  TargetEmbed target_embed_;
   std::vector<void*> device_allocations_;
   std::vector<std::uint32_t> target_layer_ids_;
 
@@ -96,22 +118,22 @@ class DraftSession final {
   DraftSession& operator=(const DraftSession&) = delete;
 
   /// Encodes prompt feature rows [start, start+n) into the draft KV
-  /// (prompt-first priming). Loops internally in kDraftChunk blocks.
+  /// (encoder + KV injection at target positions; the draft transformer
+  /// never runs over fused rows). Loops internally in kDraftChunk blocks.
   [[nodiscard]] bool PrimeRows(std::span<const float> feats, std::uint32_t n,
                                std::uint32_t start_pos,
                                std::string* error_msg = nullptr);
-  /// Fuses one host feature row into the device fused staging.
-  [[nodiscard]] bool FuseRows(std::span<const float> feats, std::uint32_t n,
-                              std::string* error_msg = nullptr);
-  /// Device pointer to the fused staging (valid after FuseRows).
-  [[nodiscard]] const float* FusedStaging() const noexcept;
-  /// Forwards one fused/device row at the current length (no head).
-  /// `d_row` may alias the last hidden row (self-loop).
-  [[nodiscard]] bool ExtendRow(const float* d_row, std::string* error_msg = nullptr);
-  /// Scores the last forwarded row through the target head (for sampling).
-  [[nodiscard]] bool ScoreLast(std::string* error_msg = nullptr);
-  /// Device pointer to the last hidden row (self-loop input).
-  [[nodiscard]] const float* LastHiddenRow() const noexcept;
+  /// Embeds one block of token ids (e.g. [id_last, mask*k]) with the
+  /// target embedding (raw gather, no embd norm) into the hidden staging.
+  [[nodiscard]] bool EmbedBlock(std::span<const std::int32_t> toks,
+                                std::string* error_msg = nullptr);
+  /// Forwards the staged block rows (from EmbedBlock) through the draft
+  /// transformer with FULL visibility over [0, start_pos+n) (non-causal
+  /// block diffusion; each query sees the whole prefix plus the block).
+  [[nodiscard]] bool ForwardBlock(std::uint32_t n, std::uint32_t start_pos,
+                                  std::string* error_msg = nullptr);
+  /// Scores staged hidden row i through the target head (for sampling).
+  [[nodiscard]] bool ScoreRow(std::uint32_t i, std::string* error_msg = nullptr);
   /// Moves the length marker back (used by the backend to roll back
   /// unaccepted proposals). KV rows beyond the marker stay valid and are
   /// overwritten by later forwards.
@@ -123,12 +145,15 @@ class DraftSession final {
  private:
   DraftSession(std::shared_ptr<DraftModel> model);
 
-  static void ForwardLayer(DraftSession& s, std::uint32_t il,
-                           std::uint32_t n, std::uint32_t start_pos,
-                           hipStream_t stream);
-  // Transformer stack over impl.hidden rows (no head scoring).
-  static void ForwardFused(DraftSession& s, std::uint32_t n,
-                           std::uint32_t start_pos, hipStream_t stream);
+  [[nodiscard]] bool FuseRows(std::span<const float> feats, std::uint32_t n,
+                              std::string* error_msg = nullptr);
+  /// Encodes the fused staging [0, n) as draft KV at [start_pos, ...).
+  [[nodiscard]] bool InjectFused(std::uint32_t n, std::uint32_t start_pos,
+                                 std::string* error_msg = nullptr);
+
+  static void ForwardBlockLayer(DraftSession& s, std::uint32_t il,
+                                std::uint32_t n, std::uint32_t start_pos,
+                                hipStream_t stream);
 
   std::shared_ptr<DraftModel> model_;
   struct Impl;

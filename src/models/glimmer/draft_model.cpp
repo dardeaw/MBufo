@@ -83,6 +83,8 @@ std::optional<DraftConfig> DraftConfig::FromGguf(
       }
     }
   }
+  // Block-diffusion mask token for the [id_last, mask * k] draft block.
+  c.mask_token_id = r.U32("tokenizer.ggml.mask_token_id");
   // No embedding and no vocabulary head in the artifact: the draft
   // consumes fused target features and predicts with the target head.
   // The backend fills vocab_size from the target model.

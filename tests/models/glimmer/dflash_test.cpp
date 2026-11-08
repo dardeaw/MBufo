@@ -55,14 +55,24 @@ int main(int argc, char** argv) {
 
   // DFLASH_LONG=1: repeat the sentence to a ~2K-token prompt.
   std::string prompt_text = "The quick brown fox jumps over the lazy dog.";
+  if (const char* ov = std::getenv("DFLASH_PROMPT"))
+    prompt_text = ov;
   if (std::getenv("DFLASH_LONG") != nullptr) {
     std::string rep;
     for (int i = 0; i < 200; ++i)
       rep += prompt_text + " ";
     prompt_text = rep;
   }
-  const auto prompt = model->Tokenize(prompt_text, /*add_bos=*/false);
+  const bool no_bos = std::getenv("DFLASH_NO_BOS") != nullptr;
+  const auto prompt =
+      model->Tokenize(prompt_text, /*add_bos=*/!no_bos);
   std::fprintf(stderr, "prompt tokens: %zu\n", prompt.size());
+  {
+    std::fprintf(stderr, "[test] prompt ids:");
+    for (const auto t : prompt)
+      std::fprintf(stderr, " %d", (int)t);
+    std::fprintf(stderr, "\n");
+  }
 
   // (1) Autoregressive baseline (temperature 0).
   std::vector<std::int32_t> base_seq;
@@ -156,10 +166,51 @@ int main(int argc, char** argv) {
         }
       }
     }
+    {
+      {
+      FILE* ff = std::fopen("/home/dardeaw/gufo_feats.bin", "wb");
+      if (ff != nullptr) {
+        std::fwrite(prompt_feats.data(), sizeof(float), prompt_feats.size(),
+                    ff);
+        std::fclose(ff);
+        std::fprintf(stderr, "[test] dumped %zu feats\n", prompt_feats.size());
+      }
+    }
+    std::fprintf(stderr, "[test] prompt pertap=");
+      const std::size_t fw = taps.size() * hidden;
+      for (std::size_t t = 0; t < taps.size(); ++t) {
+        double s = 0;
+        for (std::size_t r = 0; r < prompt.size(); ++r) {
+          for (std::size_t k = 0; k < hidden; ++k) {
+            const float v = prompt_feats[r * fw + t * hidden + k];
+            s += v < 0 ? -v : v;
+          }
+        }
+        std::fprintf(stderr, " t%zu=%.4f", t, s / (prompt.size() * hidden));
+      }
+      std::fprintf(stderr, "\n");
+    }
     std::vector<gufo::tokenization::TokenId> ptoks;
     ptoks.reserve(prompt.size());
     for (const auto t : prompt)
       ptoks.push_back(static_cast<gufo::tokenization::TokenId>(t));
+    if (const char* fp = std::getenv("GUFO_FEATS_BIN")) {
+      FILE* f = std::fopen(fp, "rb");
+      if (f == nullptr)
+        return Fail("cannot open feats file");
+      std::fseek(f, 0, SEEK_END);
+      const long sz = std::ftell(f);
+      std::fseek(f, 0, SEEK_SET);
+      std::vector<float> ext(static_cast<std::size_t>(sz) / sizeof(float),
+                             0.0F);
+      const std::size_t got =
+          std::fread(ext.data(), sizeof(float), ext.size(), f);
+      std::fclose(f);
+      std::fprintf(stderr, "[test] loaded %zu feats from %s\n", got, fp);
+      if (got != prompt.size() * taps.size() * hidden)
+        return Fail("feats file size mismatch");
+      prompt_feats.swap(ext);
+    }
     gufo::speculative::DraftTargetContext prime;
     prime.prompt_tokens = ptoks;
     prime.prompt_hidden_states = prompt_feats;
@@ -181,10 +232,15 @@ int main(int argc, char** argv) {
       for (const auto t : out) {
         context.push_back(t);
         spec_seq.push_back(t);
-        if (spec_seq.size() >= static_cast<std::size_t>(kSteps))
-          break;
       }
+      if (spec_seq.size() >= static_cast<std::size_t>(kSteps))
+        break;
     }
+    // The final round may overshoot kSteps; trim the comparison window.
+    // Length/context stay in lockstep (full rounds) so the desync check
+    // only fires on real divergence.
+    if (spec_seq.size() > static_cast<std::size_t>(kSteps))
+      spec_seq.resize(static_cast<std::size_t>(kSteps));
     spec_decode_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
             .count();
