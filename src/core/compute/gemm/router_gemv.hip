@@ -2,9 +2,10 @@
 // [T x N] = X[T x H] x W^T (W = gate_inp [N x H]) for the 256-expert /
 // 2048-hidden router shape on the decode path (n_tokens 1..8).
 //
-// Split-K over K (8 chunks, one kernel): 8 tiles x 256 threads, each
-// thread owns one expert's 256-element K-chunk and the 32 experts of a
-// tile combine 8 partials in LDS in fixed split order. The K order is
+// Split-K over K (16 chunks, one kernel): 16 blocks (8 tiles x 2
+// halves) x 256 threads; thread (expert, split) owns one 128-element
+// K-chunk and the 16 experts of a block combine 16 partials in LDS in
+// fixed split order. The K order is
 // plain 0..H (no StaggerU replay) and partials round before the final
 // sum, so logits are NOT bitwise identical to the hipblas path; top-8
 // selection is unaffected (200/200 random trials match the stagger
@@ -79,9 +80,9 @@ __global__ void RouterStaggerGemvKernel(const float* __restrict__ x,
   out[static_cast<std::size_t>(t) * n_experts + expert] = acc;
 }
 
-// Split-K router GEMV: 8 tiles x 256 threads. Thread (expert_local,
+// Split-K router GEMV: 16 blocks x 256 threads. Thread (expert_local,
 // split) accumulates one 256-element K-chunk of its expert in plain
-// K order with float4 loads; the 8 partials per expert combine in
+// K order with float4 loads; the 16 partials per expert combine in
 // LDS in fixed split order. One launch per layer, no second pass.
 __global__ void RouterSplitKGemvKernel(const float* __restrict__ x,
                                        const float* __restrict__ w,
@@ -89,14 +90,19 @@ __global__ void RouterSplitKGemvKernel(const float* __restrict__ x,
                                        std::uint32_t n_tokens,
                                        std::uint32_t n_experts) {
   const std::uint32_t t = blockIdx.x;
-  const std::uint32_t tile = blockIdx.y;
+  const std::uint32_t tile = blockIdx.y & 7u;
+  const std::uint32_t half = blockIdx.y >> 3u;
   if (t >= n_tokens) {
     return;
   }
   const std::uint32_t tid = threadIdx.x;  // 0..255
-  const std::uint32_t expert_local = tid / kRouterSplit;
-  const std::uint32_t split = tid % kRouterSplit;
-  const std::uint32_t expert = tile * kRouterTileExperts + expert_local;
+  constexpr std::uint32_t kExpPerBlock = 16;
+  constexpr std::uint32_t kSplit = 16;
+  constexpr std::uint32_t kChunk = kRouterHidden / kSplit;
+  const std::uint32_t expert_local = tid / kSplit;
+  const std::uint32_t split = tid % kSplit;
+  const std::uint32_t expert =
+      tile * kRouterTileExperts + half * kExpPerBlock + expert_local;
   extern __shared__ float smem[];
   float* sx = smem;
   float* parts = smem + kRouterHidden;
@@ -105,11 +111,11 @@ __global__ void RouterSplitKGemvKernel(const float* __restrict__ x,
     sx[i] = xrow[i];
   }
   __syncthreads();
-  const float* wbase = w + static_cast<std::size_t>(expert) * kRouterHidden +
-                       split * kRouterChunk;
-  const float* xbase = sx + split * kRouterChunk;
+  const float* wbase =
+      w + static_cast<std::size_t>(expert) * kRouterHidden + split * kChunk;
+  const float* xbase = sx + split * kChunk;
   float acc = 0.0F;
-  for (std::uint32_t i = 0; i < kRouterChunk / 4; i += 8) {
+  for (std::uint32_t i = 0; i < kChunk / 4; i += 8) {
 #pragma unroll
     for (std::uint32_t u = 0; u < 8; ++u) {
       const float4 wv = reinterpret_cast<const float4*>(wbase)[i + u];
@@ -121,12 +127,12 @@ __global__ void RouterSplitKGemvKernel(const float* __restrict__ x,
     }
     acc = RouterMaterialize(acc);
   }
-  parts[expert_local * kRouterSplit + split] = acc;
+  parts[expert_local * kSplit + split] = acc;
   __syncthreads();
   if (split == 0) {
     float total = 0.0F;
-    for (std::uint32_t s = 0; s < kRouterSplit; ++s) {
-      total += parts[expert_local * kRouterSplit + s];
+    for (std::uint32_t s = 0; s < kSplit; ++s) {
+      total += parts[expert_local * kSplit + s];
     }
     out[static_cast<std::size_t>(t) * n_experts + expert] = total;
   }
@@ -156,7 +162,8 @@ bool LaunchRouterStaggerGemv(const float* x, const float* w, float* out,
   if (hidden % kRouterChunk == 0) {
     const std::size_t lds =
         (kRouterHidden + kRouterTileExperts * kRouterSplit) * sizeof(float);
-    hipLaunchKernelGGL((RouterSplitKGemvKernel), dim3(n_tokens, kRouterTiles),
+    hipLaunchKernelGGL((RouterSplitKGemvKernel),
+                       dim3(n_tokens, kRouterTiles * 2),
                        dim3(kRouterTileExperts * kRouterSplit), lds, stream, x,
                        w, out, n_tokens, n_experts);
     return true;
