@@ -115,6 +115,12 @@ struct AtemToolSyntax {
   static constexpr std::string_view kCallsClose = "</atem:function_calls>";
 };
 
+// Llama-3.1 custom tool calls (canonical template): the model emits a
+// bare JSON object {"name": "fn", "parameters": {...}} per call.
+struct LlamaToolSyntax {
+  static constexpr std::string_view kCallOpen = "{\"name\":";
+};
+
 ToolMarkerSet ToolMarkers(
     std::optional<sampling::JsonConstraint::ToolFormat> format) {
   using Format = sampling::JsonConstraint::ToolFormat;
@@ -124,6 +130,8 @@ ToolMarkerSet ToolMarkers(
       GemmaToolSyntax::kCallOpen};
   static constexpr std::array<std::string_view, 1> atem{
       AtemToolSyntax::kCallsOpen};
+  static constexpr std::array<std::string_view, 1> llama{
+      LlamaToolSyntax::kCallOpen};
   // The template writes "\n\n" before the call block. As in llama.cpp
   // common/parsers/deepseek.cpp (TC_SEPARATOR + FC_START), that separator is
   // framing: returning it as content would double it when history is replayed.
@@ -143,6 +151,8 @@ ToolMarkerSet ToolMarkers(
     return ToolMarkerSet(gemma);
   if (*format == Format::kAtem)
     return ToolMarkerSet(atem);
+  if (*format == Format::kLlama)
+    return ToolMarkerSet(llama);
   return ToolMarkerSet(qwen);
 }
 
@@ -185,6 +195,10 @@ constexpr std::array<std::string_view, 2> kAtemClosers{
     AtemToolSyntax::kCallsClose,
     "</invoke>",
 };
+constexpr std::array<std::string_view, 2> kLlamaClosers{
+    "<|eot_id|>",
+    "</invoke>",
+};
 constexpr std::array<std::string_view, 9> kToolClosers{
     // Qwen family.
     tokenization::QwenToolSyntax::kParameterClose,
@@ -220,6 +234,8 @@ ToolCloserSet ToolClosers(
     return kGemmaClosers;
   if (*format == Format::kAtem)
     return kAtemClosers;
+  if (*format == Format::kLlama)
+    return kLlamaClosers;
   return kQwenClosers;
 }
 
@@ -2199,6 +2215,112 @@ bool ParseGemmaArgs(
   return true;
 }
 
+// Llama-3.1 custom tool calls: a bare JSON object
+// {"name": "fn", "parameters": {...}} anywhere in the assistant text.
+// Only complete objects match; an unterminated object reports progress.
+struct LlamaCallScan {
+  bool matched{false};
+  std::size_t progress{0};
+  std::size_t end{0};
+  std::string name;
+  std::vector<std::pair<std::string, std::string>> args;
+  std::vector<bool> arg_is_string;
+};
+
+static bool LlamaJsonEnd(std::string_view text, std::size_t* end) {
+  int depth = 0;
+  bool in_str = false;
+  bool escaped = false;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    if (in_str) {
+      if (escaped) {
+        escaped = false;
+      } else if (c == '\\') {
+        escaped = true;
+      } else if (c == '"') {
+        in_str = false;
+      }
+    } else if (c == '"') {
+      in_str = true;
+    } else if (c == '{') {
+      ++depth;
+    } else if (c == '}') {
+      if (--depth == 0) {
+        *end = i + 1;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+LlamaCallScan ScanLlamaToolCall(std::string_view text) {
+  LlamaCallScan scan;
+  constexpr std::string_view kOpen = LlamaToolSyntax::kCallOpen;
+  if (!text.starts_with(kOpen)) return scan;
+  std::size_t end = 0;
+  if (!LlamaJsonEnd(text, &end)) return scan;
+  scan.progress = end;
+  const auto parsed = TryParseJson(text.substr(0, end));
+  if (!parsed || !parsed->is_object()) return scan;
+  const std::string name = parsed->member_str("name");
+  const auto* params = parsed->find("parameters");
+  if (name.empty() || params == nullptr || !params->is_object()) return scan;
+  scan.name = name;
+  for (const auto& [arg_name, arg_value] : params->members()) {
+    scan.args.emplace_back(arg_name, arg_value.is_string()
+                                         ? arg_value.get_str()
+                                         : arg_value.dump());
+    scan.arg_is_string.push_back(arg_value.is_string());
+  }
+  scan.end = end;
+  scan.matched = true;
+  return scan;
+}
+
+void ParseLlamaCalls(
+    std::string_view text, std::span<const tokenization::ChatTool> tools,
+    std::vector<ParsedToolCall>* calls,
+    std::vector<std::pair<std::size_t, std::size_t>>* spans = nullptr) {
+  QuoteTracker call_quotes;
+  call_quotes.Reset(text);
+  std::size_t cursor = 0;
+  while ((cursor = text.find(LlamaToolSyntax::kCallOpen, cursor)) !=
+         std::string_view::npos) {
+    if (call_quotes.QuotedAt(cursor)) {
+      cursor += LlamaToolSyntax::kCallOpen.size();
+      continue;
+    }
+    const auto marker_begin = cursor;
+    const auto scan = ScanLlamaToolCall(text.substr(marker_begin));
+    if (!scan.matched) {
+      cursor = marker_begin + 1;
+      continue;
+    }
+    cursor = marker_begin + scan.end;
+    const bool known =
+        tools.empty() ||
+        std::ranges::any_of(tools, [&](const auto& tool) {
+          return tool.name == scan.name;
+        });
+    if (!known) continue;
+    ParsedToolCall call;
+    call.name = scan.name;
+    for (std::size_t k = 0; k < scan.args.size(); ++k) {
+      tokenization::ChatMessage::ToolArgument argument;
+      argument.name = scan.args[k].first;
+      argument.value = scan.args[k].second;
+      argument.is_string = scan.arg_is_string[k];
+      call.arguments.push_back(std::move(argument));
+    }
+    call.id = RandomId("call_");
+    calls->push_back(std::move(call));
+    call_quotes.Reset(text, cursor);
+    if (spans) spans->emplace_back(marker_begin, cursor);
+  }
+}
+
 void ParseGemmaCalls(
     std::string_view text, std::span<const tokenization::ChatTool> tools,
     std::vector<ParsedToolCall>* calls,
@@ -2355,6 +2477,10 @@ ParsedGeneration ParseGeneration(
              markers.front() == AtemToolSyntax::kCallsOpen &&
              text_from_tools.starts_with(AtemToolSyntax::kCallsOpen))
       ParseAtemCalls(parsed.text, tools, &parsed.tool_calls, nullptr);
+    else if (markers.size() == 1 &&
+             markers.front() == LlamaToolSyntax::kCallOpen &&
+             text_from_tools.starts_with(LlamaToolSyntax::kCallOpen))
+      ParseLlamaCalls(parsed.text, tools, &parsed.tool_calls, nullptr);
     else
       ParseDsmlCalls(
           text_from_tools, markers, tools, &parsed.tool_calls, &spans,
@@ -2494,12 +2620,17 @@ ParsedGeneration ParseStructuredGeneration(
                        markers.front() == GemmaToolSyntax::kCallOpen;
     const bool atem = markers.size() == 1 &&
                       markers.front() == AtemToolSyntax::kCallsOpen;
+    const bool llama = markers.size() == 1 &&
+                       markers.front() == LlamaToolSyntax::kCallOpen;
     if (gemma)
       ParseGemmaCalls(content, tools, &call.tool_calls,
                        tool_only ? &spans : nullptr);
     else if (atem)
       ParseAtemCalls(content, tools, &call.tool_calls,
                      tool_only ? &spans : nullptr);
+    else if (llama)
+      ParseLlamaCalls(content, tools, &call.tool_calls,
+                      tool_only ? &spans : nullptr);
     else
       ParseQwenCalls(content, tools, &call.tool_calls,
                       tool_only ? &spans : nullptr, false, partial);

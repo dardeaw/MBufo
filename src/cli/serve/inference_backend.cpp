@@ -37,6 +37,8 @@
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/vision/image_cache.hpp"
 
+#include <ctime>
+
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/core/hip/committed_backing.hpp"
 #include "src/core/hip/heap_placement.hpp"
@@ -47,6 +49,8 @@
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/gemma4/engine.hpp"
 #include "src/models/glimmer/engine.hpp"
+#include "src/models/gptoss/engine.hpp"
+#include "src/models/llama/engine.hpp"
 #include "src/models/qwen/continuation_adapter.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
@@ -3001,6 +3005,837 @@ private:
 // envelope (parsed back in openai_chat.cpp ParseGemmaCalls).
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
+// GPT-OSS HTTP backend: plain Sync/Evaluate sessions owned per request slot,
+// no MTP/draft sidecar and no continuation snapshots in serve. Prompt framing
+// mirrors `gufo prompt` (harmony channels, same system block); tools are
+// listed in the developer message and round-trip through the generic JSON
+// <tool_call> envelope (instruction + grammar from text_model_runner.cpp,
+// parsed back by ParseQwenCalls' compatibility form). Reasoning channels pass
+// through as content: no thinking split, so greedy serve output matches
+// `gufo prompt` token for token.
+// ---------------------------------------------------------------------------
+constexpr std::string_view kGptOssStateAbi = "gptoss-gfx1151-state-v1";
+
+using GptOssModel = models::gptoss::Model;
+using GptOssSession = models::gptoss::Session;
+
+std::vector<std::int32_t> GptOssEngineTokens(
+    std::span<const TextRunnerToken> tokens) {
+  std::vector<std::int32_t> converted;
+  converted.reserve(tokens.size());
+  for (const TextRunnerToken token : tokens) {
+    if (token > static_cast<TextRunnerToken>(
+                    std::numeric_limits<std::int32_t>::max())) {
+      throw std::invalid_argument("GPT-OSS token ID exceeds engine range");
+    }
+    converted.push_back(static_cast<std::int32_t>(token));
+  }
+  return converted;
+}
+
+std::string GptOssReasoningEffort(const ChatRequest& request) {
+  if (!request.reasoning.effort) return "medium";
+  switch (*request.reasoning.effort) {
+    case ReasoningEffort::kMinimal:
+    case ReasoningEffort::kLow:
+      return "low";
+    case ReasoningEffort::kHigh:
+    case ReasoningEffort::kXHigh:
+    case ReasoningEffort::kMax:
+      return "high";
+    case ReasoningEffort::kMedium:
+      return "medium";
+  }
+  return "medium";
+}
+
+std::string GptOssCurrentDate() {
+  const std::time_t now = std::time(nullptr);
+  std::tm date{};
+#if defined(_WIN32)
+  localtime_s(&date, &now);
+#else
+  localtime_r(&now, &date);
+#endif
+  std::string out = std::to_string(date.tm_year + 1900) + "-";
+  const int mon = date.tm_mon + 1;
+  const int mday = date.tm_mday;
+  if (mon < 10) out += "0";
+  out += std::to_string(mon) + "-";
+  if (mday < 10) out += "0";
+  out += std::to_string(mday);
+  return out;
+}
+
+// Compact JSON tool listing for the developer message. The exact call schema
+// stays enforced by the kJson grammar; this block tells the model which
+// functions exist and what they take.
+std::string GptOssToolDefs(std::span<const tokenization::ChatTool> tools) {
+  std::string out =
+      "# Tools\n\nWhen you need a tool, output ONLY the call on its own "
+      "line, with arguments as a JSON object:\n"
+      "<tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}"
+      "</tool_call>\n"
+      "Example: <tool_call>{\"name\": \"get_weather\", \"arguments\": "
+      "{\"location\": \"Paris\"}}</tool_call>\n"
+      "Available functions:\n";
+  for (const auto& tool : tools) {
+    out += "- " + tool.name + ": " + tool.description + "\n  Parameters: ";
+    const json::Value params =
+        tool.parameters_json.empty()
+            ? json::Value::object()
+            : json::parse(tool.parameters_json);
+    out += params.dump() + "\n";
+  }
+  return out;
+}
+
+std::string GptOssArgsJson(
+    std::span<const tokenization::ChatMessage::ToolArgument> args) {
+  json::Value object = json::Value::object();
+  for (const auto& arg : args) {
+    if (arg.is_string) {
+      object[arg.name] = arg.value;
+    } else {
+      try {
+        object[arg.name] = json::parse(arg.value);
+      } catch (const std::exception&) {
+        object[arg.name] = arg.value;
+      }
+    }
+  }
+  return object.dump();
+}
+
+std::string GptOssRenderPrompt(const ChatRequest& request) {
+  const auto tools =
+      request.tool_choice == ChatRequest::ToolChoice::kNone
+          ? std::span<const tokenization::ChatTool>{}
+          : std::span<const tokenization::ChatTool>{request.tools};
+  const auto& messages = request.messages;
+  std::string developer_text;
+  std::size_t body_begin = 0;
+  if (!messages.empty() &&
+      (messages.front().role == tokenization::ChatRole::kSystem ||
+       messages.front().role == tokenization::ChatRole::kDeveloper)) {
+    developer_text =
+        messages.front().content + messages.front().framing_suffix;
+    body_begin = 1;
+  }
+  std::string out = "<|start|>system<|message|>";
+  out += "You are ChatGPT, a large language model trained by OpenAI.\n";
+  out += "Knowledge cutoff: 2024-06\n";
+  out += "Current date: ";
+  out += GptOssCurrentDate();
+  out += "\n\nReasoning: ";
+  out += GptOssReasoningEffort(request);
+  out += "\n\n# Valid channels: analysis, commentary, final. "
+         "Channel must be included for every message.<|end|>";
+  if (!developer_text.empty() || !tools.empty()) {
+    out += "<|start|>developer<|message|>";
+    if (!developer_text.empty()) {
+      out += "# Instructions\n\n";
+      out += developer_text;
+    }
+    if (!tools.empty()) {
+      if (!developer_text.empty()) out += "\n\n";
+      out += GptOssToolDefs(tools);
+    }
+    out += "<|end|>";
+  }
+  for (std::size_t i = body_begin; i < messages.size(); ++i) {
+    const auto& message = messages[i];
+    if (message.role == tokenization::ChatRole::kTool) {
+      std::string tool_name = message.name;
+      if (tool_name.empty() && !message.tool_call_id.empty()) {
+        for (std::size_t j = i; j-- > 0;) {
+          if (messages[j].role != tokenization::ChatRole::kAssistant)
+            continue;
+          for (const auto& call : messages[j].tool_calls) {
+            if (call.id == message.tool_call_id)
+              tool_name = call.name;
+          }
+        }
+        if (tool_name.empty())
+          tool_name = message.tool_call_id;
+      }
+      if (tool_name.empty())
+        tool_name = "unknown";
+      out += "<|start|>functions." + tool_name +
+             " to=assistant<|channel|>commentary<|message|>" +
+             message.content + "<|end|>";
+      continue;
+    }
+    if (message.role == tokenization::ChatRole::kAssistant) {
+      out += "<|start|>assistant<|message|>";
+      if (!message.thought.empty()) {
+        out += "<|channel|>analysis<|message|>" + message.thought;
+      }
+      for (const auto& call : message.tool_calls) {
+        out += "<|channel|>commentary to=functions." + call.name +
+               "<|constrain|>json<|message|>" +
+               GptOssArgsJson(call.arguments) + "<|call|>";
+      }
+      if (!message.content.empty()) {
+        out += "<|channel|>final<|message|>" + message.content;
+      }
+      out += "<|end|>";
+      continue;
+    }
+    out += "<|start|>user<|message|>" + message.content + "<|end|>";
+  }
+  out += "<|start|>assistant";
+  return out;
+}
+
+class GptOssTextRunnerState final : public TextRunnerState {
+ public:
+  explicit GptOssTextRunnerState(const std::shared_ptr<GptOssModel>& model) {
+    std::string error;
+    session_ = model->CreateSession(&error);
+    if (session_ == nullptr) {
+      throw std::runtime_error("Failed to create GPT-OSS session: " + error);
+    }
+  }
+
+  void SetCancellationCheck(const CancellationCheck&) override {}
+  void Invalidate() noexcept override { position_ = 0; }
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
+      const noexcept override {
+    return {};
+  }
+
+  [[nodiscard]] GptOssSession& session() const { return *session_; }
+  [[nodiscard]] std::size_t position() const noexcept { return position_; }
+  void set_position(std::size_t position) noexcept { position_ = position; }
+
+ private:
+  std::unique_ptr<GptOssSession> session_;
+  std::size_t position_{0};
+};
+
+GptOssTextRunnerState& RequireGptOssState(TextRunnerState& state) {
+  auto* gptoss = dynamic_cast<GptOssTextRunnerState*>(&state);
+  if (gptoss == nullptr) {
+    throw std::logic_error("text runner state is not GPT-OSS");
+  }
+  return *gptoss;
+}
+
+const GptOssTextRunnerState& RequireGptOssState(const TextRunnerState& state) {
+  const auto* gptoss = dynamic_cast<const GptOssTextRunnerState*>(&state);
+  if (gptoss == nullptr) {
+    throw std::logic_error("text runner state is not GPT-OSS");
+  }
+  return *gptoss;
+}
+
+class GptOssTextRunner final : public HipTextModelRunner {
+ public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kJson;
+  }
+
+  GptOssTextRunner(std::shared_ptr<GptOssModel> model,
+                   std::uint32_t max_context)
+      : model_(std::move(model)), max_context_(max_context) {
+    // Harmony generation ends at <|return|>; the per-channel <|end|> never
+    // stops output on its own.
+    for (const char* marker : {"<|return|>"}) {
+      if (const auto id = model_->tokenizer().FindSpecialToken(marker)) {
+        turn_stops_.push_back(static_cast<std::int32_t>(*id));
+      }
+    }
+  }
+
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    return {
+        .model_id = model_->ModelName(),
+        .state_abi = std::string(kGptOssStateAbi),
+        .max_context = max_context_,
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = false,
+                .fork = false,
+                .final_token_advance_required = false,
+                .incremental_text_is_exact = true,
+                .multi_token_decode = false,
+                .batched_multi_token_decode = false,
+                .batched_multi_token_decode_max_width = 0,
+                .prefix_reuse = false,
+            },
+        .persistence = std::nullopt,
+    };
+  }
+
+  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      capacity = free_bytes;
+    }
+    return {
+        .resident_weights_bytes = model_->ResidentBytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = std::nullopt,
+        .temporary_scratch_bytes = std::nullopt,
+        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .requires_device_runtime_lock = true,
+    };
+  }
+
+  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+    std::vector<TextExecutionPlan> plans{
+        {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    for (std::size_t width = 2; width <= 8; ++width) {
+      plans.push_back(
+          {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+    }
+    return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          const std::int32_t token = static_cast<std::int32_t>(id);
+          const std::int32_t unit[1] = {token};
+          return sampling::ConstraintVocabulary::Piece{
+              model_->Decode(std::span<const std::int32_t>(unit, 1)),
+              model_->IsStopToken(token)};
+        });
+  }
+
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return model_->VocabSize();
+  }
+
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"", "", {}};
+  }
+
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+      std::string_view text) const override {
+    std::vector<TextRunnerToken> tokens;
+    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/false)) {
+      tokens.push_back(static_cast<TextRunnerToken>(id));
+    }
+    return tokens;
+  }
+
+  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ChatRequest& request) const override {
+    const std::string prompt = GptOssRenderPrompt(request);
+    if (prompt.empty())
+      return std::nullopt;
+    return Tokenize(prompt);
+  }
+
+  [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
+      const ChatRequest&) const override {
+    return TextGenerationBackend::InitialOutputState::kContent;
+  }
+
+  [[nodiscard]] std::string Decode(
+      std::span<const TextRunnerToken> tokens) const override {
+    const auto ids = GptOssEngineTokens(tokens);
+    return model_->Decode(ids);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+    return std::make_unique<GptOssTextRunnerState>(model_);
+  }
+
+  [[nodiscard]] bool IsTurnStopToken(std::int32_t token) const noexcept {
+    if (model_->IsStopToken(token))
+      return true;
+    return std::ranges::find(turn_stops_, token) != turn_stops_.end();
+  }
+
+  [[nodiscard]] std::string DecodeToken(std::int32_t token) const {
+    return model_->Decode(std::span<const std::int32_t>(&token, 1));
+  }
+
+  [[nodiscard]] TextPrefillStep Prefill(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens) const override {
+    auto& gptoss = RequireGptOssState(state);
+    if (offset != gptoss.position()) {
+      throw std::logic_error(
+          "GPT-OSS prefill offset does not match retained state");
+    }
+    if (offset >= prompt.size()) {
+      throw std::logic_error("GPT-OSS prefill has no remaining input");
+    }
+    const std::size_t consumed =
+        std::min(max_input_tokens, prompt.size() - offset);
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_) {
+      throw std::runtime_error("GPT-OSS prompt exceeds the served context");
+    }
+    const auto prefix = GptOssEngineTokens(prompt.first(next_position));
+    std::string error;
+    if (!gptoss.session().Sync(prefix, &error)) {
+      gptoss.set_position(0);
+      throw std::runtime_error("GPT-OSS prefill failed: " + error);
+    }
+    gptoss.set_position(next_position);
+    return {
+        .consumed_tokens = consumed,
+        .decode_ready = next_position == prompt.size(),
+    };
+  }
+
+  [[nodiscard]] TextDecodeSelection SelectNext(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    auto& gptoss = RequireGptOssState(state);
+    if (gptoss.position() >= max_context_)
+      return {.stop = true, .piece = {}};
+    const auto logits = gptoss.session().Logits();
+    if (logits.empty()) {
+      throw std::runtime_error("GPT-OSS token selection has no logits");
+    }
+    const auto token =
+        static_cast<std::int32_t>(sampler.Sample(logits));
+    if (gptoss.stop_at_eos() && IsTurnStopToken(token)) {
+      return {
+          .stop = true,
+          .token = 0,
+          .piece = {},
+      };
+    }
+    return {
+        .stop = false,
+        .token = static_cast<TextRunnerToken>(token),
+        .piece = DecodeToken(token),
+    };
+  }
+
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    if (token > static_cast<TextRunnerToken>(
+                    std::numeric_limits<std::int32_t>::max())) {
+      throw std::invalid_argument("GPT-OSS token ID exceeds engine range");
+    }
+    auto& gptoss = RequireGptOssState(state);
+    std::string error;
+    if (!gptoss.session().Evaluate(static_cast<std::int32_t>(token),
+                                    &error)) {
+      throw std::runtime_error("GPT-OSS decode failed: " + error);
+    }
+    gptoss.set_position(gptoss.position() + 1);
+  }
+
+  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    return SelectNext(state, sampler);
+  }
+
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return RequireGptOssState(state).position();
+  }
+
+ private:
+  std::shared_ptr<GptOssModel> model_;
+  std::uint32_t max_context_{0};
+  std::vector<std::int32_t> turn_stops_;
+};
+
+// ---------------------------------------------------------------------------
+// Llama HTTP backend: plain Sync/Evaluate sessions owned per request slot,
+// no speculative sidecar and no continuation snapshots in serve (dense GQA,
+// d=128: attention and GEMM ride the dispatcher's existing paths for q8 KV,
+// local dense F16 kernel otherwise). Prompt framing mirrors `gufo prompt`
+// (Llama-3.1 headers); tools are listed in the system message and round-trip
+// through the generic JSON <tool_call> envelope, as for GPT-OSS above.
+// ---------------------------------------------------------------------------
+constexpr std::string_view kLlamaStateAbi = "llama-gfx1151-state-v1";
+
+using LlamaModel = models::llama::Model;
+using LlamaSession = models::llama::Session;
+
+std::vector<std::int32_t> LlamaEngineTokens(
+    std::span<const TextRunnerToken> tokens) {
+  std::vector<std::int32_t> converted;
+  converted.reserve(tokens.size());
+  for (const TextRunnerToken token : tokens) {
+    if (token > static_cast<TextRunnerToken>(
+                    std::numeric_limits<std::int32_t>::max())) {
+      throw std::invalid_argument("Llama token ID exceeds engine range");
+    }
+    converted.push_back(static_cast<std::int32_t>(token));
+  }
+  return converted;
+}
+
+std::string LlamaToolDefs(std::span<const tokenization::ChatTool> tools) {
+  // Compact by necessity: the Llama prefill kernels fault past ~130 prompt
+  // tokens on q8 (~90 on f16; pre-existing engine limit, prompt path
+  // included). Name+parameters only; descriptions and wrappers are dropped.
+  std::string out;
+  for (const auto& tool : tools) {
+    out += "{\"name\": " + json::Value(tool.name).dump();
+    const json::Value params =
+        tool.parameters_json.empty()
+            ? json::Value::object()
+            : json::parse(tool.parameters_json);
+    out += ", \"parameters\": " + params.dump() + "}\n";
+  }
+  return out;
+}
+
+std::string LlamaArgsJson(
+    std::span<const tokenization::ChatMessage::ToolArgument> args) {
+  json::Value object = json::Value::object();
+  for (const auto& arg : args) {
+    if (arg.is_string) {
+      object[arg.name] = arg.value;
+    } else {
+      try {
+        object[arg.name] = json::parse(arg.value);
+      } catch (const std::exception&) {
+        object[arg.name] = arg.value;
+      }
+    }
+  }
+  return object.dump();
+}
+
+std::string LlamaRenderPrompt(const ChatRequest& request) {
+  const auto tools =
+      request.tool_choice == ChatRequest::ToolChoice::kNone
+          ? std::span<const tokenization::ChatTool>{}
+          : std::span<const tokenization::ChatTool>{request.tools};
+  const auto& messages = request.messages;
+  std::string system_text;
+  std::size_t body_begin = 0;
+  if (!messages.empty() &&
+      (messages.front().role == tokenization::ChatRole::kSystem ||
+       messages.front().role == tokenization::ChatRole::kDeveloper)) {
+    system_text = messages.front().content + messages.front().framing_suffix;
+    body_begin = 1;
+  }
+  std::string out = "<|begin_of_text|>";
+  // No system block without system text: the tools ride in the first user
+  // message, and an Environment: ipython line without builtin tools pulls
+  // the model into the ipython turn-taking mode by mistake.
+  if (!system_text.empty()) {
+    out += "<|start_header_id|>system<|end_header_id|>\n\n";
+    out += system_text;
+    out += "<|eot_id|>";
+  }
+  bool tools_prepended = tools.empty();
+  for (std::size_t i = body_begin; i < messages.size(); ++i) {
+    const auto& message = messages[i];
+    if (message.role == tokenization::ChatRole::kTool) {
+      out += "<|start_header_id|>ipython<|end_header_id|>\n\n";
+      out += message.content;
+      out += "<|eot_id|>";
+      continue;
+    }
+    if (message.role == tokenization::ChatRole::kAssistant) {
+      out += "<|start_header_id|>assistant<|end_header_id|>\n\n";
+      if (!message.tool_calls.empty()) {
+        // Canonical custom-tool history: the JSON call only.
+        bool first_call = true;
+        for (const auto& call : message.tool_calls) {
+          if (!first_call) out += "\n";
+          first_call = false;
+          out += "{\"name\": " + json::Value(call.name).dump();
+          out += ", \"parameters\": " + LlamaArgsJson(call.arguments) + "}";
+        }
+      } else {
+        if (!message.thought.empty()) {
+          out += message.thought;
+        }
+        out += message.content;
+      }
+      out += "<|eot_id|>";
+      continue;
+    }
+    out += "<|start_header_id|>user<|end_header_id|>\n\n";
+    if (!tools_prepended) {
+      tools_prepended = true;
+      out += "Given these functions, answer with a JSON call "
+             "{\"name\": NAME, \"parameters\": ARGS}:\n";
+      out += LlamaToolDefs(tools);
+      out += "\n";
+    }
+    out += message.content;
+    out += "<|eot_id|>";
+  }
+  if (!tools_prepended) {
+    // No user turn carries the tool block; attach it before generation.
+    out += "<|start_header_id|>user<|end_header_id|>\n\n";
+    out += "Given these functions, answer with a JSON call "
+           "{\"name\": NAME, \"parameters\": ARGS}:\n";
+    out += LlamaToolDefs(tools);
+    out += "<|eot_id|>";
+  }
+  out += "<|start_header_id|>assistant<|end_header_id|>\n\n";
+  return out;
+}
+
+class LlamaTextRunnerState final : public TextRunnerState {
+ public:
+  explicit LlamaTextRunnerState(const std::shared_ptr<LlamaModel>& model) {
+    std::string error;
+    session_ = model->CreateSession(&error);
+    if (session_ == nullptr) {
+      throw std::runtime_error("Failed to create Llama session: " + error);
+    }
+  }
+
+  void SetCancellationCheck(const CancellationCheck&) override {}
+  void Invalidate() noexcept override { position_ = 0; }
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
+      const noexcept override {
+    return {};
+  }
+
+  [[nodiscard]] LlamaSession& session() const { return *session_; }
+  [[nodiscard]] std::size_t position() const noexcept { return position_; }
+  void set_position(std::size_t position) noexcept { position_ = position; }
+
+ private:
+  std::unique_ptr<LlamaSession> session_;
+  std::size_t position_{0};
+};
+
+LlamaTextRunnerState& RequireLlamaState(TextRunnerState& state) {
+  auto* llama = dynamic_cast<LlamaTextRunnerState*>(&state);
+  if (llama == nullptr) {
+    throw std::logic_error("text runner state is not Llama");
+  }
+  return *llama;
+}
+
+const LlamaTextRunnerState& RequireLlamaState(const TextRunnerState& state) {
+  const auto* llama = dynamic_cast<const LlamaTextRunnerState*>(&state);
+  if (llama == nullptr) {
+    throw std::logic_error("text runner state is not Llama");
+  }
+  return *llama;
+}
+
+class LlamaTextRunner final : public HipTextModelRunner {
+ public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kLlama;
+  }
+
+  LlamaTextRunner(std::shared_ptr<LlamaModel> model,
+                  std::uint32_t max_context)
+      : model_(std::move(model)), max_context_(max_context) {
+    // A turn ends at <|eot_id|>; the terminal <|end_of_text|> is covered by
+    // the engine stop tokens.
+    for (const char* marker : {"<|eot_id|>"}) {
+      if (const auto id = model_->tokenizer().FindSpecialToken(marker)) {
+        turn_stops_.push_back(static_cast<std::int32_t>(*id));
+      }
+    }
+  }
+
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    return {
+        .model_id = model_->ModelName(),
+        .state_abi = std::string(kLlamaStateAbi),
+        .max_context = max_context_,
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = false,
+                .fork = false,
+                .final_token_advance_required = false,
+                .incremental_text_is_exact = true,
+                .multi_token_decode = false,
+                .batched_multi_token_decode = false,
+                .batched_multi_token_decode_max_width = 0,
+                .prefix_reuse = false,
+            },
+        .persistence = std::nullopt,
+    };
+  }
+
+  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      capacity = free_bytes;
+    }
+    return {
+        .resident_weights_bytes = model_->ResidentBytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = std::nullopt,
+        .temporary_scratch_bytes = std::nullopt,
+        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .requires_device_runtime_lock = true,
+    };
+  }
+
+  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+    std::vector<TextExecutionPlan> plans{
+        {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    for (std::size_t width = 2; width <= 8; ++width) {
+      plans.push_back(
+          {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+    }
+    return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          const std::int32_t token = static_cast<std::int32_t>(id);
+          const std::int32_t unit[1] = {token};
+          return sampling::ConstraintVocabulary::Piece{
+              model_->Decode(std::span<const std::int32_t>(unit, 1)),
+              model_->IsStopToken(token)};
+        });
+  }
+
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return model_->VocabSize();
+  }
+
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"", "", {}};
+  }
+
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+      std::string_view text) const override {
+    std::vector<TextRunnerToken> tokens;
+    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/false)) {
+      tokens.push_back(static_cast<TextRunnerToken>(id));
+    }
+    return tokens;
+  }
+
+  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ChatRequest& request) const override {
+    const std::string prompt = LlamaRenderPrompt(request);
+    if (prompt.empty())
+      return std::nullopt;
+    return Tokenize(prompt);
+  }
+
+  [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
+      const ChatRequest&) const override {
+    return TextGenerationBackend::InitialOutputState::kContent;
+  }
+
+  [[nodiscard]] std::string Decode(
+      std::span<const TextRunnerToken> tokens) const override {
+    const auto ids = LlamaEngineTokens(tokens);
+    return model_->Decode(ids);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+    return std::make_unique<LlamaTextRunnerState>(model_);
+  }
+
+  [[nodiscard]] bool IsTurnStopToken(std::int32_t token) const noexcept {
+    if (model_->IsStopToken(token))
+      return true;
+    return std::ranges::find(turn_stops_, token) != turn_stops_.end();
+  }
+
+  [[nodiscard]] std::string DecodeToken(std::int32_t token) const {
+    return model_->Decode(std::span<const std::int32_t>(&token, 1));
+  }
+
+  [[nodiscard]] TextPrefillStep Prefill(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens) const override {
+    auto& llama = RequireLlamaState(state);
+    if (offset != llama.position()) {
+      throw std::logic_error(
+          "Llama prefill offset does not match retained state");
+    }
+    if (offset >= prompt.size()) {
+      throw std::logic_error("Llama prefill has no remaining input");
+    }
+    const std::size_t consumed =
+        std::min(max_input_tokens, prompt.size() - offset);
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_) {
+      throw std::runtime_error("Llama prompt exceeds the served context");
+    }
+    const auto prefix = LlamaEngineTokens(prompt.first(next_position));
+    std::string error;
+    if (!llama.session().Sync(prefix, &error)) {
+      llama.set_position(0);
+      throw std::runtime_error("Llama prefill failed: " + error);
+    }
+    llama.set_position(next_position);
+    return {
+        .consumed_tokens = consumed,
+        .decode_ready = next_position == prompt.size(),
+    };
+  }
+
+  [[nodiscard]] TextDecodeSelection SelectNext(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    auto& llama = RequireLlamaState(state);
+    if (llama.position() >= max_context_)
+      return {.stop = true, .piece = {}};
+    const auto logits = llama.session().Logits();
+    if (logits.empty()) {
+      throw std::runtime_error("Llama token selection has no logits");
+    }
+    const auto token =
+        static_cast<std::int32_t>(sampler.Sample(logits));
+    if (llama.stop_at_eos() && IsTurnStopToken(token)) {
+      return {
+          .stop = true,
+          .token = 0,
+          .piece = {},
+      };
+    }
+    return {
+        .stop = false,
+        .token = static_cast<TextRunnerToken>(token),
+        .piece = DecodeToken(token),
+    };
+  }
+
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    if (token > static_cast<TextRunnerToken>(
+                    std::numeric_limits<std::int32_t>::max())) {
+      throw std::invalid_argument("Llama token ID exceeds engine range");
+    }
+    auto& llama = RequireLlamaState(state);
+    std::string error;
+    if (!llama.session().Evaluate(static_cast<std::int32_t>(token),
+                                   &error)) {
+      throw std::runtime_error("Llama decode failed: " + error);
+    }
+    llama.set_position(llama.position() + 1);
+  }
+
+  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    return SelectNext(state, sampler);
+  }
+
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return RequireLlamaState(state).position();
+  }
+
+ private:
+  std::shared_ptr<LlamaModel> model_;
+  std::uint32_t max_context_{0};
+  std::vector<std::int32_t> turn_stops_;
+};
+
+// ---------------------------------------------------------------------------
 // Muse Glimmer HTTP backend: plain Sync/Evaluate sessions owned per request
 // slot, no speculative sidecar and no continuation snapshots in serve. Prompt
 // framing mirrors the GGUF canonical template (Onyx ATEM tool format);
@@ -4656,12 +5491,75 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
 
+  if (reader->GetMetadataString("general.architecture") == "llama") {
+    if (!vision_model_path.empty()) {
+      SetError(error, "Llama HTTP models do not support --mmproj");
+      return false;
+    }
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error,
+               "Llama HTTP models do not support speculative decoding "
+               "(pass --speculative off)");
+      return false;
+    }
+    auto model = models::llama::Model::Load(
+        model_path,
+        models::llama::ModelOptions{
+            .max_context = max_context,
+            .kv_cache_quant = kv_cache_quant,
+        },
+        &load_error);
+    if (model == nullptr) {
+      SetError(error, "Failed to create Llama model: " + load_error);
+      return false;
+    }
+    std::cerr << "[llama] kv_cache_quant=" << kv_cache_quant << '\n';
+    // Llama sessions expose no continuation snapshots, so there is no
+    // persistent disk-cache identity; the RAM pool owns every session.
+    if (DiskCacheEnabled(resolved_disk_cache_config)) {
+      SetError(error,
+               "Llama HTTP models do not support the persistent disk cache");
+      return false;
+    }
+    return load(std::move(model), error, max_context, session_count,
+                prefill_policy, scheduler_policy, speculative_config,
+                std::move(resolved_disk_cache_config), ram_cache_config);
+  }
+
   if (reader->GetMetadataString("general.architecture") == "gpt-oss") {
-    SetError(error,
-             "gpt-oss models are not supported by the serve text backend "
-             "(Qwen executor only); serve gpt-oss via the direct gptoss "
-             "engine instead");
-    return false;
+    if (!vision_model_path.empty()) {
+      SetError(error, "GPT-OSS HTTP models do not support --mmproj");
+      return false;
+    }
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error,
+               "GPT-OSS HTTP models do not support speculative decoding "
+               "(MTP and draft backends have no serve path; pass "
+               "--speculative off)");
+      return false;
+    }
+    auto model = models::gptoss::Model::Load(
+        model_path,
+        models::gptoss::ModelOptions{
+            .max_context = max_context,
+            .kv_cache_quant = kv_cache_quant,
+        },
+        &load_error);
+    if (model == nullptr) {
+      SetError(error, "Failed to create GPT-OSS model: " + load_error);
+      return false;
+    }
+    std::cerr << "[gpt-oss] kv_cache_quant=" << kv_cache_quant << '\n';
+    // GPT-OSS sessions expose no continuation snapshots, so there is no
+    // persistent disk-cache identity; the RAM pool owns every session.
+    if (DiskCacheEnabled(resolved_disk_cache_config)) {
+      SetError(error,
+               "GPT-OSS HTTP models do not support the persistent disk cache");
+      return false;
+    }
+    return load(std::move(model), error, max_context, session_count,
+                prefill_policy, scheduler_policy, speculative_config,
+                std::move(resolved_disk_cache_config), ram_cache_config);
   }
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
@@ -5107,6 +6005,124 @@ bool InferenceBackend::load(
     new_state->supports_images = false;
     auto runner =
         std::make_shared<GlimmerTextRunner>(std::move(model), max_context);
+    new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
+    auto runner_pool = std::make_shared<TextRunnerPool>(
+        std::move(runner), session_count, std::nullopt, ram_cache_config);
+    new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+        std::move(runner_pool), prefill_policy, scheduler_policy);
+    {
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
+}
+
+bool InferenceBackend::load(
+    std::shared_ptr<models::gptoss::Model> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config) {
+  if (model == nullptr) {
+    SetError(error, "GPT-OSS model must not be null");
+    return false;
+  }
+  if (max_context == 0)
+    max_context = model->MaxContext();
+
+  if (session_count == 0) {
+    SetError(error, "HTTP session count must be at least one");
+    return false;
+  }
+  if (max_context == 0 || max_context > model->MaxContext()) {
+    SetError(error, "HTTP context exceeds the loaded GPT-OSS model context");
+    return false;
+  }
+  if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    SetError(error,
+             "GPT-OSS HTTP models do not support speculative decoding");
+    return false;
+  }
+  // No continuation snapshots exist for GPT-OSS sessions, so the disk cache
+  // has no identity to key on; the RAM pool owns every execution slot.
+  if (DiskCacheEnabled(disk_cache_config)) {
+    SetError(error,
+             "GPT-OSS HTTP models do not support the persistent disk cache");
+    return false;
+  }
+  try {
+    auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextModelPreset::kUnspecified;
+    new_state->sampling_defaults.supplied = {};
+    new_state->supports_images = false;
+    auto runner =
+        std::make_shared<GptOssTextRunner>(std::move(model), max_context);
+    new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
+    auto runner_pool = std::make_shared<TextRunnerPool>(
+        std::move(runner), session_count, std::nullopt, ram_cache_config);
+    new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+        std::move(runner_pool), prefill_policy, scheduler_policy);
+    {
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
+}
+
+bool InferenceBackend::load(
+    std::shared_ptr<models::llama::Model> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config) {
+  if (model == nullptr) {
+    SetError(error, "Llama model must not be null");
+    return false;
+  }
+  if (max_context == 0)
+    max_context = model->MaxContext();
+
+  if (session_count == 0) {
+    SetError(error, "HTTP session count must be at least one");
+    return false;
+  }
+  if (max_context == 0 || max_context > model->MaxContext()) {
+    SetError(error, "HTTP context exceeds the loaded Llama model context");
+    return false;
+  }
+  if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    SetError(error,
+             "Llama HTTP models do not support speculative decoding");
+    return false;
+  }
+  // No continuation snapshots exist for Llama sessions, so the disk cache
+  // has no identity to key on; the RAM pool owns every execution slot.
+  if (DiskCacheEnabled(disk_cache_config)) {
+    SetError(error,
+             "Llama HTTP models do not support the persistent disk cache");
+    return false;
+  }
+  try {
+    auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextModelPreset::kUnspecified;
+    new_state->sampling_defaults.supplied = {};
+    new_state->supports_images = false;
+    auto runner =
+        std::make_shared<LlamaTextRunner>(std::move(model), max_context);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     auto runner_pool = std::make_shared<TextRunnerPool>(

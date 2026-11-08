@@ -76,6 +76,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
           "</atem:invoke></atem:function_calls>. "
           "Tool arguments must follow the chosen function's schema; do not "
           "wrap the call in anything else.";
+    // kLlama elicitation lives in the renderer (canonical tool block
+    // in the first user message); no extra system instruction.
     if (request.response_format)
       instruction += " The JSON response schema applies to the final answer.";
   }
