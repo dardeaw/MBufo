@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "src/core/model_config.hpp"
+#include "src/core/gguf_reader.hpp"
 #include "src/models/qwen/continuation_hooks.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/generator.hpp"
@@ -121,6 +122,12 @@ public:
   }
   [[nodiscard]] const core::ModelConfig& GetConfig() const noexcept {
     return weights_.config;
+  }
+  /// The GGUF the weights came from. Lets serve-side features (embeddings)
+  /// read artifact-declared metadata such as `<arch>.pooling_type` without
+  /// duplicating the reader.
+  [[nodiscard]] const core::GgufReader& GetReader() const noexcept {
+    return *reader_;
   }
   [[nodiscard]] std::size_t GetWeightRegionCount() const noexcept {
     return weight_regions_.size();

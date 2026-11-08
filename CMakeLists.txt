@@ -127,12 +127,15 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/blocked_wmma.hip.cpp
     src/core/compute/attention/blocked_splitk.hip.cpp
     src/core/compute/attention/mixed_batch_attn.hip.cpp
-    src/core/compute/attention/attention_dispatcher.hpp)
+    src/core/compute/attention/flash_f16_dense.hip.cpp
+    src/core/compute/attention/attention_dispatcher.hpp
+    src/core/compute/attention/flash_f16_dense.hpp)
   set_source_files_properties(
     src/core/compute/attention/blocked_kv.hip.cpp
     src/core/compute/attention/blocked_wmma.hip.cpp
     src/core/compute/attention/blocked_splitk.hip.cpp
-    src/core/compute/attention/mixed_batch_attn.hip.cpp PROPERTIES LANGUAGE HIP)
+    src/core/compute/attention/mixed_batch_attn.hip.cpp
+    src/core/compute/attention/flash_f16_dense.hip.cpp PROPERTIES LANGUAGE HIP)
   set_target_properties(gufo_core_blocked_kv PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
@@ -164,6 +167,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/routed_moe.hip
     src/core/compute/gemm/argmax.hip
+    src/core/compute/pooling/pooling_norm.hip
     src/core/compute/gemm/gemm.hpp
     src/core/compute/gemm/gemm_device.cuh
     src/core/compute/gemm/gemm_dispatcher.hpp
@@ -178,7 +182,8 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/w8a8_tiled.hip
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/routed_moe.hip
-    src/core/compute/gemm/argmax.hip PROPERTIES LANGUAGE HIP)
+    src/core/compute/gemm/argmax.hip
+    src/core/compute/pooling/pooling_norm.hip PROPERTIES LANGUAGE HIP)
   # The Wave64 WMMA instantiation needs wavefrontsize64 (the same per-file
   # flag the model libs use for their WMMA TUs); this file holds no wave32
   # shuffles. The scalar tail kernel is wave-size agnostic.
@@ -265,6 +270,7 @@ target_link_libraries(gufo_core PUBLIC ICU::uc ICU::i18n Threads::Threads
 add_subdirectory(src/models/qwen)
 add_subdirectory(src/models/qwen_image_21)
 add_subdirectory(src/models/gemma4)
+add_subdirectory(src/models/bge_m3)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
@@ -441,6 +447,7 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
   add_subdirectory(tests/models/gemma4)
+  add_subdirectory(tests/models/bge_m3)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
 
@@ -504,6 +511,16 @@ if (BUILD_TESTING)
   target_link_libraries(json_test PRIVATE gufo_core)
   add_test(NAME json_test COMMAND json_test)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
+
+  add_executable(pooling_norm_test tests/core/pooling_norm_test.cpp)
+  target_link_libraries(pooling_norm_test PRIVATE gufo_core)
+  add_test(NAME pooling_norm_test COMMAND pooling_norm_test)
+  set_tests_properties(pooling_norm_test PROPERTIES LABELS "cpu;core;embedding")
+
+  add_executable(layernorm_gelu_test tests/core/layernorm_gelu_test.cpp)
+  target_link_libraries(layernorm_gelu_test PRIVATE gufo_core)
+  add_test(NAME layernorm_gelu_test COMMAND layernorm_gelu_test)
+  set_tests_properties(layernorm_gelu_test PROPERTIES LABELS "cpu;core;embedding")
 
   add_executable(heap_placement_test tests/core/heap_placement_test.cpp)
   target_link_libraries(heap_placement_test PRIVATE gufo_core)

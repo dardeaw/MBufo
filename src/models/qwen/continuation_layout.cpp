@@ -21,7 +21,9 @@ ContinuationLayout::ContinuationLayout(const core::ModelConfig& c,
                                        hip::QwenExecutionPolicy policy,
                                        std::uint32_t context)
     : context_(context) {
-  if (!c.IsValidQwen() || !context || context > c.context_length ||
+  // Dense full-attention decoders (interval 1) only ever take the kKey/kValue
+  // branch below, so the layout stays correct with zero SSM components.
+  if ((!c.IsValidQwen() && !c.IsDenseQwenAttention()) || !context || context > c.context_length ||
       (policy.kv_cache_storage != hip::QwenKvCacheStorage::kFp16 &&
        policy.kv_cache_storage != hip::QwenKvCacheStorage::kFp32) ||
       (policy.recurrent_state_storage !=

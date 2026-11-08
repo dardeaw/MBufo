@@ -945,6 +945,12 @@ std::optional<ModelConfig> GgufReader::ExtractModelConfig(
   }
   if (auto val = GetMetadataUint32(prefix + "full_attention_interval")) {
     config.full_attention_interval = *val;
+  } else if (HasTensor("blk.0.attn_q.weight") || HasTensor("blk.0.wq.weight")) {
+    // Dense decoder without an interval key (e.g. Qwen3-Embedding-0.6B,
+    // arch "qwen3"): every layer is full causal attention. Without this the
+    // hybrid default (4) misclassifies layers as Gated DeltaNet, the loader
+    // refuses the artifact, and layer indexing would be wrong.
+    config.full_attention_interval = 1;
   }
   if (auto val = GetMetadataUint32(prefix + "ssm.conv_kernel")) {
     config.ssm_conv_kernel = *val;
@@ -1009,8 +1015,9 @@ std::optional<ModelConfig> GgufReader::ExtractModelConfig(
     }
   }
 
-  // 6. Validate configuration against Qwen3.5/3.8 structural rules
-  if (!config.IsValidQwen()) {
+  // 6. Validate configuration against Qwen3.5/3.8 structural rules, or the
+  // dense full-attention variant (interval 1, no recurrent state).
+  if (!config.IsValidQwen() && !config.IsDenseQwenAttention()) {
     if (error_msg != nullptr) {
       *error_msg = "Model config failed Qwen structural validation (head_dim=" +
                    std::to_string(config.head_dim) +

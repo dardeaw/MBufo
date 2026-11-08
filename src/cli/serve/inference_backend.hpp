@@ -201,7 +201,13 @@ public:
   [[nodiscard]] std::optional<std::size_t> count_chat_tokens(
       const ChatRequest& request) const override;
 
-private:
+  /// Single-prefill embedding for POST /v1/embeddings. Only the Qwen dense
+  /// path with a declared GGUF pooling strategy serves it; every other model
+  /// kind refuses explicitly via `error`.
+  [[nodiscard]] std::optional<EmbeddingResult> Embed(
+      const std::string& text, std::string* error) override;
+
+ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

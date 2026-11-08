@@ -305,17 +305,29 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
       }
-      gemm_weight(layer.attn_q, arena_.d_scratch_bf16, arena_.d_normed,
-                  arena_.d_ssm_qkv, q_projection_size, hidden_size,
-                  arena_.d_scratch_q8_act);
+      // Dense decoders (e.g. Qwen3-Embedding) carry a plain Q projection and
+      // project it straight into d_q. Hybrid layers instead unpack the fused
+      // head-interleaved Q+gate rows. The attention kernels below skip the
+      // sigmoid gate multiply when the gate pointer is null.
+      const bool dense_attention = config.IsDenseQwenAttention();
+      if (dense_attention) {
+        gemm_weight(layer.attn_q, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_q, attention_size, hidden_size,
+                    arena_.d_scratch_q8_act);
+      } else {
+        gemm_weight(layer.attn_q, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_ssm_qkv, q_projection_size, hidden_size,
+                    arena_.d_scratch_q8_act);
+        LaunchBatchedUnpackQG(arena_.d_ssm_qkv, arena_.d_q, arena_.d_ssm_gate,
+                              batch_size, config.num_attention_heads,
+                              config.head_dim, arena_.stream);
+      }
       gemm_weight(layer.attn_k, arena_.d_scratch_bf16, arena_.d_normed,
                   arena_.d_k, kv_size, hidden_size, arena_.d_scratch_q8_act);
       gemm_weight(layer.attn_v, arena_.d_scratch_bf16, arena_.d_normed,
                   arena_.d_v, kv_size, hidden_size, arena_.d_scratch_q8_act);
 
-      LaunchBatchedUnpackQG(arena_.d_ssm_qkv, arena_.d_q, arena_.d_ssm_gate,
-                            batch_size, config.num_attention_heads,
-                            config.head_dim, arena_.stream);
+      const float* q_gate = dense_attention ? nullptr : arena_.d_ssm_gate;
 
       const std::size_t total_k = arena_.GetAttentionKvPlaneElements();
       const std::uint32_t attn_layer_idx = l / config.full_attention_interval;
@@ -393,7 +405,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // still needs the pack.
       const bool kv_already_written = fused_qknorm_rope_kv;
       const bool wmma_attention = LaunchQwenWmmaAttention(
-          arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+          arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
           arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
           arena_.d_attention_kv_f16,
           OffsetIfPresent(
@@ -414,7 +426,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             visible_context,
             [&] {
               tiled_attention = LaunchBatchedAttentionTile(
-                  arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                  arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
                   arena_.d_kv_cache,
                   OffsetIfPresent(arena_.d_kv_cache, total_k),
                   arena_.d_attention_kv_f16,
@@ -428,7 +440,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             },
             [&] {
               LaunchBatchedAttention(
-                  arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                  arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
                   arena_.d_kv_cache,
                   OffsetIfPresent(arena_.d_kv_cache, total_k),
                   arena_.d_attention_kv_f16,
@@ -963,19 +975,27 @@ void QwenGpuExecutor::PrefillAttentionPre(const PrefillChunkCtx& ctx,
                                  arena_.d_scratch_q8_act, batch_size,
                                  hidden_size, arena_.stream);
   }
-  PrefillGemmWeight(layer.attn_q, arena_.d_scratch_bf16, arena_.d_normed,
-                    arena_.d_ssm_qkv, batch_size, q_projection_size, hidden_size,
-                    arena_.d_scratch_q8_act, half_prefill);
+  // Dense decoders project the plain Q straight into d_q (see
+  // ForwardPromptChunk); hybrid layers unpack the fused Q+gate interleave.
+  const bool dense_attention = config.IsDenseQwenAttention();
+  if (dense_attention) {
+    PrefillGemmWeight(layer.attn_q, arena_.d_scratch_bf16, arena_.d_normed,
+                      arena_.d_q, batch_size, attention_size, hidden_size,
+                      arena_.d_scratch_q8_act, half_prefill);
+  } else {
+    PrefillGemmWeight(layer.attn_q, arena_.d_scratch_bf16, arena_.d_normed,
+                      arena_.d_ssm_qkv, batch_size, q_projection_size,
+                      hidden_size, arena_.d_scratch_q8_act, half_prefill);
+    LaunchBatchedUnpackQG(arena_.d_ssm_qkv, arena_.d_q, arena_.d_ssm_gate,
+                          batch_size, config.num_attention_heads,
+                          config.head_dim, arena_.stream);
+  }
   PrefillGemmWeight(layer.attn_k, arena_.d_scratch_bf16, arena_.d_normed,
                     arena_.d_k, batch_size, kv_size, hidden_size, arena_.d_scratch_q8_act,
                     half_prefill);
   PrefillGemmWeight(layer.attn_v, arena_.d_scratch_bf16, arena_.d_normed,
                     arena_.d_v, batch_size, kv_size, hidden_size, arena_.d_scratch_q8_act,
                     half_prefill);
-
-  LaunchBatchedUnpackQG(arena_.d_ssm_qkv, arena_.d_q, arena_.d_ssm_gate,
-                        batch_size, config.num_attention_heads,
-                        config.head_dim, arena_.stream);
 
   const std::size_t total_k = arena_.GetAttentionKvPlaneElements();
   const std::uint32_t attn_layer_idx = l / config.full_attention_interval;
@@ -1029,8 +1049,12 @@ void QwenGpuExecutor::PrefillAttentionPost(const PrefillChunkCtx& ctx,
     const std::size_t visible_context =
         static_cast<std::size_t>(ctx.start_pos) + batch_size;
     const bool kv_already_written = ctx.fuse_qknorm_rope_kv;
+    // Dense decoders carry no gate rows: the kernels skip the sigmoid gate
+    // multiply on a null gate pointer.
+    const float* q_gate =
+        config.IsDenseQwenAttention() ? nullptr : arena_.d_ssm_gate;
     const bool wmma_attention = LaunchQwenWmmaAttention(
-        arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+        arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
         arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
         arena_.d_attention_kv_f16,
         OffsetIfPresent(
@@ -1050,7 +1074,7 @@ void QwenGpuExecutor::PrefillAttentionPost(const PrefillChunkCtx& ctx,
           visible_context,
           [&] {
             tiled_attention = LaunchBatchedAttentionTile(
-                arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
                 arena_.d_kv_cache,
                 OffsetIfPresent(arena_.d_kv_cache, total_k),
                 arena_.d_attention_kv_f16,
@@ -1064,7 +1088,7 @@ void QwenGpuExecutor::PrefillAttentionPost(const PrefillChunkCtx& ctx,
           },
           [&] {
             LaunchBatchedAttention(
-                arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
                 arena_.d_kv_cache,
                 OffsetIfPresent(arena_.d_kv_cache, total_k),
                 arena_.d_attention_kv_f16,

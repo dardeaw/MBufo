@@ -125,6 +125,16 @@ struct ChatRequest {
   std::string response_format_description;
 };
 
+/// Fixed-length sentence embedding from a single prefill, with no decode and
+/// no retained KV: the executor that produced it is released with the call.
+/// Served by POST /v1/embeddings; every backend refuses by default and only
+/// models that declare a GGUF pooling strategy opt in.
+struct EmbeddingResult {
+  std::vector<float> values;
+  std::size_t prompt_tokens{0};
+  double prefill_ms{0.0};
+};
+
 /// Model-agnostic text generation boundary used by the HTTP transport.
 ///
 /// Implementations retain ownership of tokenization, templates, complete
@@ -394,6 +404,18 @@ public:
   /// generating. Empty when the backend cannot tell.
   [[nodiscard]] virtual std::optional<std::size_t> count_chat_tokens(
       const ChatRequest&) const {
+    return std::nullopt;
+  }
+
+  /// Embeds one raw text into a fixed-length L2-normalized vector. The
+  /// default refuses explicitly; a model kind opts in by overriding and
+  /// running exactly one prefill (no decode, no KV retention). Returning
+  /// nullopt must always carry a human-readable reason in `error` — never a
+  /// silent fallback vector.
+  [[nodiscard]] virtual std::optional<EmbeddingResult> Embed(
+      const std::string& text, std::string* error) {
+    (void)text;
+    if (error != nullptr) *error = "embedding is not supported by this model";
     return std::nullopt;
   }
 };

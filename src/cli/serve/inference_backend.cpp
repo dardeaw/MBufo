@@ -30,6 +30,7 @@
 #include "src/core/gguf_identity.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
+#include "src/core/pooling_norm.hpp"
 #include "src/core/sampling.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/control_tokens.hpp"
@@ -1036,6 +1037,16 @@ class QwenTextRunner final : public HipTextModelRunner {
 public:
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
+  }
+  /// Shared weights for serve-side single-prefill features (embeddings).
+  /// The weights stay owned by the runner; callers only borrow them to build
+  /// a transient executor whose KV is released with the request.
+  [[nodiscard]] std::shared_ptr<const hip::QwenGpuModel> QwenModel()
+      const noexcept {
+    return model_;
+  }
+  [[nodiscard]] hip::QwenExecutionPolicy ExecutionPolicy() const noexcept {
+    return execution_policy_;
   }
   QwenTextRunner(
       std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t max_context,
@@ -4884,6 +4895,124 @@ std::optional<std::size_t> InferenceBackend::count_chat_tokens(
   return state->scheduler->runner().CountPromptTokens(effective_request);
 #else
   (void)request;
+  return std::nullopt;
+#endif
+}
+
+// Leg-1 single-prefill embedding: tokenize, run one prefill with hidden
+// capture and no lm_head, pool to one vector, L2-normalize, release. No
+// decode runs and the transient executor (with its KV) dies with the call.
+std::optional<EmbeddingResult> InferenceBackend::Embed(
+    const std::string& text, std::string* error) {
+#if defined(ENGINE_ENABLE_HIP)
+  auto refuse = [&](const std::string& message) {
+    if (error != nullptr) *error = message;
+    return std::optional<EmbeddingResult>{};
+  };
+  const auto current = impl_->Snapshot();
+  if (current == nullptr || current->scheduler == nullptr)
+    return refuse("no model is loaded");
+  const auto* qwen =
+      dynamic_cast<const QwenTextRunner*>(&current->scheduler->runner());
+  if (qwen == nullptr) {
+    return refuse(
+        "embeddings require a Qwen dense model; this backend serves a "
+        "different model kind");
+  }
+  const auto model = qwen->QwenModel();
+  if (model == nullptr) return refuse("Qwen model is unavailable");
+  // The artifact declares its reduction; an artifact without pooling_type
+  // (chat checkpoints) is refused explicitly instead of guessed.
+  const std::string arch = model->GetConfig().architecture;
+  const std::uint32_t pooling_type =
+      model->GetReader().GetMetadataUint32(arch + ".pooling_type").value_or(0);
+  const auto pooling =
+      core::embedding::PoolingStrategyFromGgufType(pooling_type);
+  if (!pooling.has_value()) {
+    return refuse("model '" + current->model_id +
+                  "' declares no GGUF pooling_type; embeddings refused");
+  }
+  std::vector<TextRunnerToken> prompt_tokens;
+  try {
+    prompt_tokens = current->scheduler->runner().Tokenize(text);
+  } catch (const std::exception& exception) {
+    return refuse(std::string("embedding tokenize failed: ") +
+                  exception.what());
+  }
+  if (prompt_tokens.empty())
+    return refuse("embedding input tokenizes to zero tokens");
+  // EOS pooling (GGUF pooling_type 3 = last token): the artifact was trained
+  // with an EOS terminator, so one is appended unless the text already ends
+  // with it. This mirrors the HuggingFace tokenize path exactly.
+  {
+    const auto eos =
+        static_cast<TextRunnerToken>(model->GetTokenizer().GetEosTokenId());
+    if (eos == static_cast<TextRunnerToken>(tokenization::kInvalidTokenId))
+      return refuse("embedding model has no EOS token");
+    if (prompt_tokens.back() != eos) prompt_tokens.push_back(eos);
+  }
+  // Leg-1 window: the transient executor sizes its KV arena to this bound,
+  // so longer inputs are refused explicitly instead of oversubscribing.
+  constexpr std::uint32_t kEmbeddingMaxTokens = 4096;
+  const std::uint32_t embed_context =
+      std::min(current->max_context, kEmbeddingMaxTokens);
+  if (prompt_tokens.size() > embed_context) {
+    return refuse("embedding input of " +
+                  std::to_string(prompt_tokens.size()) +
+                  " tokens exceeds the 4096-token leg-1 window");
+  }
+  std::vector<tokenization::TokenId> ids;
+  ids.reserve(prompt_tokens.size());
+  for (const TextRunnerToken token : prompt_tokens)
+    ids.push_back(static_cast<tokenization::TokenId>(token));
+  std::string exec_error;
+  auto executor = hip::QwenGpuExecutor::Create(
+      model, &exec_error, embed_context, qwen->ExecutionPolicy());
+  if (executor == nullptr)
+    return refuse("embedding executor init failed: " + exec_error);
+  const std::size_t dim = model->GetConfig().hidden_size;
+  executor->SetPromptHiddenCapture(true);
+  const auto start = std::chrono::steady_clock::now();
+  try {
+    // compute_logits=false skips the lm_head matmul; hidden states are what
+    // the pooling reads. The predicted token is intentionally unused: an
+    // embedding request never decodes.
+    (void)executor->ForwardPromptBatch(ids, 0, false);
+  } catch (const std::exception& exception) {
+    return refuse(std::string("embedding prefill failed: ") +
+                  exception.what());
+  }
+  const double prefill_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - start)
+          .count();
+  const std::span<const float> hidden = executor->GetPromptHiddenStates();
+  if (hidden.size() != ids.size() * dim || dim == 0)
+    return refuse("embedding hidden capture size mismatch");
+  EmbeddingResult result;
+  result.values.resize(dim);
+  result.prompt_tokens = ids.size();
+  result.prefill_ms = prefill_ms;
+  if (!core::embedding::ApplyPooling(hidden, ids.size(), dim, *pooling,
+                                     result.values))
+    return refuse("embedding pooling shape mismatch");
+  // The hidden capture is the last block output (pre-final-norm); the
+  // artifact pools the post-norm state, so run the model's output RMSNorm on
+  // the host. Dim-sized with exact F32 weights, bit-deterministic.
+  {
+    std::vector<float> normed(dim);
+    models::ForwardRMSNorm(result.values, model->GetWeights().output_norm,
+                           1e-6F, normed);
+    result.values.swap(normed);
+  }
+  if (!(core::embedding::L2Normalize(result.values) > 0.0))
+    return refuse("embedding has zero norm; refused");
+  // Transient executor dies here: no decode ran and no KV is retained.
+  executor.reset();
+  return result;
+#else
+  (void)text;
+  if (error != nullptr) *error = "embeddings require the HIP backend";
   return std::nullopt;
 #endif
 }
