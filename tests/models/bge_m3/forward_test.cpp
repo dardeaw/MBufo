@@ -4,6 +4,7 @@
 // id refusals, CLS-pooling identity (Sync pools row 0), unit L2 norm, and
 // input sensitivity. Numeric exactness vs HuggingFace is verified out of tree
 // (local torch cosine check); the HIP test pins device-vs-CPU agreement.
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -116,11 +117,67 @@ void TestPoolingAndSensitivity() {
   assert(Near(static_cast<float>(std::sqrt(norm)), 1.0F, 1e-6F));
 }
 
+void TestPaddedBatch() {
+  using gufo::models::bge_m3::BgeM3Scratch;
+  using gufo::models::bge_m3::CpuForward;
+  using gufo::models::bge_m3::CpuForwardBatch;
+  const auto weights = MakeTinyWeights();
+  const std::size_t h = 8;
+  // Batch arenas must hold B * Lmax rows (positions still cap Lmax at 8).
+  auto scratch = BgeM3Scratch::Create(weights.config, 32);
+  auto small_scratch = BgeM3Scratch::Create(weights.config, 8);
+  // Groups: padding-boundary lengths, all-short rows, all-full rows.
+  // Max pad id 15 is in-vocabulary (vocab 16) but never a real id here.
+  const std::vector<std::vector<std::uint32_t>> groups_flat = {
+      {0, 5, 9}, {0, 5, 9, 2, 4}, {0, 5, 9, 2, 4, 6, 7, 8}};
+  const std::vector<std::vector<std::vector<std::uint32_t>>> groups = {
+      groups_flat,
+      {{1}, {2, 3}, {4, 5}},
+      {{0, 1, 2, 3, 4, 5, 6, 7}, {7, 6, 5, 4, 3, 2, 1, 0}},
+  };
+  for (const auto& batch : groups) {
+    std::size_t L = 0;
+    for (const auto& row : batch) L = std::max(L, row.size());
+    std::vector<float> batched(batch.size() * L * h, 0.0F);
+    assert(CpuForwardBatch(weights, batch, /*pad_id=*/15, scratch, batched));
+    for (std::size_t b = 0; b < batch.size(); ++b) {
+      std::vector<float> ref(batch[b].size() * h, 0.0F);
+      assert(CpuForward(weights, batch[b], scratch, ref));
+      // Real rows are bit-identical to the single-sequence forward
+      // (mask only touches pad slots; summation order is unchanged).
+      for (std::size_t i = 0; i < batch[b].size() * h; ++i) {
+        assert(batched[(b * L) * h + i] == ref[i]);
+      }
+    }
+    // Determinism: rerun is bit-identical.
+    std::vector<float> rerun(batched.size(), 0.0F);
+    assert(CpuForwardBatch(weights, batch, /*pad_id=*/15, scratch, rerun));
+    assert(rerun == batched);
+  }
+  // Refusals: empty batch, empty row, pad id out of vocab, over capacity,
+  // wrong-size output.
+  std::vector<std::vector<std::uint32_t>> empty_batch;
+  std::vector<float> out(8, 0.0F);
+  assert(!CpuForwardBatch(weights, empty_batch, 15, scratch, out));
+  const std::vector<std::vector<std::uint32_t>> empty_row = {{0, 1}, {}};
+  assert(!CpuForwardBatch(weights, empty_row, 15, scratch, out));
+  const std::vector<std::vector<std::uint32_t>> bad_pad = {{0, 1}};
+  assert(!CpuForwardBatch(weights, bad_pad, /*pad_id=*/16, scratch, out));
+  // Over capacity: 2 rows of 8 need 16 rows but small_scratch holds 8.
+  const std::vector<std::vector<std::uint32_t>> too_big = {
+      {0, 1, 2, 3, 4, 5, 6, 7}, {0, 1, 2, 3, 4, 5, 6, 7}};
+  assert(!CpuForwardBatch(weights, too_big, 15, small_scratch, out));
+  const std::vector<std::vector<std::uint32_t>> one = {{0, 1}};
+  std::vector<float> short_out(2 * h - 1, 0.0F);
+  assert(!CpuForwardBatch(weights, one, 15, scratch, short_out));
+}
+
 }  // namespace
 
 int main() {
   TestDeterminismAndShape();
   TestPoolingAndSensitivity();
+  TestPaddedBatch();
   std::cout << "bge_m3_forward_test: all assertions passed\n";
   return 0;
 }

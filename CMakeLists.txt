@@ -127,6 +127,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/blocked_wmma.hip.cpp
     src/core/compute/attention/blocked_splitk.hip.cpp
     src/core/compute/attention/mixed_batch_attn.hip.cpp
+    src/core/compute/attention/fused_fa_gqa128.hip.cpp
     src/core/compute/attention/flash_f16_dense.hip.cpp
     src/core/compute/attention/attention_dispatcher.hpp
     src/core/compute/attention/flash_f16_dense.hpp)
@@ -135,6 +136,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/blocked_wmma.hip.cpp
     src/core/compute/attention/blocked_splitk.hip.cpp
     src/core/compute/attention/mixed_batch_attn.hip.cpp
+    src/core/compute/attention/fused_fa_gqa128.hip.cpp
     src/core/compute/attention/flash_f16_dense.hip.cpp PROPERTIES LANGUAGE HIP)
   set_target_properties(gufo_core_blocked_kv PROPERTIES
     HIP_STANDARD 17
@@ -271,6 +273,8 @@ add_subdirectory(src/models/qwen)
 add_subdirectory(src/models/qwen_image_21)
 add_subdirectory(src/models/gemma4)
 add_subdirectory(src/models/bge_m3)
+add_subdirectory(src/models/bge_reranker)
+add_subdirectory(src/models/qwen_reranker)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
@@ -516,6 +520,11 @@ if (BUILD_TESTING)
   target_link_libraries(pooling_norm_test PRIVATE gufo_core)
   add_test(NAME pooling_norm_test COMMAND pooling_norm_test)
   set_tests_properties(pooling_norm_test PROPERTIES LABELS "cpu;core;embedding")
+
+  add_executable(rerank_score_test tests/core/rerank_score_test.cpp)
+  target_link_libraries(rerank_score_test PRIVATE gufo_core)
+  add_test(NAME rerank_score_test COMMAND rerank_score_test)
+  set_tests_properties(rerank_score_test PROPERTIES LABELS "cpu;core;rerank")
 
   add_executable(layernorm_gelu_test tests/core/layernorm_gelu_test.cpp)
   target_link_libraries(layernorm_gelu_test PRIVATE gufo_core)

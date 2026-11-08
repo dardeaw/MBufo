@@ -58,16 +58,17 @@
 namespace gufo::core::compute::attention_dispatcher {
 
 // Which kernel the caller should run for this attention call.
-// kLegacy means "run your existing code path unchanged": all F16 inputs,
-// MTP verify, sparse/checkpoint callers, Fp8 blocked (scalar-only codec,
-// served by the caller's existing scalar path), and every unsupported
-// shape. Legacy is always safe; the blocked routes are only returned when
-// a kernel with the exact geometry exists.
+// kLegacy means "run your existing code path unchanged": F16 inputs outside
+// the (16, 8, d=128) fused route, MTP verify, sparse/checkpoint callers,
+// Fp8 blocked (scalar-only codec, served by the caller's existing scalar
+// path), and every unsupported shape. Legacy is always safe; the blocked
+// routes are only returned when a kernel with the exact geometry exists.
 enum class AttentionRoute : std::uint32_t {
   kLegacy = 0,
   kScalarBlocked = 1,  // blocked_kv::AttentionKv direct read
   kBlockedWmma = 2,    // blocked_wmma::AttentionBlockedWmma prefill
   kBlockedSplitK = 3,  // blocked_splitk::AttentionBlockedSplitK decode
+  kFusedFaGqa128 = 4,  // fused_fa_gqa128::LaunchFusedFaGqa128 prefill
 };
 
 // Per-side KV codec of the call being routed. Values mirror
@@ -156,6 +157,15 @@ inline AttentionRoute RouteAttention(
   }
   const bool k_f16 = in.k_codec == DispatchCodec::kF16;
   const bool v_f16 = in.v_codec == DispatchCodec::kF16;
+  // Dense-F16 fused flash prefill (core fused_fa_gqa128): the one narrow
+  // exception to the F16-stays-legacy rule -- exact GQA geometry
+  // (heads == 16, kv_heads == 8, head_dim == 128), dense-causal only.
+  // The launcher re-checks the geometry and returns false otherwise, so an
+  // unsupported call still lands on the caller's legacy chain.
+  if (k_f16 && v_f16 && in.window == 0 && in.heads == 16 &&
+      in.kv_heads == 8 && in.head_dim == 128) {
+    return AttentionRoute::kFusedFaGqa128;
+  }
   // F16 default path stays untouched (both sides F16), and mixed
   // F16/blocked batches are refused outright (caller falls back).
   if (k_f16 && v_f16)
@@ -214,6 +224,8 @@ inline const char* AttentionRouteName(AttentionRoute route) noexcept {
       return "blocked-wmma";
     case AttentionRoute::kBlockedSplitK:
       return "blocked-splitk";
+    case AttentionRoute::kFusedFaGqa128:
+      return "fused-fa-gqa128";
   }
   return "unknown";
 }

@@ -68,8 +68,17 @@ struct BgeM3Config {
 /// set when non-null) when the artifact is not `general.architecture ==
 /// "bert"`, when the pooling declaration is missing/not-CLS, or when the
 /// geometry fails IsBgeM3Config.
+/// Encoder-only extraction options. Reranker GGUFs declare no pooling
+/// metadata (relevance always reads CLS by construction), so rerank
+/// use passes {.require_cls_pooling = false}; embeddings keep the
+/// strict default.
+struct BgeM3ConfigOptions {
+  bool require_cls_pooling{true};
+};
+
 [[nodiscard]] std::optional<BgeM3Config> ExtractBgeM3Config(
-    const core::GgufReader& reader, std::string* error_msg = nullptr);
+    const core::GgufReader& reader, std::string* error_msg = nullptr,
+    BgeM3ConfigOptions options = {});
 
 /// Mirrors a BgeM3Config into the shared ModelConfig for callers that only
 /// need dimensions. Deliberately marks full_attention_interval = 0 so the

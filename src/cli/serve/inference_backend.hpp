@@ -207,6 +207,13 @@ public:
   [[nodiscard]] std::optional<EmbeddingResult> Embed(
       const std::string& text, std::string* error) override;
 
+  /// Rerank dispatch: the BERT cross-encoder when a bert artifact is
+  /// loaded, the Qwen yes/no head for Qwen dense artifacts, an explicit
+  /// refusal otherwise.
+  [[nodiscard]] std::optional<RerankResult> Rerank(
+      const std::string& query, const std::vector<std::string>& documents,
+      std::string* error) override;
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

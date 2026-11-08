@@ -11,7 +11,8 @@ constexpr std::uint32_t kClsPoolingType = 2;
 }  // namespace
 
 std::optional<BgeM3Config> ExtractBgeM3Config(const core::GgufReader& reader,
-                                              std::string* error_msg) {
+                                              std::string* error_msg,
+                                              BgeM3ConfigOptions options) {
   auto refuse = [&](const std::string& message) -> std::optional<BgeM3Config> {
     if (error_msg != nullptr) *error_msg = message;
     return std::nullopt;
@@ -50,16 +51,18 @@ std::optional<BgeM3Config> ExtractBgeM3Config(const core::GgufReader& reader,
   // The shared core mapping (PoolingStrategyFromGgufType) is the single
   // source of truth; anything but CLS refuses here because this model
   // directory only implements the CLS semantic.
-  const auto pooling =
-      reader.GetMetadataUint32(std::string(kPrefix) + "pooling_type");
-  if (!pooling.has_value()) {
-    return refuse("bert.pooling_type is missing; refusing to guess pooling");
+  if (options.require_cls_pooling) {
+    const auto pooling =
+        reader.GetMetadataUint32(std::string(kPrefix) + "pooling_type");
+    if (!pooling.has_value()) {
+      return refuse("bert.pooling_type is missing; refusing to guess pooling");
+    }
+    if (core::embedding::PoolingStrategyFromGgufType(*pooling) !=
+        core::embedding::PoolingStrategy::kCls) {
+      return refuse("bge-m3 supports only CLS pooling (bert.pooling_type 2)");
+    }
+    config.pooling_type = *pooling;
   }
-  if (core::embedding::PoolingStrategyFromGgufType(*pooling) !=
-      core::embedding::PoolingStrategy::kCls) {
-    return refuse("bge-m3 supports only CLS pooling (bert.pooling_type 2)");
-  }
-  config.pooling_type = *pooling;
   if (auto v = reader.GetMetadataUint32("tokenizer.ggml.bos_token_id")) {
     config.cls_token_id = *v;
   }

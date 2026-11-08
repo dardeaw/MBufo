@@ -16,13 +16,15 @@ EngineModel::~EngineModel() = default;
 EngineModel::EngineModel() = default;
 #endif
 
-std::unique_ptr<EngineModel> EngineModel::Create(const std::string& model_path,
-                                                 std::string* error_msg) {
+std::unique_ptr<EngineModel> EngineModel::Create(
+    const std::string& model_path, std::string* error_msg,
+    BgeM3ConfigOptions options) {
   auto reader = core::GgufReader::OpenFile(model_path, error_msg);
   if (reader == nullptr) {
     return nullptr;
   }
-  auto weights = BgeM3Weights::LoadFromGguf(*reader, error_msg);
+  auto weights =
+      BgeM3Weights::LoadFromGguf(*reader, error_msg, options);
   if (!weights.has_value()) {
     return nullptr;
   }
