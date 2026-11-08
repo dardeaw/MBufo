@@ -352,6 +352,29 @@ void F32ToF16(const float* in, __half* out, std::size_t count,
                      dim3(bs), 0, stream, in, out, count);
 }
 
+__global__ void Bf16ToF16Kernel(const std::uint16_t* __restrict__ in,
+                                __half* __restrict__ out, std::size_t count) {
+  const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
+                        threadIdx.x;
+  if (i >= count)
+    return;
+  // BF16 -> FP32 is an exact left shift; narrowing to F16 rounds once.
+  const std::uint32_t f32 = static_cast<std::uint32_t>(in[i]) << 16;
+  float f;
+  __builtin_memcpy(&f, &f32, sizeof(float));
+  out[i] = __float2half(f);
+}
+
+void ConvertBf16ToF16(const std::uint16_t* in, __half* out,
+                      std::size_t count, hipStream_t stream) {
+  if (count == 0 || in == nullptr || out == nullptr)
+    return;
+  const std::uint32_t bs = 256;
+  hipLaunchKernelGGL(Bf16ToF16Kernel,
+                     dim3(static_cast<std::uint32_t>((count + bs - 1) / bs)),
+                     dim3(bs), 0, stream, in, out, count);
+}
+
 void StoreKvF16(const float* src, __half* cache, std::uint32_t n_tokens,
                 std::uint32_t dim, std::uint32_t start_pos,
                 hipStream_t stream) {

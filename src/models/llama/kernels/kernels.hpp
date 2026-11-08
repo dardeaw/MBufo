@@ -51,6 +51,12 @@ void SiluMul(const float* gate, const float* up, float* out,
 void F32ToF16(const float* in, __half* out, std::size_t count,
               hipStream_t stream);
 
+/// BF16 -> F16 elementwise (one-time weight upload narrowing for
+/// BF16-labeled GGUFs; the dense runtime is F16-native). In-place
+/// safe: each lane converts its own element.
+void ConvertBf16ToF16(const std::uint16_t* in, __half* out,
+                      std::size_t count, hipStream_t stream);
+
 /// F32 rows -> F16 KV planes at [pos, pos+n).
 void StoreKvF16(const float* src, __half* cache, std::uint32_t n_tokens,
                 std::uint32_t dim, std::uint32_t start_pos,

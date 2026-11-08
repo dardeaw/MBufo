@@ -45,6 +45,20 @@ bool MirrorTensor(TensorRef& t, std::vector<void*>& owned,
   }
   t.device = dev;
   owned.push_back(dev);
+  if (t.type == core::GgmlType::kBF16) {
+    // The dense runtime is F16-native (Embed, UnquantizedF16Gemm,
+    // GemvBatched): narrow BF16 weights to F16 once at upload.
+    // Same footprint (2 bytes/elem); converted in place on the
+    // default stream, which also orders all later runtime use.
+    kernels::ConvertBf16ToF16(static_cast<const std::uint16_t*>(dev),
+                             static_cast<__half*>(dev),
+                             t.size_bytes / 2, nullptr);
+    if (!Check(hipStreamSynchronize(nullptr), error_msg,
+             "bf16 upload convert")) {
+      return false;
+    }
+    t.type = core::GgmlType::kF16;
+  }
   return true;
 }
 
