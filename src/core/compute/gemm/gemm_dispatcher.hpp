@@ -9,6 +9,8 @@
 //   * prefill Q8 Wave64   -> kW8A8Varlen  (host-side 16-split, §3.2)
 //   * prefill F16/BF16    -> kHipBlasLt   (plan-cache runner, staged)
 //   * MoE                 -> kLegacy      (existing fused MoE, untouched)
+//   * decode MoE K-quant -> kDecodeKQuant (lightweight fused slot kernel,
+//     moe_decode_kq.hip; n <= 8, SwiGLU, Q4_K/Q5_K gate-up, Q5_K/Q8_0 down)
 //
 // quant_code uses the GUFO_GEMM_* codes from gemm.hpp; this header is
 // included after those defines (see gemm.hpp).
@@ -116,6 +118,52 @@ enum class NarrowDecodeRoute { kLegacy, kNarrowQ80, kNarrowQ80Prequant };
     return NarrowDecodeRoute::kLegacy;
   }
   return NarrowDecodeRoute::kNarrowQ80Prequant;
+}
+
+
+// Lightweight decode MoE route (moe_decode_kq): the fused per-slot K-quant
+// x SwiGLU kernel owns 1..8-token decode batches with top-k sparsity, Q4_K
+// or Q5_K gate/up weights, and Q5_K or load-converted Q8_0 down weights.
+// K-quant blocks are 256 wide (gate/up K = hidden) and the down rows are
+// 256 (Q5_K) or 32 (Q8_0) wide, so hidden and expert_ff must be 256-wide;
+// (hidden + expert_ff) floats of LDS bound the geometry (64 KB budget, one
+// block per slot). The fixed 64-slot grid with a slot>=live mask is
+// capture-compatible (no host sync, no data-dependent launch), so the same
+// route serves captured and eager launches; the launcher additionally uses
+// an exact live-slot grid when eager (mask never fires there). Anything
+// outside returns kLegacy and the caller keeps the routed WMMA path
+// bit-identical.
+enum class DecodeMoeRoute { kLegacy, kDecodeKQuant };
+
+constexpr std::size_t kDecodeMoeMaxTokens = 8;
+constexpr std::size_t kDecodeMoeMaxTopK = 8;
+constexpr std::size_t kDecodeMoeMaxSlots = 64;
+
+[[nodiscard]] inline DecodeMoeRoute DecideDecodeMoeRoute(
+    bool gate_kquant, bool down_supported, std::size_t n_tokens,
+    std::size_t top_k, std::size_t hidden, std::size_t expert_ff) {
+  if (!gate_kquant || !down_supported) {
+    return DecodeMoeRoute::kLegacy;
+  }
+  if (n_tokens < 1 || n_tokens > kDecodeMoeMaxTokens) {
+    return DecodeMoeRoute::kLegacy;
+  }
+  if (top_k == 0 || top_k > kDecodeMoeMaxTopK) {
+    return DecodeMoeRoute::kLegacy;
+  }
+  if (n_tokens * top_k > kDecodeMoeMaxSlots) {
+    return DecodeMoeRoute::kLegacy;
+  }
+  if (hidden == 0 || hidden % 256 != 0) {
+    return DecodeMoeRoute::kLegacy;
+  }
+  if (expert_ff == 0 || expert_ff % 256 != 0) {
+    return DecodeMoeRoute::kLegacy;
+  }
+  if (hidden + expert_ff > 16384) {
+    return DecodeMoeRoute::kLegacy;
+  }
+  return DecodeMoeRoute::kDecodeKQuant;
 }
 
 }  // namespace gufo::core::compute::gemm

@@ -168,6 +168,8 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/w8a8_tiled.hip
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/routed_moe.hip
+    src/core/compute/gemm/moe_decode_kq.hip
+    src/core/compute/gemm/router_gemv.hip
     src/core/compute/gemm/argmax.hip
     src/core/compute/pooling/pooling_norm.hip
     src/core/compute/gemm/gemm.hpp
@@ -184,6 +186,8 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/w8a8_tiled.hip
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/routed_moe.hip
+    src/core/compute/gemm/moe_decode_kq.hip
+    src/core/compute/gemm/router_gemv.hip
     src/core/compute/gemm/argmax.hip
     src/core/compute/pooling/pooling_norm.hip PROPERTIES LANGUAGE HIP)
   # The Wave64 WMMA instantiation needs wavefrontsize64 (the same per-file

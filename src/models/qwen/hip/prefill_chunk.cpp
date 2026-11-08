@@ -11,6 +11,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/fused_fa_gqa128.hpp"
+#include "src/models/qwen/hip/moe.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
@@ -644,6 +645,28 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                static_cast<const float*>(layer.ffn_norm.data),
                                nullptr, arena_.d_scratch_bf16, output_rows,
                                hidden_size, eps, arena_.stream);
+    } else if (layer.is_moe) {
+      // Routed MoE (qwen35moe): the post-attention residual and norm run
+      // unfolded, then the shared routed core (router, experts, shared
+      // expert, epilogue) writes arena_.d_ffn_out.
+      LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_attn_out,
+                               arena_.d_hidden, batch_size, hidden_size,
+                               arena_.stream);
+      LaunchBatchedRMSNorm(arena_.d_hidden,
+                           static_cast<const float*>(layer.ffn_norm.data),
+                           arena_.d_normed, arena_.d_scratch_bf16, batch_size,
+                           hidden_size, eps, arena_.stream);
+      std::string moe_error;
+      if (!MoeForwardHip(config, layer, arena_.d_normed,
+                         arena_.d_scratch_bf16, arena_.d_ffn_out,
+                         static_cast<std::uint32_t>(batch_size),
+                         arena_.GetMoeScratchView(), arena_.stream,
+                         arena_.hipblas_handle, nullptr, 0, &moe_error)) {
+        throw std::runtime_error("Qwen MoE prefill failed: " + moe_error);
+      }
+      LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out,
+                               arena_.d_hidden, batch_size, hidden_size,
+                               arena_.stream);
     } else if (ffn_feeds_q8_only) {
       // The post-attention residual add folds into the norm: one pass reads the
       // hidden state and the attention output, writes the updated hidden state
@@ -669,7 +692,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     const void* ffn_down_q8_act = arena_.d_scratch_q8_act;
     const void* ffn_down_input = arena_.d_scratch_bf16;
 
-    {
+    if (!layer.is_moe) {
       if (!half_prefill && !ffn_feeds_q8_only) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,
@@ -751,6 +774,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       }
     }
 
+    // Dense down + residual tail: skipped on MoE layers (MoeForwardHip wrote
+    // arena_.d_ffn_out and linked the residual in the norm branch above).
+    if (!layer.is_moe) {
     if (half_prefill) {
       LaunchBatchedQuantGEMMResidualFp16(
           layer.ffn_down.type, layer.ffn_down.data, ffn_down_input,
@@ -763,6 +789,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out,
                                arena_.d_hidden, batch_size, hidden_size,
                                arena_.stream);
+    }
     }
 
 

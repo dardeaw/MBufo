@@ -24,6 +24,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
@@ -142,6 +143,10 @@ private:
   std::shared_ptr<const tokenization::QwenTokenizer> tokenizer_;
   std::vector<QwenGpuWeightRegion> weight_regions_;
   std::shared_ptr<models::qwen::vision::Encoder> vision_;
+  // Load-time converted MoE weights (Q6_K down -> Q8_0 for the routed core,
+  // which has no Q6_K instantiation). Device-owned; freed with the model.
+  std::vector<void*> moe_converted_;
+  std::size_t moe_converted_bytes_{0};
 };
 
 class QwenGpuSnapshot final {
@@ -243,6 +248,130 @@ struct QwenFfnScratch {
   std::span<float> out;
 };
 
+/// Device scratch for one qwen35moe layer invocation, carved from a single
+/// arena-owned block sized by QwenMoeScratchBytes (IsMoE arenas only).
+struct QwenMoeScratch {
+  std::span<float> router;            // [B * N]
+  std::span<std::int32_t> ids;        // [S]
+  std::span<float> weights;           // [S]
+  std::span<std::uint32_t> counts;    // [N]
+  std::span<std::int32_t> pad_bounds;  // [N + 1]
+  std::span<std::int32_t> cursors;     // [N]
+  std::span<std::int32_t> rows_token;  // [C]
+  std::span<std::int32_t> rows_slot;   // [C]
+  std::span<std::int32_t> tiles;       // [Tcap]
+  std::span<std::uint32_t> n_tiles;    // [1]
+  std::span<__half> x_half;           // [B * H]
+  std::span<float> gate_e;            // [S * E]
+  std::span<__half> up_half;          // [S * E]
+  std::span<float> down_e;            // [S * H]
+  std::span<float> shexp_gate;        // [B * Sh]
+  std::span<float> shexp_up;          // [B * Sh]
+  std::span<float> shexp_act;         // [B * Sh]
+  std::span<float> shexp_out;         // [B * H]
+  std::span<float> shexp_glogit;      // [B]
+  std::span<hip_bfloat16> x_bf16;     // [B * H]
+  // Byte view aliased over the x_bf16 storage for Q8_1 activation staging
+  // (sequential use only; sized generously since x_bf16 holds B*H bf16).
+  std::span<std::uint8_t> x_q8;
+};
+
+[[nodiscard]] inline std::size_t QwenMoeScratchAlign16(
+    std::size_t bytes) noexcept {
+  return (bytes + 15) & ~static_cast<std::size_t>(15);
+}
+
+// Total bytes of the single MoE scratch block (B = arena max batch,
+// S = B * top_k, C = S + N * 15, Tcap = C / 16 + N + 1).
+[[nodiscard]] inline std::size_t QwenMoeScratchBytes(
+    const core::ModelConfig& config, std::size_t max_batch) noexcept {
+  const std::size_t b = max_batch;
+  const std::size_t n = config.expert_count;
+  const std::size_t k = config.expert_used_count;
+  const std::size_t h = config.hidden_size;
+  const std::size_t e = config.expert_ffn_size;
+  const std::size_t s = config.shared_expert_ffn_size;
+  if (n == 0 || k == 0 || h == 0 || e == 0 || s == 0 || b == 0) {
+    return 0;
+  }
+  const std::size_t slots = b * k;
+  const std::size_t compact = slots + n * 15;
+  const std::size_t tile_cap = compact / 16 + n + 1;
+  std::size_t total = 0;
+  total += QwenMoeScratchAlign16(b * n * sizeof(float));
+  total += QwenMoeScratchAlign16(slots * sizeof(std::int32_t));
+  total += QwenMoeScratchAlign16(slots * sizeof(float));
+  total += QwenMoeScratchAlign16(n * sizeof(std::uint32_t));
+  total += QwenMoeScratchAlign16((n + 1) * sizeof(std::int32_t));
+  total += QwenMoeScratchAlign16(n * sizeof(std::int32_t));
+  total += QwenMoeScratchAlign16(compact * sizeof(std::int32_t));
+  total += QwenMoeScratchAlign16(compact * sizeof(std::int32_t));
+  total += QwenMoeScratchAlign16(tile_cap * sizeof(std::int32_t));
+  total += QwenMoeScratchAlign16(sizeof(std::uint32_t));
+  total += QwenMoeScratchAlign16(b * h * sizeof(__half));
+  total += QwenMoeScratchAlign16(slots * e * sizeof(float));
+  total += QwenMoeScratchAlign16(slots * e * sizeof(__half));
+  total += QwenMoeScratchAlign16(slots * h * sizeof(float));
+  total += QwenMoeScratchAlign16(b * s * sizeof(float));
+  total += QwenMoeScratchAlign16(b * s * sizeof(float));
+  total += QwenMoeScratchAlign16(b * s * sizeof(float));
+  total += QwenMoeScratchAlign16(b * h * sizeof(float));
+  total += QwenMoeScratchAlign16(b * sizeof(float));
+  total += QwenMoeScratchAlign16(b * h * sizeof(hip_bfloat16));
+  return total;
+}
+
+[[nodiscard]] inline QwenMoeScratch MakeQwenMoeScratchView(
+    void* base, const core::ModelConfig& config,
+    std::size_t max_batch) noexcept {
+  const std::size_t b = max_batch;
+  const std::size_t n = config.expert_count;
+  const std::size_t k = config.expert_used_count;
+  const std::size_t h = config.hidden_size;
+  const std::size_t e = config.expert_ffn_size;
+  const std::size_t s = config.shared_expert_ffn_size;
+  const std::size_t slots = b * k;
+  const std::size_t compact = slots + n * 15;
+  const std::size_t tile_cap = compact / 16 + n + 1;
+  QwenMoeScratch view{};
+  if (base == nullptr) {
+    return view;
+  }
+  auto carve = [&](std::size_t bytes) {
+    auto* ptr = static_cast<std::uint8_t*>(base);
+    base = ptr + QwenMoeScratchAlign16(bytes);
+    return ptr;
+  };
+  view.router = {reinterpret_cast<float*>(carve(b * n * sizeof(float))),
+                 b * n};
+  view.ids = {reinterpret_cast<std::int32_t*>(carve(slots * 4)), slots};
+  view.weights = {reinterpret_cast<float*>(carve(slots * 4)), slots};
+  view.counts = {reinterpret_cast<std::uint32_t*>(carve(n * 4)), n};
+  view.pad_bounds = {reinterpret_cast<std::int32_t*>(carve((n + 1) * 4)),
+                     n + 1};
+  view.cursors = {reinterpret_cast<std::int32_t*>(carve(n * 4)), n};
+  view.rows_token = {reinterpret_cast<std::int32_t*>(carve(compact * 4)),
+                     compact};
+  view.rows_slot = {reinterpret_cast<std::int32_t*>(carve(compact * 4)),
+                    compact};
+  view.tiles = {reinterpret_cast<std::int32_t*>(carve(tile_cap * 4)),
+                tile_cap};
+  view.n_tiles = {reinterpret_cast<std::uint32_t*>(carve(4)), 1};
+  view.x_half = {reinterpret_cast<__half*>(carve(b * h * 2)), b * h};
+  view.gate_e = {reinterpret_cast<float*>(carve(slots * e * 4)), slots * e};
+  view.up_half = {reinterpret_cast<__half*>(carve(slots * e * 2)), slots * e};
+  view.down_e = {reinterpret_cast<float*>(carve(slots * h * 4)), slots * h};
+  view.shexp_gate = {reinterpret_cast<float*>(carve(b * s * 4)), b * s};
+  view.shexp_up = {reinterpret_cast<float*>(carve(b * s * 4)), b * s};
+  view.shexp_act = {reinterpret_cast<float*>(carve(b * s * 4)), b * s};
+  view.shexp_out = {reinterpret_cast<float*>(carve(b * h * 4)), b * h};
+  view.shexp_glogit = {reinterpret_cast<float*>(carve(b * 4)), b};
+  view.x_bf16 = {reinterpret_cast<hip_bfloat16*>(carve(b * h * 2)), b * h};
+  view.x_q8 = {reinterpret_cast<std::uint8_t*>(view.x_bf16.data()),
+               b * h * sizeof(hip_bfloat16)};
+  return view;
+}
+
 /// Typed non-owning capability views over stable Qwen GPU arena allocations.
 /// The nested aggregates carry element counts without owning memory or changing
 /// any address used by kernels or graph capture.
@@ -257,6 +386,7 @@ static_assert(std::is_trivially_copyable_v<QwenDecodeScratch>);
 static_assert(std::is_trivially_copyable_v<QwenAttentionScratch>);
 static_assert(std::is_trivially_copyable_v<QwenSsmScratch>);
 static_assert(std::is_trivially_copyable_v<QwenFfnScratch>);
+static_assert(std::is_trivially_copyable_v<QwenMoeScratch>);
 static_assert(std::is_trivially_copyable_v<QwenGpuScratchView>);
 static_assert(std::is_same_v<decltype(QwenDecodeScratch::sampled_token),
                              std::span<std::uint32_t>>);
@@ -360,6 +490,10 @@ public:
   std::size_t preq_q81_bytes{0};
   hip_bfloat16* d_weights_bf16{nullptr};
   void* d_scratch_q8_act{nullptr};
+  // Single-block MoE scratch (IsMoE arenas only, sized by
+  // QwenMoeScratchBytes for the arena max batch).
+  void* d_moe_scratch{nullptr};
+  std::size_t moe_scratch_bytes_{0};
 
   [[nodiscard]] std::uint32_t GetMaxBatch() const noexcept {
     return max_batch_;
@@ -407,6 +541,7 @@ public:
                               std::uint32_t expected_valid_context);
   [[nodiscard]] QwenGpuScratchView GetScratchView(
       std::size_t batch_size = 1) noexcept;
+  [[nodiscard]] QwenMoeScratch GetMoeScratchView() const noexcept;
   void SetTargetLayerCapture(std::span<const std::uint32_t> target_layer_ids);
   [[nodiscard]] std::span<const std::uint32_t> GetTargetLayerCapture()
       const noexcept {

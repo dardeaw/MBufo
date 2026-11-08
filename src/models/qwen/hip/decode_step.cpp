@@ -5,7 +5,10 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/blocked_q8.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
+#include <stdexcept>
+
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/moe.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/models/qwen/modules/modules.hpp"
 
@@ -258,8 +261,16 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       }
     }
 
-    // Fused SwiGLU FFN
-    {
+    // Fused SwiGLU FFN (routed MoE on qwen35moe layers)
+    if (layer.is_moe) {
+      std::string moe_error;
+      if (!MoeForwardHip(config, layer, decode_scratch.normed.data(), nullptr,
+                         ffn_scratch.out.data(), 1, arena.GetMoeScratchView(),
+                         arena.stream, arena.hipblas_handle,
+                         arena.d_preq_q81, arena.preq_q81_bytes, &moe_error)) {
+        throw std::runtime_error("Qwen MoE decode failed: " + moe_error);
+      }
+    } else {
       // Non-fused FFN, routed through the module. Same fused SwiGLU kernel +
       // same down GEMV as the former inline calls; behavior identical. The
       // module reads the arena device spans (x = d_normed, act_scratch =

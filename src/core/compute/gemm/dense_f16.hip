@@ -877,6 +877,37 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 
 }  // namespace
 
+namespace {
+
+__global__ void ConvertF32ToF16Kernel(const float* __restrict__ in,
+                                      __half* __restrict__ out,
+                                      std::size_t n) {
+  const std::size_t idx = static_cast<std::size_t>(blockIdx.x) *
+                              static_cast<std::size_t>(blockDim.x) +
+                          threadIdx.x;
+  if (idx < n) {
+    out[idx] = __float2half(in[idx]);
+  }
+}
+
+}  // namespace
+
+bool ConvertF32ToF16(const float* in, __half* out, std::size_t n,
+                     hipStream_t stream) {
+  if (n == 0) {
+    return true;
+  }
+  if (in == nullptr || out == nullptr) {
+    return false;
+  }
+  constexpr unsigned kBlockSize = 256;
+  const unsigned grid =
+      static_cast<unsigned>((n + kBlockSize - 1) / kBlockSize);
+  hipLaunchKernelGGL(ConvertF32ToF16Kernel, dim3(grid), dim3(kBlockSize), 0,
+                     stream, in, out, n);
+  return true;
+}
+
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
                         hipStream_t stream) {

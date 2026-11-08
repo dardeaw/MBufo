@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -11,7 +12,9 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/hip/blocked_q8.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -161,6 +164,104 @@ void CopyMappedWeights(const core::GgufMappedRegion& source, void* copy) {
 
 }  // namespace
 
+namespace {
+
+// The routed MoE core instantiates Q4_K/Q5_K (plus Q8_0/Q4_0/Q5_1/FAST) but
+// no Q6_K. Four qwen35moe layers carry Q6_K expert-down weights; converting
+// them to Q8_0 at load keeps every layer on the identical routed path.
+// Host-side data prep only (dequant + requant, no compute kernel).
+[[nodiscard]] std::uint16_t F32ToF16Bits(float value) noexcept {
+  std::uint32_t bits = 0;
+  static_assert(sizeof(float) == sizeof(bits));
+  std::memcpy(&bits, &value, sizeof(bits));
+  const std::uint32_t sign = (bits >> 16U) & 0x8000U;
+  const std::int32_t exp =
+      static_cast<std::int32_t>((bits >> 23U) & 0xFFU) - 112;
+  const std::uint32_t mantissa = bits & 0x7FFFFFU;
+  if ((bits & 0x7FFFFFFFU) == 0) {
+    return static_cast<std::uint16_t>(sign);
+  }
+  if (exp >= 31) {
+    return static_cast<std::uint16_t>(sign | 0x7BFFU);
+  }
+  if (exp <= 0) {
+    return static_cast<std::uint16_t>(sign);
+  }
+  const std::uint32_t half =
+      sign | (static_cast<std::uint32_t>(exp) << 10U) | (mantissa >> 13U);
+  const std::uint32_t round_bit = (mantissa >> 12U) & 1U;
+  const std::uint32_t sticky = mantissa & 0xFFFU;
+  if (round_bit != 0 && (sticky != 0 || (half & 1U) != 0)) {
+    return static_cast<std::uint16_t>(half + 1U);
+  }
+  return static_cast<std::uint16_t>(half);
+}
+
+[[nodiscard]] bool ConvertQ6KDownToQ80(models::QwenLayerWeights& layer,
+                                       std::vector<void*>& owned,
+                                       std::size_t& owned_bytes,
+                                       std::vector<float>& host_f32,
+                                       std::string* error_msg) {
+  auto& tensor = layer.ffn_down_exps;
+  if (!layer.is_moe || tensor.empty() ||
+      tensor.type != core::GgmlType::kQ6_K) {
+    return true;
+  }
+  const std::size_t num_elements = tensor.num_elements;
+  if (num_elements == 0 || num_elements % 32 != 0) {
+    if (error_msg != nullptr) {
+      *error_msg = "Q6_K expert-down element count is not Q8_0 compatible";
+    }
+    return false;
+  }
+  host_f32.resize(num_elements);
+  gufo::quant::DequantizeQ6_K(tensor.data, host_f32.data(), num_elements);
+  const std::size_t num_blocks = num_elements / 32;
+  std::vector<std::uint8_t> q80(num_blocks * 34);
+  for (std::size_t b = 0; b < num_blocks; ++b) {
+    float amax = 0.0F;
+    for (std::size_t i = 0; i < 32; ++i) {
+      const float v = host_f32[b * 32 + i];
+      const float a = v < 0 ? -v : v;
+      if (a > amax) amax = a;
+    }
+    const float d = amax / 127.0F;
+    const float id = d != 0.0F ? 1.0F / d : 0.0F;
+    auto* block = q80.data() + b * 34;
+    std::uint16_t scale_bits = F32ToF16Bits(d);
+    std::memcpy(block, &scale_bits, sizeof(scale_bits));
+    for (std::size_t i = 0; i < 32; ++i) {
+      long q = std::lround(host_f32[b * 32 + i] * id);
+      if (q > 127) q = 127;
+      if (q < -127) q = -127;
+      block[2 + i] = static_cast<std::uint8_t>(static_cast<std::int8_t>(q));
+    }
+  }
+  void* device = nullptr;
+  if (hipMalloc(&device, q80.size()) != hipSuccess) {
+    if (error_msg != nullptr) {
+      *error_msg = "Failed to allocate converted Q8_0 expert-down weights";
+    }
+    return false;
+  }
+  if (hipMemcpy(device, q80.data(), q80.size(), hipMemcpyHostToDevice) !=
+      hipSuccess) {
+    (void)hipFree(device);
+    if (error_msg != nullptr) {
+      *error_msg = "Failed to upload converted Q8_0 expert-down weights";
+    }
+    return false;
+  }
+  tensor.data = device;
+  tensor.type = core::GgmlType::kQ8_0;
+  tensor.available_bytes = q80.size();
+  owned.push_back(device);
+  owned_bytes += q80.size();
+  return true;
+}
+
+}  // namespace
+
 QwenGpuModel::QwenGpuModel(
     std::shared_ptr<const core::GgufReader> reader,
     models::QwenModelWeights weights,
@@ -174,6 +275,9 @@ QwenGpuModel::QwenGpuModel(
       vision_(std::move(vision)) {}
 
 QwenGpuModel::~QwenGpuModel() {
+  for (void* ptr : moe_converted_) {
+    (void)hipFree(ptr);
+  }
   ReleaseWeightRegions(weight_regions_);
 }
 
@@ -185,7 +289,11 @@ std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
     }
     total += region.size;
   }
-  return total;
+  if (moe_converted_bytes_ >
+      std::numeric_limits<std::size_t>::max() - total) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return total + moe_converted_bytes_;
 }
 
 std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
@@ -233,7 +341,12 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
                remap(layer.ssm_beta) && remap(layer.ssm_a) &&
                remap(layer.ssm_dt) && remap(layer.ssm_norm) &&
                remap(layer.ffn_norm) && remap(layer.ffn_gate) &&
-               remap(layer.ffn_up) && remap(layer.ffn_down);
+               remap(layer.ffn_up) && remap(layer.ffn_down) &&
+               remap(layer.ffn_gate_exps) && remap(layer.ffn_up_exps) &&
+               remap(layer.ffn_down_exps) && remap(layer.ffn_gate_inp) &&
+               remap(layer.ffn_gate_shexp) && remap(layer.ffn_up_shexp) &&
+               remap(layer.ffn_down_shexp) &&
+               remap(layer.ffn_gate_inp_shexp);
   }
   if (!remapped) {
     ReleaseWeightRegions(weight_regions);
@@ -243,11 +356,28 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     return nullptr;
   }
 
+  std::vector<void*> moe_converted;
+  std::size_t moe_converted_bytes = 0;
+  std::vector<float> moe_host_f32;
+  for (auto& layer : weights_opt->layers) {
+    if (!ConvertQ6KDownToQ80(layer, moe_converted, moe_converted_bytes,
+                              moe_host_f32, error_msg)) {
+      for (void* ptr : moe_converted) {
+        (void)hipFree(ptr);
+      }
+      ReleaseWeightRegions(weight_regions);
+      return nullptr;
+    }
+  }
+
   std::shared_ptr<const tokenization::QwenTokenizer> shared_tokenizer(
       std::move(tokenizer));
-  return std::make_shared<const QwenGpuModel>(
+  auto model = std::make_shared<QwenGpuModel>(
       std::move(reader), std::move(*weights_opt), std::move(shared_tokenizer),
       std::move(weight_regions), std::move(vision));
+  model->moe_converted_ = std::move(moe_converted);
+  model->moe_converted_bytes_ = moe_converted_bytes;
+  return model;
 }
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(

@@ -216,6 +216,10 @@ void QuantizeQ8Tiled(const float* x, void* out, std::size_t batch,
 bool W8A8Gemm(const void* w, const void* x_tiled, float* out,
               std::size_t batch, std::size_t m, std::size_t k,
               hipStream_t stream);
+/// Bulk F32 -> F16 narrowing (round-to-nearest-even) for routed-expert and
+/// shared-expert F16 GEMM inputs. Model-agnostic; returns false on nulls.
+bool ConvertF32ToF16(const float* in, __half* out, std::size_t n,
+                     hipStream_t stream);
 /// F16 activation rows, F16/unquantized weights, F32 accumulation.
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
@@ -244,6 +248,46 @@ void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
 void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
                   std::uint32_t n_tokens, std::uint32_t n_experts,
                   std::uint32_t k, hipStream_t stream);
+// Lightweight decode MoE (qwen35moe, moe_decode_kq.hip): fused per-slot
+// K-quant x SwiGLU for 1..8 tokens, top-k sparse. gate/up are Q4_K or Q5_K
+// (hidden K, 256-wide blocks); down is Q5_K (256-wide) or load-converted
+// Q8_0 (32-wide). x is F32 [n_tokens x hidden]; ids/weights come from
+// RouterTopK; down_e receives F32 [slots x hidden] for the shared
+// fn_compat::MoeEpilogue. Fixed 64-slot grid with a slot>=live mask
+// (capture-compatible); masked slots leave down_e untouched. hidden and
+// expert_ff must be nonzero multiples of 256 with hidden + expert_ff <=
+// 16384 (LDS budget). Returns false for out-of-contract shapes or types;
+// the caller keeps the routed WMMA legacy path.
+bool LaunchDecodeMoeKQuant(const void* gate_w, WeightType gate_type,
+                           const void* up_w, const void* down_w,
+                           WeightType down_type, const float* x,
+                           const std::int32_t* ids, float* down_e,
+                           std::uint32_t n_tokens, std::uint32_t top_k,
+                           std::size_t hidden, std::size_t expert_ff,
+                           hipStream_t stream);
+// Fused shared-gate + combine epilogue for the 35B decode MoE path
+// (moe_decode_kq.hip; the shared fn_compat::MoeEpilogue is untouched).
+// Replaces the per-layer hipblas 1xH glogit SGEMM plus the shared epilogue:
+// glogit[t] = shexp_vec . x[t] (F32 sequential dot), then out =
+// sum_s w_s * down_e + sigmoid(glogit) * shared, mirroring the shared
+// epilogue's k<=16 branch exactly. n_tokens 1..8, top_k 1..16, hidden
+// nonzero multiple of 256. Returns false for out-of-contract shapes; the
+// caller keeps the SGEMM + shared-epilogue legacy pair.
+bool LaunchDecodeMoeEpilogue(const float* expert_out, const float* weights,
+                             const float* shared_out,
+                             const float* shexp_vec, const float* x,
+                             float* out, std::uint32_t n_tokens,
+                             std::uint32_t top_k, std::size_t hidden,
+                             hipStream_t stream);
+// Order-preserving skinny router GEMV (q36, router_gemv.hip): F32
+// [n_tokens x hidden] x [hidden x n_experts] for the 256-expert /
+// 2048-hidden router shape, replaying the hipblas SGEMM StaggerU order
+// (32-row M-tiles start K at tile*64, single FMA chain per output) so
+// logits are bitwise identical to the SGEMM path. n_tokens 1..8 only;
+// returns false for any other shape and the caller keeps hipblas.
+bool LaunchRouterStaggerGemv(const float* x, const float* w, float* out,
+                             std::uint32_t n_tokens, std::uint32_t n_experts,
+                             std::size_t hidden, hipStream_t stream);
 /// Full-vocabulary greedy argmax; scratch holds n_tokens * kArgmaxParts.
 void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
             std::uint32_t n_tokens, std::uint32_t vocab, hipStream_t stream);
