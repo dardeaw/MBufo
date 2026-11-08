@@ -149,26 +149,20 @@ bool LaunchRouterStaggerGemv(const float* x, const float* w, float* out,
   if (hidden % kRouterUnroll != 0) {
     return false;
   }
-  // Capture/eager grid split (same idiom as LaunchDecodeMoeKQuant):
-  // captured graphs keep the fixed 8-token x 8-tile grid with the
-  // t>=n_tokens mask; eager launches use the exact token grid.
-  // hipStreamIsCapturing is a host-side query, legal during capture.
-  hipStreamCaptureStatus capture_status = hipStreamCaptureStatusNone;
-  if (hipStreamIsCapturing(stream, &capture_status) != hipSuccess) {
-    return false;
-  }
-  const std::uint32_t grid_t =
-      capture_status == hipStreamCaptureStatusNone ? n_tokens : 8;
+  // Exact token grid in every mode: the t>=n_tokens mask already bakes
+  // n_tokens into the captured launch, so cross-token-count replay was never
+  // supported; a fixed 8-wide grid would only schedule 8-n_tokens dead
+  // blocks per tile (~0.1 us each on gfx1151).
   if (hidden % kRouterChunk == 0) {
     const std::size_t lds =
         (kRouterHidden + kRouterTileExperts * kRouterSplit) * sizeof(float);
-    hipLaunchKernelGGL((RouterSplitKGemvKernel), dim3(grid_t, kRouterTiles),
+    hipLaunchKernelGGL((RouterSplitKGemvKernel), dim3(n_tokens, kRouterTiles),
                        dim3(kRouterTileExperts * kRouterSplit), lds, stream, x,
                        w, out, n_tokens, n_experts);
     return true;
   }
   const std::size_t lds = hidden * sizeof(float);
-  hipLaunchKernelGGL((RouterStaggerGemvKernel), dim3(grid_t, kRouterTiles),
+  hipLaunchKernelGGL((RouterStaggerGemvKernel), dim3(n_tokens, kRouterTiles),
                      dim3(kRouterTileExperts), lds, stream, x, w, out,
                      n_tokens, n_experts, hidden);
   return true;

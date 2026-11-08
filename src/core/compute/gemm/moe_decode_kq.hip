@@ -283,41 +283,32 @@ bool LaunchDecodeMoeKQuant(const void* gate_w, WeightType gate_type,
   if (!gate_ok || !down_ok) {
     return false;
   }
-  // Capture/eager grid split (the dispatcher stays data-only: it cannot see
-  // the stream). Captured graphs keep the fixed 64-slot grid with the
-  // slot>=live mask; eager launches use the exact live-slot grid so no dead
-  // blocks are scheduled. hipStreamIsCapturing is a host-side query and is
-  // legal to call while a capture is in flight.
-  hipStreamCaptureStatus capture_status = hipStreamCaptureStatusNone;
-  if (hipStreamIsCapturing(stream, &capture_status) != hipSuccess) {
-    return false;
-  }
-  const std::uint32_t grid =
-      capture_status == hipStreamCaptureStatusNone
-          ? static_cast<std::uint32_t>(slots)
-          : kSlotsCap;
+  // Exact live-slot grid in every mode: the slot>=live mask already bakes
+  // the live count into the captured launch, so cross-batch replay was never
+  // supported; a fixed 64-slot grid would only schedule 64-live dead blocks
+  // (~0.1 us each on gfx1151).
   const std::size_t lds = (hidden + expert_ff) * sizeof(float);
   const bool is_q4k = gate_type == WeightType::kQ4_K;
   const bool down_q80 = down_type == WeightType::kQ8_0;
   if (is_q4k && !down_q80) {
     hipLaunchKernelGGL(
         (DecodeMoeKQuantKernel<WeightType::kQ4_K, WeightType::kQ5_K>),
-        dim3(grid), dim3(kThreads), lds, stream, gate_w, up_w, down_w, x,
+        dim3(static_cast<std::uint32_t>(slots)), dim3(kThreads), lds, stream, gate_w, up_w, down_w, x,
         ids, down_e, n_tokens, top_k, hidden, expert_ff);
   } else if (is_q4k && down_q80) {
     hipLaunchKernelGGL(
         (DecodeMoeKQuantKernel<WeightType::kQ4_K, WeightType::kQ8_0>),
-        dim3(grid), dim3(kThreads), lds, stream, gate_w, up_w, down_w, x,
+        dim3(static_cast<std::uint32_t>(slots)), dim3(kThreads), lds, stream, gate_w, up_w, down_w, x,
         ids, down_e, n_tokens, top_k, hidden, expert_ff);
   } else if (!is_q4k && !down_q80) {
     hipLaunchKernelGGL(
         (DecodeMoeKQuantKernel<WeightType::kQ5_K, WeightType::kQ5_K>),
-        dim3(grid), dim3(kThreads), lds, stream, gate_w, up_w, down_w, x,
+        dim3(static_cast<std::uint32_t>(slots)), dim3(kThreads), lds, stream, gate_w, up_w, down_w, x,
         ids, down_e, n_tokens, top_k, hidden, expert_ff);
   } else {
     hipLaunchKernelGGL(
         (DecodeMoeKQuantKernel<WeightType::kQ5_K, WeightType::kQ8_0>),
-        dim3(grid), dim3(kThreads), lds, stream, gate_w, up_w, down_w, x,
+        dim3(static_cast<std::uint32_t>(slots)), dim3(kThreads), lds, stream, gate_w, up_w, down_w, x,
         ids, down_e, n_tokens, top_k, hidden, expert_ff);
   }
   return true;
