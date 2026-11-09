@@ -84,6 +84,12 @@ bool IsQwen38Artifact(const core::GgufReader& reader) {
   if (name.has_value() && name->find("Qwen3.8") != std::string_view::npos) {
     return true;
   }
+  // Qwen3.5-27B shares the 64x5120x248320 geometry below but is a different
+  // model family (arch qwen35, unpinned chat template); never treat Qwen3.5
+  // artifacts as Qwen3.8 ones.
+  if (name.has_value() && name->find("Qwen3.5") != std::string_view::npos) {
+    return false;
+  }
   const auto config = reader.ExtractModelConfig();
   return config.has_value() && config->num_layers == 64 &&
          config->hidden_size == 5120 && config->vocab_size == 248320;
