@@ -27,7 +27,9 @@ unified memory. Model focus: **Qwen3.8 Flash-Next** (primary) and Qwen3.8 27B,
 with the **Gemma 4 26B-A4B** family as a supported complement on its own
 dedicated engine.
 
-**Contents:** [Quickstart](#quickstart) ·
+**Contents:** [Supported models](#supported-models-v0280) ·
+[vs llama.cpp](#vs-llamacpp-v0280-gfx1151) ·
+[Quickstart](#quickstart) ·
 [Mixed-batch scheduling](#mixed-batch-scheduling-high-concurrency) ·
 [Low-bit KV cache](#low-bit-kv-cache) ·
 [Kernel-level speedups](#kernel-level-speedups) ·
@@ -36,6 +38,29 @@ dedicated engine.
 [Upstream tracking](#upstream-tracking) ·
 [Build](#build-from-source) · [Docs](#documentation-index) ·
 [Limits](#compatibility-and-limits)
+
+## Supported models (v0.28.0)
+
+One port serves all of these through the [multi-model router](#multi-model-router).
+`Serve` = HTTP backend present; `Ladder` = registry/pilot or scoring test present;
+`MTP/draft` = speculative draft backend present.
+
+| Model | Params | Serve | Ladder | MTP/draft | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Qwen3.8 Flash-Next (primary) | 30B-A3B MoE | yes | pilot | MTP | ROCmFP4-FAST preset, blocked-Q8 KV |
+| Qwen3.8 27B | 27B | yes (`QWEN_KV_QUANT`, `--kv-quant` override) | pilot | DFlash2 (incl. q8) | dense + MoE paths |
+| Gemma 4 | 26B-A4B | yes (HTTP backend, native tools) | ladder 15/15 @24k | MTP sidecar (q8 via F16 mirror) | full-512 layers stay F16 |
+| Qwen3.6-35B-A3B | 35B-A3B MoE | engine/bench only | — | none | Q6_K→Q8_0 load, split-K decode MoE; keep ≤60K tokens above 64K ctx (MODE2 reset risk) |
+| GPT-OSS 20B / 120B | 20B / 117B MoE (MXFP4) | yes (text backend) | pilot | none | zero-copy streaming upload + chunked H2D mirrors for 120B |
+| Muse Glimmer 30B | 30B | yes (ATEM tools, kv-quant) | prompt path | DFlash end-to-end (~89%) | DFlash 89% rate is measured, E4 falsified as non-bug |
+| Llama-3.1-8B | 8B dense GQA | yes (text backend) | pilot adapter | none | — |
+| Qwen3-Embedding-0.6B | 0.6B | yes (`/v1/embeddings`) | n/a (prefill-only) | none | pooled single-prefill Embed |
+| bge-m3 | 0.6B XLM-R | yes (`/v1/embeddings`) | encoder tests | none | CLS pooling, Q4_K_M loader, hipBLASLt autotune |
+| bge-reranker-v2-m3 | cross-encoder | yes (`/v1/reranking`, BERT dispatch) | ScoreBatch tests | none | padded multi-sequence batching |
+| Qwen3-Reranker | yes/no head | yes (`/v1/reranking`, Qwen dispatch) | scoring tests | none | shared rerank scoring heads |
+
+DSpark remains legacy. Model weights are not bundled; each guide under
+[docs/models](docs/models/README.md) lists the required files.
 
 ## Benchmarks at a glance
 
@@ -61,6 +86,23 @@ concurrency its draft head switches off and per-session TPS falls to ~22. Under 
 best fairness too (SRTF prefill + starvation decode-priority cut the long-prefill
 starvation of short requests ~2.3x). Full method and the other axes (prefill, fairness,
 ITL): `高併發測速方法.md`.
+
+## vs llama.cpp (v0.28.0, gfx1151)
+
+Same weights, release build, greedy; prefill = cold-KV single-stream tok/s,
+decode = speculative-on tok/s unless noted. Positive = MBufo faster.
+
+| Workload | Prefill delta | Decode delta | Conditions / notes |
+| --- | --- | --- | --- |
+| Flash-Next | **+52%** | on par or better | cold KV, greedy, MTP on |
+| Qwen3.6-35B-A3B | **+52.5%** | parity-or-better | split-K router GEMV decode; greedy |
+| bge-m3 (long docs) | **+35~50%** | n/a (prefill-only) | long-doc shapes, hipBLASLt autotune, cached executor |
+| Qwen3-Embedding-0.6B (long docs) | **+41~50%** | n/a (prefill-only) | long-doc shapes, single-prefill Embed |
+| Reranker (batched scoring) | n/a | **+15% over target** | padded multi-sequence ScoreBatch |
+| GPT-OSS 120B | **+62%** | **-17%** | structural gap, stated as-is: decode stays memory-bound on this path |
+
+No model-serving perf tests were run for this release bump; figures above are
+the measured v0.28.0 development numbers restated, not re-benchmarked here.
 
 ## Quickstart
 
@@ -169,6 +211,18 @@ finish, so nothing is cut off mid-generation.
 
 The router is opt-in: without `--multi-model` the server is exactly the
 single-model build, byte-for-byte.
+
+### What v0.28.0 adds
+
+| Router function | Behavior |
+| --- | --- |
+| Multi-model hosting | L0/L1 EngineRegistry factory with adapters for 27B, flash-next, gemma4, glimmer and llama; `/admin/load` + `/admin/eject` at runtime, startup model is the never-evicted default |
+| Automatic dispatch | each request routes by its `model` field; empty `model` on `openai_chat` routes to the default instead of `400 missing_model` |
+| Fallback semantics | unknown model id is rejected without affecting loaded models; load-time OOM LRU-evicts cold non-default models (`allow_evict:false` → `409 insufficient_memory`); eject frees GPU memory after in-flight requests drain |
+| Embeddings | `POST /v1/embeddings` via cached single-prefill Embed (bge-m3, Qwen3-Embedding) |
+| Reranking | `POST /v1/reranking` with BERT (bge-reranker-v2-m3) + Qwen (Qwen3-Reranker) dispatch and padded batching |
+| Tool calls | ATEM / Gemma / Qwen tool-call mapping across backends |
+| Qwen KV flag fix | explicit `--kv-quant` now overrides `QWEN_KV_QUANT` on the Qwen path |
 
 ## Mixed-batch scheduling (high concurrency)
 

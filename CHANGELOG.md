@@ -3,6 +3,20 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) only, never upstream.
 
+## v0.28.0 (2026-11-09)
+- **New usable GGUF (8 families)**:
+  - Qwen3.6-35B-A3B MoE (Q6_K→Q8_0 load, HIP routed core with CPU reference and order-preserving split-K router GEMV; engine/bench path, no dedicated serve backend, no ladder pilot or draft yet).
+  - GPT-OSS 20B/120B MoE (native MXFP4 routed GEMM with fused decode MoE/QKV/wo/router paths, zero-copy streaming upload and chunked H2D mirrors for 120B; serve text backend plus registry pilot, no speculative draft).
+  - Muse Glimmer 30B (NeoX RoPE, W8A8/Q8_0 and MQB-first attention; serve backend with ATEM tools and kv-quant plus prompt path, DFlash end-to-end speculative draft).
+  - Llama-3.1-8B dense GQA (serve text backend plus EngineRegistry pilot adapter, no draft).
+  - Qwen3-Embedding-0.6B (dense Qwen attention path; served via POST /v1/embeddings single-prefill Embed, prefill-only so ladder/draft N/A).
+  - bge-m3 encoder (XLM-R, CLS pooling, F16 hipBLASLt path with fused QKV, Q4_K_M loader and per-shape autotune; served via /v1/embeddings, prefill-only so no draft).
+  - bge-reranker-v2-m3 cross-encoder (shared rerank scoring heads, padded ScoreBatch batching; served via /v1/reranking BERT dispatch, scoring-only so no draft).
+  - Qwen3-Reranker yes/no head (served via /v1/reranking Qwen dispatch, scoring-only so no draft).
+- **Faster than llama.cpp (gfx1151, same weights, greedy)**: flash-next prefill +52%; 35B prefill +52.5% with decode at parity-or-better; bge-m3 long-doc prefill +35~50%; Qwen3-Embedding long-doc +41~50%; reranker batched scoring +15% over target; GPT-OSS 120B prefill +62% with decode -17% (structural gap: decode stays memory-bound on this path, stated as-is).
+- **ModelRouter + serve**: multi-model router over the L0/L1 EngineRegistry factory (adapters for 27B, flash-next, gemma4, glimmer, llama) with per-request `model` dispatch, empty-model → default, unknown-id rejection, free-memory gate with LRU eviction (`allow_evict:false` → 409) and drain-on-eject; new POST /v1/embeddings (cached single-prefill executor) and POST /v1/reranking (BERT+Qwen dispatch); ATEM/Gemma/Qwen tool-call mapping; Qwen `--kv-quant` explicit flag now overrides `QWEN_KV_QUANT`; serve backends for 27B, gemma4, llama, glimmer and gptoss.
+- **Known limits**: qwen35 above 64K context should stay under 60K tokens (driver MODE2 reset risk); DSpark stays legacy; gemma4 full-512 layers stay F16; Glimmer DFlash sits at ~89% (E4 falsified as non-bug).
+
 ## v0.27.0 (2026-11-02)
 - **Shared attention core (one dispatcher, three models)**: new attention dispatcher routes decode/prefill by KV layout — shared blocked-KV codecs with a WMMA prefill reader and a Split-K decode reader, plus a unified varlen mixed-batch attention interface. 27B attention layers, flash-next decode attention, and gemma4 SWA layers all resolve through it; F16 paths are untouched.
 - **Shared GEMM core (sdot4, MoE, W8A8, narrow, quantize)**: wave32 sdot4 GEMV, fused/routed MoE, host-side 16-split W8A8 varlen GEMM, narrow-Q8 prequant scratch moved to caller arenas and shared with the flash Q8_1 prequantize core, and tiled quantize — relocated verbatim from the flash-next/gemma4 launchers into `src/core/compute/gemm`.
