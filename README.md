@@ -4,7 +4,7 @@ A [gufo](https://github.com/gufo-org/gufo) fork for AMD Strix Halo, built as a
 **fair, low-cost inference engine** — fairness from scheduling that never lets
 queues cut in line, low cost from low-precision compute.
 
-> [繁體中文版本](README.zh-Hant.md)
+> [繁體中文版本](README.zh-Hant.md) · [简体中文版本](README.zh-CN.md)
 
 Upstream gufo owns single-stream peak performance. MBufo asks the serving
 question instead: what does one Strix Halo node do with sixteen requests at

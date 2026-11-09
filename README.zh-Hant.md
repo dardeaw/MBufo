@@ -3,7 +3,7 @@
 專為 AMD Strix Halo 打造的 [gufo](https://github.com/gufo-org/gufo) 分支，定位
 為**公平性＋高效低銷的推論引擎**——排隊不插隊靠公平調度，花費少靠低精度計算。
 
-> [English version](README.md)
+> [English version](README.md) · [简体中文版](README.zh-CN.md)
 
 上游 gufo 負責單路極限效能；MBufo 改問服務端的問題：一台 Strix Halo 節點同時
 面對十六路請求時能跑多滿，每一路又能吃多長的上下文？三根支柱回答它——負載下
