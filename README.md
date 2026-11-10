@@ -30,7 +30,7 @@ contributors.
 | --- | --- | --- |
 | 1 | **short-request TTFT 0.7 s** | A short request stuck behind a 250K-token prefill used to wait 3.4 s; with the fairness scheduler it waits 0.7 s (fairness-A 160 → 7.32, fairness-B 856 → 191, ITL unchanged, greedy byte-identical; v0.25.3). |
 | 2 | **KV memory cut in half** | The blocked-Q8 cache holds a 262144-token session in 3.42 GB instead of 6.44 GB (K4V4: 1.81 GB), with the quality cost measured, not assumed (v0.25.2). |
-| 3 | **11 GGUF families** | One HTTP port serves all of them — 8 newly usable in v0.28.0 on top of Flash-Next, 27B and Gemma 4 (see [§3 model table](#supported-models-v0280)). |
+| 3 | **13 GGUF families** | One HTTP port serves all of them — 8 newly usable in v0.28.0 plus 2 in v0.29.0 on top of Flash-Next, 27B and Gemma 4 (see [§3 model table](#supported-models-v0290)). |
 
 ## 1. High concurrency (architecture)
 
@@ -212,7 +212,7 @@ One port, many models. `serve llm --multi-model` turns the server into a
 registry: the startup model becomes the **default**, and every request routes
 to the model named in its `model` field. Models are added and dropped at
 runtime through an admin API — no restart, no dropped connections. (The
-[§3 model table](#supported-models-v0280) lists everything one port can serve.)
+[§3 model table](#supported-models-v0290) lists everything one port can serve.)
 
 Start with a default model and enable the router:
 
@@ -448,18 +448,20 @@ the measured v0.28.0 development numbers restated, not re-benchmarked here.
 
 ## 3. GGUF coverage (compatibility)
 
-### Supported models (v0.28.0)
+### Supported models (v0.29.0)
 
 One port serves all of these through the [multi-model router](#multi-model-router).
 `Serve` = HTTP backend present; `Ladder` = registry/pilot or scoring test present;
-`MTP/draft` = speculative draft backend present. 11 rows: 8 newly usable in
-v0.28.0 plus the three incumbents (Flash-Next, 27B, Gemma 4).
+`MTP/draft` = speculative draft backend present. 13 rows: 8 newly usable in v0.28.0 plus 2 in v0.29.0
+plus the three incumbents (Flash-Next, 27B, Gemma 4).
 
 | Model | Params | Serve | Ladder | MTP/draft | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Qwen3.8 Flash-Next (primary) | 30B-A3B MoE | yes | pilot | MTP | ROCmFP4-FAST preset, blocked-Q8 KV |
 | Qwen3.8 27B | 27B | yes (`QWEN_KV_QUANT`, `--kv-quant` override) | pilot | DFlash2 (incl. q8) | dense + MoE paths |
 | Gemma 4 | 26B-A4B | yes (HTTP backend, native tools) | ladder 15/15 @24k | MTP sidecar (q8 via F16 mirror) | full-512 layers stay F16 |
+| Gemma-4-12B | 12B dense | bench only | none | none | K-quant->Q8 preconvert at load, WMMA Q8 prefill (pp512 158->778 tok/s) |
+| Qwen3.5-35B-A3B | 35B-A3B MoE | engine/bench via qwen35moe path | none | none | template pin gate exempted; stay under 60K tokens above 64K ctx |
 | Qwen3.6-35B-A3B | 35B-A3B MoE | engine/bench only | — | none | Q6_K→Q8_0 load, split-K decode MoE; keep ≤60K tokens above 64K ctx (MODE2 reset risk) |
 | GPT-OSS 20B / 120B | 20B / 117B MoE (MXFP4) | yes (text backend) | pilot | none | zero-copy streaming upload + chunked H2D mirrors for 120B |
 | Muse Glimmer 30B | 30B | yes (ATEM tools, kv-quant) | prompt path | DFlash end-to-end (~89%) | DFlash 89% rate is measured, E4 falsified as non-bug |
@@ -563,6 +565,13 @@ images, function tools, structured output and streaming; see the
 | Reranking | `POST /v1/reranking` with BERT (bge-reranker-v2-m3) + Qwen (Qwen3-Reranker) dispatch and padded batching |
 | Tool calls | ATEM / Gemma / Qwen tool-call mapping across backends |
 | Qwen KV flag fix | explicit `--kv-quant` now overrides `QWEN_KV_QUANT` on the Qwen path |
+
+### What v0.29.0 adds
+
+| Area | Behavior |
+| --- | --- |
+| Gemma-4-12B | existing gemma4 engine path + bench pp/tg; x_slab fault fix; K-quant->Q8 preconvert -> WMMA Q8 prefill (pp512 158->778 tok/s); no serve backend yet |
+| Qwen3.5 | 35B-A3B verified on qwen35moe path; template pin gate exemption for the family |
 
 ## Benchmark (MBufo v0.25.5, gfx1151 Strix Halo)
 
@@ -686,9 +695,10 @@ container notes live in the
 - Conversation state is versioned by KV format; a snapshot written in one format
   is not reused by another.
 - Upstream release tags are immutable and are never reused as MBufo tags.
-- Known limits (v0.28.0, short): qwen35 above 64K context should stay under
+- Known limits (v0.29.0, short): qwen35 above 64K context should stay under
   60K tokens (driver MODE2 reset risk); DSpark stays legacy; gemma4 full-512
-  layers stay F16; Glimmer DFlash sits at ~89% (E4 falsified as non-bug).
+  layers stay F16; Glimmer DFlash sits at ~89% (E4 falsified as non-bug);
+  Gemma-4-12B is bench-only (no serve backend yet).
 
 ## License and credits
 

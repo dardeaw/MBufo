@@ -3,6 +3,11 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) only, never upstream.
 
+## v0.29.0 (2026-11-10)
+- **Gemma-4-12B dense bring-up (new usable GGUF)**: wired onto the existing gemma4 engine path (no dedicated serve backend yet); `bench` pp/tg dispatch; fixed an n>1092 prefill GPU fault (x_slab staged only max(qdim,hidden) while the MLP down-projection reads n*shared_ff - now max(qdim,hidden,shared_ff)); load-time K-quant->Q8 preconvert engages the WMMA Q8 prefill route (K-quant types used to fall through to hipBLAS) - pp512 158->778 tok/s, pp2113 122->462 tok/s, greedy generation byte-identical to the old path. Full-512 layers stay F16 (gemma4-wide limit).
+- **Qwen3.5 family**: 35B-A3B verified on the existing qwen35moe path; Qwen3.8 template pin gate no longer misfires on Qwen3.5 geometry (name-based exemption, smaller 0.8/2/4/9/27B siblings keep the LegacyChatMl path). Known limit stands: stay under 60K tokens above 64K context (driver MODE2 reset risk).
+- **Integration**: merge-all2 base plus q35a-onboard (35B-A3B docs, 12B engine/bench/fault-fix/Q8) and q35small-onboard (template fix); release binary builds clean.
+
 ## v0.28.0 (2026-11-09)
 - **New usable GGUF (8 families)**:
   - Qwen3.6-35B-A3B MoE (Q6_K→Q8_0 load, HIP routed core with CPU reference and order-preserving split-K router GEMV; engine/bench path, no dedicated serve backend, no ladder pilot or draft yet).
