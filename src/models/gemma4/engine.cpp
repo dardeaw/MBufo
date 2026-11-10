@@ -1126,8 +1126,12 @@ struct Session::Impl {
         static_cast<std::size_t>(w.config.shared_ff) * hidden, error);
     const std::uint32_t qdim_max =
         w.config.num_heads * w.config.head_dim_full;
+    // x_slab stages every F32Gemm activation row, whose width K can be
+    // qdim, hidden, or shared_ff (the MLP down-projection reads
+    // n*shared_ff). Sizing by max(qdim, hidden) overflows the slab once
+    // n > chunk*xwidth/shared_ff (12B: n > 1092) and faults the GPU.
     const std::uint32_t xwidth =
-        qdim_max > hidden ? qdim_max : hidden;
+        std::max({qdim_max, hidden, w.config.shared_ff});
     x_slab = buffers.Alloc<__half>(
         static_cast<std::size_t>(chunk) * xwidth, error);
     x_q8_slab = buffers.Alloc<std::uint8_t>(
