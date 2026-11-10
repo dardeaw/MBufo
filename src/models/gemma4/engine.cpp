@@ -290,6 +290,52 @@ struct DeviceBuffers {
   return static_cast<std::uint16_t>(half);
 }
 
+[[nodiscard]] float F16BitsToF32(std::uint16_t bits) noexcept {
+  const std::uint32_t sign = (static_cast<std::uint32_t>(bits) >> 15U) & 1U;
+  const std::uint32_t exp = (static_cast<std::uint32_t>(bits) >> 10U) & 0x1FU;
+  const std::uint32_t mantissa = bits & 0x3FFU;
+  if (exp == 0U) {
+    float v = static_cast<float>(mantissa) / 1024.0F * 5.96046448e-08F;
+    return sign != 0U ? -v : v;
+  }
+  std::uint32_t fbits =
+      (sign << 31U) | ((exp + 112U) << 23U) | (mantissa << 13U);
+  float value = 0.0F;
+  static_assert(sizeof(float) == sizeof(fbits));
+  std::memcpy(&value, &fbits, sizeof(value));
+  return value;
+}
+
+// Quantize 32 floats to one GGUF Q8_0 block ({fp16 d, int8 qs[32]}), the
+// same contract as the device DequantQ40ToQ8Kernel output: value = d * qs.
+inline void QuantizeQ80Block(const float* x, std::uint8_t* out) {
+  float amax = 0.0F;
+  for (int i = 0; i < 32; ++i) {
+    float a = x[i] < 0.0F ? -x[i] : x[i];
+    if (a > amax)
+      amax = a;
+  }
+  std::uint16_t dbits = 0;
+  float inv = 0.0F;
+  if (amax > 0.0F) {
+    dbits = F32ToF16Bits(amax / 127.0F);
+    const float d = F16BitsToF32(dbits);
+    if (d > 0.0F)
+      inv = 1.0F / d;
+  }
+  std::memcpy(out, &dbits, sizeof(dbits));
+  auto* qs = reinterpret_cast<std::int8_t*>(out + 2);
+  for (int i = 0; i < 32; ++i) {
+    const float v = x[i] * inv;
+    int q = static_cast<int>(v + (v >= 0.0F ? 0.5F : -0.5F));
+    if (q > 127)
+      q = 127;
+    else if (q < -128)
+      q = -128;
+    qs[i] = static_cast<std::int8_t>(q);
+  }
+}
+
 [[nodiscard]] bool IsKQuantForF16(core::GgmlType type) noexcept {
   return type == core::GgmlType::kQ3_K || type == core::GgmlType::kQ4_K ||
          type == core::GgmlType::kQ5_K || type == core::GgmlType::kQ6_K ||
@@ -657,6 +703,129 @@ struct DeviceBuffers {
   return true;
 }
 
+/// Host-side K-quant -> Q8_0 pre-conversion of dense per-layer projections
+/// once at load. K-quant models (e.g. Q4_K_M) fail the device Q4_0 kernel's
+/// type gate, so without this mirror every prefill GEMM falls back to
+/// K-quant -> F16 dequant + hipBLAS. Mirrors PredequantKQuantDense: pinned
+/// staging, row-chunk streaming, per-tensor arenas (a single multi-GiB
+/// block exceeds the platform's contiguous SVM mapping budget). Tensors
+/// outside the host-supported set keep q8 == nullptr and stay on the
+/// fallback path.
+[[nodiscard]] bool PreconvertKQuantQ8(ModelWeights& w, DeviceBuffers& buffers,
+                                      hipStream_t stream, std::string* error) {
+  std::vector<TensorRef*> refs;
+  for (auto& l : w.layers) {
+    for (TensorRef* t :
+         {&l.wq, &l.wk, &l.wv, &l.wo, &l.ffn_gate, &l.ffn_up, &l.ffn_down}) {
+      if (t->empty() || t->q8 != nullptr || t->experts != 1 || t->rows < 256 ||
+          (t->cols % 32) != 0 || (t->cols % 256) != 0 ||
+          !IsKQuantForF16(t->type)) {
+        continue;
+      }
+      refs.push_back(t);
+    }
+  }
+  if (!w.output.empty() && w.output.q8 == nullptr && w.output.experts == 1 &&
+      w.output.rows >= 256 && (w.output.cols % 32) == 0 &&
+      (w.output.cols % 256) == 0 && IsKQuantForF16(w.output.type)) {
+    refs.push_back(&w.output);
+  }
+  if (refs.empty())
+    return true;
+  constexpr std::size_t kChunkElems = 16 << 20;
+  void* stage_f32_raw = nullptr;
+  void* stage_q8_raw = nullptr;
+  if (!Check(hipHostMalloc(&stage_f32_raw, kChunkElems * sizeof(float), 0),
+             error, "kq8 stage f32 alloc") ||
+      !Check(hipHostMalloc(&stage_q8_raw, (kChunkElems / 32) * 34, 0), error,
+             "kq8 stage q8 alloc"))
+    return false;
+  float* stage_f32 = static_cast<float*>(stage_f32_raw);
+  std::uint8_t* stage_q8 = static_cast<std::uint8_t*>(stage_q8_raw);
+  for (auto* t : refs) {
+    const std::size_t rows_total =
+        static_cast<std::size_t>(t->rows) * t->experts;
+    const std::size_t row_elems = t->cols;
+    const std::size_t row_bytes = t->RowBytes();
+    const std::size_t row_q8 = (row_elems / 32) * 34;
+    const std::size_t bytes = (rows_total * row_q8 + 255) / 256 * 256;
+    void* arena = nullptr;
+    if (!Check(hipMalloc(&arena, bytes), error, "kq8 q8 arena alloc")) {
+      (void)hipHostFree(stage_f32_raw);
+      (void)hipHostFree(stage_q8_raw);
+      return false;
+    }
+    buffers.allocations.push_back(arena);
+    const void* qdata = t->data;
+    std::size_t done_rows = 0;
+    while (done_rows < rows_total) {
+      std::size_t chunk_rows = kChunkElems / row_elems;
+      if (chunk_rows == 0)
+        chunk_rows = 1;
+      if (chunk_rows > rows_total - done_rows)
+        chunk_rows = rows_total - done_rows;
+      const std::uint8_t* csrc = static_cast<const std::uint8_t*>(qdata) +
+                                 row_bytes * done_rows;
+      bool dequant_ok = true;
+#pragma omp parallel for schedule(static) if (chunk_rows > 4)
+      for (std::size_t r = 0; r < chunk_rows; ++r) {
+        const void* rsrc = csrc + row_bytes * r;
+        float* rdst = stage_f32 + r * row_elems;
+        switch (t->type) {
+          case core::GgmlType::kQ3_K:
+            gufo::quant::DequantizeQ3_K(rsrc, rdst, row_elems);
+            break;
+          case core::GgmlType::kQ4_K:
+            gufo::quant::DequantizeQ4_K(rsrc, rdst, row_elems);
+            break;
+          case core::GgmlType::kQ5_K:
+            gufo::quant::DequantizeQ5_K(rsrc, rdst, row_elems);
+            break;
+          case core::GgmlType::kQ6_K:
+            gufo::quant::DequantizeQ6_K(rsrc, rdst, row_elems);
+            break;
+          case core::GgmlType::kQ8_K:
+            gufo::quant::DequantizeQ8_K(rsrc, rdst, row_elems);
+            break;
+          default:
+            dequant_ok = false;
+            break;
+        }
+      }
+      if (!dequant_ok) {
+        if (error != nullptr)
+          *error = "gemma4 K-quant Q8 preconvert lacks host support";
+        (void)hipHostFree(stage_f32_raw);
+        (void)hipHostFree(stage_q8_raw);
+        return false;
+      }
+      const std::size_t chunk_elems = chunk_rows * row_elems;
+#pragma omp parallel for schedule(static) if (chunk_elems > 4096)
+      for (std::size_t b = 0; b < chunk_elems / 32; ++b)
+        QuantizeQ80Block(stage_f32 + b * 32, stage_q8 + b * 34);
+      auto* chunk_d =
+          static_cast<std::uint8_t*>(arena) + done_rows * row_q8;
+      if (!Check(hipMemcpy(chunk_d, stage_q8, chunk_rows * row_q8,
+                           hipMemcpyHostToDevice),
+                 error, "kq8 q8 upload")) {
+        (void)hipHostFree(stage_f32_raw);
+        (void)hipHostFree(stage_q8_raw);
+        return false;
+      }
+      done_rows += chunk_rows;
+    }
+    t->q8 = arena;
+  }
+  (void)hipHostFree(stage_f32_raw);
+  (void)hipHostFree(stage_q8_raw);
+  if (!Check(hipStreamSynchronize(stream), error, "kq8 preconvert sync"))
+    return false;
+  std::fprintf(stderr,
+               "[gemma4] pre-converted %zu K-quant dense tensors to Q8\n",
+               refs.size());
+  return true;
+}
+
 /// GEMMA4_F16WQ: dequantize the fused gate_up and down expert slabs to raw
 /// F16 once at load (~12.7 GB VRAM for this model). The compact MoE path then
 /// runs UnquantizedF16Gemm straight off these arenas with zero per-expert
@@ -791,6 +960,15 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       return nullptr;
     }
     q8weights.allocations.clear();
+    DeviceBuffers kq8weights;
+    if (!PreconvertKQuantQ8(*model_owner->weights_, kq8weights, 0,
+                            &load_error)) {
+      if (error_msg != nullptr)
+        *error_msg = "Failed to pre-convert gemma4 K-quant Q8 weights: " +
+                     load_error;
+      return nullptr;
+    }
+    kq8weights.allocations.clear();
   }
   {
     DeviceBuffers kqweights;

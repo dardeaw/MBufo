@@ -19,7 +19,7 @@ struct TensorRef {
   const void* device{nullptr};
   /// Persistent F16 mirror (pre-dequantized at load; nullptr = dequant on the fly).
   const void* f16{nullptr};
-  /// Persistent Q8_0 mirror (losslessly converted from Q4_0 at load for W8A8/WMMA prefill).
+  /// Persistent Q8_0 mirror (converted from Q4_0/K-quants at load for W8A8/WMMA prefill).
   const void* q8{nullptr};
   /// True when `device` mirrors the host-mapped GGUF payload.
   bool host_mapped{false};
