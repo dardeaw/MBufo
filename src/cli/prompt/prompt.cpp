@@ -1100,7 +1100,10 @@ int RunPrompt(std::span<const char* const> args) {
       std::cerr << "Gemma4 session failed: " << err << '\n';
       return 1;
     }
-    const auto ids = gmodel->Tokenize(gemma_prompt);
+    tokenization::TokenizerOptions gemma_tok_opts;
+    gemma_tok_opts.add_bos = true;
+    const auto ids = gmodel->tokenizer().Encode(gemma_prompt, gemma_tok_opts);
+    if (getenv("GEMMA4_DUMP_IDS") != nullptr) { std::fprintf(stderr, "[prompt-ids]"); for (auto t : ids) std::fprintf(stderr, " %d", (int)t); std::fprintf(stderr, "\n"); }
     std::fprintf(stderr, "[gemma4] prompt tokens: %zu\n", ids.size());
     std::vector<std::int32_t> prompt(ids.begin(), ids.end());
     const std::vector<tokenization::TokenId> prompt_ids(ids.begin(),
@@ -1200,6 +1203,7 @@ int RunPrompt(std::span<const char* const> args) {
       tokenization::TokenId token = 0;
       if (pure_greedy && !trace_tokens) {
         token = static_cast<tokenization::TokenId>(gsession->SampleGreedy());
+        if (getenv("GEMMA4_DUMP_IDS") != nullptr) std::fprintf(stderr, "[ids] %d\n", (int)token);
       } else {
         const auto lg = gsession->Logits();
         if (host_logits.size() != lg.size()) host_logits.resize(lg.size());

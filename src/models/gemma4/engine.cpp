@@ -14,6 +14,7 @@
 
 #include "src/models/gemma4/kernels/kernels.hpp"
 #include "src/core/compute/attention/blocked_kv.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/blocked_wmma.hpp"
@@ -87,6 +88,19 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
                           static_cast<std::size_t>(n_tokens) * k, stream);
     }
     if (w.f16 != nullptr) {
+      if (getenv("GEMMA4_DUMP_GEMV") != nullptr && n_tokens == 1 && m == 4096 &&
+          k == 3840) {
+        hipDeviceSynchronize();
+        std::vector<float> px(4);
+        (void)hipMemcpy(px.data(), xr, sizeof(px), hipMemcpyDeviceToHost);
+        std::vector<__half> pw(4);
+        (void)hipMemcpy(pw.data(), w.f16, sizeof(pw), hipMemcpyDeviceToHost);
+        std::fprintf(stderr,
+                     "[gemv-probe] m=%u k=%u x0=%f x1=%f x2=%f x3=%f w0=%04x "
+                     "w1=%04x w2=%04x w3=%04x\n",
+                     m, k, px[0], px[1], px[2], px[3], pw[0], pw[1], pw[2],
+                     pw[3]);
+      }
       core::compute::gemm::GemvBatched(w.f16, 1,
                            static_cast<std::uint64_t>(k) * sizeof(__half), k,
                            xr, y, n_tokens, m, softcap, stream);
@@ -251,6 +265,307 @@ struct DeviceBuffers {
   }
   if (tied_output)
     w.output.device = w.token_embd.device;
+  return true;
+}
+
+[[nodiscard]] std::uint16_t F32ToF16Bits(float value) noexcept {
+  std::uint32_t bits = 0;
+  static_assert(sizeof(float) == sizeof(bits));
+  std::memcpy(&bits, &value, sizeof(bits));
+  const std::uint32_t sign = (bits >> 16U) & 0x8000U;
+  const std::int32_t exp = static_cast<std::int32_t>((bits >> 23U) & 0xFFU) - 112;
+  const std::uint32_t mantissa = bits & 0x7FFFFFU;
+  if ((bits & 0x7FFFFFFFU) == 0)
+    return static_cast<std::uint16_t>(sign);
+  if (exp >= 31)
+    return static_cast<std::uint16_t>(sign | 0x7BFFU);
+  if (exp <= 0)
+    return static_cast<std::uint16_t>(sign);
+  const std::uint32_t half =
+      sign | (static_cast<std::uint32_t>(exp) << 10U) | (mantissa >> 13U);
+  const std::uint32_t round_bit = (mantissa >> 12U) & 1U;
+  const std::uint32_t sticky = mantissa & 0xFFFU;
+  if (round_bit != 0 && (sticky != 0 || (half & 1U) != 0))
+    return static_cast<std::uint16_t>(half + 1U);
+  return static_cast<std::uint16_t>(half);
+}
+
+[[nodiscard]] bool IsKQuantForF16(core::GgmlType type) noexcept {
+  return type == core::GgmlType::kQ3_K || type == core::GgmlType::kQ4_K ||
+         type == core::GgmlType::kQ5_K || type == core::GgmlType::kQ6_K ||
+         type == core::GgmlType::kQ8_K;
+}
+
+/// Host-side K-quant -> F16 pre-dequant for dense Gemma 4 variants (12B).
+/// The GPU kernels (EmbedScale, DequantSlab, narrow GEMV) only unpack
+/// F32/F16/BF16/Q4_0/Q8_0, so K-quant dense tensors would be silently
+/// misread. Dequantizing once at load keeps every layer on the existing
+/// dense paths: F32Gemm consumes w.f16 (hipBLAS F16 / shared GemvBatched)
+/// and EmbedScale reads the F16 table. MoE artifacts (Q4_0 experts) carry
+/// no K-quant dense tensors, so this is a no-op for them. Tensors whose
+/// K-quant subtype has no host dequant fail loudly here, never silently.
+[[nodiscard]] bool PredequantKQuantDense(ModelWeights& w,
+                                        DeviceBuffers& buffers,
+                                        std::string* error) {
+  std::vector<TensorRef*> refs;
+  auto consider = [&](TensorRef& t) {
+    if (!t.empty() && t.f16 == nullptr && IsKQuantForF16(t.type))
+      refs.push_back(&t);
+  };
+  consider(w.token_embd);
+  for (auto& l : w.layers) {
+    consider(l.wq);
+    consider(l.wk);
+    consider(l.wv);
+    consider(l.wo);
+    consider(l.ffn_gate);
+    consider(l.ffn_up);
+    consider(l.ffn_down);
+  }
+  consider(w.output);
+  if (refs.empty())
+    return true;
+  // Dedupe aliased tensors (the LM head may share the embedding table):
+  // convert each backing store once, then attach every view.
+  std::vector<TensorRef*> uniq;
+  for (auto* t : refs) {
+    bool seen = false;
+    for (auto* u : uniq) {
+      if (u->data == t->data && u->type == t->type) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen)
+      uniq.push_back(t);
+  }
+  // Per-tensor arenas: a single ~24 GiB block for a 12B model exceeds
+  // the platform's contiguous SVM mapping budget, while per-tensor blocks
+  // map fine. converted in row streaming chunks (~50 MiB host staging) so
+  // neither host staging nor any single H2D copy stresses the unified
+  // memory budget.
+  // Element budget per streaming chunk (row width varies: 3840 for
+  // projections, 262144 for the embedding table).
+  constexpr std::size_t kChunkElems = 16 << 20;
+  // Pinned staging: pageable std::vector sources force the runtime through
+  // the staging-copy path, which stalls under unified-memory pressure.
+  // Sized for the widest row (hidden dim); freed before return.
+  const std::size_t stage_elems = kChunkElems;
+  void* stage_f32_raw = nullptr;
+  void* stage_f16_raw = nullptr;
+  if (!Check(hipHostMalloc(&stage_f32_raw, stage_elems * sizeof(float), 0),
+             error, "kquant stage f32 alloc") ||
+      !Check(hipHostMalloc(&stage_f16_raw, stage_elems * sizeof(__half), 0),
+             error, "kquant stage f16 alloc"))
+    return false;
+  float* stage_f32 = static_cast<float*>(stage_f32_raw);
+  std::uint16_t* stage_f16 = static_cast<std::uint16_t*>(stage_f16_raw);
+  const std::size_t stage_cap = stage_elems;
+  for (auto* t : uniq) {
+    const std::size_t elems =
+        static_cast<std::size_t>(t->rows) * t->cols * t->experts;
+    const std::size_t bytes = (elems * sizeof(__half) + 255) / 256 * 256;
+    void* arena = nullptr;
+    if (!Check(hipMalloc(&arena, bytes), error, "kquant f16 arena alloc")) {
+      (void)hipHostFree(stage_f32_raw);
+      (void)hipHostFree(stage_f16_raw);
+      return false;
+    }
+    buffers.allocations.push_back(arena);
+    auto* d = static_cast<__half*>(arena);
+    // Host mmap stays alive via Model::reader_; never read the device mirror.
+    const void* qdata = t->data;
+    // All K-quant rows pack 256 elements per superblock; rows are
+    // independent, so dequantize row-chunks in parallel (single-threaded
+    // over 12B params takes ~1h).
+    if (elems % 256 != 0) {
+      if (error != nullptr)
+        *error = "gemma4 K-quant row is not a multiple of 256 elements";
+      (void)hipHostFree(stage_f32_raw);
+      (void)hipHostFree(stage_f16_raw);
+      return false;
+    }
+    {
+      const std::size_t rows_total =
+          static_cast<std::size_t>(t->rows) * t->experts;
+      const std::uint64_t row_elems = t->cols;
+      const std::uint64_t row_bytes = t->RowBytes();
+      std::size_t done_rows = 0;
+      while (done_rows < rows_total) {
+        std::size_t chunk_rows = kChunkElems / row_elems;
+        if (chunk_rows == 0)
+          chunk_rows = 1;
+        if (chunk_rows > rows_total - done_rows)
+          chunk_rows = rows_total - done_rows;
+        const std::size_t chunk_elems = chunk_rows * row_elems;
+        if (chunk_elems > stage_cap) {
+          if (error != nullptr)
+            *error = "gemma4 K-quant row exceeds staging capacity";
+          (void)hipHostFree(stage_f32_raw);
+          (void)hipHostFree(stage_f16_raw);
+          return false;
+        }
+        float* host_f32 = stage_f32;
+        std::uint16_t* host_f16 = stage_f16;
+        const std::uint8_t* csrc =
+            static_cast<const std::uint8_t*>(qdata) +
+            static_cast<std::size_t>(row_bytes) * done_rows;
+        bool dequant_ok = true;
+#pragma omp parallel for schedule(static) if (chunk_rows > 4)
+        for (std::size_t r = 0; r < chunk_rows; ++r) {
+          const void* rsrc =
+              csrc + static_cast<std::size_t>(row_bytes) * r;
+          float* rdst = host_f32 + r * row_elems;
+          switch (t->type) {
+            case core::GgmlType::kQ3_K:
+              gufo::quant::DequantizeQ3_K(rsrc, rdst, row_elems);
+              break;
+            case core::GgmlType::kQ4_K:
+              gufo::quant::DequantizeQ4_K(rsrc, rdst, row_elems);
+              break;
+            case core::GgmlType::kQ5_K:
+              gufo::quant::DequantizeQ5_K(rsrc, rdst, row_elems);
+              break;
+            case core::GgmlType::kQ6_K:
+              gufo::quant::DequantizeQ6_K(rsrc, rdst, row_elems);
+              break;
+            case core::GgmlType::kQ8_K:
+              gufo::quant::DequantizeQ8_K(rsrc, rdst, row_elems);
+              break;
+            default:
+              dequant_ok = false;
+              break;
+          }
+        }
+        if (!dequant_ok) {
+          if (error != nullptr)
+            *error = "gemma4 K-quant pre-dequant lacks host support";
+          (void)hipHostFree(stage_f32_raw);
+          (void)hipHostFree(stage_f16_raw);
+          return false;
+        }
+#pragma omp parallel for schedule(static) if (chunk_elems > 4096)
+        for (std::size_t i = 0; i < chunk_elems; ++i)
+          host_f16[i] = F32ToF16Bits(host_f32[i]);
+        auto* chunk_d = d + done_rows * row_elems;
+        if (!Check(hipMemcpy(chunk_d, host_f16,
+                             chunk_elems * sizeof(__half),
+                             hipMemcpyHostToDevice),
+                   error, "kquant f16 upload")) {
+          (void)hipHostFree(stage_f32_raw);
+          (void)hipHostFree(stage_f16_raw);
+          return false;
+        }
+        done_rows += chunk_rows;
+      }
+    }
+    // Snapshot: attaching republishes token_embd as F16 below while t
+    // aliases the same TensorRef, so compare against the original key.
+    const void* want_data = t->data;
+    const core::GgmlType want_type = t->type;
+    for (auto* v : refs) {
+      if (v->data == want_data && v->type == want_type) {
+        v->f16 = d;
+        if (v == &w.token_embd) {
+          // EmbedScale dispatches on type only: publish the F16 table.
+          v->device = d;
+          v->type = core::GgmlType::kF16;
+        }
+      }
+    }
+  }
+  (void)hipHostFree(stage_f32_raw);
+  (void)hipHostFree(stage_f16_raw);
+  if (getenv("GEMMA4_DUMP_KQ") != nullptr) {
+    for (std::size_t ti = 0; ti < uniq.size(); ++ti) {
+      if (ti == 1) {
+        auto* td = uniq[ti];
+        std::size_t tne =
+            static_cast<std::size_t>(td->rows) * td->cols * td->experts;
+        std::vector<__half> wqback(tne);
+        const __half* wqdev = nullptr;
+        for (auto* v : refs) {
+          if (v->data == td->data && v->type == td->type && v->f16 != nullptr) {
+            wqdev = static_cast<const __half*>(v->f16);
+            break;
+          }
+        }
+        if (wqdev != nullptr &&
+            hipMemcpy(wqback.data(), wqdev, tne * sizeof(__half),
+                      hipMemcpyDeviceToHost) == hipSuccess) {
+          FILE* wf = std::fopen("/tmp/wq_f16.bin", "wb");
+          if (wf != nullptr) {
+            std::fwrite(wqback.data(), sizeof(__half), tne, wf);
+            std::fclose(wf);
+            std::fprintf(stderr, "[kq-dump] wrote %zu f16 elems\n", tne);
+          }
+        }
+      }
+      auto* t = uniq[ti];
+      const std::size_t pe = static_cast<std::size_t>(t->rows) * t->cols *
+                             t->experts;
+      if (pe == 0)
+        continue;
+      std::uint32_t nn = 0, inf = 0;
+      double mn = 1e30, mx = -1e30, sum = 0.0;
+      // Sample first/middle/last 4096 elems to bound D2H traffic.
+      for (int s = 0; s < 3; ++s) {
+        std::size_t base = 0;
+        if (s == 1)
+          base = pe / 2;
+        else if (s == 2)
+          base = pe - 4096;
+        std::size_t n = 4096;
+        if (base + n > pe)
+          n = pe - base;
+        std::vector<__half> chunk(n);
+        // locate arena: re-walk refs for first view with this backing store
+        const __half* __restrict__ dev = nullptr;
+        for (auto* v : refs) {
+          if (v->data == t->data && v->type == t->type && v->f16 != nullptr) {
+            dev = static_cast<const __half*>(v->f16);
+            break;
+          }
+        }
+        if (dev == nullptr)
+          continue;
+        if (hipMemcpy(chunk.data(), dev + base, n * sizeof(__half),
+                      hipMemcpyDeviceToHost) != hipSuccess)
+          continue;
+        for (std::size_t i = 0; i < n; ++i) {
+          std::uint16_t b = 0;
+          std::memcpy(&b, &chunk[i], 2);
+          std::uint32_t ee = (b >> 10) & 31;
+          if (ee == 31 && (b & 1023) != 0)
+            ++nn;
+          else if (ee == 31)
+            ++inf;
+          else {
+            float v = 0.0F;
+            std::uint32_t m = b & 1023u;
+            if (ee == 0)
+              v = (float)m / 1024.0F * 5.96046448e-08F;
+            else
+              v = ldexpf((float)(1024 + m) / 1024.0F, (int)ee - 25);
+            if ((b & 0x8000u) != 0u)
+              v = -v;
+            sum += (double)v;
+            if (v < mn)
+              mn = v;
+            if (v > mx)
+              mx = v;
+          }
+        }
+      }
+      std::fprintf(stderr, "[kq-scan %zu] nan=%u inf=%u min=%f max=%f sum=%f\n",
+                   ti, nn, inf, mn, mx, sum);
+    }
+  }
+  if (!Check(hipDeviceSynchronize(), error, "kquant f16 sync"))
+    return false;
+  std::fprintf(stderr,
+               "[gemma4] pre-dequantized %zu K-quant dense tensors to F16\n",
+               uniq.size());
   return true;
 }
 
@@ -476,6 +791,17 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       return nullptr;
     }
     q8weights.allocations.clear();
+  }
+  {
+    DeviceBuffers kqweights;
+    if (!PredequantKQuantDense(*model_owner->weights_, kqweights,
+                               &load_error)) {
+      if (error_msg != nullptr)
+        *error_msg = "Failed to pre-dequantize gemma4 K-quant weights: " +
+                     load_error;
+      return nullptr;
+    }
+    kqweights.allocations.clear();  // arena lives for the process
   }
   // Full-attention layers need rope_freqs (proportional rope). The GGUF may
   // omit it; synthesise the llama.cpp conversion pattern and mirror it.
@@ -722,10 +1048,16 @@ struct Session::Impl {
     expert_weights = buffers.Alloc<float>(
         static_cast<std::size_t>(chunk) * w.config.experts_used, error);
     expert_counts = buffers.Alloc<std::uint32_t>(w.config.num_experts, error);
-    expert_out = buffers.Alloc<float>(static_cast<std::size_t>(chunk) *
-                                          w.config.experts_used *
-                                          w.config.expert_ff,
-                                      error);
+    // Dense layers reuse expert_out as the up-projection output
+    // (chunk x shared_ff); MoE layers need chunk x experts_used x expert_ff.
+    const std::size_t expert_out_width =
+        static_cast<std::size_t>(w.config.experts_used) * w.config.expert_ff >
+                w.config.shared_ff
+            ? static_cast<std::size_t>(w.config.experts_used) *
+                  w.config.expert_ff
+            : w.config.shared_ff;
+    expert_out = buffers.Alloc<float>(
+        static_cast<std::size_t>(chunk) * expert_out_width, error);
     const std::uint32_t mlp_width =
         hidden > w.config.shared_ff ? hidden : w.config.shared_ff;
     mlp_out = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * mlp_width,
@@ -830,11 +1162,15 @@ struct Session::Impl {
         ::gufo::core::compute::blocked_splitk::
             AttentionBlockedSplitKScratchBytes() / sizeof(float),
         error);
+    // Dense Gemma 4 variants (12B) allocate no MoE routing scratch:
+    // hipMalloc(0) yields nullptr, so only require those when experts exist.
+    const bool need_moe = w.config.num_experts > 0;
     if (this->hidden == nullptr || normed == nullptr || qbuf == nullptr ||
         kbuf == nullptr || vbuf == nullptr || attn_out == nullptr ||
-        router_tmp == nullptr || router_logits == nullptr ||
-        expert_ids == nullptr || expert_weights == nullptr ||
-        expert_counts == nullptr || expert_out == nullptr ||
+        router_tmp == nullptr ||
+        (need_moe && (router_logits == nullptr || expert_ids == nullptr ||
+                      expert_weights == nullptr || expert_counts == nullptr ||
+                      expert_out == nullptr)) ||
         mlp_out == nullptr || moe_out == nullptr || logits == nullptr ||
         w_slab == nullptr || w_slab2 == nullptr || x_slab == nullptr ||
         splitk_partials == nullptr || preq_scratch == nullptr) {
@@ -1053,6 +1389,33 @@ constexpr std::uint32_t kBlockedWmmaMinTokens = 32;
 void Session::ForwardLayerPre(Session& s, std::uint32_t il,
                                std::uint32_t n, std::uint32_t start_pos,
                                hipStream_t stream) {
+  if (getenv("GEMMA4_DUMP_LAYERS") != nullptr) {
+    hipDeviceSynchronize();
+    char path[64];
+    std::snprintf(path, sizeof(path), "/tmp/hidden_l%u.bin", il);
+    FILE* fh = std::fopen(path, "wb");
+    if (fh != nullptr) {
+      std::fwrite(s.impl_->hidden, sizeof(float),
+                  static_cast<std::size_t>(n) *
+                      s.model_->weights_->config.hidden_size,
+                  fh);
+      std::fclose(fh);
+    }
+  }
+  if (getenv("GEMMA4_DUMP_L5") != nullptr && il == 5) {
+    hipDeviceSynchronize();
+    auto& ww = *s.model_->weights_;
+    std::vector<float> hh(static_cast<std::size_t>(1) * ww.config.hidden_size);
+    (void)hipMemcpy(hh.data(), s.impl_->hidden, hh.size() * sizeof(float), hipMemcpyDeviceToHost);
+    FILE* fh = std::fopen("/tmp/l5_in.bin", "wb");
+    if (fh != nullptr) {
+      std::fwrite(hh.data(), sizeof(float), hh.size(), fh);
+      std::fclose(fh);
+    }
+    double hs = 0.0;
+    for (float v : hh) hs += (double)v;
+    std::fprintf(stderr, "[l5-probe] hidden_in sum=%f\n", hs);
+  }
   auto& w = *s.model_->weights_;
   const auto& c = w.config;
   const std::uint32_t hidden = c.hidden_size;
@@ -1123,9 +1486,13 @@ void Session::ForwardLayerPre(Session& s, std::uint32_t il,
         for (float v : h) ss += (double)v;
         return ss;
       };
-      std::fprintf(stderr, "[gemma4] L0 n=%u norm0=%.6f qbuf0=%.6f\n", n,
-                   hsum(s.impl_->normed, hidden),
-                   hsum(s.impl_->qbuf, static_cast<std::size_t>(qdim)));
+      std::fprintf(stderr,
+                   "[gemma4] L0 n=%u norm0=%.6f qbuf0=%.6f kbuf0=%.6f "
+                   "vbuf0=%.6f\n",
+                   n, hsum(s.impl_->normed, hidden),
+                   hsum(s.impl_->qbuf, static_cast<std::size_t>(qdim)),
+                   hsum(s.impl_->kbuf, static_cast<std::size_t>(kvdim)),
+                   hsum(s.impl_->vbuf, static_cast<std::size_t>(kvdim)));
     }
 
     const std::uint32_t rot_dim = c.RotaryDim(il);
@@ -1320,6 +1687,9 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il,
         const attn_disp::AttentionRoute attn_route2 =
             attn_disp::RouteAttention(attn_in, attn_policy);
         bool ran_blocked_splitk = false;
+        if (getenv("GEMMA4_DUMP_ROUTE") != nullptr && il < 8)
+          std::fprintf(stderr, "[route] il=%u n=%u route2=%d blocked=%d\n", il, n,
+                       (int)attn_route2, (int)use_blocked);
         if (attn_route2 == attn_disp::AttentionRoute::kBlockedSplitK &&
             getenv("GEMMA4_NO_BLOCKED_SPLITK") == nullptr) {
           const std::uint32_t base =
@@ -1345,6 +1715,26 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il,
                          c.num_heads, kv_heads, head_dim,
                          s.impl_->kv_stride[kv_layer],
                          c.LayerIsSwa(il) ? c.sliding_window : 0, stream);
+      if (getenv("GEMMA4_DUMP_KVATTN") != nullptr && (il == 0 || il == 6) && n <= 4) {
+        hipDeviceSynchronize();
+        const std::size_t kw2 =
+            static_cast<std::size_t>(8) * c.KvHeads(c.KvProducingLayer(il)) * c.HeadDim(il);
+        std::vector<__half> kh2(kw2), vh2(kw2);
+        char pk[64], pv[64];
+        std::snprintf(pk, sizeof(pk), "/tmp/kvattn_%u_k.bin", il);
+        std::snprintf(pv, sizeof(pv), "/tmp/kvattn_%u_v.bin", il);
+        if (hipMemcpy(kh2.data(), s.impl_->kv_k[c.KvProducingLayer(il)],
+                      kw2 * sizeof(__half), hipMemcpyDeviceToHost) == hipSuccess) {
+          FILE* fk = std::fopen(pk, "wb");
+          if (fk != nullptr) { std::fwrite(kh2.data(), sizeof(__half), kw2, fk); std::fclose(fk); }
+        }
+        if (hipMemcpy(vh2.data(), s.impl_->kv_v[c.KvProducingLayer(il)],
+                      kw2 * sizeof(__half), hipMemcpyDeviceToHost) == hipSuccess) {
+          FILE* fv = std::fopen(pv, "wb");
+          if (fv != nullptr) { std::fwrite(vh2.data(), sizeof(__half), kw2, fv); std::fclose(fv); }
+        }
+        std::fprintf(stderr, "[kvattn-dump] il=%u n=%u\n", il, n);
+      }
     }
 }
 
@@ -2097,6 +2487,20 @@ void Session::ForwardFinish(Session& s, std::uint32_t n,
              s.impl_->w_slab, s.impl_->x_slab, stream, c.final_logit_softcapping,
              nullptr, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap, s.impl_->preq_scratch, s.impl_->preq_bytes);
 
+  if (getenv("GEMMA4_DUMP_HEAD") != nullptr && n <= 72) {
+    hipDeviceSynchronize();
+    std::vector<float> hn(static_cast<std::size_t>(hidden));
+    const float* lrh = (all_logits || getenv("GEMMA4_FORCE_ALLLOGITS") != nullptr)
+        ? s.impl_->normed : s.impl_->normed + static_cast<std::size_t>(n - logit_rows) * hidden;
+    (void)hipMemcpy(hn.data(), lrh, hn.size() * sizeof(float), hipMemcpyDeviceToHost);
+    FILE* fh2 = std::fopen("/tmp/head_in.bin", "wb");
+    if (fh2 != nullptr) { std::fwrite(hn.data(), sizeof(float), hn.size(), fh2); std::fclose(fh2); }
+    std::vector<float> lg2(static_cast<std::size_t>(logit_rows) * c.vocab_size);
+    (void)hipMemcpy(lg2.data(), s.impl_->logits, lg2.size() * sizeof(float), hipMemcpyDeviceToHost);
+    FILE* fl2 = std::fopen("/tmp/head_logits.bin", "wb");
+    if (fl2 != nullptr) { std::fwrite(lg2.data(), sizeof(float), lg2.size(), fl2); std::fclose(fl2); }
+    std::fprintf(stderr, "[head-dump] wrote in/out\n");
+  }
   s.impl_->last_fwd_n = n;
   s.impl_->last_chunk_n = logit_rows;
   s.impl_->length = start_pos + n;

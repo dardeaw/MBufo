@@ -180,9 +180,12 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
                (int)c.is_swa[4], (int)c.is_swa[5]);
   c.sliding_window = r.U32(key("attention.sliding_window"));
   c.shared_kv_layers = r.U32(key("attention.shared_kv_layers"), false, 0);
-  c.num_experts = r.U32(key("expert_count"));
-  c.experts_used = r.U32(key("expert_used_count"));
-  c.expert_ff = r.U32(key("expert_feed_forward_length"));
+  // Dense Gemma 4 variants (12B) carry no expert_* keys: the MoE branch
+  // stays off (LayerWeights::IsMoe() == false) and every layer runs the
+  // shared dense SwiGLU FFN (shared_ff) through the existing dense path.
+  c.num_experts = r.U32(key("expert_count"), false);
+  c.experts_used = r.U32(key("expert_used_count"), false);
+  c.expert_ff = r.U32(key("expert_feed_forward_length"), false);
   c.shared_ff = r.U32(key("feed_forward_length"));
   c.final_logit_softcapping =
       r.F32(key("final_logit_softcapping"), 0.0F);
@@ -194,7 +197,8 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   if (c.head_dim_full % 64 != 0 || c.head_dim_swa % 64 != 0) {
     r.Fail("gemma4 head dimensions must be multiples of 64");
   }
-  if (c.experts_used == 0 || c.experts_used > c.num_experts) {
+  if (c.num_experts > 0 &&
+      (c.experts_used == 0 || c.experts_used > c.num_experts)) {
     r.Fail("gemma4 expert selection is out of range");
   }
   if (c.num_experts > 1024) {

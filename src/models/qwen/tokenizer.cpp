@@ -711,10 +711,39 @@ std::vector<TokenId> QwenTokenizer::BpeMergeChunk(
   std::vector<TokenId> word_tokens;
   word_tokens.reserve(chunk.size());
 
-  for (const unsigned char c : chunk) {
-    const TokenId tid = byte_tokens_[c];
-    if (tid != kInvalidTokenId) {
-      word_tokens.push_back(tid);
+  if (pre_tokenizer_ == PreTokenizer::kGemma4) {
+    // SentencePiece BPE starts from Unicode characters, not bytes: try the
+    // whole code point first so U+2581 fuses with following text through
+    // merges such as "U+2581 w". Code points the vocabulary does not carry
+    // fall back to single bytes below.
+    std::size_t i = 0;
+    while (i < chunk.size()) {
+      const Utf8CodePoint cp = DecodeUtf8(chunk, i);
+      bool consumed = false;
+      if (cp.length > 1) {
+        const auto it =
+            token_to_id_.find(std::string(chunk.substr(i, cp.length)));
+        if (it != token_to_id_.end()) {
+          word_tokens.push_back(it->second);
+          i += cp.length;
+          consumed = true;
+        }
+      }
+      if (!consumed) {
+        const TokenId tid =
+            byte_tokens_[static_cast<unsigned char>(chunk[i])];
+        if (tid != kInvalidTokenId) {
+          word_tokens.push_back(tid);
+        }
+        i += 1;
+      }
+    }
+  } else {
+    for (const unsigned char c : chunk) {
+      const TokenId tid = byte_tokens_[c];
+      if (tid != kInvalidTokenId) {
+        word_tokens.push_back(tid);
+      }
     }
   }
 

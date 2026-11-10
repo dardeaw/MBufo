@@ -4839,7 +4839,12 @@ class Gemma4TextRunner final : public HipTextModelRunner {
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     std::vector<TextRunnerToken> tokens;
-    for (const std::int32_t id : model_->Tokenize(text)) {
+    for (const std::int32_t id :
+           model_->tokenizer().Encode(text, [] {
+             tokenization::TokenizerOptions o;
+             o.add_bos = true;
+             return o;
+           }())) {
       if (id < 0) {
         throw std::invalid_argument("Gemma4 tokenizer returned a token ID "
                                     "outside the engine range");

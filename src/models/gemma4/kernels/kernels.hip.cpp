@@ -1526,17 +1526,24 @@ __global__ void AttentionGqaKernel(
   const float* qbase = q + static_cast<std::size_t>(t) * heads * d +
                        static_cast<std::size_t>(kv_h) * qpg * d;
   __shared__ float qsm[MaxQ][MaxD];
-  for (std::uint32_t qq = 0; qq < qpg; ++qq) {
-    const float* qrow = qbase + static_cast<std::size_t>(qq) * d;
-    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x)
-      qsm[qq][i] = qrow[i];
-  }
-  __syncthreads();
+  // Strip-mine over query heads: the shared tile holds at most MaxQ heads,
+  // so wider GQA groups (qpg == 16 for kv_heads == 1) run in several
+  // identical passes. Single-pass shapes (qpg <= MaxQ) take exactly the
+  // previous path. All threads iterate the same chunks, so the barriers
+  // below stay uniform.
+  for (std::uint32_t q0 = 0; q0 < qpg; q0 += MaxQ) {
+    const std::uint32_t nq = qpg - q0 < MaxQ ? qpg - q0 : MaxQ;
+    for (std::uint32_t qq = 0; qq < nq; ++qq) {
+      const float* qrow = qbase + static_cast<std::size_t>(q0 + qq) * d;
+      for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x)
+        qsm[qq][i] = qrow[i];
+    }
+    __syncthreads();
   const std::uint32_t lo =
       window > 0 && pos + 1 > window ? pos + 1 - window : 0;
   __shared__ float mls[MaxQ][2];
   __shared__ float acc[MaxQ][MaxD];
-  for (std::uint32_t qq = 0; qq < qpg; ++qq) {
+  for (std::uint32_t qq = 0; qq < nq; ++qq) {
     if (threadIdx.x < 2)
       mls[qq][threadIdx.x] = threadIdx.x == 0 ? -INFINITY : 0.0F;
     for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x)
@@ -1549,23 +1556,23 @@ __global__ void AttentionGqaKernel(
     const __half* krow =
         k_cache + static_cast<std::size_t>(pp) * kv_stride + kv_h * d;
     float dot[MaxQ];
-    for (std::uint32_t qq = 0; qq < qpg; ++qq) dot[qq] = 0.0F;
+    for (std::uint32_t qq = 0; qq < nq; ++qq) dot[qq] = 0.0F;
     for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
       const float kv = __half2float(krow[i]);
-      for (std::uint32_t qq = 0; qq < qpg; ++qq)
+      for (std::uint32_t qq = 0; qq < nq; ++qq)
         dot[qq] += qsm[qq][i] * kv;
     }
     for (std::uint32_t off = 16; off > 0; off >>= 1)
-      for (std::uint32_t qq = 0; qq < qpg; ++qq)
+      for (std::uint32_t qq = 0; qq < nq; ++qq)
         dot[qq] += __shfl_down_sync(0xffffffffull, dot[qq], off);
     if ((threadIdx.x & 31) == 0) {
       const std::uint32_t w = threadIdx.x / 32;
-      for (std::uint32_t qq = 0; qq < qpg; ++qq) red[w][qq] = dot[qq];
+      for (std::uint32_t qq = 0; qq < nq; ++qq) red[w][qq] = dot[qq];
     }
     __syncthreads();
     if (threadIdx.x < MaxQ) {
       const std::uint32_t qq = threadIdx.x;
-      if (qq < qpg) {
+      if (qq < nq) {
         float sc = 0.0F;
         for (std::uint32_t w = 0; w < blockDim.x / 32; ++w) sc += red[w][qq];
         const float m_new = fmaxf(mls[qq][0], sc);
@@ -1582,19 +1589,20 @@ __global__ void AttentionGqaKernel(
         v_cache + static_cast<std::size_t>(pp) * kv_stride + kv_h * d;
     for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
       const float vv = __half2float(vrow[i]);
-      for (std::uint32_t qq = 0; qq < qpg; ++qq)
+      for (std::uint32_t qq = 0; qq < nq; ++qq)
         acc[qq][i] = acc[qq][i] * cw[qq][0] + cw[qq][1] * vv;
     }
     __syncthreads();
   }
-  for (std::uint32_t qq = 0; qq < qpg; ++qq) {
+  for (std::uint32_t qq = 0; qq < nq; ++qq) {
     float* orow = out + (static_cast<std::size_t>(t) * heads +
-                         static_cast<std::size_t>(kv_h) * qpg + qq) *
+                         static_cast<std::size_t>(kv_h) * qpg + q0 + qq) *
                             d;
     const float linv = 1.0F / mls[qq][1];
     for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x)
       orow[i] = acc[qq][i] * linv;
   }
+  }  // chunks of MaxQ query heads
 }
 
 __global__ void RouterInputKernel(const float* attn_out,

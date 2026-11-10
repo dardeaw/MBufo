@@ -10,7 +10,9 @@
 
 namespace gufo::models::gemma4 {
 
-/// Architecture parameters of a `gemma4` GGUF artifact (Gemma 4 26B A4B).
+/// Architecture parameters of a `gemma4` GGUF artifact
+/// (Gemma 4 26B A4B MoE and 12B dense; dense variants leave the
+/// expert_* keys absent and num_experts == 0).
 /// Every value is read from the file.
 struct Config {
   std::uint32_t num_layers{0};      ///< block_count, 30.
@@ -33,10 +35,10 @@ struct Config {
   std::vector<bool> is_swa;         ///< per-layer sliding-window flag.
   std::vector<std::uint32_t> head_dim_per_layer;  ///< from weight shapes.
 
-  std::uint32_t num_experts{0};     ///< expert_count, 128.
+  std::uint32_t num_experts{0};     ///< expert_count, 128 MoE; 0 = dense.
   std::uint32_t experts_used{0};    ///< expert_used_count, 8.
   std::uint32_t expert_ff{0};       ///< expert_feed_forward_length, 704.
-  std::uint32_t shared_ff{0};       ///< feed_forward_length, 2112.
+  std::uint32_t shared_ff{0};       ///< feed_forward_length, 2112 MoE shared / 15360 dense FFN.
 
   float final_logit_softcapping{0.0F};  ///< 30.0; 0 disables.
 
