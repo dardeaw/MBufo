@@ -25,6 +25,7 @@
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/gemma4/engine.hpp"
 #include "src/testing/compare/logit_comparator.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -1281,6 +1282,192 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   return opt;
 }
 
+
+namespace {
+bool IsGemma4(const core::GgufReader& reader) {
+  return reader.GetMetadataString("general.architecture") == "gemma4";
+}
+}  // namespace
+
+int RunGemmaBenchmark(
+    const BenchOptions& options,
+    const std::shared_ptr<const core::GgufReader>& reader,
+    std::chrono::steady_clock::time_point model_load_start) {
+  namespace gm = models::gemma4;
+  if (!options.speculative_backend.empty()) {
+    std::cerr << "Error: Gemma bench does not support --speculative\n";
+    return 1;
+  }
+  if (options.concurrency != std::vector<std::size_t>{1}) {
+    std::cerr << "Error: Gemma bench supports C1; use the serving benchmark "
+                 "for concurrent requests\n";
+    return 1;
+  }
+  const auto max_or_zero = [](const std::vector<std::size_t>& values) {
+    return values.empty() ? std::size_t{0}
+                          : *std::max_element(values.begin(), values.end());
+  };
+  const std::size_t max_tokens =
+      std::max({max_or_zero(options.n_depths), max_or_zero(options.n_prompts),
+                max_or_zero(options.n_gens)});
+  if (max_tokens > std::numeric_limits<std::uint32_t>::max()) {
+    std::cerr << "Error: benchmark workload exceeds the context range\n";
+    return 1;
+  }
+  const std::size_t required_context =
+      std::max<std::size_t>(4096, max_or_zero(options.n_depths) +
+                                      max_or_zero(options.n_prompts) +
+                                      max_or_zero(options.n_gens));
+  std::string kv = "f16";
+  if (const char* kv_env = std::getenv("GEMMA4_KV_QUANT")) {
+    kv = kv_env;
+    if (kv != "f16" && kv != "q8") {
+      std::cerr << "Error: GEMMA4_KV_QUANT must be f16 or q8\n";
+      return 1;
+    }
+  }
+  std::string error;
+  gm::ModelOptions model_options;
+  model_options.max_context = static_cast<std::uint32_t>(required_context);
+  model_options.decode_concurrency = 1;
+  model_options.kv_cache_quant = kv;
+  auto model = gm::Model::Load(options.model_path, model_options, &error);
+  if (model == nullptr) {
+    std::cerr << "Error creating Gemma model: " << error << '\n';
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
+  PrintModelLoadTime(model_load_start);
+  std::cout << "[Gemma] kv_cache_quant=" << kv << '\n';
+
+  std::vector<std::int32_t> tokens;
+  {
+    const auto pattern = model->Tokenize(
+        "The quick brown fox jumps over the lazy dog. "
+        "Strix Halo executes this deterministic benchmark sequence. ");
+    if (pattern.empty()) {
+      std::cerr << "Error: benchmark token pattern is empty\n";
+      return 1;
+    }
+    tokens.resize(required_context);
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+      tokens[i] = pattern[i % pattern.size()];
+    }
+  }
+
+  const auto summarize = [](const std::vector<double>& runs) {
+    double mean = 0.0;
+    for (double v : runs) mean += v;
+    mean /= static_cast<double>(runs.size());
+    double var = 0.0;
+    for (double v : runs) var += (v - mean) * (v - mean);
+    var /= static_cast<double>(runs.size());
+    return std::make_pair(mean, std::sqrt(var));
+  };
+  const double size_gib =
+      static_cast<double>(reader->GetSize()) / (1024.0 * 1024.0 * 1024.0);
+  const auto model_name = model->ModelName();
+  std::cout << "| " << std::left << std::setw(32) << "model"
+            << " | " << std::right << std::setw(10) << "size"
+            << " | " << std::left << std::setw(10) << "backend"
+            << " | " << std::right << std::setw(18) << "test"
+            << " | " << std::right << std::setw(21) << "t/s"
+            << " |\n"
+            << "| " << std::string(32, '-') << " | " << std::string(10, '-')
+            << " | " << std::string(10, '-') << " | " << std::string(18, '-')
+            << " | " << std::string(21, '-') << " |\n";
+  std::ostringstream size_text;
+  size_text << std::fixed << std::setprecision(2) << size_gib << " GiB";
+  const auto print_result = [&](std::string_view test_name, double mean,
+                                double stddev) {
+    std::ostringstream throughput;
+    throughput << std::fixed << std::setprecision(2) << mean << " ± " << stddev;
+    std::cout << "| " << std::left << std::setw(32) << model_name << " | "
+              << std::right << std::setw(10) << size_text.str() << " | "
+              << std::left << std::setw(10) << "ROCm (HIP)"
+              << " | " << std::right << std::setw(18) << test_name << " | "
+              << std::right << std::setw(21) << throughput.str() << " |\n"
+              << std::flush;
+  };
+
+  for (const std::size_t depth : options.n_depths) {
+    for (const std::size_t prompt_length : options.n_prompts) {
+      if (depth + prompt_length >= required_context) {
+        std::cerr << "Error: prompt benchmark exceeds context\n";
+        return 1;
+      }
+      std::vector<double> runs;
+      for (std::size_t repetition = 0; repetition <= options.repetitions;
+           ++repetition) {
+        auto session = model->CreateSession(&error);
+        if (!session ||
+            (depth > 0 &&
+             !session->Sync(std::span(tokens).first(depth), &error))) {
+          std::cerr << "Error preparing depth: " << error << '\n';
+          return 1;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        if (!session->Sync(std::span(tokens).first(depth + prompt_length),
+                           &error)) {
+          std::cerr << "Error running prefill: " << error << '\n';
+          return 1;
+        }
+        const double secs =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          start)
+                .count();
+        if (repetition > 0) runs.push_back(prompt_length / secs);
+      }
+      if (runs.empty()) runs.push_back(0.0);
+      const auto [mean, stddev] = summarize(runs);
+      std::ostringstream name;
+      name << "pp" << prompt_length;
+      print_result(name.str(), mean, stddev);
+    }
+  }
+
+  for (const std::size_t depth : options.n_depths) {
+    for (const std::size_t gen_length : options.n_gens) {
+      if (depth + gen_length >= required_context) {
+        std::cerr << "Error: decode benchmark exceeds context\n";
+        return 1;
+      }
+      std::vector<double> runs;
+      for (std::size_t repetition = 0; repetition <= options.repetitions;
+           ++repetition) {
+        auto session = model->CreateSession(&error);
+        if (!session ||
+            (depth > 0 &&
+             !session->Sync(std::span(tokens).first(depth), &error))) {
+          std::cerr << "Error preparing depth: " << error << '\n';
+          return 1;
+        }
+        std::int32_t token = session->SampleGreedy();
+        const auto start = std::chrono::steady_clock::now();
+        std::size_t generated = 0;
+        for (; generated < gen_length; ++generated) {
+          if (!session->Evaluate(token, &error)) {
+            std::cerr << "Error running decode: " << error << '\n';
+            return 1;
+          }
+          token = session->SampleGreedy();
+        }
+        const double secs =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          start)
+                .count();
+        if (repetition > 0) runs.push_back(generated / secs);
+      }
+      if (runs.empty()) runs.push_back(0.0);
+      const auto [mean, stddev] = summarize(runs);
+      std::ostringstream name;
+      name << "tg" << gen_length;
+      print_result(name.str(), mean, stddev);
+    }
+  }
+  return 0;
+}
+
 int RunBench(std::span<const char* const> args) {
   std::string parse_err;
   const auto opt_res = ParseBenchOptions(args, &parse_err);
@@ -1322,6 +1509,9 @@ int RunBench(std::span<const char* const> args) {
   }
   if (IsQwen38FlashNext(*reader)) {
     return RunQwen38FlashNextBenchmark(opt, reader, model_load_start);
+  }
+  if (IsGemma4(*reader)) {
+    return RunGemmaBenchmark(opt, reader, model_load_start);
   }
   if (reader->GetMetadataString("general.architecture") == "gpt-oss") {
     std::cerr << "Error: gpt-oss models are not supported by the Qwen GPU "
