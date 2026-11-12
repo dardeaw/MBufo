@@ -3368,12 +3368,11 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                                  : l.ffn_gate_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST
                                      ? WeightType::kQ4_0_ROCMFP4_FAST
                                      : WeightType::kQ4_K;
-    // The paired gate/up kernel only covers Q4_K/Q5_K: MXFP4 pairs take
-    // the two separate routed GEMMs below, which have the native path.
-    // Wide prefill tiles gate/up at 128 rows for the paired kernel; the
-    // separate calls below cannot take 128-row tiles, so they reuse the
-    // 64-row down tiles covering the same buckets (mirrors wide_down).
-    // (The 64-row tiles start at the base of the tile map in both modes.)
+    // The paired gate/up kernel only covers Q4_K/Q5_K natively; other
+    // formats take the two separate routed GEMMs below.
+    // Wide prefill buckets gate/up at 128 rows for the paired kernel,
+    // which only covers Q4_K/Q5_K natively. Other formats run the two
+    // separate calls on the 64-row down tiles (same buckets, proven path).
     const bool wide_gate = routed_64_tiles_ != 0;
     const std::uint32_t gate_n_tiles =
         wide_gate ? routed_64_tiles_ : routed_n_tiles_;
