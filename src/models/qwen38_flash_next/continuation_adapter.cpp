@@ -776,8 +776,12 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
                              component.part == ContinuationPart::kValue ||
                              component.part == ContinuationPart::kDraftKey ||
                              component.part == ContinuationPart::kDraftValue;
-    if (!bytes.empty() && restores_kv)
+    if (!bytes.empty() && restores_kv) {
       state.CaptureState().kv_stage_valid_ = 0;
+      for (auto& at : state.CaptureState().attention_) {
+        at.kv_stage_valid_ = 0;
+      }
+    }
     {
       const std::lock_guard lock(state.jobs_mutex);
       state.coverage[id.value - 1].emplace_back(first * row, end * row);

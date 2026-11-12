@@ -1321,8 +1321,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                 k_ptr = reinterpret_cast<const __half*>(ks.k_cache_kv);
                 v_ptr = reinterpret_cast<const __half*>(ks.v_cache_kv);
               } else {
-                k_ptr = session.kv_stage_k_;
-                v_ptr = session.kv_stage_v_;
+                k_ptr = ks.kv_stage_k_ ? ks.kv_stage_k_ : session.kv_stage_k_;
+                v_ptr = ks.kv_stage_v_ ? ks.kv_stage_v_ : session.kv_stage_v_;
               }
             }
             const std::size_t qo = static_cast<std::size_t>(offsets[i]) * qdim;

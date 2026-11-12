@@ -1377,6 +1377,16 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
         at.v_cache_kv = Alloc<std::uint8_t>(
             a, static_cast<std::size_t>(max_context) * kv_value_row, error_msg,
             &s->allocated_bytes_);
+        at.kv_stage_k_ = Alloc<__half>(
+            a, static_cast<std::size_t>(max_context) * kv_row, error_msg,
+            &s->allocated_bytes_);
+        at.kv_stage_v_ = Alloc<__half>(
+            a, static_cast<std::size_t>(max_context) * kv_row, error_msg,
+            &s->allocated_bytes_);
+        at.kv_stage_cap_ = max_context;
+        at.kv_stage_ksrc_ = at.k_cache_kv;
+        at.kv_stage_vsrc_ = at.v_cache_kv;
+        at.kv_stage_valid_ = 0;
       } else {
         at.k_cache =
             Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
@@ -2638,18 +2648,15 @@ bool Executor::EnsureKvStaging(Session& session, Session::AttentionState& s,
       KvBlockedRowBytes(kv_row, KvKeyBlockBytes(options_.kv_format));
   const std::size_t kv_value_row =
       KvBlockedRowBytes(kv_row, KvValueBlockBytes(options_.kv_format));
-  // Persistent per-session staging: reused across prefill chunks and
-  // dequantized incrementally (only rows [valid, need) are converted).
-  // The source pointers disambiguate trunk vs draft caches; snapshot
-  // restore/rollback invalidate (see RestoreSnapshot/Rollback). Any
-  // failure here falls back to the scalar kernel below.
-  if (session.kv_stage_ksrc_ != s.k_cache_kv ||
-      session.kv_stage_vsrc_ != s.v_cache_kv) {
-    session.kv_stage_ksrc_ = s.k_cache_kv;
-    session.kv_stage_vsrc_ = s.v_cache_kv;
-    session.kv_stage_valid_ = 0;
+  // Persistent per-layer staging: each attention layer has its own buffer
+  // and validity counter, enabling true incremental dequantization across chunks.
+  if (s.kv_stage_ksrc_ != s.k_cache_kv ||
+      s.kv_stage_vsrc_ != s.v_cache_kv) {
+    s.kv_stage_ksrc_ = s.k_cache_kv;
+    s.kv_stage_vsrc_ = s.v_cache_kv;
+    s.kv_stage_valid_ = 0;
   }
-  if (need > session.kv_stage_cap_) {
+  if (need > s.kv_stage_cap_) {
     const std::size_t new_cap = (std::size_t{need} + 4095) & ~std::size_t{4095};
     __half* nk = nullptr;
     __half* nv = nullptr;
@@ -2667,34 +2674,34 @@ bool Executor::EnsureKvStaging(Session& session, Session::AttentionState& s,
       auto& a = session.allocations_;
       a.erase(std::remove(a.begin(), a.end(), p), a.end());
     };
-    if (session.kv_stage_k_ != nullptr) {
-      (void)hipFree(session.kv_stage_k_);
-      forget(session.kv_stage_k_);
+    if (s.kv_stage_k_ != nullptr) {
+      (void)hipFree(s.kv_stage_k_);
+      forget(s.kv_stage_k_);
     }
-    if (session.kv_stage_v_ != nullptr) {
-      (void)hipFree(session.kv_stage_v_);
-      forget(session.kv_stage_v_);
+    if (s.kv_stage_v_ != nullptr) {
+      (void)hipFree(s.kv_stage_v_);
+      forget(s.kv_stage_v_);
     }
-    session.kv_stage_k_ = nk;
-    session.kv_stage_v_ = nv;
+    s.kv_stage_k_ = nk;
+    s.kv_stage_v_ = nv;
     session.allocations_.push_back(nk);
     session.allocations_.push_back(nv);
-    session.kv_stage_cap_ = new_cap;
-    session.kv_stage_valid_ = 0;
+    s.kv_stage_cap_ = new_cap;
+    s.kv_stage_valid_ = 0;
   }
-  if (need > session.kv_stage_valid_) {
-    const std::uint32_t base = session.kv_stage_valid_;
+  if (need > s.kv_stage_valid_) {
+    const std::uint32_t base = s.kv_stage_valid_;
     if (!rocm::DequantizeKvRows(
             s.k_cache_kv + std::size_t{base} * kv_key_row,
-            session.kv_stage_k_ + std::size_t{base} * kv_row,
+            s.kv_stage_k_ + std::size_t{base} * kv_row,
             s.v_cache_kv + std::size_t{base} * kv_value_row,
-            session.kv_stage_v_ + std::size_t{base} * kv_row, need - base,
+            s.kv_stage_v_ + std::size_t{base} * kv_row, need - base,
             kv_row, KvKeyBlockBytes(options_.kv_format),
             KvValueBlockBytes(options_.kv_format),
             rocm::KvCodecOf(options_.kv_format), stream_)) {
       return false;
     }
-    session.kv_stage_valid_ = need;
+    s.kv_stage_valid_ = need;
     if (const char* dump = std::getenv("GUFO_KV_STAGE")) {
       // Offline audit hook: append the f16 staging rows dequantized by this
       // call so they can be compared against the blocked cache of the same run
@@ -2703,9 +2710,9 @@ bool Executor::EnsureKvStaging(Session& session, Session::AttentionState& s,
       const std::size_t bytes = std::size_t{need} * kv_row * sizeof(__half);
       void* host = std::malloc(2 * bytes);
       if (host != nullptr &&
-          hipMemcpy(host, session.kv_stage_k_, bytes, hipMemcpyDeviceToHost) ==
+          hipMemcpy(host, s.kv_stage_k_, bytes, hipMemcpyDeviceToHost) ==
               hipSuccess &&
-          hipMemcpy(static_cast<char*>(host) + bytes, session.kv_stage_v_,
+          hipMemcpy(static_cast<char*>(host) + bytes, s.kv_stage_v_,
                     bytes, hipMemcpyDeviceToHost) == hipSuccess) {
         if (std::FILE* f = std::fopen(dump, "ab")) {
           const std::uint32_t header[3] = {need, kv_row, base};
@@ -3031,8 +3038,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
           if (!EnsureKvStaging(session, s, need, kv_row, error_msg)) {
             return false;
           }
-          kk = session.kv_stage_k_;
-          vv = session.kv_stage_v_;
+          kk = s.kv_stage_k_;
+          vv = s.kv_stage_v_;
         }
         bool ok = false;
         {
@@ -3972,6 +3979,10 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
   // append; clamp the persistent Q8 staging so it cannot serve stale rows.
   session.kv_stage_valid_ =
       std::min(session.kv_stage_valid_, session.spec_base_ + keep);
+  for (auto& at : session.attention_) {
+    at.kv_stage_valid_ =
+        std::min(at.kv_stage_valid_, session.spec_base_ + keep);
+  }
   if (keep < n) {
     const std::size_t conv_elems =
         static_cast<std::size_t>(c.ssm_conv_kernel - 1) * c.SsmConvChannels();
@@ -4474,6 +4485,9 @@ bool Executor::RestoreSnapshot(Session& session,
   // Snapshot payloads overwrite cache rows below any staged frontier;
   // invalidate the persistent Q8 staging (buffers are kept for reuse).
   session.kv_stage_valid_ = 0;
+  for (auto& at : session.attention_) {
+    at.kv_stage_valid_ = 0;
+  }
   if (payload.size() < sizeof(SnapshotHeader)) {
     AssignError(error_msg, "snapshot payload is truncated");
     return false;

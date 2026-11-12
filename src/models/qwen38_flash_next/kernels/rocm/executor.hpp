@@ -159,6 +159,12 @@ private:
     std::uint8_t* v_cache_kv{nullptr};  ///< blocked layout (q8/fp8)
     float* index_k{nullptr};   ///< [index_capacity_][indexer_dim] raw ring
     __half* block_k{nullptr};  ///< [max_context/ratio][indexer_dim]
+    __half* kv_stage_k_{nullptr};
+    __half* kv_stage_v_{nullptr};
+    std::size_t kv_stage_cap_{0};
+    const void* kv_stage_ksrc_{nullptr};
+    const void* kv_stage_vsrc_{nullptr};
+    std::uint32_t kv_stage_valid_{0};
   };
   /// Per-launch values the kernels read from device memory, so a captured
   /// graph replays at any position.
