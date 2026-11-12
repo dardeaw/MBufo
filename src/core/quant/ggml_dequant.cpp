@@ -416,6 +416,98 @@ void DequantizeQ8_0(const void* src, float* dst, std::size_t k) {
   }
 }
 
+namespace {
+// Round-to-nearest-even float -> f16 bits (normals, subnormals, Inf clamp).
+std::uint16_t FloatToFp16Bits(float v) noexcept {
+  std::uint32_t b = 0;
+  std::memcpy(&b, &v, sizeof(b));
+  const std::uint32_t sign = (b >> 16) & 0x8000U;
+  const std::int32_t exp =
+      static_cast<std::int32_t>((b >> 23) & 0xFFU) - 112;
+  const std::uint32_t mant = b & 0x7FFFFFU;
+  if (exp >= 31) {
+    return static_cast<std::uint16_t>(sign | 0x7BFFU);
+  }
+  if (exp <= 0) {
+    // Subnormal f16: total right shift is 13 (f32->f16 mantissa) plus the
+    // extra (1 - exp) for the missing exponent range. Round to nearest even.
+    if (exp < -10) {
+      return static_cast<std::uint16_t>(sign);
+    }
+    const int shift = 14 - exp;  // 15..24
+    const std::uint32_t full = mant | 0x800000U;
+    std::uint32_t r = full >> shift;
+    const std::uint32_t mask =
+        shift >= 32 ? 0xFFFFFFFFU : ((1U << shift) - 1U);
+    const std::uint32_t rem = full & mask;
+    const std::uint32_t half = 1U << (shift - 1);
+    if (rem > half || (rem == half && (r & 1U) != 0)) {
+      r += 1;
+    }
+    // Rounding can carry past the 10-bit subnormal mantissa: that is the
+    // smallest normal (0x0400), not zero.
+    if (r > 0x3FFU) {
+      return static_cast<std::uint16_t>(sign | 0x0400U);
+    }
+    return static_cast<std::uint16_t>(sign | r);
+  }
+  std::uint32_t h = sign | (static_cast<std::uint32_t>(exp) << 10) |
+                    (mant >> 13);
+  // Round to nearest even.
+  const std::uint32_t rest = mant & 0x1FFFU;
+  if (rest > 0x1000U || (rest == 0x1000U && (h & 1U) != 0)) {
+    h += 1;
+  }
+  return static_cast<std::uint16_t>(h);
+}
+}  // namespace
+
+void QuantizeQ8_0(const float* src, void* dst, std::size_t k) {
+  auto* blocks = static_cast<block_q8_0*>(dst);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    float amax = 0.0F;
+    for (std::size_t i = 0; i < 32; ++i) {
+      const float v = std::fabs(src[b * 32 + i]);
+      if (v > amax) {
+        amax = v;
+      }
+    }
+    if (!(amax > 0.0F)) {
+      blocks[b].d = 0;
+      std::memset(blocks[b].qs, 0, sizeof(blocks[b].qs));
+      continue;
+    }
+    const float d = amax / 127.0F;
+    const float id = 1.0F / d;
+    blocks[b].d = FloatToFp16Bits(d);
+    for (std::size_t i = 0; i < 32; ++i) {
+      int q = static_cast<int>(std::lround(src[b * 32 + i] * id));
+      if (q > 127) q = 127;
+      if (q < -127) q = -127;
+      blocks[b].qs[i] = static_cast<std::int8_t>(q);
+    }
+  }
+}
+
+void DequantizeMxfp4(const void* src, float* dst, std::size_t k) {
+  // OCP E2M1: {0, .5, 1, 1.5, 2, 3, 4, 6} with the top bit as sign.
+  // Index 8 (-0) decodes to +0 to match the device Q8_0 presentation.
+  static constexpr float kCodebook[16] = {
+      0.0F, 0.5F, 1.0F, 1.5F, 2.0F, 3.0F, 4.0F, 6.0F,
+      0.0F, -0.5F, -1.0F, -1.5F, -2.0F, -3.0F, -4.0F, -6.0F};
+  const auto* blocks = static_cast<const block_mxfp4*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = std::exp2(static_cast<int>(blocks[b].e) - 127);
+    for (std::size_t i = 0; i < 16; ++i) {
+      dst[b * 32 + i] = kCodebook[blocks[b].qs[i] & 0xF] * d;
+      dst[b * 32 + 16 + i] = kCodebook[blocks[b].qs[i] >> 4] * d;
+    }
+  }
+}
+
+
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,
                      std::size_t k) {
   const auto* blocks = static_cast<const block_q8_0*>(row_data);

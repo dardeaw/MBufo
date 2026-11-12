@@ -33,6 +33,8 @@ struct Format {
       return {32, 18};
     case GgmlType::kQ4_0_ROCMFP4_FAST:
       return {32, 17};
+    case GgmlType::kMXFP4:
+      return {32, 17};
     case GgmlType::kQ3_0_ROCMFPX:
       return {32, 14};
     case GgmlType::kQ4_K:
@@ -127,14 +129,17 @@ struct Binder {
     m.down =
         Get(prefix + "_down.weight", hc_dim, c.hc_low_rank, 1,
             {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32,
-             GgmlType::kQ6_K, GgmlType::kQ4_0_ROCMFP4_FAST});
+             GgmlType::kQ6_K, GgmlType::kQ4_0_ROCMFP4_FAST,
+             GgmlType::kQ4_0_ROCMFP4, GgmlType::kMXFP4});
     m.up = Get(prefix + "_up.weight", c.hc_low_rank, hc_dim, 1,
                {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
-                GgmlType::kF32, GgmlType::kQ4_0_ROCMFP4_FAST});
+                GgmlType::kF32, GgmlType::kQ4_0_ROCMFP4_FAST,
+                GgmlType::kQ4_0_ROCMFP4, GgmlType::kMXFP4});
     if (with_inject) {
       m.inject = Get(
           prefix + "_inject.weight", hc_dim, c.hc_count, 1,
-          {GgmlType::kF32, GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kQ6_K});
+          {GgmlType::kF32, GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kQ6_K,
+          GgmlType::kQ4_0_ROCMFP4, GgmlType::kQ4_0_ROCMFP4_FAST});
     }
     return m;
   }
@@ -147,10 +152,13 @@ struct Binder {
     const std::uint64_t hidden = c.hidden_size;
     const std::uint64_t hc_dim = c.HcDim();
     const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
-                        GgmlType::kF32, GgmlType::kQ6_K};
+                        GgmlType::kF32, GgmlType::kQ6_K,
+                        GgmlType::kQ4_0_ROCMFP4, GgmlType::kQ4_0_ROCMFP4_FAST,
+                        GgmlType::kMXFP4};
     const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K,
                           GgmlType::kQ6_K, GgmlType::kQ5_1,
-                          GgmlType::kQ8_0, GgmlType::kQ4_0_ROCMFP4_FAST};
+                          GgmlType::kQ8_0, GgmlType::kQ4_0_ROCMFP4_FAST,
+                          GgmlType::kMXFP4};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -164,10 +172,12 @@ struct Binder {
                          c.SsmConvChannels(), 1, {GgmlType::kF32});
       l.ssm_alpha = Get(
           p + "ssm_alpha.weight", hidden, c.ssm_num_v_heads, 1,
-          {GgmlType::kF32, GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ6_K});
+          {GgmlType::kF32, GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ6_K,
+                          GgmlType::kQ4_0_ROCMFP4, GgmlType::kQ4_0_ROCMFP4_FAST});
       l.ssm_beta = Get(
           p + "ssm_beta.weight", hidden, c.ssm_num_v_heads, 1,
-          {GgmlType::kF32, GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ6_K});
+          {GgmlType::kF32, GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ6_K,
+                          GgmlType::kQ4_0_ROCMFP4, GgmlType::kQ4_0_ROCMFP4_FAST});
       l.ssm_dt =
           Get(p + "ssm_dt.bias", c.ssm_num_v_heads, 1, 1, {GgmlType::kF32});
       l.ssm_a = Get(p + "ssm_a", c.ssm_num_v_heads, 1, 1, {GgmlType::kF32});
@@ -261,7 +271,8 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   const Config& c = w.config;
   const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K,
                       GgmlType::kBF16, GgmlType::kF16,
-                      GgmlType::kF32,  GgmlType::kQ4_0_ROCMFP4_FAST};
+                      GgmlType::kF32,  GgmlType::kQ4_0_ROCMFP4_FAST,
+                      GgmlType::kQ4_0_ROCMFP4, GgmlType::kMXFP4};
 
   {
     // The vocabulary is the embedding row count; no metadata key carries it.
@@ -292,7 +303,8 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     } else {
       w.ple_table =
           b.Get("per_layer_token_embd.weight", c.ple_head_dim, rows, 1,
-                {GgmlType::kIQ4_NL, GgmlType::kBF16, GgmlType::kQ3_0_ROCMFPX});
+                {GgmlType::kIQ4_NL, GgmlType::kBF16, GgmlType::kQ3_0_ROCMFPX,
+                GgmlType::kQ8_0});
     }
   }
   w.layers.reserve(c.num_layers);

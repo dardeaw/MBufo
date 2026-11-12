@@ -10,6 +10,9 @@
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/weight_upload.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include <cstdlib>
+#include <vector>
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
 namespace gufo::models::qwen38_flash_next::rocm {
@@ -21,6 +24,25 @@ namespace {
 /// over-read stays inside the allocation (the extra bytes meet zeroed
 /// activation padding and contribute nothing).
 constexpr std::size_t kTailMargin = 4096;
+
+namespace {
+// Device row stride for the formats Copy() can emit (raw or converted).
+std::size_t DeviceRowBytes(core::GgmlType type, std::uint32_t cols) {
+  switch (type) {
+    case core::GgmlType::kF32:
+      return static_cast<std::size_t>(cols) * 4;
+    case core::GgmlType::kF16:
+    case core::GgmlType::kBF16:
+      return static_cast<std::size_t>(cols) * 2;
+    case core::GgmlType::kQ8_0:
+      return static_cast<std::size_t>(cols) / 32 * 34;
+    case core::GgmlType::kQ4_0_ROCMFP4_FAST:
+      return static_cast<std::size_t>(cols) / 32 * 17;
+    default:
+      return 0;
+  }
+}
+}  // namespace
 
 struct Conversion {
   void* source;
@@ -68,6 +90,94 @@ struct Uploader {
       return hipSuccess;
     }
     return weights->Allocate(pointer, size);
+  }
+
+  // Host-side Q8_0 conversion for formats the device kernels do not read
+  // (ROCmFP4 dual-scale attention, Q6_K embeddings): dequantize each row
+  // with the core CPU oracle and requantize to Q8_0, then upload the bytes.
+  // The Q8_0 step is ~64x finer than the 4-bit source step, so the
+  // round-trip error is negligible next to the source quantization itself.
+  // Experts never reach here: they upload raw (see layer_supported below).
+  DeviceTensor CopyConvertedQ8(const TensorRef& t) {
+    DeviceTensor d;
+    if (t.experts != 1) {
+      Fail("Q8 conversion needs a single-slab tensor: " +
+           std::string(t.name));
+      return d;
+    }
+    const std::size_t cols = static_cast<std::size_t>(t.cols);
+    const std::size_t rows = static_cast<std::size_t>(t.rows);
+    if (cols == 0 || cols % 32 != 0 || rows == 0) {
+      Fail("Q8 conversion needs non-empty 32-wide rows: " +
+           std::string(t.name));
+      return d;
+    }
+    const std::size_t q8_row = cols / 32 * 34;
+    const std::size_t size = q8_row * rows;
+    void* ptr = nullptr;
+    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for converted " + std::string(t.name) +
+           " (" + std::to_string(size) + " bytes)");
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    constexpr std::size_t kChunkRows = 1024;
+    std::vector<float> fbuf(cols * kChunkRows);
+    std::vector<std::uint8_t> staging(size);
+    for (std::size_t r0 = 0; r0 < rows; r0 += kChunkRows) {
+      const std::size_t chunk = std::min(kChunkRows, rows - r0);
+      const std::uint8_t* src = t.Expert(0) + r0 * t.RowBytes();
+      float* frow = fbuf.data();
+      for (std::size_t r = 0; r < chunk; ++r) {
+        const void* row_src = src + r * t.RowBytes();
+        if (t.type == core::GgmlType::kQ4_0_ROCMFP4) {
+          gufo::quant::DequantizeQ4_0_ROCMFP4(row_src, frow, cols);
+        } else if (t.type == core::GgmlType::kQ4_0_ROCMFP4_FAST) {
+          gufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, frow, cols);
+        } else if (t.type == core::GgmlType::kQ6_K) {
+          gufo::quant::DequantizeQ6_K(row_src, frow, cols);
+        } else {
+          Fail("unexpected conversion source for " + std::string(t.name));
+          return d;
+        }
+        frow += cols;
+      }
+      gufo::quant::QuantizeQ8_0(fbuf.data(), staging.data() + r0 * q8_row,
+                                chunk * cols);
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    if (hipMemcpy(ptr, staging.data(), size, hipMemcpyHostToDevice) !=
+        hipSuccess) {
+      Fail("converted upload failed for " + std::string(t.name));
+      return d;
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kQ8_0;
+    d.cols = static_cast<std::uint32_t>(cols);
+    d.rows = static_cast<std::uint32_t>(rows);
+    d.experts = 1;
+    max_q8_cols = std::max<std::size_t>(max_q8_cols, cols);
+    return d;
+  }
+
+  // Q8_0-safe dense weights (attention/SSM/indexer/PLE-KV/mixer/
+  // shared-expert/embedding/head) may arrive quantized (ROCmFP4 single
+  // or dual scale, Q6_K): convert on the host. Everything else uploads
+  // raw; F32-only consumers (norms/router/biases/nextn, inject below)
+  // never see these types because the bind sets reject them there.
+  DeviceTensor CopyQ8(const TensorRef& t) {
+    if (!t.empty() && ok &&
+        (t.type == core::GgmlType::kQ4_0_ROCMFP4 ||
+         t.type == core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+         t.type == core::GgmlType::kQ6_K)) {
+      return CopyConvertedQ8(t);
+    }
+    return Copy(t);
   }
 
   DeviceTensor Copy(const TensorRef& t) {
@@ -230,8 +340,164 @@ struct Uploader {
     return d;
   }
 
+  // The mixer combine reads inject as F32 rows: quantized files are
+  // dequantized to F32 on the host (exact values, no requant loss).
+  DeviceTensor CopyF32(const TensorRef& t) {
+    DeviceTensor d;
+    if (t.empty() || !ok) {
+      return d;
+    }
+    if (t.type == core::GgmlType::kF32) {
+      return Copy(t);
+    }
+    const std::size_t cols = static_cast<std::size_t>(t.cols);
+    const std::size_t rows = static_cast<std::size_t>(t.rows);
+    const std::size_t size = cols * rows * sizeof(float);
+    void* ptr = nullptr;
+    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for F32 " + std::string(t.name));
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    std::vector<float> staging(cols * rows);
+    for (std::size_t r = 0; r < rows; ++r) {
+      const void* row_src =
+          t.Expert(0) + r * t.RowBytes();
+      float* out = staging.data() + r * cols;
+      switch (t.type) {
+        case core::GgmlType::kQ8_0:
+          gufo::quant::DequantizeQ8_0(row_src, out, cols);
+          break;
+        case core::GgmlType::kQ4_0_ROCMFP4:
+          gufo::quant::DequantizeQ4_0_ROCMFP4(row_src, out, cols);
+          break;
+        case core::GgmlType::kQ4_0_ROCMFP4_FAST:
+          gufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, out, cols);
+          break;
+        case core::GgmlType::kQ6_K:
+          gufo::quant::DequantizeQ6_K(row_src, out, cols);
+          break;
+        case core::GgmlType::kF16: {
+          const auto* h = static_cast<const std::uint16_t*>(row_src);
+          for (std::size_t i = 0; i < cols; ++i)
+            out[i] = gufo::quant::Fp16ToFloat(h[i]);
+          break;
+        }
+        case core::GgmlType::kBF16: {
+          const auto* h = static_cast<const std::uint16_t*>(row_src);
+          for (std::size_t i = 0; i < cols; ++i) {
+            const std::uint32_t bits = static_cast<std::uint32_t>(h[i]) << 16;
+            std::memcpy(out + i, &bits, sizeof(float));
+          }
+          break;
+        }
+        default:
+          Fail("cannot dequantize inject " + std::string(t.name));
+          return d;
+      }
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    if (hipMemcpy(ptr, staging.data(), size, hipMemcpyHostToDevice) !=
+        hipSuccess) {
+      Fail("F32 upload failed for " + std::string(t.name));
+      return d;
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kF32;
+    d.cols = static_cast<std::uint32_t>(cols);
+    d.rows = static_cast<std::uint32_t>(rows);
+    d.experts = 1;
+    return d;
+  }
+
+  // Stacks quantized projections (ROCmFP4/Q6_K alpha+beta) as one Q8_0
+  // matrix: each part is host-converted, then the bytes are uploaded
+  // contiguously. The consumer reads it through the Q8_0 dense path.
+  DeviceTensor StackConvertedQ8(
+      std::initializer_list<const TensorRef*> parts) {
+    DeviceTensor d;
+    if (!ok) {
+      return d;
+    }
+    const core::GgmlType type = (*parts.begin())->type;
+    std::size_t rows = 0;
+    std::size_t size = 0;
+    for (const TensorRef* t : parts) {
+      const bool convertible =
+          t->type == core::GgmlType::kQ4_0_ROCMFP4 ||
+          t->type == core::GgmlType::kQ4_0_ROCMFP4_FAST ||
+          t->type == core::GgmlType::kQ6_K;
+      if (t->empty() || t->type != type ||
+          t->cols != (*parts.begin())->cols || t->cols % 32 != 0 ||
+          !convertible) {
+        Fail("stacked Q8 conversion needs one shape of quantized rows");
+        return d;
+      }
+      rows += t->rows;
+      size += (t->cols / 32 * 34) * t->rows;
+    }
+    void* ptr = nullptr;
+    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("stacked Q8 tensor allocation failed");
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    std::vector<std::uint8_t> staging(size);
+    std::size_t offset = 0;
+    for (const TensorRef* t : parts) {
+      const std::size_t part = (t->cols / 32 * 34) * t->rows;
+      constexpr std::size_t kChunkRows = 1024;
+      const std::size_t cols = static_cast<std::size_t>(t->cols);
+      const std::size_t nrows = static_cast<std::size_t>(t->rows);
+      std::vector<float> fbuf(cols * kChunkRows);
+      for (std::size_t r0 = 0; r0 < nrows; r0 += kChunkRows) {
+        const std::size_t chunk = std::min(kChunkRows, nrows - r0);
+        const std::uint8_t* src = t->Expert(0) + r0 * t->RowBytes();
+        float* frow = fbuf.data();
+        for (std::size_t r = 0; r < chunk; ++r) {
+          const void* row_src = src + r * t->RowBytes();
+          if (type == core::GgmlType::kQ4_0_ROCMFP4) {
+            gufo::quant::DequantizeQ4_0_ROCMFP4(row_src, frow, cols);
+          } else if (type == core::GgmlType::kQ4_0_ROCMFP4_FAST) {
+            gufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, frow, cols);
+          } else {
+            gufo::quant::DequantizeQ6_K(row_src, frow, cols);
+          }
+          frow += cols;
+        }
+        gufo::quant::QuantizeQ8_0(fbuf.data(),
+                                    staging.data() + offset + r0 * cols / 32 * 34,
+                                    chunk * cols);
+      }
+      offset += part;
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    if (hipMemcpy(ptr, staging.data(), size, hipMemcpyHostToDevice) !=
+        hipSuccess) {
+      Fail("stacked Q8 upload failed");
+      return d;
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kQ8_0;
+    d.cols = (*parts.begin())->cols;
+    d.rows = static_cast<std::uint32_t>(rows);
+    d.experts = 1;
+    max_q8_cols = std::max<std::size_t>(max_q8_cols, d.cols);
+    return d;
+  }
+
   DeviceMixer Mixer(const HcMixer& m) {
-    return {Copy(m.norm), Copy(m.down), Copy(m.up), Copy(m.inject)};
+    return {Copy(m.norm), CopyQ8(m.down), CopyQ8(m.up), CopyF32(m.inject)};
   }
 
   DeviceLayer Layer(const LayerWeights& l) {
@@ -253,33 +519,42 @@ struct Uploader {
     if (l.linear && stackable({&l.ssm_qkv, &l.ssm_gate})) {
       d.ssm_in = Stack({&l.ssm_qkv, &l.ssm_gate});
     } else {
-      d.ssm_qkv = Copy(l.ssm_qkv);
-      d.ssm_gate = Copy(l.ssm_gate);
+      d.ssm_qkv = CopyQ8(l.ssm_qkv);
+      d.ssm_gate = CopyQ8(l.ssm_gate);
     }
     d.ssm_conv1d = Copy(l.ssm_conv1d);
     if (l.linear) {
-      d.ssm_alpha_beta = Stack({&l.ssm_alpha, &l.ssm_beta});
+      const bool stacked_native =
+          l.ssm_alpha.type == l.ssm_beta.type &&
+          l.ssm_alpha.cols == l.ssm_beta.cols &&
+          (l.ssm_alpha.type == core::GgmlType::kF32 ||
+           l.ssm_alpha.type == core::GgmlType::kQ8_0);
+      if (stacked_native) {
+        d.ssm_alpha_beta = Stack({&l.ssm_alpha, &l.ssm_beta});
+      } else {
+        d.ssm_alpha_beta = StackConvertedQ8({&l.ssm_alpha, &l.ssm_beta});
+      }
     }
     d.ssm_dt = Copy(l.ssm_dt);
     d.ssm_a = Copy(l.ssm_a);
     d.ssm_norm = Copy(l.ssm_norm);
-    d.ssm_out = Copy(l.ssm_out);
+    d.ssm_out = CopyQ8(l.ssm_out);
     if (!l.linear && stackable({&l.attn_q, &l.attn_k, &l.attn_v})) {
       d.attn_qkv = Stack({&l.attn_q, &l.attn_k, &l.attn_v});
     } else {
-      d.attn_q = Copy(l.attn_q);
-      d.attn_k = Copy(l.attn_k);
-      d.attn_v = Copy(l.attn_v);
+      d.attn_q = CopyQ8(l.attn_q);
+      d.attn_k = CopyQ8(l.attn_k);
+      d.attn_v = CopyQ8(l.attn_v);
     }
-    d.attn_out = Copy(l.attn_out);
+    d.attn_out = CopyQ8(l.attn_out);
     d.attn_q_norm = Copy(l.attn_q_norm);
     d.attn_k_norm = Copy(l.attn_k_norm);
-    d.indexer_q = Copy(l.indexer_q);
-    d.indexer_k = Copy(l.indexer_k);
+    d.indexer_q = CopyQ8(l.indexer_q);
+    d.indexer_k = CopyQ8(l.indexer_k);
     d.indexer_q_norm = Copy(l.indexer_q_norm);
     d.indexer_k_norm = Copy(l.indexer_k_norm);
-    d.ple_key = Copy(l.ple_key);
-    d.ple_value = Copy(l.ple_value);
+    d.ple_key = CopyQ8(l.ple_key);
+    d.ple_value = CopyQ8(l.ple_value);
     d.ple_norm_key = Copy(l.ple_norm_key);
     d.ple_norm_query = Copy(l.ple_norm_query);
     d.ple_norm_conv = Copy(l.ple_norm_conv);
@@ -288,9 +563,9 @@ struct Uploader {
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
     d.ffn_down_exps = Copy(l.ffn_down_exps);
-    d.shexp_gate = Copy(l.shexp_gate);
-    d.shexp_up = Copy(l.shexp_up);
-    d.shexp_down = Copy(l.shexp_down);
+    d.shexp_gate = CopyQ8(l.shexp_gate);
+    d.shexp_up = CopyQ8(l.shexp_up);
+    d.shexp_down = CopyQ8(l.shexp_down);
     d.nextn_enorm = Copy(l.nextn_enorm);
     d.nextn_hnorm = Copy(l.nextn_hnorm);
     SplitMtpProjection(l.nextn_eh_proj, d.nextn_fc_embedding,
@@ -302,9 +577,9 @@ struct Uploader {
   Uploaded Model(const ModelWeights& w, const MtpWeights* mtp,
                  std::uint32_t trunk_shards) {
     Uploaded u;
-    u.token_embd = Copy(w.token_embd);
+    u.token_embd = CopyQ8(w.token_embd);
     u.output =
-        w.output.data == w.token_embd.data ? u.token_embd : Copy(w.output);
+        w.output.data == w.token_embd.data ? u.token_embd : CopyQ8(w.output);
     u.hc_head = Mixer(w.hc_head);
     u.layers.reserve(w.layers.size());
     for (const auto& l : w.layers) {
@@ -357,18 +632,26 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
-  // The CPU reference also reads Q6_K, but the production embedding, dense
-  // and routed kernels do not. Reject it before allocating device weights.
+  // Formats without a device path (ROCmFP4 dual-scale, Q6_K) are
+  // converted to Q8_0 inside CopyQ8(); experts stay native-only.
   const auto supported = [&](const TensorRef& t) {
-    if (t.type != core::GgmlType::kQ6_K)
-      return true;
-    if (error_msg != nullptr)
-      *error_msg = "unsupported HIP tensor format Q6_K: " + std::string(t.name);
-    return false;
+    (void)t;
+    return true;
   };
   const auto layer_supported = [&](const LayerWeights& l) {
-    return supported(l.ffn_gate_exps) && supported(l.ffn_up_exps) &&
-           supported(l.ffn_down_exps);
+    // Experts upload raw (gate/up stay K-quant, down may also be FAST):
+    // anything else was rejected at bind time.
+    for (const TensorRef* t :
+         {&l.ffn_gate_exps, &l.ffn_up_exps, &l.ffn_down_exps}) {
+      if (t->type == core::GgmlType::kQ6_K ||
+          t->type == core::GgmlType::kQ4_0_ROCMFP4) {
+        if (error_msg != nullptr)
+          *error_msg = "unsupported HIP tensor format for experts: " +
+                       std::string(t->name);
+        return false;
+      }
+    }
+    return true;
   };
   if (!supported(w.token_embd) || !supported(w.output) ||
       !std::all_of(w.layers.begin(), w.layers.end(), layer_supported) ||
@@ -421,7 +704,12 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   assert(up.requested == measured);
   m->token_embd_ = uploaded.token_embd;
   m->output_ = uploaded.output;
-  m->output_bytes_ = w.output.SizeBytes();
+  // Converted heads change row stride: measure the device tensor.
+  m->output_bytes_ = uploaded.output.type == w.output.type
+                         ? w.output.SizeBytes()
+                         : DeviceRowBytes(uploaded.output.type,
+                                          uploaded.output.cols) *
+                               uploaded.output.rows;
   m->hc_head_ = uploaded.hc_head;
   m->layers_ = std::move(uploaded.layers);
   m->mtp_ = uploaded.mtp;

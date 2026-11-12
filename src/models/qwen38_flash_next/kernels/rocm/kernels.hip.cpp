@@ -6205,6 +6205,7 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
          : kType == WeightType::kQ4_0_ROCMFP4_FAST
              ? (k / 32) * 17
+         : kType == WeightType::kMXFP4 ? (k / 32) * 17
          : kType == WeightType::kQ4_0 ? (k / 32) * 18
                                        : (k / 32) * sizeof(Q8_0Block);
 }
@@ -6243,6 +6244,12 @@ __device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
 // 1152 magic), so FAST rides the same fp16 WMMA core as the production experts.
 __constant__ int8_t kFastCodebook[16] = {0, 1,  2,  3,  4,  6,  8,  10,
                                          0, -1, -2, -3, -4, -6, -8, -10};
+
+// MXFP4: E2M1 codebook {0,.5,1,1.5,2,3,4,6} times 16 (sign in bit 3),
+// one E8M0 scale per 32-value block. Same Q8_0 presentation as FAST with
+// a halved scale, matching the native MXFP4 vec MoE math bit-for-bit.
+__constant__ int8_t kMxfp4Q8Codes[16] = {0, 8, 16,  24,  32,  48,  64,  96,
+                                         0, -8, -16, -24, -32, -48, -64, -96};
 
 __device__ __forceinline__ float FastScaleUe4m3(std::uint8_t e) {
   if (e > 0x7e)
@@ -6297,8 +6304,9 @@ __launch_bounds__(256) __global__
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
   constexpr bool kQ8 = kType == WeightType::kQ8_0;
   constexpr bool kFast = kType == WeightType::kQ4_0_ROCMFP4_FAST;
+  constexpr bool kMxfp4 = kType == WeightType::kMXFP4;
   constexpr bool kQ40 = kType == WeightType::kQ4_0;
-  constexpr bool kQ8Like = kQ8 || kFast || kQ40;
+  constexpr bool kQ8Like = kQ8 || kFast || kQ40 || kMxfp4;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
@@ -6502,6 +6510,25 @@ __launch_bounds__(256) __global__
         const int2 r3 = FastTable16(q.w);
         f_codes[u] = make_uint4(r0.x, r1.x, r2.x, r3.x);
         f_codes_hi[u] = make_uint4(r0.y, r1.y, r2.y, r3.y);
+      } else if constexpr (kMxfp4) {
+        // GGML MXFP4 block is 17 bytes: one E8M0 scale byte then 16 packed
+        // 4-bit codes (low nibbles are elements 0-15, high nibbles 16-31).
+        const auto* blk = f_ptr[u] + ((kb0 + f_c) * 17);
+        const float d = exp2f(static_cast<float>(blk[0]) - 128.0F);
+        f_dm[u] = __builtin_bit_cast(
+            std::uint32_t, __floats2half2_rn(d * 0.125F, 0.0f));
+        uint4 q;
+        __builtin_memcpy(&q, blk + 1, 16);
+        std::uint8_t qs[16];
+        __builtin_memcpy(qs, &q, 16);
+        std::int8_t c0[16], c1[16];
+#pragma unroll
+        for (int j = 0; j < 16; ++j) {
+          c0[j] = kMxfp4Q8Codes[qs[j] & 0xF];
+          c1[j] = kMxfp4Q8Codes[qs[j] >> 4];
+        }
+        __builtin_memcpy(&f_codes[u], c0, 16);
+        __builtin_memcpy(&f_codes_hi[u], c1, 16);
       } else {
         constexpr int kBlockChunks = kQ5K ? 11 : 9;
         constexpr int kCodeChunk = kQ5K ? 3 : 1;
@@ -7542,6 +7569,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
           (RoutedF16GEMMKernel<WeightType::kQ4_0_ROCMFP4_FAST, kBM, BN, kBK>),
           grid, dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
           rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+      return true;
+    case WeightType::kMXFP4:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kMXFP4, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
       return true;
     case WeightType::kQ5_K:
       if constexpr (BN > 48) {

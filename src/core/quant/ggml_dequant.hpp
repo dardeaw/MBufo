@@ -219,6 +219,12 @@ float DotProductQ8_K(const void* row_data, std::span<const float> vec,
 // Dequantize row of Q8_0 to float
 void DequantizeQ8_0(const void* src, float* dst, std::size_t k);
 
+// Quantize float row to Q8_0 (symmetric per-32 amax/127). Load-time helper
+// for placing formats without a device path (ROCmFP4 dual-scale, Q6_K)
+// onto the Q8_0 dense kernels. The Q8_0 step is ~64x finer than the
+// 4-bit source step, so the round-trip error is negligible.
+void QuantizeQ8_0(const float* src, void* dst, std::size_t k);
+
 // Dequantize row of IQ4_NL to float
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k);
 
@@ -258,6 +264,10 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
 void DequantizeQ4_0_ROCMFP4(const void* src, float* dst, std::size_t k);
 void DequantizeQ4_0_ROCMFP4_FAST(const void* src, float* dst, std::size_t k);
 void DequantizeQ3_0_ROCMFPX(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of MXFP4 (OCP microscaling, GGML type 39) to float.
+// Matches the device Q8_0 presentation bit-for-bit for finite scales.
+void DequantizeMxfp4(const void* src, float* dst, std::size_t k);
 
 float DotProductQ4_0_ROCMFP4(const void* row_data, std::span<const float> vec,
                              std::size_t k);

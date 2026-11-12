@@ -152,12 +152,21 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
         if (!sparse) {
           if (ratios[i] != 0)
             r.Fail("linear layers cannot use attention compression");
-        } else if (ratios[i] == 0 || ratios[i] > 4096) {
+        } else if (ratios[i] > 4096) {
           r.Fail("attention compression must fit the 4096-row index ring");
-        } else if (c.compress_ratio == 0) {
-          c.compress_ratio = static_cast<std::uint32_t>(ratios[i]);
-        } else if (c.compress_ratio != ratios[i]) {
-          r.Fail("attention.compress_ratios differ between attention layers");
+        } else {
+          // Some converters zero the whole array; the runtime only
+          // implements one shared ratio, so an unspecified attention
+          // layer takes the value its siblings use (4 on this family).
+          std::uint32_t ratio = static_cast<std::uint32_t>(ratios[i]);
+          if (ratio == 0) {
+            ratio = c.compress_ratio != 0 ? c.compress_ratio : 4;
+          }
+          if (c.compress_ratio == 0) {
+            c.compress_ratio = ratio;
+          } else if (c.compress_ratio != ratio) {
+            r.Fail("attention.compress_ratios differ between attention layers");
+          }
         }
       }
     }

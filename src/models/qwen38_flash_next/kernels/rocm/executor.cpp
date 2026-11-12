@@ -3317,11 +3317,14 @@ bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
   const Config& c = config();
   return ExpertMatrixRows(n_tokens) &&
          (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
-          l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
+          l.ffn_gate_exps.type == GgmlType::kQ5_K ||
+          l.ffn_gate_exps.type == GgmlType::kMXFP4 ||
+          l.ffn_gate_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST) &&
          l.ffn_up_exps.type == l.ffn_gate_exps.type &&
          (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
           l.ffn_down_exps.type == GgmlType::kQ8_0 ||
-          l.ffn_down_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST) &&
+          l.ffn_down_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST ||
+          l.ffn_down_exps.type == GgmlType::kMXFP4) &&
          c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
 }
 
@@ -3360,22 +3363,38 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     auto* up_half = reinterpret_cast<__half*>(s_.up_e);
     const WeightType gate_type = l.ffn_gate_exps.type == GgmlType::kQ5_K
                                      ? WeightType::kQ5_K
+                                 : l.ffn_gate_exps.type == GgmlType::kMXFP4
+                                     ? WeightType::kMXFP4
+                                 : l.ffn_gate_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST
+                                     ? WeightType::kQ4_0_ROCMFP4_FAST
                                      : WeightType::kQ4_K;
+    // The paired gate/up kernel only covers Q4_K/Q5_K: MXFP4 pairs take
+    // the two separate routed GEMMs below, which have the native path.
+    // Wide prefill tiles gate/up at 128 rows for the paired kernel; the
+    // separate calls below cannot take 128-row tiles, so they reuse the
+    // 64-row down tiles covering the same buckets (mirrors wide_down).
+    // (The 64-row tiles start at the base of the tile map in both modes.)
+    const bool wide_gate = routed_64_tiles_ != 0;
+    const std::uint32_t gate_n_tiles =
+        wide_gate ? routed_64_tiles_ : routed_n_tiles_;
+    const std::uint32_t gate_tile_rows = wide_gate ? 64 : routed_tile_rows_;
     const bool gated_ok =
-        routed_64_tiles_ != 0
+        wide_gate &&
+                (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
+                 l.ffn_gate_exps.type == GgmlType::kQ5_K)
             ? RoutedGatedF16Gemm(
                   l.ffn_gate_exps.data, l.ffn_up_exps.data, gate_type, x_half,
                   s_.routed_tiles + routed_pair_offset_, routed_pair_tiles_,
                   s_.routed_bounds, s_.rows_token, s_.rows_slot, up_half,
                   c.expert_ff, c.hidden_size, stream_)
             : (RoutedF16Gemm(l.ffn_gate_exps.data, gate_type, x_half,
-                             s_.routed_tiles, routed_n_tiles_,
-                             routed_tile_rows_, s_.routed_bounds, s_.rows_token,
+                             s_.routed_tiles, gate_n_tiles,
+                             gate_tile_rows, s_.routed_bounds, s_.rows_token,
                              s_.rows_slot, nullptr, s_.gate_e, nullptr,
                              c.expert_ff, c.hidden_size, stream_) &&
                RoutedF16Gemm(l.ffn_up_exps.data, gate_type, x_half,
-                             s_.routed_tiles, routed_n_tiles_,
-                             routed_tile_rows_, s_.routed_bounds, s_.rows_token,
+                             s_.routed_tiles, gate_n_tiles,
+                             gate_tile_rows, s_.routed_bounds, s_.rows_token,
                              s_.rows_slot, s_.gate_e, nullptr, up_half,
                              c.expert_ff, c.hidden_size, stream_));
     if (!gated_ok) {
@@ -3386,7 +3405,8 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
         l.ffn_down_exps.type == GgmlType::kQ8_0 ? WeightType::kQ8_0
         : l.ffn_down_exps.type == GgmlType::kQ4_0_ROCMFP4_FAST
             ? WeightType::kQ4_0_ROCMFP4_FAST
-            : WeightType::kQ5_1;
+        : l.ffn_down_exps.type == GgmlType::kMXFP4 ? WeightType::kMXFP4
+                                                  : WeightType::kQ5_1;
     // Prefill takes the 64-token down tiles: they decode each expert's
     // weights over more rows, also where narrower tiles would be fewer.
     const bool wide_down = routed_64_tiles_ != 0;
