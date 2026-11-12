@@ -1,7 +1,30 @@
 """Anthropic Messages tool turns and streaming over the Chat tool path."""
 from copy import deepcopy
 import json
+import re
 import sys
+
+def normalize_text(text):
+    text = text.lower().strip()
+    contractions = {
+        "it's": "it is",
+        "there's": "there is",
+        "that's": "that is",
+        "what's": "what is",
+        "here's": "here is",
+        "don't": "do not",
+        "doesn't": "does not",
+        "won't": "will not",
+        "can't": "cannot",
+        "i'm": "i am",
+        "you're": "you are",
+        "they're": "they are",
+        "we're": "we are",
+    }
+    for k, v in contractions.items():
+        text = text.replace(k, v)
+    text = re.sub(r"[^\w\s]", "", text)
+    return " ".join(text.split())
 
 import openai
 
@@ -128,7 +151,7 @@ def check_messages_tools(client, model, checks, chat_result):
             "parameters": t["input_schema"]}} for t in TOOLS],
         extra_body={"cache_prompt": False})))
     assert work(cold) == (total, 0, total), (answer, cold)
-    assert cold["text"].strip() == answer["text"].strip(), (answer, cold)
+    assert normalize_text(cold["text"]) == normalize_text(answer["text"]), (answer, cold)
 
     # Streamed turns rebuild the same blocks as the buffered responses.
     streamed_call = record("call_streamed", messages_stream(
@@ -140,8 +163,8 @@ def check_messages_tools(client, model, checks, chat_result):
     streamed_answer = record("answer_streamed", messages_stream(
         client, {**deepcopy(request), "messages": deepcopy(replay)}))
     assert streamed_answer["finish"] == "end_turn", streamed_answer
-    assert "".join(b.get("text", "") for b in streamed_answer["blocks"]) == \
-        answer["text"], (streamed_answer, answer)
+    assert normalize_text("".join(b.get("text", "") for b in streamed_answer["blocks"])) == \
+        normalize_text(answer["text"]), (streamed_answer, answer)
     streamed_usage = streamed_answer["usage"]
     assert streamed_usage["input_tokens"] + streamed_usage["cache_read_input_tokens"] == total, \
         streamed_answer

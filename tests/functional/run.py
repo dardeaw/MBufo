@@ -96,7 +96,8 @@ def provenance():
                 "GPU_MAX_HW_QUEUES", "HSA_ENABLE_SDMA", "HSA_ENABLE_INTERRUPT",
                 "HSA_USERPTR_FOR_PAGED_MEM", "HSA_USE_SVM",
                 "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
-                "LD_LIBRARY_PATH", "LD_PRELOAD")}},
+                "LD_LIBRARY_PATH", "LD_PRELOAD",
+                "GUFO_KV_WMMA", "GUFO_KV_I8", "GUFO_KV_V4")}},
     }
 
 
@@ -192,6 +193,13 @@ def compare_runs(baseline_dir, candidate_dir):
 def server(command, log_path, startup_timeout, environment=None):
     def interrupt(signum, frame):
         raise KeyboardInterrupt(f"signal {signum}")
+
+    if environment is None:
+        environment = os.environ.copy()
+    else:
+        environment = dict(environment)
+    for var in ("GUFO_KV_WMMA", "GUFO_KV_I8", "GUFO_KV_V4"):
+        environment.setdefault(var, "1")
 
     with log_path.open("w") as log:
         process = None
@@ -316,6 +324,8 @@ def main():
     output = args.output.resolve()
     # Every suite process inherits the tier; see tier.py.
     os.environ["GUFO_FUNCTIONAL_TIER"] = args.tier
+    for var in ("GUFO_KV_WMMA", "GUFO_KV_I8", "GUFO_KV_V4"):
+        os.environ.setdefault(var, "1")
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
         port = reserve.getsockname()[1]
