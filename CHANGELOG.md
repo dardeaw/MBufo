@@ -3,6 +3,13 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) only, never upstream.
 
+## v0.29.1 (2026-11-13)
+- **Qwen3.8-Flash-Next Q8 KV Prefill Acceleration (131K Context)**:
+  - Fixed quadratic redundant dequantization in chunked prefill: moved KV staging buffers from shared `Session` scope into per-layer `Session::AttentionState`. Each of the 9 full-attention layers now maintains its own buffer and `kv_stage_valid_` cursor, eliminating ~17M redundant token dequantizations across 30 chunks at 131K context.
+  - Preallocated staging buffers directly to `max_context` during `CreateSession` (9 layers total ~1.125 GiB), avoiding frequent synchronous `hipMalloc`/`hipFree` calls and memory fragmentation during prefill.
+  - Prefill speed with blocked Q8 KV reaches 1461~1471 tok/s at 123K/131K tokens (97.2% of native F16 baseline 1514 tok/s, up from 1246 tok/s; -14.4s wall time per turn).
+  - Validation: passed `tool_ladder.py` context degradation benchmarks up to 128k context (23/24 pass, 100% on tool-calling accuracy).
+
 ## v0.29.0 (2026-11-10)
 - **Gemma-4-12B dense bring-up (new usable GGUF)**: wired onto the existing gemma4 engine path (no dedicated serve backend yet); `bench` pp/tg dispatch; fixed an n>1092 prefill GPU fault (x_slab staged only max(qdim,hidden) while the MLP down-projection reads n*shared_ff - now max(qdim,hidden,shared_ff)); load-time K-quant->Q8 preconvert engages the WMMA Q8 prefill route (K-quant types used to fall through to hipBLAS) - pp512 158->778 tok/s, pp2113 122->462 tok/s, greedy generation byte-identical to the old path. Full-512 layers stay F16 (gemma4-wide limit).
 - **Qwen3.5 family**: 35B-A3B verified on the existing qwen35moe path; Qwen3.8 template pin gate no longer misfires on Qwen3.5 geometry (name-based exemption, smaller 0.8/2/4/9/27B siblings keep the LegacyChatMl path). Known limit stands: stay under 60K tokens above 64K context (driver MODE2 reset risk).
