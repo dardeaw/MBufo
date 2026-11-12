@@ -136,7 +136,11 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
     // One ratio per layer; zero on linear layers. Every attention layer of
     // this model shares one value, which is all the runtime implements.
     const auto ratios = r.U64Array(key("attention.compress_ratios"));
-    if (ratios.size() != c.num_layers_all || c.full_attention_interval == 0) {
+    // Trunk-only arrays (no trailing draft entry) are accepted: the loop
+    // below skips nextn layers explicitly.
+    if ((ratios.size() != c.num_layers_all &&
+         ratios.size() != c.num_layers) ||
+        c.full_attention_interval == 0) {
       r.Fail("attention.compress_ratios must describe every layer");
     } else {
       for (std::size_t i = 0; i < ratios.size(); ++i) {
