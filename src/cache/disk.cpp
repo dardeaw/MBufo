@@ -607,6 +607,9 @@ struct DiskStore::Impl {
   do {                  \
   } while (false)
 #endif
+  // Set by the destructor: an in-flight orphan reclamation stops at its next
+  // file instead of finishing a scan of the whole store.
+  std::atomic<bool> stopping{false};
   // Declared last: future joins before state/FDs/lock are destroyed.
   std::future<void> reclamation;
 
@@ -706,6 +709,7 @@ struct DiskStore::Impl {
               [](const auto& a, const auto& b) { return a.file_ < b.file_; });
   }
   ~Impl() {
+    stopping.store(true, std::memory_order_relaxed);
     if (reclamation.valid())
       reclamation.wait();
     while (!verified.empty()) {
@@ -844,22 +848,62 @@ struct DiskStore::Impl {
           "cache durability outcome uncertain; run orphan recovery before "
           "publication or retirement");
   }
+  struct ReclaimStopped {};
   void Reclaim() {
+    try {
+      ReclaimImpl();
+    } catch (const ReclaimStopped&) {
+      // Shutdown interrupted the scan. Every unlink so far was individually
+      // complete; the rest of the orphans are reclaimed at the next start.
+    }
+  }
+  void ReclaimImpl() {
     // Any incomplete cleanup must establish deletion durability before its
     // released byte capacity can fund another publication.
     recovery_required = true;
+    // Referenced files per directory, built once: the scan holds `mutex`, so
+    // entries cannot change under it. Referenced() searches every entry's
+    // components per file, which is quadratic over a store of ~400K files
+    // (minutes of CPU at startup, all of it holding `mutex` and blocking
+    // publication and shutdown).
+    std::set<DiskFileId> ref_manifests, ref_chunks, ref_private;
+    for (const auto& entry : entries) {
+      ref_manifests.insert(entry.file_);
+      for (const auto& c : entry.manifest_.components) {
+        for (const auto& payload : c.chunks)
+          ref_chunks.insert(payload.file);
+        for (auto payload : {c.tail, c.private_state})
+          if (payload)
+            ref_private.insert(payload->file);
+      }
+    }
+    const auto referenced = [&](int directory, const DiskFileId& id) {
+      if (directory == manifests.Get())
+        return ref_manifests.contains(id);
+      if (directory == chunks.Get())
+        return ref_chunks.contains(id);
+      if (directory == private_files.Get())
+        return ref_private.contains(id);
+      return false;  // as Referenced(): temporary files are never referenced
+    };
+    const auto check_stop = [&] {
+      if (stopping.load(std::memory_order_relaxed))
+        throw ReclaimStopped{};
+    };
     // Even invalid manifests are removed and that removal made durable before
     // dependencies: a crash must never resurrect a manifest with deleted bytes.
     Scan(manifests.Get(), [&](const auto& name, const auto&) {
+      check_stop();
       auto id = ParseName(name);
-      if (id && !Referenced(manifests.Get(), *id))
+      if (id && !referenced(manifests.Get(), *id))
         Remove(manifests.Get(), name);
     });
     Sync(manifests.Get());
     for (int directory : {chunks.Get(), private_files.Get(), temporary.Get()}) {
       Scan(directory, [&](const auto& name, const auto&) {
+        check_stop();
         auto id = ParseName(name);
-        if (id && !Referenced(directory, *id))
+        if (id && !referenced(directory, *id))
           Remove(directory, name);
       });
       Sync(directory);
@@ -870,6 +914,7 @@ struct DiskStore::Impl {
     for (int directory :
          {manifests.Get(), chunks.Get(), private_files.Get(), temporary.Get()})
       Scan(directory, [&](const auto& name, const auto& st) {
+        check_stop();
         if (ParseName(name))
           managed = Add(managed, st.st_size);
       });
