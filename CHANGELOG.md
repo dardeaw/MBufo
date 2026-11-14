@@ -3,7 +3,12 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) only, never upstream.
 
-## v0.29.2 (2026-11-15)
+## v0.29.1 (2026-11-13)
+- **Qwen3.8-Flash-Next Q8 KV Prefill Acceleration (131K Context)**:
+  - Fixed quadratic redundant dequantization in chunked prefill: moved KV staging buffers from shared `Session` scope into per-layer `Session::AttentionState`. Each of the 9 full-attention layers now maintains its own buffer and `kv_stage_valid_` cursor, eliminating ~17M redundant token dequantizations across 30 chunks at 131K context.
+  - Preallocated staging buffers directly to `max_context` during `CreateSession` (9 layers total ~1.125 GiB), avoiding frequent synchronous `hipMalloc`/`hipFree` calls and memory fragmentation during prefill.
+  - Prefill speed with blocked Q8 KV reaches 1461~1471 tok/s at 123K/131K tokens (97.2% of native F16 baseline 1514 tok/s, up from 1246 tok/s; -14.4s wall time per turn).
+  - Validation: passed `tool_ladder.py` context degradation benchmarks up to 128k context (23/24 pass, 100% on tool-calling accuracy).
 - **Blocked KV In-Register F16 Dequantization (`GUFO_KV_I8=2`)**:
   - `WmmaCausalAttentionKernel` gains `kBlkF16` in-place execution: reads K and V directly from blocked int8 (`q8`) or packed 4-bit (`q4`) caches and performs exact in-register F16 dequantization, eliminating context-sized F16 staging allocations entirely (~12-15 GiB GTT memory saved across 8 sessions).
   - Uses packed F16 instructions (`v_pk_mul_f16`, converting 8 codes per register) with single-rounding arithmetic bit-identical to the staging route.
@@ -19,13 +24,10 @@ Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) on
   - Merged MTP decode with trailing prefill chunks: decoders execute an MTP step with the arriving prefill chunk riding the same verify pass (`Session::DecodeBatchWithChunk`, `DecodeBatchWithPrefillChunk`, `TryStepMixedMtp`), enabled by default.
   - Added wide `ForwardBatch` mode for trailing prefill chunks (rows > 64): row-wise execution runs `ForwardBody`'s fused arithmetic over every row (`WideMixer`, `WideFfn`, `WideChunkCore`). Fixed `MoeBatch` and `DenseBatch` for rows > 64 to use prefill GEMM/WMMA routes.
   - Mitigates decoder interruption during long prompt arrivals mid-decode: merged pass latency reduced from ~670 ms to ~523 ms, inter-token decode latency drops from 176-216 ms to 133-172 ms, and decoder token throughput during concurrent prefill increases by +33% (48 -> 64 tokens).
-
-## v0.29.1 (2026-11-13)
-- **Qwen3.8-Flash-Next Q8 KV Prefill Acceleration (131K Context)**:
-  - Fixed quadratic redundant dequantization in chunked prefill: moved KV staging buffers from shared `Session` scope into per-layer `Session::AttentionState`. Each of the 9 full-attention layers now maintains its own buffer and `kv_stage_valid_` cursor, eliminating ~17M redundant token dequantizations across 30 chunks at 131K context.
-  - Preallocated staging buffers directly to `max_context` during `CreateSession` (9 layers total ~1.125 GiB), avoiding frequent synchronous `hipMalloc`/`hipFree` calls and memory fragmentation during prefill.
-  - Prefill speed with blocked Q8 KV reaches 1461~1471 tok/s at 123K/131K tokens (97.2% of native F16 baseline 1514 tok/s, up from 1246 tok/s; -14.4s wall time per turn).
-  - Validation: passed `tool_ladder.py` context degradation benchmarks up to 128k context (23/24 pass, 100% on tool-calling accuracy).
+- **Disk Cache Linear Orphan Reclamation & Clean Shutdown**:
+  - Replaced quadratic `DiskStore::Impl::Reclaim` component walks over ~400K-file stores with one-pass referenced file set indexing and O(log n) file lookups.
+  - Reclamation on 99 GB / 405K-file cache finishes within 3 s of readiness (down from minutes of holding store mutex).
+  - Added atomic stop flag in destructor; process stop exits in 2.3 s (resolves previous >45 s timeout and SIGABRT during service restart). Prompt restoration from disk tier verified across restarts (27K cached tokens).
 
 ## v0.29.0 (2026-11-10)
 - **Gemma-4-12B dense bring-up (new usable GGUF)**: wired onto the existing gemma4 engine path (no dedicated serve backend yet); `bench` pp/tg dispatch; fixed an n>1092 prefill GPU fault (x_slab staged only max(qdim,hidden) while the MLP down-projection reads n*shared_ff - now max(qdim,hidden,shared_ff)); load-time K-quant->Q8 preconvert engages the WMMA Q8 prefill route (K-quant types used to fall through to hipBLAS) - pp512 158->778 tok/s, pp2113 122->462 tok/s, greedy generation byte-identical to the old path. Full-512 layers stay F16 (gemma4-wide limit).
