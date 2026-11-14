@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -36,6 +37,33 @@ bool UseMixedBatch() {
     const char* e = std::getenv("GUFO_MIXED_BATCH");
     return e == nullptr || e[0] != '0';
   }();
+  return on;
+}
+[[nodiscard]] bool EnvOn(const char* name) {
+  const char* e = std::getenv(name);
+  return e != nullptr && e[0] != '\0' && e[0] != '0';
+}
+// Speculative (MTP verify) items join the packed mixed attention by default;
+// GUFO_MIXED_SPEC=0 keeps them on per-item cores. Measured on current code:
+// verify chains match the per-item cores to 2e-6 (F16 kernel) and byte for
+// byte (blocked q8/q4), with C2/C4 acceptance unchanged. The earlier 92%->46%
+// collapse came from the retired WmmaMixedAttention route.
+// GUFO_MIXED_CHECK=1 also runs the per-item cores on the same rows and logs
+// the largest output difference per layer. GUFO_MIXED_LOG=1 prints one line
+// per mixed launch.
+bool MixedSpec() {
+  static const bool on = [] {
+    const char* e = std::getenv("GUFO_MIXED_SPEC");
+    return e == nullptr || e[0] == '\0' || e[0] != '0';
+  }();
+  return on;
+}
+bool MixedCheck() {
+  static const bool on = EnvOn("GUFO_MIXED_CHECK");
+  return on;
+}
+bool MixedLog() {
+  static const bool on = EnvOn("GUFO_MIXED_LOG");
   return on;
 }
 // int8 WMMA mixed path (blocked K/V read directly, no F16 staging).
@@ -1164,17 +1192,14 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         }
       }
       std::uint32_t gdn_active = 0;
-      // Mixed-batch attention: all items must be dense rows. Speculative
-      // verify chains are excluded: the packed WmmaMixedAttention reads the
-      // mixed decode/prefill row family and its logits differ from the
-      // single-session path the MTP draft was built against
-      // (docs/MIXED_BATCH.md "chunk family noise"), collapsing draft acceptance
-      // under concurrency (92% -> 46% at batch_width 2-4). Those sessions keep
-      // the legacy per-item cores. Sparse batches keep legacy cores too.
+      // Mixed-batch attention: all items must be dense rows (sparse batches
+      // keep the per-item cores). Speculative verify chains are included
+      // unless GUFO_MIXED_SPEC=0 (see MixedSpec()).
       bool use_mixed =
           !l.linear && UseMixedBatch() && items.size() >= 2 &&
-          !std::any_of(items.begin(), items.end(),
-                       [](const BatchItem& it) { return it.speculative; });
+          (MixedSpec() ||
+           !std::any_of(items.begin(), items.end(),
+                        [](const BatchItem& it) { return it.speculative; }));
       if (use_mixed) {
         for (std::size_t i = 0; i < items.size(); ++i) {
           const auto& item = items[i];
@@ -1330,17 +1355,27 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
             ublks[i].q = base.q + qo;
             ublks[i].k = k_ptr;
             ublks[i].v = v_ptr;
-            ublks[i].gate = base.attn_gate + qo;
+            // The blocked launcher refuses a fused gate; it is applied after
+            // the launch below. The F16 kernel fuses it.
+            ublks[i].gate = i8_mixed ? nullptr : base.attn_gate + qo;
             ublks[i].out = base.ctx + qo;
             ublks[i].kv_len = session.position_ + n;
             ublks[i].q_pos_base = session.position_;
             ublks[i].n_rows = n;
-            ublks[i].k_codec = codec;
-            ublks[i].v_codec = codec;
+            // Blocked sides name their own grid: 18-byte blocks are kQ4.
+            ublks[i].k_codec = !i8_mixed           ? codec
+                               : i8_kbb == 18U     ? mb::MixedKvCodec::kQ4
+                                                   : mb::MixedKvCodec::kQ8;
+            ublks[i].v_codec = !i8_mixed           ? codec
+                               : i8_vbb == 18U     ? mb::MixedKvCodec::kQ4
+                                                   : mb::MixedKvCodec::kQ8;
             ublks[i].head_dim = c.head_dim;
             ublks[i].heads = c.num_heads;
             ublks[i].kv_heads = c.num_kv_heads;
-            ublks[i].score_scale = 0.0F;
+            // Explicit 1/sqrt(d): the blocked launcher branch reads 0 as 1.0
+            // (other models' convention), the F16 kernel as 1/sqrt(d).
+            ublks[i].score_scale =
+                1.0F / std::sqrt(static_cast<float>(c.head_dim));
             ublks[i].q_stride = 0;
             ublks[i].k_stride = 0;
             ublks[i].v_stride = 0;
@@ -1364,9 +1399,31 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           const bool mx_ok = mb::LaunchMixedBatchAttention(
               ublks, items.size(), mixed_scratch_, mixed_scratch_bytes_,
               stream_);
-          fprintf(stderr, "[mixed] il=%u rows=%u blks=%zu ok=%d i8=%d (unified)\n",
-                  il, rows, items.size(), (int)mx_ok, (int)i8_mixed);
-          if (!mx_ok) {
+          if (MixedLog()) {
+            std::size_t spec_items = 0;
+            for (const auto& it : items)
+              spec_items += it.speculative ? 1 : 0;
+            fprintf(stderr,
+                    "[mixed] il=%u rows=%u blks=%zu spec=%zu ok=%d i8=%d\n", il,
+                    rows, items.size(), spec_items, (int)mx_ok, (int)i8_mixed);
+          }
+          // The blocked kernels return the raw attention output; only the F16
+          // kernel fuses the sigmoid output gate.
+          if (mx_ok && i8_mixed) {
+            SigmoidMul(base.ctx, base.attn_gate,
+                       static_cast<std::size_t>(rows) * qdim, stream_);
+          }
+          std::vector<float> mixed_host;
+          if (mx_ok && MixedCheck()) {
+            mixed_host.resize(static_cast<std::size_t>(rows) * qdim);
+            if (!Check(hipMemcpyAsync(mixed_host.data(), base.ctx,
+                                      mixed_host.size() * sizeof(float),
+                                      hipMemcpyDeviceToHost, stream_),
+                       error) ||
+                !Check(hipStreamSynchronize(stream_), error))
+              return false;
+          }
+          if (!mx_ok || !mixed_host.empty()) {
             for (std::size_t i = 0; i < items.size(); ++i) {
               const auto& item = items[i];
               auto& session = *item.session;
@@ -1388,11 +1445,35 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                 return false;
               }
             }
-          } else {
+            UseScratch(base);
+            if (!mixed_host.empty()) {
+              std::vector<float> legacy_host(mixed_host.size());
+              if (!Check(hipMemcpyAsync(legacy_host.data(), base.ctx,
+                                        legacy_host.size() * sizeof(float),
+                                        hipMemcpyDeviceToHost, stream_),
+                         error) ||
+                  !Check(hipStreamSynchronize(stream_), error))
+                return false;
+              for (std::size_t i = 0; i < items.size(); ++i) {
+                const std::size_t r0 = std::size_t{offsets[i]} * qdim;
+                const std::size_t cnt = items[i].tokens.size() * qdim;
+                double max_abs = 0.0, max_ref = 0.0;
+                for (std::size_t k = r0; k < r0 + cnt; ++k) {
+                  max_abs = std::max(
+                      max_abs, std::fabs(double(mixed_host[k]) - legacy_host[k]));
+                  max_ref = std::max(max_ref, std::fabs(double(legacy_host[k])));
+                }
+                fprintf(stderr,
+                        "[mixed-check] il=%u item=%zu n=%zu spec=%d pos=%u "
+                        "max_abs=%.3e max_ref=%.3e\n",
+                        il, i, items[i].tokens.size(),
+                        (int)items[i].speculative, items[i].session->position_,
+                        max_abs, max_ref);
+              }
+            }
+          }
+          if (mx_ok) {
             ++mixed_batches_;
-            // NOTE: the unified kernel already applies the sigmoid output
-            // gate in its epilogue (like WmmaCausalAttention); re-applying
-            // here would square the gate. (Gate iron rule.)
           }
         }
         UseScratch(base);
