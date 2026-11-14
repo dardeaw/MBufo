@@ -3351,6 +3351,13 @@ bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
          c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
 }
 
+bool Executor::MoeExpertsWide(const DeviceLayer& l, const float* x,
+                              float* out, std::uint32_t n_tokens,
+                              std::string* error_msg) const {
+  PrefillPhase phase(true);
+  return MoeExperts(l, x, out, n_tokens, error_msg);
+}
+
 bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                           std::uint32_t n_tokens,
                           std::string* error_msg) const {

@@ -586,6 +586,11 @@ private:
   /// Runs routed experts after the router and shared expert are ready.
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
                   std::uint32_t n_tokens, std::string* error_msg) const;
+  /// MoeExperts with the prefill phase scoped to this call: wide routed
+  /// tiles (64-row down, paired 128-row gate/up) for batches that carry a
+  /// prefill chunk.
+  bool MoeExpertsWide(const DeviceLayer& l, const float* x, float* out,
+                      std::uint32_t n_tokens, std::string* error_msg) const;
   bool MoeBatch(const DeviceLayer& l, const float* x, float* out,
                 std::uint32_t rows, std::string* error) const;
   /// Whether a draft of `session` requesting the small head gets it.

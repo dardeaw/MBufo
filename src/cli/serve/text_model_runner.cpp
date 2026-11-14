@@ -1765,6 +1765,209 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
   return step;
 }
 
+// Prefill step riding one multi-token (MTP) decode step of `decoders`.
+// Mirrors Prefill line for line with the in-pass capture disabled: the budget
+// stops at the next boundary, checkpoint or prompt-snapshot position, and the
+// captures Prefill takes after its step are taken here too. Decoder handling
+// mirrors pool DecodeBatch. nullopt (nothing but idempotent capture joins)
+// when the backend refuses; the caller then runs the ordinary pair.
+std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithDecoders(
+    std::size_t max_input_tokens, std::span<Request*> decoders,
+    std::span<const std::size_t> max_tokens,
+    std::vector<TextDecodeStep>& decode_steps) {
+  if (!*this) {
+    throw std::logic_error("text runner request is empty");
+  }
+  if (impl_->pending_selection.has_value()) {
+    throw std::logic_error(
+        "text runner cannot prefill with a pending decode token");
+  }
+  if (impl_->stopped) {
+    throw std::logic_error("text runner request already stopped");
+  }
+  if (impl_->decode_ready || decoders.empty() ||
+      max_tokens.size() != decoders.size()) {
+    return std::nullopt;
+  }
+  if (max_input_tokens == 0) {
+    throw std::invalid_argument(
+        "text runner prefill budget must be at least one token");
+  }
+  std::vector<TextRunnerDecode> decodes;
+  decodes.reserve(decoders.size());
+  for (std::size_t index = 0; index < decoders.size(); ++index) {
+    auto* request = decoders[index];
+    if (request == nullptr || !*request || request == this ||
+        request->impl_->runner != impl_->runner ||
+        !request->impl_->decode_ready || request->impl_->stopped ||
+        request->impl_->pending_selection.has_value() ||
+        max_tokens[index] == 0) {
+      throw std::logic_error("invalid decoder in merged prefill step");
+    }
+    for (std::size_t j = 0; j < index; ++j) {
+      if (decoders[j] == request) {
+        throw std::invalid_argument(
+            "merged prefill step contains a duplicate decoder");
+      }
+    }
+    decodes.push_back({
+        .state = dynamic_cast<TextRunnerState&>(request->impl_->lease.state()),
+        .max_tokens = max_tokens[index],
+        .sampler = request->impl_->sampler,
+    });
+  }
+  if (impl_->cancelled && impl_->cancelled())
+    return std::nullopt;
+
+  // Prefill's frontier logic with in_pass == false.
+  impl_->CapturePromptSnapshot();
+  const auto snapshot_position = impl_->snapshot_tokens.size();
+  while (!impl_->boundaries.empty() &&
+         impl_->boundaries.front() <= impl_->prefill_offset) {
+    impl_->boundaries.erase(impl_->boundaries.begin());
+  }
+  if (!impl_->boundaries.empty()) {
+    max_input_tokens = std::min(
+        max_input_tokens, impl_->boundaries.front() - impl_->prefill_offset);
+  }
+  while (!impl_->checkpoints.empty() &&
+         impl_->checkpoints.front() <= impl_->prefill_offset)
+    impl_->checkpoints.erase(impl_->checkpoints.begin());
+  if (!impl_->checkpoints.empty())
+    max_input_tokens = std::min(
+        max_input_tokens, impl_->checkpoints.front() - impl_->prefill_offset);
+  if (impl_->prefill_offset < snapshot_position)
+    max_input_tokens =
+        std::min(max_input_tokens, snapshot_position - impl_->prefill_offset);
+  const std::size_t remaining = impl_->prompt.size() - impl_->prefill_offset;
+  auto frontier = impl_->prefill_offset < snapshot_position
+                      ? snapshot_position
+                      : impl_->prompt.size();
+  if (!impl_->checkpoints.empty())
+    frontier = std::min(frontier, impl_->checkpoints.front());
+  if (!impl_->boundaries.empty())
+    frontier = std::min(frontier, impl_->boundaries.front());
+  const auto model_prompt =
+      std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
+
+  auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
+  const auto capabilities = impl_->runner->Descriptor().capabilities;
+  const bool finish_step = capabilities.partial_prefill_retention &&
+                           !capabilities.prefill_rollback && impl_->cancelled;
+  struct Rearm {
+    TextRunnerState* state;
+    const CancellationCheck* check;
+    ~Rearm() {
+      if (state != nullptr)
+        state->SetCancellationCheck(*check);
+    }
+  } rearm{finish_step ? &state : nullptr, &impl_->cancelled};
+  if (finish_step)
+    state.SetCancellationCheck({});
+  impl_->lease.PreparePrefill(std::min(remaining, max_input_tokens));
+  auto lookahead_end = impl_->prompt.size();
+  for (const auto point : impl_->checkpoints)
+    if (point > frontier)
+      lookahead_end = std::min(lookahead_end, point);
+  for (const auto point : impl_->boundaries)
+    if (point > frontier)
+      lookahead_end = std::min(lookahead_end, point);
+  if (snapshot_position > frontier)
+    lookahead_end = std::min(lookahead_end, snapshot_position);
+  struct ClearLookahead {
+    TextRunnerState& state;
+    ~ClearLookahead() { state.SetPrefillLookahead({}); }
+  } clear_lookahead{state};
+  state.SetPrefillLookahead(std::span<const TextRunnerToken>(impl_->prompt)
+                                .subspan(frontier, lookahead_end - frontier));
+
+  impl_->state_reusable = false;
+  for (auto* decoder : decoders) {
+    decoder->CapturePromptSnapshot();
+    decoder->impl_->state_reusable = false;
+  }
+  TextPrefillStep step;
+  try {
+    decode_steps = impl_->runner->DecodeBatchWithPrefillChunk(
+        decodes, state, model_prompt, impl_->prefill_offset, max_input_tokens,
+        step);
+  } catch (const MixedBatchRefused&) {
+    impl_->state_reusable = true;
+    for (auto* decoder : decoders)
+      decoder->impl_->state_reusable = true;
+    return std::nullopt;
+  }
+  if (decode_steps.size() != decoders.size()) {
+    throw std::runtime_error(
+        "text runner returned an invalid merged decode batch size");
+  }
+  // Decoders: pool DecodeBatch's acceptance.
+  for (std::size_t index = 0; index < decoders.size(); ++index) {
+    auto& dstep = decode_steps[index];
+    if (dstep.failure)
+      continue;
+    auto& request = *decoders[index]->impl_;
+    if (dstep.execution_plan.physical_width == 0 ||
+        dstep.execution_plan.physical_width > decoders.size() + 1 ||
+        dstep.selections.size() > max_tokens[index] ||
+        (dstep.selections.empty() && !dstep.stop)) {
+      throw std::runtime_error(
+          "text runner returned an invalid merged decode step");
+    }
+    for (const auto& selection : dstep.selections) {
+      if (selection.stop) {
+        throw std::runtime_error(
+            "text runner merged decode contains an embedded stop selection");
+      }
+      request.sampler.Accept(selection.token);
+      request.generated.push_back(selection.token);
+    }
+    request.stopped = dstep.stop;
+    request.state_reusable = true;
+  }
+  // A chunk that failed after the batch ran: the decode steps above stand;
+  // the request reports the interrupted step and its state is not reused.
+  if (step.interrupted) {
+    impl_->state_reusable = false;
+    return step;
+  }
+  // Chunk: Prefill's post-step bookkeeping.
+  const std::size_t maximum_consumed = std::min(remaining, max_input_tokens);
+  if (step.consumed_tokens == 0 || step.consumed_tokens > maximum_consumed) {
+    throw std::runtime_error(
+        "text runner returned an invalid prefill token count");
+  }
+  impl_->prefill_offset += step.consumed_tokens;
+  const bool reached_frontier = impl_->prefill_offset == impl_->prompt.size();
+  if (step.decode_ready != (impl_->prefill_offset == model_prompt.size())) {
+    throw std::runtime_error(
+        "text runner returned an inconsistent prefill boundary");
+  }
+  impl_->decode_ready = reached_frontier;
+  step.decode_ready = reached_frontier;
+  impl_->state_reusable = true;
+  if (!reached_frontier && impl_->prefill_offset == snapshot_position)
+    impl_->CapturePromptSnapshot(false);
+  const bool history = !impl_->checkpoints.empty() &&
+                       impl_->checkpoints.front() == impl_->prefill_offset;
+  const bool shared = !impl_->boundaries.empty() &&
+                      impl_->boundaries.front() == impl_->prefill_offset;
+  if (history)
+    impl_->checkpoints.erase(impl_->checkpoints.begin());
+  if (shared)
+    impl_->boundaries.erase(impl_->boundaries.begin());
+  const bool shared_with_peers =
+      history &&
+      std::ranges::find(impl_->shared_checkpoints, impl_->prefill_offset) !=
+          impl_->shared_checkpoints.end();
+  if ((history || shared) && impl_->prefill_offset != snapshot_position)
+    impl_->CaptureBoundarySnapshot(impl_->prefill_offset, history, shared,
+                                   shared_with_peers
+                                       ? SnapshotPurpose::kBranchPoint
+                                       : SnapshotPurpose::kHistory);
+  return step;
+}
+
 TextDecodeSelection TextRunnerPool::Request::SelectNext() {
   if (!*this) {
     throw std::logic_error("text runner request is empty");

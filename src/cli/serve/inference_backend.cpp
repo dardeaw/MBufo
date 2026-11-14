@@ -2914,6 +2914,102 @@ public:
     return true;
   }
 
+  // Merged MTP decode + prefill chunk: one engine DecodeBatchWithChunk runs
+  // every decode's MTP step with the chunk riding the verify pass. Refuses
+  // (MixedBatchRefused, nothing mutated) when MTP is off, the shape exceeds
+  // the 1024-row envelope, or the engine rejects the inputs. A chunk that
+  // fails after the batch ran is reported as an interrupted chunk_step with
+  // no consumed tokens, so completed decode steps are still delivered.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchWithPrefillChunk(
+      std::span<const TextRunnerDecode> decodes,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens,
+      TextPrefillStep& chunk_step) const override {
+    auto& qfn = RequireQwenFlashNextState(prefill_state);
+    if (!use_mtp_ || decodes.empty() || decodes.size() > 8 ||
+        offset != qfn.position() || offset >= prompt.size() ||
+        max_input_tokens == 0)
+      throw MixedBatchRefused("merged MTP decode preconditions unmet");
+    const std::size_t remaining = prompt.size() - offset;
+    const std::size_t verify_rows =
+        decodes.size() * (std::size_t{max_draft_tokens_} + 1);
+    if (verify_rows >= 1024)
+      throw MixedBatchRefused("merged MTP decode exceeds envelope");
+    const std::size_t consumed = std::min<std::size_t>(
+        {max_input_tokens, remaining, 1024 - verify_rows,
+         remaining <= model_->PrefillThroughCapacity()
+             ? model_->PrefillThroughCapacity()
+             : model_->PrefillCapacity()});
+    if (consumed == 0)
+      throw MixedBatchRefused("merged MTP decode has no chunk room");
+    const auto count = decodes.size();
+    std::vector<sampling::SamplerState> samplers;
+    std::vector<QwenFlashNextSession::DecodeResult> results(count);
+    std::vector<QwenFlashNextSession::BatchOutcome> outcomes(count);
+    std::vector<QwenFlashNextSession::SpeculativeStats> before;
+    std::vector<QwenFlashNextSession::DecodeRequest> requests;
+    samplers.reserve(count);
+    before.reserve(count);
+    requests.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      auto& state = RequireQwenFlashNextState(decodes[i].state.get());
+      auto& session = state.session();
+      auto& sampler = samplers.emplace_back(decodes[i].sampler.get());
+      before.push_back(session.Statistics());
+      requests.push_back(
+          {&session,
+           std::min<std::size_t>(decodes[i].max_tokens,
+                                 std::uint64_t{max_draft_tokens_} + 1),
+           &sampler, &results[i], state.stop_at_eos(), &outcomes[i]});
+    }
+    const auto chunk_ids =
+        QwenFlashNextEngineTokens(prompt.subspan(offset, consumed));
+    QwenFlashNextSession::BatchOutcome chunk_outcome;
+    std::string error;
+    const bool ok = QwenFlashNextSession::DecodeBatchWithChunk(
+        requests, &qfn.session(), std::span<const std::int32_t>(chunk_ids),
+        &chunk_outcome, &error);
+    bool attempted = chunk_outcome.completed || !chunk_outcome.error.empty();
+    for (const auto& outcome : outcomes)
+      attempted = attempted || outcome.completed || !outcome.error.empty();
+    if (!ok && !attempted)
+      throw MixedBatchRefused("merged MTP decode refused: " + error);
+    const auto active_count = static_cast<std::size_t>(std::count_if(
+        results.begin(), results.end(),
+        [](const auto& result) { return !result.tokens.empty(); }));
+    std::vector<TextDecodeStep> steps(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      if (!outcomes[i].completed) {
+        steps[i].failure = std::make_exception_ptr(std::runtime_error(
+            "Flash-Next merged MTP failed: " + outcomes[i].error));
+        continue;
+      }
+      auto& state = RequireQwenFlashNextState(decodes[i].state.get());
+      decodes[i].sampler.get().CopyDrawStateFrom(samplers[i]);
+      state.set_position(state.session().Position());
+      auto& step = steps[i];
+      ResolveStepTokens(state, results[i].stop, results[i].tokens, &step);
+      step.execution_plan = {.kind = TextExecutionPlanKind::kBatched,
+                             .physical_width = active_count + 1};
+      const auto stats = state.session().Statistics();
+      step.draft_rounds = stats.cycles - before[i].cycles;
+      step.draft_tokens = stats.drafted - before[i].drafted;
+      step.draft_accepted_tokens = stats.accepted - before[i].accepted;
+      step.lookup_tokens = stats.lookup - before[i].lookup;
+      step.lookup_accepted_tokens =
+          stats.lookup_accepted - before[i].lookup_accepted;
+    }
+    if (!chunk_outcome.completed) {
+      chunk_step = {.consumed_tokens = 0, .decode_ready = false,
+                    .interrupted = true};
+      return steps;
+    }
+    qfn.set_position(offset + consumed);
+    chunk_step = {.consumed_tokens = consumed,
+                  .decode_ready = (offset + consumed) == prompt.size()};
+    return steps;
+  }
+
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const override {
     if (decodes.size() < 2 || !use_mtp_) {

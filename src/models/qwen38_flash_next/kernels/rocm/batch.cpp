@@ -788,6 +788,16 @@ bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
                           std::uint32_t rows, std::string* error) const {
   if (rows <= kDecodeRows)
     return Dense(w, x, out, rows, error);
+  // Batches wider than one vec tile (a prefill chunk riding decode rows) take
+  // the prefill GEMM routes (F16 WMMA or W8A8), which read each weight once
+  // for all rows; the vec route below re-reads per 32-row piece and was ~2x
+  // slower for a 512-row chunk. Packed batch scratch is rewritten in place
+  // between layers, so the staging caches are dropped before the call.
+  if (rows > 64) {
+    q8t_src_ = nullptr;
+    half_src_ = nullptr;
+    return Dense(w, x, out, rows, error);
+  }
   if (w.type != core::GgmlType::kQ8_0) {
     core::compute::gemm::fn_compat::SmallGemm(w.data, static_cast<int>(EmbeddingType(w.type)), x, out, rows, w.rows, w.cols,
               stream_);
@@ -903,10 +913,40 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
                          error)) {
     return false;
   }
+  // Batches wider than one vec tile (a prefill chunk riding decode rows):
+  // one routed F16 WMMA pass streams each touched expert once for all rows
+  // instead of once per 64-row tile. MoeExperts defers its epilogue to the
+  // next Combine when out == s_.block_out, but ForwardBatch follows with
+  // CombineBatch, which does not fold it; the epilogue therefore runs here.
+  // (That missed fold is what dropped the whole MoE output in the earlier
+  // whole-batch WMMA attempt.) GUFO_BATCH_WMMA_MOE=0 keeps the vec tiles.
+  static const bool batch_wmma_moe = [] {
+    const char* e = std::getenv("GUFO_BATCH_WMMA_MOE");
+    return e == nullptr || e[0] == '\0' || e[0] != '0';
+  }();
+  if (batch_wmma_moe && rows > 64 && WmmaExperts(l, rows)) {
+    ExpertCounts(base.ids, base.expert_counts, rows, c.num_experts,
+                 c.num_experts_used, stream_);
+    if (!Check(hipMemcpyAsync(counts_host_, base.expert_counts,
+                              c.num_experts * sizeof(std::uint32_t),
+                              hipMemcpyDeviceToHost, stream_),
+               error) ||
+        !Check(hipEventRecord(counts_ready_, stream_), error))
+      return false;
+    if (!MoeExpertsWide(l, x, out, rows, error))
+      return false;
+    if (moe_pending_) {
+      moe_pending_ = false;
+      MoeEpilogueVec4F16(reinterpret_cast<const __half*>(s_.down_e),
+                         s_.weights, s_.shexp_out, s_.router + c.num_experts,
+                         c.num_experts + 1, out, rows, c.num_experts_used,
+                         c.hidden_size, stream_);
+    }
+    return true;
+  }
   // Small batches keep the single-decode-matched kernels bit-exactly:
   // Q4_K vector fast path (vec cap 64, used to 32) and the tiled MoeExperts
-  // loop. Above 32 rows Q4_K batches use 64-row vec tiles (exact); the WMMA
-  // route stays out pending batch-numerics characterization (see docs).
+  // loop. Above 32 rows Q4_K batches use 64-row vec tiles (exact).
   if (rows <= 32 && l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
       l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
     // Share expert weights across request boundaries while retaining the
@@ -1015,6 +1055,14 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   if (rows == 0 || rows > kMaxBatchRows || rows > options_.max_batch) {
     return Fail(error, "decode batch exceeds executor capacity");
   }
+  // Logit rows: all rows, except that a trailing prefill chunk (a
+  // non-speculative item longer than max_speculative) contributes only its
+  // last row, selected at offset offsets[last] (see the head below).
+  const bool trailing_chunk =
+      !items.back().speculative &&
+      items.back().tokens.size() > options_.max_speculative;
+  const std::uint32_t logit_rows =
+      trailing_chunk ? offsets[items.size() - 1] + 1 : rows;
   // MTP parity with single Forward (kPrefill): a non-speculative multi-row
   // item is a prefill chunk, which requires a consumed predictor frontier and
   // a predictor-KV feed below. Legacy refuses loudly here, before any GPU
@@ -1506,10 +1554,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
               ? (c.IsPleLayer(il + 1) ? nullptr
                                       : layers[il + 1].hc_attn.norm.f32())
               : model_->hc_head().norm.f32();
-      // NOTE: no UseScratch(base) here on purpose. MoeExperts sets moe_pending_
-      // when out == s_.block_out so this Combine folds the epilogue; a restore
-      // would clear that flag (UseScratch resets it) and drop the whole MoE
-      // contribution silently. s_ already addresses base.
+      // CombineBatch does not fold a deferred MoE epilogue; MoeBatch settles
+      // its own epilogue before returning, so block_out is final here.
       CombineBatch(base.res, next_norm, rows);
       normed = next_norm != nullptr;
     }
@@ -1533,6 +1579,25 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       }
     }
     UseScratch(base);
+    if (logit_rows != rows) {
+      // A trailing prefill chunk needs only its last row's logits (as the
+      // single Forward's n_logits = 1): head rows are every leading row plus
+      // that one, compacted so its logits land at row `lead`.
+      const auto lead = offsets[items.size() - 1];
+      const auto chunk_n = static_cast<std::uint32_t>(items.back().tokens.size());
+      if (lead > 0 && !HcMixBatch(model_->hc_head(), base.res, false,
+                                  base.mixed, nullptr, lead, error))
+        return false;
+      return HcMixBatch(model_->hc_head(),
+                        base.res + static_cast<std::size_t>(lead + chunk_n - 1) *
+                                       c.HcDim(),
+                        false,
+                        base.mixed + static_cast<std::size_t>(lead) *
+                                         c.hidden_size,
+                        nullptr, 1, error) &&
+             DenseBatch(model_->output(), base.mixed, batch_logits_,
+                        logit_rows, error);
+    }
     return HcMixBatch(model_->hc_head(), base.res, false, base.mixed, nullptr,
                       rows, error) &&
            DenseBatch(model_->output(), base.mixed, batch_logits_, rows, error);
@@ -1575,7 +1640,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       return false;
     }
   }
-  batch_rows_ = rows;
+  batch_rows_ = logit_rows;
   return true;
 }
 

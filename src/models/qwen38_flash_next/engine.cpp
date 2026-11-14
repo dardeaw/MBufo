@@ -1494,9 +1494,154 @@ bool Session::EvaluateBatch(std::span<const AdvanceRequest> requests,
   return RunIsolatedBatch(requests, error_msg);
 }
 
+bool Session::DecodeBatchWithChunk(std::span<const DecodeRequest> requests,
+                                   Session* chunk_session,
+                                   std::span<const std::int32_t> chunk,
+                                   BatchOutcome* chunk_outcome,
+                                   std::string* error_msg) {
+  // Validation first: a refusal returns false with every outcome untouched,
+  // so the caller can run the ordinary decode batch and prefill instead.
+  const auto refuse = [&](const char* what) {
+    AssignError(error_msg, what);
+    return false;
+  };
+  if (requests.empty() || requests.size() > 8 || chunk_session == nullptr ||
+      chunk.empty() || chunk_outcome == nullptr)
+    return refuse("mixed MTP batch needs decodes and a chunk");
+  Model* model = chunk_session->model_.get();
+  if (!chunk_session->valid_ ||
+      chunk_session->Position() + chunk.size() > chunk_session->ContextSize())
+    return refuse("mixed MTP batch chunk is not runnable");
+  for (const auto token : chunk) {
+    if (token < 0 || static_cast<std::uint32_t>(token) >= model->VocabSize())
+      return refuse("mixed MTP batch chunk token out of range");
+  }
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& r = requests[i];
+    bool valid = r.session != nullptr && r.session != chunk_session &&
+                 r.session->valid_ && r.session->model_.get() == model &&
+                 r.sampler != nullptr && r.result != nullptr &&
+                 r.outcome != nullptr && r.max_tokens > 0 &&
+                 !r.session->tokens_.empty();
+    for (std::size_t j = 0; valid && j < i; ++j)
+      valid = r.session != requests[j].session &&
+              r.sampler != requests[j].sampler &&
+              r.result != requests[j].result &&
+              r.outcome != requests[j].outcome;
+    if (!valid)
+      return refuse("invalid or non-independent mixed MTP batch");
+  }
+  try {
+    for (const auto& r : requests) {
+      if (r.session->continuation_hooks_)
+        r.session->continuation_hooks_->BeforeExecution();
+      if (r.session->session_->Cancelled())
+        return refuse("mixed MTP batch peer cancelled");
+    }
+    if (chunk_session->continuation_hooks_)
+      chunk_session->continuation_hooks_->BeforeExecution();
+    if (chunk_session->session_->Cancelled())
+      return refuse("mixed MTP batch chunk cancelled");
+  } catch (const std::exception& exception) {
+    return refuse(exception.what());
+  }
+  std::array<std::uint64_t, 8> epochs{};
+  std::array<sampling::SamplerState::DrawState, 8> draws{};
+  std::array<speculative::PromptLookup<>::State, 8> lookup_states{};
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& r = requests[i];
+    *r.outcome = {};
+    epochs[i] = r.session->session_->MutationEpoch();
+    draws[i] = r.sampler->SaveDrawState();
+    lookup_states[i] = r.session->lookup_.Save();
+  }
+  *chunk_outcome = {};
+  const auto chunk_epoch = chunk_session->session_->MutationEpoch();
+
+  std::string shared_error;
+  try {
+    (void)DecodeBatchImpl(requests, &shared_error, chunk_session, chunk,
+                          chunk_outcome);
+  } catch (const std::exception& exception) {
+    shared_error = exception.what();
+  }
+  // Decodes: exactly RunIsolatedBatch's settlement.
+  bool success = true;
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& r = requests[i];
+    auto& outcome = *r.outcome;
+    auto& session = *r.session;
+    if (!outcome.completed && outcome.error.empty()) {
+      if (session.session_->Cancelled()) {
+        outcome.error = "generation cancelled";
+      } else if (session.session_->MutationEpoch() == epochs[i]) {
+        session.valid_ = true;
+        r.sampler->RestoreDrawState(draws[i]);
+        session.lookup_.Restore(lookup_states[i]);
+        try {
+          outcome.completed = session.DecodeStep(
+              r.max_tokens, *r.sampler, r.result, &outcome.error,
+              r.stop_at_eos);
+        } catch (const std::exception& exception) {
+          outcome.error = exception.what();
+        }
+      } else {
+        outcome.error =
+            shared_error.empty() ? "batch execution failed" : shared_error;
+      }
+    }
+    if (!outcome.completed) {
+      if (outcome.error.empty())
+        outcome.error = "batch request failed";
+      if (session.session_->MutationEpoch() != epochs[i])
+        session.valid_ = false;
+      if (success)
+        AssignError(error_msg, outcome.error);
+      success = false;
+    } else {
+      session.valid_ = true;
+    }
+  }
+  // Chunk: completed, re-synced alone when untouched, or poisoned.
+  if (!chunk_outcome->completed && chunk_outcome->error.empty()) {
+    if (chunk_session->session_->Cancelled()) {
+      chunk_outcome->error = "generation cancelled";
+    } else if (chunk_session->session_->MutationEpoch() == chunk_epoch) {
+      chunk_session->valid_ = true;
+      std::vector<std::int32_t> full(chunk_session->tokens_.begin(),
+                                     chunk_session->tokens_.end());
+      full.insert(full.end(), chunk.begin(), chunk.end());
+      try {
+        chunk_outcome->completed =
+            chunk_session->Sync(full, &chunk_outcome->error);
+      } catch (const std::exception& exception) {
+        chunk_outcome->error = exception.what();
+      }
+    } else {
+      chunk_outcome->error =
+          shared_error.empty() ? "batch execution failed" : shared_error;
+    }
+  }
+  if (!chunk_outcome->completed) {
+    if (chunk_outcome->error.empty())
+      chunk_outcome->error = "mixed chunk failed";
+    if (chunk_session->session_->MutationEpoch() != chunk_epoch)
+      chunk_session->valid_ = false;
+    if (success)
+      AssignError(error_msg, chunk_outcome->error);
+    success = false;
+  } else {
+    chunk_session->valid_ = true;
+  }
+  return success;
+}
+
 bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
-                              std::string* error_msg) {
-  if (requests.size() == 1) {
+                              std::string* error_msg, Session* chunk_session,
+                              std::span<const std::int32_t> chunk,
+                              BatchOutcome* chunk_outcome) {
+  const bool with_chunk = chunk_session != nullptr && !chunk.empty();
+  if (requests.size() == 1 && !with_chunk) {
     const auto& r = requests.front();
     r.outcome->completed = r.session->DecodeStep(
         r.max_tokens, *r.sampler, r.result, &r.outcome->error, r.stop_at_eos);
@@ -1549,6 +1694,12 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
     }
   }
   if (!DraftCatchUpBatch(catchup, error_msg, propose))
+    return false;
+  // Feed protocol for the riding chunk: consume a pending predictor frontier
+  // with its first token before the trunk appends it.
+  if (with_chunk && chunk_session->MtpEnabled() &&
+      !chunk_session->tokens_.empty() &&
+      !chunk_session->DraftCatchUp(chunk.front(), false, error_msg))
     return false;
   // Each round shares predictor projections across ready sessions.
   // Attention state, proposal distributions and RNG streams stay private.
@@ -1652,7 +1803,11 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
     return v > 0 ? static_cast<std::uint32_t>(v) : 64U;
   }();
   std::vector<std::pair<std::size_t, std::size_t>> groups;
-  if (!items.empty()) {
+  if (with_chunk) {
+    // One pass: every verify chain plus the chunk, which rides last so the
+    // chains keep their row offsets and the chunk's logit row is `offset`.
+    groups.emplace_back(0, items.size());
+  } else if (!items.empty()) {
     if (!any_speculative || items.size() <= 1) {
       groups.emplace_back(0, items.size());
     } else {
@@ -1677,8 +1832,26 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
     group.reserve(end - begin);
     for (std::size_t i = begin; i < end; ++i)
       group.push_back(items[i].batch);
+    if (with_chunk)
+      group.push_back({chunk_session->session_.get(), chunk, false});
+    const auto forward_start = std::chrono::steady_clock::now();
     if (!exec.ForwardBatch(group, error_msg))
       return false;
+    if (with_chunk && std::getenv("GUFO_MIXED_LOG") != nullptr) {
+      const auto now = std::chrono::steady_clock::now();
+      std::uint32_t verify_rows = 0;
+      for (std::size_t i = begin; i < end; ++i)
+        verify_rows += static_cast<std::uint32_t>(items[i].batch.tokens.size());
+      std::fprintf(
+          stderr,
+          "[mixed-mtp] decodes=%zu verify_rows=%u chunk=%zu draft_ms=%.1f "
+          "forward_ms=%.1f\n",
+          end - begin, verify_rows, chunk.size(),
+          std::chrono::duration<double, std::milli>(forward_start - cycle_start)
+              .count(),
+          std::chrono::duration<double, std::milli>(now - forward_start)
+              .count());
+    }
     std::uint32_t offset = 0;
     for (std::size_t i = begin; i < end; ++i) {
       const auto& p = pending[items[i].request];
@@ -1706,6 +1879,32 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
         r.outcome->error = exception.what();
       }
     }
+    if (with_chunk) {
+      // Feed bookkeeping: last-row logits, the kept hidden rows the predictor
+      // replays. ForwardBatch compacts a chunk longer than max_speculative to
+      // its last row at `offset`; a shorter one keeps all its logit rows.
+      const auto n = chunk.size();
+      const auto logit_row =
+          n > exec.max_speculative()
+              ? offset
+              : offset + static_cast<std::uint32_t>(n) - 1;
+      try {
+        if (chunk_session->session_->Cancelled()) {
+          chunk_outcome->error = "generation cancelled";
+        } else if (exec.SelectBatchLogits(logit_row, 1,
+                                          chunk_session->logits_.data(),
+                                          &chunk_outcome->error)) {
+          chunk_session->hidden_base_ = static_cast<std::uint32_t>(
+              chunk_session->tokens_.size() + n -
+              std::min<std::size_t>(n, exec.max_speculative()));
+          chunk_session->tokens_.insert(chunk_session->tokens_.end(),
+                                        chunk.begin(), chunk.end());
+          chunk_outcome->completed = true;
+        }
+      } catch (const std::exception& exception) {
+        chunk_outcome->error = exception.what();
+      }
+    }
   }
   for (std::size_t i = 0; i < requests.size(); ++i) {
     if (launched[i])
@@ -1724,9 +1923,11 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
   }
   const bool used_lookup =
       std::ranges::any_of(pending, [](const auto& p) { return p.lookup != 0; });
-  if (used_lookup)
+  if (used_lookup || with_chunk)
     policy.SkipCycle();
-  if (!used_lookup && batch_drafts && items.size() == requests.size() &&
+  // A riding chunk's cost is not a decode cost: never train the controller.
+  if (!used_lookup && !with_chunk && batch_drafts &&
+      items.size() == requests.size() &&
       std::ranges::all_of(requests,
                           [](const auto& r) { return r.outcome->completed; })) {
     const auto ms = std::chrono::duration<float, std::milli>(

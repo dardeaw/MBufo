@@ -233,6 +233,17 @@ public:
   [[nodiscard]] static bool EvaluateBatchWithChunk(
       std::span<const AdvanceRequest> advances, Session* chunk_session,
       std::span<const std::int32_t> chunk, std::string* error_msg = nullptr);
+  /// One MTP decode step for every request (draft, verify, accept) with one
+  /// prefill chunk of a distinct session riding the same verify pass. The
+  /// chunk follows Feed: predictor catch-up first, its last-row logits kept.
+  /// Decode outcomes follow DecodeBatch (independent retry when untouched,
+  /// poisoned when partially mutated). The chunk is completed, re-synced
+  /// alone when the batch did not touch it, or poisoned. Returns false with
+  /// nothing mutated when the inputs are not a valid independent batch.
+  [[nodiscard]] static bool DecodeBatchWithChunk(
+      std::span<const DecodeRequest> requests, Session* chunk_session,
+      std::span<const std::int32_t> chunk, BatchOutcome* chunk_outcome,
+      std::string* error_msg = nullptr);
   [[nodiscard]] std::span<const float> Logits() const noexcept {
     return valid_ ? std::span<const float>(logits_) : std::span<const float>{};
   }
@@ -347,7 +358,10 @@ private:
                              std::span<const std::int32_t> chunk,
                              std::string* error_msg);
   static bool DecodeBatchImpl(std::span<const DecodeRequest> requests,
-                              std::string* error_msg);
+                              std::string* error_msg,
+                              Session* chunk_session = nullptr,
+                              std::span<const std::int32_t> chunk = {},
+                              BatchOutcome* chunk_outcome = nullptr);
   static bool EvaluateBatchImpl(std::span<const AdvanceRequest> requests,
                                 std::string* error_msg);
   struct PendingDecode;

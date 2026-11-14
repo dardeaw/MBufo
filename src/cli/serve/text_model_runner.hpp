@@ -481,6 +481,25 @@ public:
     (void)chunk_step;
     return false;
   }
+  /// Merged multi-token decode step + prefill chunk: every decode runs one
+  /// MTP step and the chunk rides the same verify pass. Throws
+  /// MixedBatchRefused with nothing mutated when the backend cannot merge
+  /// (the default); otherwise returns one step per decode (failures per lane)
+  /// and fills chunk_step, or throws after partial work.
+  [[nodiscard]] virtual std::vector<TextDecodeStep>
+  DecodeBatchWithPrefillChunk(std::span<const TextRunnerDecode> decodes,
+                              TextRunnerState& prefill_state,
+                              std::span<const TextRunnerToken> prompt,
+                              std::size_t offset, std::size_t max_input_tokens,
+                              TextPrefillStep& chunk_step) const {
+    (void)decodes;
+    (void)prefill_state;
+    (void)prompt;
+    (void)offset;
+    (void)max_input_tokens;
+    (void)chunk_step;
+    throw MixedBatchRefused("backend has no merged multi-token decode");
+  }
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
   /// Retain a safe executed frontier when cancellation interrupts publication
@@ -624,6 +643,15 @@ public:
     [[nodiscard]] std::optional<TextPrefillStep> PrefillWithCoworkers(
         std::size_t max_input_tokens, std::span<Request*> coworkers,
         std::span<std::exception_ptr> coworker_failures);
+    /// Prefill step whose chunk rides one multi-token decode step of
+    /// `decoders` (MTP). Budget clipping and post-step captures follow
+    /// Prefill exactly (never an in-pass capture). nullopt, with nothing
+    /// mutated, when the merge is refused; `decode_steps` gets one step per
+    /// decoder on success (lane failures inside the steps).
+    [[nodiscard]] std::optional<TextPrefillStep> PrefillWithDecoders(
+        std::size_t max_input_tokens, std::span<Request*> decoders,
+        std::span<const std::size_t> max_tokens,
+        std::vector<TextDecodeStep>& decode_steps);
     [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();
     [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);
