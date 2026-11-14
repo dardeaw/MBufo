@@ -1637,14 +1637,20 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
       any_speculative = any_speculative || pending[i].speculative;
     }
   }
-  // D-1 verify-batch core: a cohort carrying speculative verify chains shares
-  // one ForwardBatch only while its packed rows stay on the single-path
-  // kernels (kDecodeRows total). Past that the batched GEMM routes take
-  // different numerics from single Forward and flip greedy accepts at close
-  // races (measured: cold-concurrent exact, warm width-4 divergent,
-  // --draft-tokens 1 restores exactness). Plain-only cohorts are bit-exact at
-  // any width and keep the single launch.
-  constexpr std::uint32_t kVerifyBatchMaxRows = 8;
+  // Verify-batch grouping: a cohort carrying speculative verify chains is
+  // split into ForwardBatch groups of at most this many packed rows. Above 8
+  // rows the batched GEMM routes use different numerics from single Forward,
+  // so greedy outputs can differ from C1 at near-ties; they are not less
+  // accurate. Splitting at 8 restreams the experts once per group, and the
+  // draft-length controller learns short drafts. Measured C4 (q8, MTP,
+  // 16 requests): cap 8 -> 2.52 tokens per verify round, 88.5 tok/s;
+  // cap 64 -> 3.17 tokens per round, 96.5 tok/s, 20% fewer rounds.
+  // GUFO_VERIFY_BATCH_ROWS=8 restores the C1-exact grouping.
+  static const std::uint32_t kVerifyBatchMaxRows = [] {
+    const char* e = std::getenv("GUFO_VERIFY_BATCH_ROWS");
+    const long v = e != nullptr ? std::strtol(e, nullptr, 10) : 0;
+    return v > 0 ? static_cast<std::uint32_t>(v) : 64U;
+  }();
   std::vector<std::pair<std::size_t, std::size_t>> groups;
   if (!items.empty()) {
     if (!any_speculative || items.size() <= 1) {

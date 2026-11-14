@@ -1516,17 +1516,17 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     for (std::size_t i = 0; i < items.size(); ++i) {
       const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
       UseScratch(RowScratch(base, offsets[i]));
-      // Stage final residuals for immediate MTP drafting. target_hidden
-      // holds max_speculative rows; bigger items (prefill chunks) skip this:
-      // the ForwardBatch MTP tail below feeds their predictor KV instead, and
-      // the tail advances mtp_.position past the chunk so kept rows are never
-      // read for it. Copying n > max_speculative rows would heap-overflow.
-      if (n > options_.max_speculative)
-        continue;
+      // Stage final residuals for immediate MTP drafting, exactly as the
+      // single Forward does: the last min(n, max_speculative) rows. The MTP
+      // tail below feeds tokens[1:] only, so the predictor stays one position
+      // behind and the next DraftReplay reads the chunk's last kept row here;
+      // skipping the copy for long chunks left that row stale.
+      const std::uint32_t kept = std::min(n, options_.max_speculative);
       if (!items[i].session->Cancelled() && items[i].session->mtp_enabled_ &&
           !Check(hipMemcpyAsync(
-                     items[i].session->mtp_.target_hidden, s_.res,
-                     static_cast<std::size_t>(n) * c.HcDim() * sizeof(float),
+                     items[i].session->mtp_.target_hidden,
+                     s_.res + static_cast<std::size_t>(n - kept) * c.HcDim(),
+                     static_cast<std::size_t>(kept) * c.HcDim() * sizeof(float),
                      hipMemcpyDeviceToDevice, stream_),
                  error)) {
         return false;
