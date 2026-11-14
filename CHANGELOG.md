@@ -3,6 +3,23 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) only, never upstream.
 
+## v0.29.2 (2026-11-15)
+- **Blocked KV In-Register F16 Dequantization (`GUFO_KV_I8=2`)**:
+  - `WmmaCausalAttentionKernel` gains `kBlkF16` in-place execution: reads K and V directly from blocked int8 (`q8`) or packed 4-bit (`q4`) caches and performs exact in-register F16 dequantization, eliminating context-sized F16 staging allocations entirely (~12-15 GiB GTT memory saved across 8 sessions).
+  - Uses packed F16 instructions (`v_pk_mul_f16`, converting 8 codes per register) with single-rounding arithmetic bit-identical to the staging route.
+  - Now the default for the Q8 KV codec (`GUFO_KV_I8=2`). Yields +14.8% (Q8) and +16.0% (Q4) prefill throughput improvements over integer WMMA, maintaining bit-identical attention outputs across dense and sparse windows.
+- **Mixed-Batch Attention & MTP Verification Alignment**:
+  - Corrected packed mixed-batch attention for blocked Q8/Q4 rows: explicit `1/sqrt(head_dim)` scaling, omitted fused gate on blocked rows with post-launch `SigmoidMul`, and registered explicit codecs.
+  - Speculative MTP verify chains now join packed attention by default (`GUFO_MIXED_SPEC=1`), matching per-item baselines within 2e-6 on F16 KV and byte-for-byte on Q8/K4V4 while preserving 83-88% acceptance.
+- **64-Row Verify-Batch Grouping (`GUFO_VERIFY_BATCH_ROWS=64`)**:
+  - Packaged verify cohorts up to 64 rows, eliminating multiple short ForwardBatch invocations per step that restreamed MoE experts.
+  - Increased tokens per round from 2.52 to 3.17, reduced verify rounds by 20%, and increased aggregate C4 decode throughput from 88.5 to 96.5 tok/s (+9%).
+  - Fixed `target_hidden` staging for chunked prefill items exceeding `max_speculative`.
+- **Merged MTP Decode + Prefill Chunk & Wide ForwardBatch (`GUFO_MIXED_MTP=1`)**:
+  - Merged MTP decode with trailing prefill chunks: decoders execute an MTP step with the arriving prefill chunk riding the same verify pass (`Session::DecodeBatchWithChunk`, `DecodeBatchWithPrefillChunk`, `TryStepMixedMtp`), enabled by default.
+  - Added wide `ForwardBatch` mode for trailing prefill chunks (rows > 64): row-wise execution runs `ForwardBody`'s fused arithmetic over every row (`WideMixer`, `WideFfn`, `WideChunkCore`). Fixed `MoeBatch` and `DenseBatch` for rows > 64 to use prefill GEMM/WMMA routes.
+  - Mitigates decoder interruption during long prompt arrivals mid-decode: merged pass latency reduced from ~670 ms to ~523 ms, inter-token decode latency drops from 176-216 ms to 133-172 ms, and decoder token throughput during concurrent prefill increases by +33% (48 -> 64 tokens).
+
 ## v0.29.1 (2026-11-13)
 - **Qwen3.8-Flash-Next Q8 KV Prefill Acceleration (131K Context)**:
   - Fixed quadratic redundant dequantization in chunked prefill: moved KV staging buffers from shared `Session` scope into per-layer `Session::AttentionState`. Each of the 9 full-attention layers now maintains its own buffer and `kv_stage_valid_` cursor, eliminating ~17M redundant token dequantizations across 30 chunks at 131K context.
