@@ -3962,6 +3962,52 @@ __device__ __forceinline__ int32x8_t WmmaI8(int32x4_t a, int32x4_t b,
   return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
 }
 
+/// Eight signed 8-bit codes times an F16 block scale, as F16. Each code is
+/// placed in the low byte of the F16 1024 (0x6400 | (code ^ 0x80) is exactly
+/// 1152 + code), the bias subtracted exactly and the scale applied with one
+/// packed F16 multiply. The exact product of two F16 values fits in F32, so
+/// the single F16 rounding equals DequantizeKvRows' __float2half(code * scale).
+__device__ __forceinline__ uint4 BlkQ8x8ToHalf(std::uint64_t codes,
+                                               __half scale) {
+  const std::uint32_t lo = static_cast<std::uint32_t>(codes) ^ 0x80808080U;
+  const std::uint32_t hi = static_cast<std::uint32_t>(codes >> 32) ^ 0x80808080U;
+  const __half2 bias = __halves2half2(__ushort_as_half(0x6480),
+                                      __ushort_as_half(0x6480));
+  const __half2 sc2 = __halves2half2(scale, scale);
+  const auto pair = [&](std::uint32_t word, std::uint32_t sel) {
+    const std::uint32_t bits = __builtin_amdgcn_perm(0x64646464U, word, sel);
+    __half2 h;
+    __builtin_memcpy(&h, &bits, sizeof(bits));
+    h = __hmul2(__hsub2(h, bias), sc2);
+    std::uint32_t out;
+    __builtin_memcpy(&out, &h, sizeof(out));
+    return out;
+  };
+  return make_uint4(pair(lo, 0x04010400U), pair(lo, 0x04030402U),
+                    pair(hi, 0x04010400U), pair(hi, 0x04030402U));
+}
+
+/// Eight signed 4-bit codes (element i in nibble i of `packed`) times an F16
+/// block scale, as F16; the same exact-bias construction with 1032.
+__device__ __forceinline__ uint4 BlkQ4x8ToHalf(std::uint32_t packed,
+                                               __half scale) {
+  const std::uint32_t x = packed ^ 0x88888888U;
+  const __half2 bias = __halves2half2(__ushort_as_half(0x6408),
+                                      __ushort_as_half(0x6408));
+  const __half2 sc2 = __halves2half2(scale, scale);
+  const auto pair = [&](std::uint32_t shift) {
+    const std::uint32_t bits = 0x64006400U | ((x >> shift) & 0xFU) |
+                               (((x >> (shift + 4)) & 0xFU) << 16);
+    __half2 h;
+    __builtin_memcpy(&h, &bits, sizeof(bits));
+    h = __hmul2(__hsub2(h, bias), sc2);
+    std::uint32_t out;
+    __builtin_memcpy(&out, &h, sizeof(out));
+    return out;
+  };
+  return make_uint4(pair(0), pair(8), pair(16), pair(24));
+}
+
 /// `kBlkF16` reads the blocked (int8 or packed 4-bit) K/V caches in place and
 /// dequantizes both to F16 in registers, then runs the unchanged F16 score,
 /// softmax and PV sequence. The values equal DequantizeKvRows' staging output
@@ -4413,6 +4459,26 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 #pragma unroll
         for (std::uint32_t j = 0; j < kVRegs; ++j) {
           uint4 reg = make_uint4(0u, 0u, 0u, 0u);
+          if constexpr (kBlkF16) {
+            if (live) {
+              const std::uint32_t dim = v_slice + (j * 8);
+              const std::uint8_t* vent = vrow + ((dim / 32) * v_block_bytes);
+              if (v_block_bytes == 34) {
+                std::uint64_t codes = 0;
+                __builtin_memcpy(&codes, vent + (dim % 32), sizeof(codes));
+                reg = BlkQ8x8ToHalf(
+                    codes, *reinterpret_cast<const __half*>(vent + 32));
+              } else {
+                std::uint32_t packed = 0;
+                __builtin_memcpy(&packed, vent + ((dim % 32) / 2),
+                                 sizeof(std::uint32_t));
+                reg = BlkQ4x8ToHalf(
+                    packed, *reinterpret_cast<const __half*>(vent + 16));
+              }
+            }
+            dst[j] = reg;
+            continue;
+          }
           if (live) {
             const std::uint32_t dim = v_slice + (j * 8);
             const std::uint8_t* vent = vrow + ((dim / 32) * v_block_bytes);
@@ -4530,30 +4596,17 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
               k_blk_base +
               (static_cast<std::size_t>(key_position) * row_bytes) +
               ((d8 / 32) * k_block_bytes);
-          auto* hp = reinterpret_cast<__half*>(&reg);
           if (k_block_bytes == 34) {
-            const float sc =
-                __half2float(*reinterpret_cast<const __half*>(kent + 32));
+            const __half sc = *reinterpret_cast<const __half*>(kent + 32);
             std::uint64_t codes = 0;
             __builtin_memcpy(&codes, kent + (d8 % 32), sizeof(codes));
-#pragma unroll
-            for (std::uint32_t i = 0; i < 8; ++i) {
-              const int qc = static_cast<int>(
-                  static_cast<std::int8_t>((codes >> (8 * i)) & 0xFFu));
-              hp[i] = __float2half(static_cast<float>(qc) * sc);
-            }
+            reg = BlkQ8x8ToHalf(codes, sc);
           } else {
-            const float sc =
-                __half2float(*reinterpret_cast<const __half*>(kent + 16));
+            const __half sc = *reinterpret_cast<const __half*>(kent + 16);
             std::uint32_t packed = 0;
             __builtin_memcpy(&packed, kent + ((d8 % 32) / 2),
                              sizeof(std::uint32_t));
-#pragma unroll
-            for (std::uint32_t i = 0; i < 8; ++i) {
-              const int qc = static_cast<int>((packed >> (4 * i)) & 0xFu);
-              const int val = qc - (qc & 8 ? 16 : 0);
-              hp[i] = __float2half(static_cast<float>(val) * sc);
-            }
+            reg = BlkQ4x8ToHalf(packed, sc);
           }
         }
         dst[n] = reg;

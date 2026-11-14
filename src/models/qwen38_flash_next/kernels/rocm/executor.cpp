@@ -1387,16 +1387,21 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
         at.v_cache_kv = Alloc<std::uint8_t>(
             a, static_cast<std::size_t>(max_context) * kv_value_row, error_msg,
             &s->allocated_bytes_);
-        at.kv_stage_k_ = Alloc<__half>(
-            a, static_cast<std::size_t>(max_context) * kv_row, error_msg,
-            &s->allocated_bytes_);
-        at.kv_stage_v_ = Alloc<__half>(
-            a, static_cast<std::size_t>(max_context) * kv_row, error_msg,
-            &s->allocated_bytes_);
-        at.kv_stage_cap_ = max_context;
-        at.kv_stage_ksrc_ = at.k_cache_kv;
-        at.kv_stage_vsrc_ = at.v_cache_kv;
-        at.kv_stage_valid_ = 0;
+        // The in-place blocked attention modes (GUFO_KV_I8) never read the
+        // F16 staging copy; EnsureKvStaging still allocates it on demand
+        // for any caller that does, so skip the context-sized reservation.
+        if (WmmaI8Mode() == 0) {
+          at.kv_stage_k_ = Alloc<__half>(
+              a, static_cast<std::size_t>(max_context) * kv_row, error_msg,
+              &s->allocated_bytes_);
+          at.kv_stage_v_ = Alloc<__half>(
+              a, static_cast<std::size_t>(max_context) * kv_row, error_msg,
+              &s->allocated_bytes_);
+          at.kv_stage_cap_ = max_context;
+          at.kv_stage_ksrc_ = at.k_cache_kv;
+          at.kv_stage_vsrc_ = at.v_cache_kv;
+          at.kv_stage_valid_ = 0;
+        }
       } else {
         at.k_cache =
             Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
