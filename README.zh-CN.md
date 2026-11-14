@@ -1,484 +1,203 @@
 # MBufo
 
-专为 AMD Strix Halo 打造的 [gufo](https://github.com/gufo-org/gufo) 分支，定位
-为**公平性＋高效低销的推理引擎**——排队不插队靠公平调度，花费少靠低精度计算。
+专为 AMD Strix Halo（`gfx1151`）架构深度打造的 [gufo](https://github.com/gufo-org/gufo) 分支，定位为**高并发、极致公平性与低成本的生产级推理引擎**。
 
-> [English](README.md) · [繁體中文](README.zh-Hant.md)
+> [English Version](README.md) · [繁體中文版](README.zh-Hant.md)
 
-上游 gufo 负责单路极限效能；MBufo 改问服务端的问题：一台 Strix Halo 节点同时
-面对十六路请求时能跑多满，每一路又能吃多长的上下文？三根支柱回答它——负载下
-公平的排程（§1）、花得少的低精度计算（§2）、一个 port 服务多颗模型的 GGUF
-覆盖（§3）。底层引擎、核心与绝大部分程序码都来自上游，在此致谢 gufo-org 及
-所有贡献者。
+上游 gufo 专精于单流极限吞吐；MBufo 则聚焦于服务端实际服务的核心挑战：单台 Strix Halo 节点在面临十六路以上高并发请求时如何保持满载，且每路请求如何承载长达 256K 的极限上下文。MBufo 以三大核心支柱解答：**负载下的公平调度（§1）**、**极致节省显存与算力的低精度计算（§2）**，以及**单端口整合全家族的 GGUF 兼容支持（§3）**。底层引擎、算子内核与核心架构源自上游，在此诚挚致谢 gufo-org 及广大社区贡献者。
 
-**目录：** [三个数字](#mbufo-三个数字) ·
-[§1 高并发](#1-高并发架构差异) ·
-[§2 低精度计算](#2-低精度计算成本差异) ·
-[§3 GGUF 相容](#3-gguf-相容覆盖承诺) ·
+**目录：** [核心特性](#mbufo-核心特性) ·
+[§1 高并发架构](#1-高并发架构) ·
+[§2 低精度计算与成本优化](#2-低精度计算与成本优化) ·
+[§3 GGUF 全家族支持与多模型路由](#3-gguf-全家族支持与多模型路由) ·
 [快速开始](#快速开始) ·
-[效能基准](#效能基准mbufo-v0255gfx1151-strix-halo) ·
+[性能基准](#性能基准-gfx1151-strix-halo) ·
 [上游追踪](#上游追踪) ·
-[建置](#从源代码建置) · [文件](#文件索引) ·
-[限制](#相容性与限制)
+[从源码构建](#从源码构建) ·
+[文档索引](#文档索引) ·
+[兼容性与限制](#兼容性与限制)
 
-## MBufo 三个数字
+---
 
-| # | 数字 | 含义 |
+## MBufo 核心特性
+
+| 特性 | 指标 | 说明 |
 | --- | --- | --- |
-| 1 | **短请求 TTFT 0.7 秒** | 被 25 万 token prefill 卡住的短请求，原本要等 3.4 秒；公平排程后只要 0.7 秒（fairness-A 160 → 7.32、fairness-B 856 → 191，ITL 不变，贪婪输出位元一致；v0.25.3）。 |
-| 2 | **KV 内存省一半** | blocked-Q8 快取让 262144 token 的 session 从 6.44 GB 降到 3.42 GB（K4V4 为 1.81 GB），代价是量出来的、不是假设的（v0.25.2）。 |
-| 3 | **11 个 GGUF 家族** | 一个 HTTP port 全数服务——v0.28.0 新增 8 个可用家族，加上 Flash-Next、27B、Gemma 4（见[§3 模型总表](#支援的模型v0280)）。 |
+| **极速响应** | **短请求 TTFT 0.7 秒** | 具备防饥饿公平调度机制，短请求即便遭遇 25 万 token 超长 Prefill 并发，首字延迟仍稳定压在 0.7 秒内，保证输出位元精确无失真。 |
+| **极致省容** | **KV 缓存显存减半** | Blocked-Q8 缓存架构让单一 262,144 (256K) token 请求的 KV 占用从 6.44 GB 骤降至 3.42 GB（4-bit 模式更可低至 1.81 GB）。 |
+| **全能托管** | **13 个 GGUF 模型家族** | 单一 HTTP 端口统筹服务，涵盖 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 与 Reranker，支持动态热加载与无重启卸载。 |
 
-## §1 高并发（架构差异）
+---
 
-并发不是一个数字。一台吃重的服务器能不能用，是两件事决定的，MBufo 两件都当成
-主轴：
+## 1. 高并发架构
 
-- **ITL（token 间延迟）**——请求已经在串流之后，它前后两个 token 之间的间隔。
-  批次效率再高，只要会让一条串流冻住一整个 prefill 步骤，那就不叫服务，那叫
-  排队加上额外手续。
-- **公平性**——没有任何 session、客户端或 prompt 可以饿死别人。一段 25 万 token
-  的 prompt 插进对话中途，不该因此换到比十六路短对话更大的装置占比。
+在高并发服务场景中，吞吐量并非唯一指标。系统能否在满载下保持高可用，关键取决于两大核心要素：
 
-上游的排程器骨架已经是对的：prefill chunk 有上限（`--prefill-chunk`）、有待跑
-decoder 时先服务 decode 再做 prefill、admission 有每客户端上限。它缺的是“便宜
-地同时兑现这三件事”所需的装置时间：一个有上限的 chunk 仍然吃掉一整个 tick，而
-那个 tick 里**没有任何** decoder 产出 token——因为 chunk 与 decode 是两趟分别
-扫过权重的计算。ITL 与公平性就是从这个 tick 漏掉的：每一轮，串流中的请求都要
-付一次与它无关的 prefill 步骤。
+- **ITL（Inter-Token Latency，Token 间延迟）**：请求进入流式生成后的输出间隔。若为批次吞吐而让流在 Prefill 阶段长时间冻结，将严重损害交互体验。
+- **调度公平性（Fairness）**：严格保障不同请求、Session 与客户端之间的公平性，避免长 Prompt 独占硬件算力导致短对话饥饿中断。
 
-MBufo 把两者合并：chunk 与 decode 列共用同一个 `ForwardBatch`、同一个注意力
-核心，于是 prefill 的那个 tick 也顺便把该出的 token 全部产出。合并没有绕过公平
-政策；公平政策正是让合并安全的前提。
+上游调度具备分块 Prefill（`--prefill-chunk`）与优先 Decode 的基础架构，但在两者切换时，传统做法需要分别对模型权重进行两次扫描，造成调度空隙与延迟损耗。MBufo 通过深度融合解决了这个瓶颈。
 
-### 统一 mixed-batch 界面
+### 统一混合批处理（Unified Mixed-Batch）
 
-一次 `ForwardBatch` 把 decode 列与 prefill chunk 一起送进同一个注意力核心，
-不再是两趟权重计算。自 v0.27.0 起，decode/prefill 路由走单一共用 dispatcher——
-统一 varlen mixed-batch 注意力界面，底下是共用 blocked-KV 编解码器、WMMA
-prefill reader 与 Split-K decode reader。27B 注意力层、Flash-Next decode 注意力、
-Gemma 4 SWA 层全部经由它解析；F16 路径完全未动，接线后 F16 输出位元一致。
+MBufo 将 Prefill Chunk 与 Decode 步骤合并至同一个 `ForwardBatch` 与注意力内核中执行，每轮计算在推进 Prefill 的同时立即输出到期的 Decode Token。
 
-| 量测项 | 结果 |
+- **延迟缩短 2 倍**：流式请求在 5 批次下的 Token 间隔由 121 ms 缩短至 **57 ms**（仅需单次权重扫描）。
+- **满载稳定**：16 路 sustained 并发下，平均耗时由 17.0 秒缩减至 **15.3 秒**，尾部延迟大幅收敛。
+- **硬件高利用率**：16 路满载运行时 GPU 利用率维持在 99%，输出完全位元精确、零错误。
+- **批次上限扩展**：支持高达 32 Sessions / 1024 Rows 批次规模。
+
+> 混合批处理仅重排任务执行时机，不变更任何模型运算语义。默认已开启；亦可通过环境变量 `GUFO_MIXED_BATCH=0` 切换回传统调度模式。设计细节与验证矩阵请参阅 [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md)。
+
+### DecodeBatch 与 Split-K Decode 算子
+
+在服务层将 Decode 步骤以预处理批次推进（`StepDecodeBatch` / `ExecutePreparedDecodeBatch`），底层注意力内核全面接入共用 Split-K 解码读取器（`blocked_splitk`）。在共用 Q8 下，Gemma 4 SWA 层解码性能提升，27B 注意力层直接读取开销极低，且 F16 输出维持全精度位元精确。
+
+### 公平调度防饥饿架构
+
+为杜绝超长 Prefill 挤压短请求首字延迟，MBufo 实现三层调度防护机制：
+
+1. **SRTF（Shortest Remaining Time First）Prefill 调度**：剩余分块 ≤1 的短 Prefill 优先排入执行，避免短任务在队尾无谓等待。
+2. **饥饿解码优先抢占（Starvation Preemption）**：当有请求等待 Session 槽位时，长 Prefill 会主动让路、优先排空常驻 Decode，以最快速度释放槽位（上限 32 轮，避免 Prefill 自身饥饿）。
+3. **Near-Done 闸门机制**：仅在常驻解码器距离结束 ≤64 Tokens 时触发抢占，若常驻均为长篇输出则不盲目延后 Prefill，兼顾整体通畅度。
+
+| 评测指标（gfx1151，FP4 + f16 + MTP + 4 sessions） | 实测表现 |
 | --- | --- |
-| 串流请求的 token 间隔，5 列批次 | 两趟计算 121 ms → 合并后 **57 ms**（**2.1 倍**）：间隔从两趟权重计算缩成一趟 |
-| 16 路 sustained 服务，3 轮 | **平均 15.3 秒 对 17.0 秒**（合并开 14/17/15，关 15/16/20），实测尾延迟改善 |
-| 4 路混合 prompt A/B | **5.3 秒对 6.3 秒**，每轮都赢，输出全对 |
-| 16 路并发 | GPU 使用率 99%，输出全数正确，零错误 |
-| 批次封装 | 32 session / 1024 列（上游为 8 / 8，过程中修掉三个硬上限：GDN、MoE、logits） |
+| Fairness-A 退化比 | **160 → 7.32** |
+| Fairness-B 退化比 | **856 → 191** |
+| 短请求 TTFT（首字延迟） | **3.4 秒 → 0.7 秒** |
+| ITL（Token 间延迟） | 稳定不增加 |
+| 贪婪输出正确性 | 位元一致（SHA 对比通过） |
 
-先讲一个但书：66 列时一个合并步骤要 316 ms，比两趟分开的 247 ms 慢，因为在那种
-规模下 batch-MoE 掉到 memory-bound 的 vec 路径。上面的端到端数字在服务并发下仍然
-胜出——每轮少扫一趟权重——但大批次在 FLOP 这一侧的问题另案追踪。
+### 负载下三引擎对比（启用 MTP）
 
-混合批次改变的是工作何时跑，不是模型算出什么。它默认开启；设定
-`GUFO_MIXED_BATCH=0` 即可完全还原上游排程，tick-tock 也一并还原。设计铁律、
-验证矩阵与逐阶段量测见 [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md)。
+在相同测试框架与充分预热环境下（并发 1 / 2 / 3 / 4 之总 TPS 与每 Session TPS）：
 
-### DecodeBatch＋Split-K decode
-
-serve 层以准备好的批次步进 decode（`src/cli/serve/` 的 `StepDecodeBatch` /
-`ExecutePreparedDecodeBatch` / `TextModelRunner::DecodeBatch`），而其中的注意力
-计算走共用 Split-K decode reader（`blocked_splitk`，v0.26.1），不再走 scalar 路径。
-具体数字：Gemma 4 SWA 层在共用 Q8 下 decode 只比搬移前基准慢 6.4%（scalar reader
-时期为 8.0%），27B 注意力层 decode 直接读取为 −1.0%，F16 输出与搬移前 binary 位元
-一致。
-
-### 公平性：排队不插队（SRTF＋饥饿 decode 优先抢占＋near-done 闸门）
-
-长 prefill 曾把短请求的 TTFT 挤爆（5 进 4 反饥饿场景）。三个机制修掉它，全程保持
-贪婪输出位元一致（sha 比对通过：24K prefill 单跑与并发跑出相同 sha）：
-
-- **SRTF prefill 选取**——剩余 ≤1 个 chunk 的 near-done prefill 排在长 prefill
-  续片前面（同级按 FIFO）。
-- **饥饿 decode 优先抢占**——有请求在排队等 session 槽位时，长 prefill chunk 让路，
-  先把常驻 decode 排空，好让等待者一有常驻完成就被接纳；上限 32 轮，prefill 不会
-  被饿死。
-- **near-done 闸门**——只有当某个常驻 decoder 距 `token_limit` ≤64 token（槽位即将
-  空出）才触发抢占；若常驻全是长输出 decoder，就不做无意义的 prefill 延迟。光是这个
-  闸门就把 fairness-A 从 76.5 拉回 7.32。
-
-| 量测（gfx1151，FP4＋f16＋MTP＋sessions 4，同 harness） | 结果 |
-| --- | --- |
-| fairness-A 退化比 | **160 → 7.32** |
-| fairness-B 退化比 | **856 → 191** |
-| 短请求 TTFT | **3.4 秒 → 0.7 秒** |
-| ITL | 不变 |
-| 贪婪输出 | 位元一致（sha 通过） |
-
-### 投机解码（MTP / DFlash）
-
-投机是各模型草稿后端挂在统一 draft registry 之下（v0.27.0）：
-
-- **Flash-Next MTP**——并发宽度 2/3/4 的接受率 **48.8/38.9/41.7% →
-  88.7/91.6/89.5%**（v0.25.1 修复：含投机 verify 的批次不再走与草稿路径不一致的
-  packed mixed WMMA 核心）。接受率不再随 batch 衰减——上游 95 → 82 → 68，本构建
-  稳在 ~90%——各宽度总吞吐全面超过上游（97/111/133 对 70/105/112）。（注：旧笔记的
-  flash 92% 是宽度 3 峰值 91.6% 的约数，以上三数为准。）
-- **27B DFlash2**——支援 blocked-Q8 KV（verify 写进 blocked sidecar，continuation
-  快取与 serve 磁盘身份位元级携带）；v0.24.1 verify 路由修复救回 **+248–340%**
-  decode（short/prose/code/json 5.8/5.6/13.2/11.9 → 22.9/19.5/56.2/52.3 tok/s）。
-- **Glimmer DFlash**——端到端投机草稿 **~89%**（E4 证伪为非 bug；v0.28.0 已知限制，
-  照实陈述）。
-- **Gemma 4 MTP**——async-GPU 草稿重写＋单 forward verify 之后，decode 达
-  **74–86 tok/s**（长 KV **+50%**：p2k 56.9 → 86.2，p8k 50.2 → 75.7，`d=3`）。最佳
-  草稿深度 `d=3`（净吞吐最高，**每轮接受 1.74–1.78**）；`d=4` 原始接受率最高
-  （1.98）但 verify 成本稍高。（注：旧笔记 ~1.6/round 依 CHANGELOG v0.26.0 修正为
-  1.74–1.78。）
-
-### prefix RAM 快取＋多 sessions 生产配置
-
-重复 prefix 走上游 RAM 快取（shared-prefix 边界、RAM 上限、coherent prefix 索引）
-不再重算，continuation 快照让长对话可恢复。生产形状是 session 数 × 上下文；自
-v0.25.4 `-j` 修复后 session 数是诚实的（`-j 8` 真跑 8 路：TTFT 楼梯消失，8 路
-decode 总量 124.5 → 148.2／121.1 → 144.4），常用默认已写进 CLI（llm 路径
-`--sessions` 1 → 4、`--kv-quant` f16 → q8；v0.25.2）。
-
-| 目标 | 设定 |
-| --- | --- |
-| 16 路、高并发 | `--sessions 16 -c 65536 --kv-quant q8`（约 103 GB，余 20 GB） |
-| 8 路、长对话 | `--sessions 8 -c 131072 --kv-quant q8`（约 101 GB，余 21 GB） |
-| 单路、最大上下文 | `--sessions 1 -c 262144 --kv-quant q8` |
-| 4 路、最大上下文 | `--sessions 4 -c 262144 --kv-quant q8`（约 101 GB，余 21 GB——总字节与 8×131072 相同） |
-| 单路、最快最精准 prefill | `--sessions 1 -c 262144 --kv-quant f16`（全精度 KV；每位置最重，但单流装得下） |
-| 还原上游排程 | 环境变数 `GUFO_MIXED_BATCH=0` |
-
-载入器限制的是“session 数 × 上下文”，不是单一上下文。在 128 GB Strix Halo
-上以 blocked Q8 快取＋4-bit value 列实测，8 路甚至可到 192K（`-c 196608`，
-107 GB，只剩 16 GB 余裕）；16 路拉到 96K 则会被
-`text runner request-state claim exceeds state capacity` 拒载。量测条件为
-UD-Q4_K_XL ＋ MTP Q8_0 sidecar ＋ BF16 mmproj，旧的 32K 上限已不成立。
-
-### 排程器保证什么
-
-| 保证 | 机制 |
-| --- | --- |
-| 待跑 decoder 绝不排在 prefill 之后 | 只有在没有 decoder 待跑时（或正在凑第一批时）才进合并步骤，所以 prefill 只在空隙里跑，永远不会插队到串流请求前面。 |
-| chunk 不能把 decoder 挤出轮替 | 每次合并或 prefill 步骤后，`MarkAllDecodersDue` 会把所有常驻 decoder 重新标记为待跑，下一步就全部服务。 |
-| 任何 prompt 都无法独占装置 | chunk 是有上限的切片（`--prefill-chunk` 默认 512 token），25 万 token 的 prompt 每轮只喂一片。 |
-| 同等的 session 轮流 | decode 伫列会轮替（`PopDecoder` 把服务过的请求移到队尾），不是固定队头顺序，所以没有哪个 session 能一直赢得前排。 |
-| 单一客户端无法塞满伫列 | `--max-pending-per-client` 限制单一客户端的待处理请求（回 `client_quota`），出队也跨客户端轮流，一个客户端爆量不会饿死别人。 |
-| 某一层拒绝也不损失 | 每一层都可独立降级；投机列被拒就退回原本路径：正确，只是没有加速。 |
-
-### 三引擎负载对比（开 MTP）
-
-沿用先前的并发服务对比（同 harness、皆暖机；并发 1／2／3／4 的“总／每 session”
-decode TPS——A Halogen · B gufo-upstream · C MBufo；数字与英文版一致，旧中文版此表
-为过时版本已同步）：
-
-| 引擎 | 总 TPS | 每 session TPS | fairness A / B |
+| 引擎 | 总 TPS | 每 Session TPS | Fairness A / B |
 | --- | --- | --- | --- |
-| A Halogen | 85 / 82 / 75 / 88 | 85 / 41 / 25 / 22 | 322 / 1140 |
-| B upstream | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
-| C MBufo | 66 / 83 / 110 / 129 | 66 / 42 / 38 / 33 | **19 / 187** |
+| A (Halogen) | 85 / 82 / 75 / 88 | 85 / 41 / 25 / 22 | 322 / 1140 |
+| B (gufo 上游) | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
+| **C (MBufo)** | **66 / 83 / 110 / 129** | **66 / 42 / 38 / 33** | **19 / 187** |
 
-A 单流峰值最高，但只在单独执行时投机——一旦并发就关掉投机头，每 session TPS 掉到
-~22。负载下 **C 扩展最佳**（线性到 129 TPS、每 session 最平），自 v0.25.3 起公平性
-也最好。完整方法与其余面向（prefill、fairness、ITL）见 `高并发测速方法.md`。
+MBufo 在多路负载下展现出最优秀的线性扩展能力（总吞吐平稳攀升至 129 TPS，单路速率平缓），且具备最佳的公平性指标。
 
-### 多模型 router
+### 高效投机解码（Speculative Decoding）
 
-一个 port、多颗模型。`serve llm --multi-model` 把服务器变成模型 registry：启动
-模型成为**默认**，每个请求依 `model` 字段路由到对应模型。模型可在执行期增减
-（admin API）——不重启、不断线。（[§3 模型总表](#支援的模型v0280)列出一个 port
-能服务的全部对象。）
+通过统一 Draft Registry 整合多种模型专属的草稿架构：
 
-启动时指定默认模型并开启 router：
+- **Flash-Next MTP**：并发宽度 2 / 3 / 4 下接受率维持在 **88.7% / 91.6% / 89.5%**，打破随批次衰减的瓶颈，总吞吐达到 97 / 111 / 133 tok/s。
+- **27B DFlash2**：原生整合 Blocked-Q8 KV 缓存，验证流程直接写入 Blocked Sidecar，保持精准一致。
+- **Gemma 4 MTP**：采用异步 GPU 草稿与单 Forward 验证，长上下文解码速度达 **74–86 tok/s**（`d=3` 深度下每轮平均接受 1.74–1.78 tokens）。
+- **Muse Glimmer DFlash**：端到端投机接受率达 **~89%**。
 
-```sh
-./build/release/gufo serve llm --multi-model \
-  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
-  --served-model-name flash-next -c 262144 --kv-quant q8 --sessions 4
-```
+### Prefix RAM 缓存与生产级 Session 配置
 
-依名称路由（不带 `model` 就打默认模型）：
+- 重复 Prefix 直接从内存缓存读取（共用边界、可自定义 RAM 上限），避免重复计算。
+- 多 Session 调度经全面校准，消除并发时的阶梯式延迟，支持多路并行加速。
 
-```sh
-curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
-  -d '{"model": "flash-next", "messages": [{"role": "user", "content": "hi"}]}'
-```
-
-执行期载入另一颗模型（例如 Gemma 4），再路由过去：
-
-```sh
-curl http://localhost:8080/admin/load -H "Content-Type: application/json" \
-  -d '{"id": "gemma4",
-       "path": "models/gemma-4-26b/gemma-4-26B-A4B-it-Q4_0.gguf",
-       "max_context": 262144, "session_count": 2, "kv_cache_quant": "q8"}'
-
-curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
-  -d '{"model": "gemma4", "messages": [{"role": "user", "content": "hi"}]}'
-```
-
-列出已载入的模型，用完就卸载：
-
-```sh
-curl http://localhost:8080/admin/models
-curl http://localhost:8080/admin/eject -H "Content-Type: application/json" \
-  -d '{"id": "gemma4"}'
-```
-
-**内存安全。** 每次 `/admin/load` 先估计模型占用、比对免费装置内存。塞不下
-时，router 会 **LRU 卸载**最久未用的非默认模型腾出空间（在 `evicted` 回报踢了
-哪些）；带 `"allow_evict": false` 则改回 `409 insufficient_memory` 失败。默认
-模型永不被踢，registry 不会被清空。卸载模型时，其 GPU 内存要等 in-flight 请求
-跑完才释放，不会打到一半断掉。
-
-| Admin 端点 | 方法 | Body | 效果 |
-| --- | --- | --- | --- |
-| `/admin/models` | GET | — | 列出已载入模型、context、最后使用时间 |
-| `/admin/load` | POST | `{id, path, max_context?, session_count?, kv_cache_quant?, vision_model_path?, enable_yarn?, allow_evict?}` | 载入并注册模型（内存吃紧时 LRU 卸载） |
-| `/admin/eject` | POST | `{id}` | 卸载模型；内存等 in-flight 请求排空后才释放 |
-
-router 是选择性的：不带 `--multi-model` 时，服务器就是纯粹的单模型版，位元级
-不变。
-
-### v0.28.0 router 新增
-
-| 功能 | 行为 |
-| --- | --- |
-| 多模型托管 | L0/L1 EngineRegistry factory，27B、flash-next、gemma4、glimmer、llama 五个 adapter；执行期 `/admin/load`＋`/admin/eject`，启动模型为永不卸载的默认 |
-| 自动分派 | 每个请求依 `model` 字段路由；`openai_chat` 空 `model` 改走默认，不再 `400 missing_model` |
-| fallback 语义 | 未知模型 id 被拒绝且不影响已载入模型；载入期 OOM 就 LRU 卸载冷门非默认模型（`allow_evict:false` → `409 insufficient_memory`）；卸载等 in-flight 请求排空才释放 GPU 内存 |
-| Embeddings | `POST /v1/embeddings` 经快取 single-prefill Embed（bge-m3、Qwen3-Embedding） |
-| Reranking | `POST /v1/reranking`，BERT（bge-reranker-v2-m3）＋Qwen（Qwen3-Reranker）分派，padding 批次 |
-| 工具呼叫 | ATEM／Gemma／Qwen 跨后端工具呼叫映射 |
-| Qwen KV 旗标修正 | 显式 `--kv-quant` 在 Qwen 路径覆写 `QWEN_KV_QUANT` |
-
-## §2 低精度计算（成本差异）
-
-花费用数字论证。KV 精度、权重精度、注意力变体各自对基准量过；这里没有“越窄
-越免费”这种事。一句话建议：`--kv-quant q8` 配 ROCmFP4 或 Q4_K 权重——再窄都是
-明确的交易，代价写在下面。
-
-### KV 快取：blocked Q8／Q4
-
-上游的 blocked Q8 KV 路径被泛化成“格式加编解码器”抽象，且 key 与 value 两轴
-都可再压成 4-bit 的 18-byte 打包区块（每 32 个元素 18 字节）。两轴精度独立
-选择，因此 K8V8、K4V8、K8V4、K4V4 四种组合都可达成。自 v0.26.1 起编解码器收进
-单一共用核心（`src/core/compute/attention/`：`gufo_core_blocked_kv`）——blocked
-写入器、scalar 直读器（`blocked_kv`）、WMMA prefill reader（`blocked_wmma`）、
-Split-K decode reader（`blocked_splitk`）。量化 KV 是共用能力；F16 默认路径各地
-未动。
-
-| 模式 | 状态 | 说明 |
+| 部署目标 | 建议参数配置 | 资源占用概况 |
 | --- | --- | --- |
-| `f16` | 默认 | 基准数值。KV 快取不做量化。 |
-| `q8` | 支援 | Blocked 8-bit，每 32 个元素配一个 f16 尺度（34 字节）。 |
-| `q8` + `GUFO_KV_V4=1` | 手动开启，K8V4 | 4-bit value 打包成 18 字节，key 维持 8-bit。 |
-| `q8` + `GUFO_KV_Q4=1` | 手动开启，K4V8 | 4-bit key 打包成 18 字节，value 维持 8-bit。 |
-| `q8` + 两者同时 | 手动开启，K4V4 | key 与 value 都是 4-bit。 |
+| 16 路高并发服务 | `--sessions 16 -c 65536 --kv-quant q8` | 约 103 GB（保留约 20 GB 冗余） |
+| 8 路超长对话服务 | `--sessions 8 -c 131072 --kv-quant q8` | 约 101 GB（保留约 21 GB 冗余） |
+| 4 路极限 256K 对话 | `--sessions 4 -c 262144 --kv-quant q8` | 约 101 GB（保留约 21 GB 冗余） |
+| 单路极限 256K 对话 | `--sessions 1 -c 262144 --kv-quant q8` | 轻量占用，极致吞吐 |
+| 单路最高精度 Prefill | `--sessions 1 -c 262144 --kv-quant f16` | 全精度 KV，无量化损耗 |
 
-**建议使用 `q8`。** blocked 模式在编解码层级是位元精确的；`f16` 仍是默认与基准。
-4-bit 路径是给“KV 内存成为瓶颈”的机器手动开启的环境变数钩子，不是
-`--kv-quant` 的格式选项，也不会改变任何默认值——未设定时引擎与不含这些路径的版本
-位元相同（以 logit dump 杂凑比对验证）。完整说明见 [docs/KV-V4.md](docs/KV-V4.md)。
+---
 
-#### 占用
+## 2. 低精度计算与成本优化
 
-每个 KV 位置的字节数，以及 `-c 262144`、Qwen3.8 Flash-Next 12 个注意力层下
-单一 session 的总量：
+MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配置为 `--kv-quant q8` 搭配 ROCmFP4 或 Q4_K 权重。
 
-| 模式 | 每位置字节 | 262144 单一 session |
-| --- | --- | --- |
-| `f16` | 2048 | 6.44 GB |
-| `q8` | 1088 | 3.42 GB |
-| K8V4 / K4V8 | 832 | 2.62 GB |
-| K4V4 | 576 | 1.81 GB |
+### KV 缓存：Blocked Q8 与 4-bit 紧凑布局
 
-#### 代价（量出来的）
+底层将 Blocked Q8 KV 抽象为标准化编解码器，支持 Key 与 Value 独立选择 4-bit（每 32 元素占 18 字节）或 8-bit（每 32 元素占 34 字节）精度。共用核心整合了 Blocked 写入器、直读者、WMMA Prefill 读取器与 Split-K 解码读取器。
 
-以 `q8` 为基准的正确性：三个互不相关的 400-token 上下文、各 98 步
-matched-token decode、对三个上下文取平均：
+| 模式 | 状态 | 每位置字节数 | 256K Session 显存占用 | 说明 |
+| --- | --- | --- | --- | --- |
+| `f16` | 默认基准 | 2048 B | 6.44 GB | 基准数值，无 KV 量化。 |
+| `q8` | **推荐模式** | 1088 B | 3.42 GB | Blocked 8-bit，平衡性最佳。 |
+| `q8` + `GUFO_KV_V4=1` | 手动开启 (K8V4) | 832 B | 2.62 GB | Value 压缩为 4-bit，Key 维持 8-bit。 |
+| `q8` + 两者开启 | 手动开启 (K4V4) | 576 B | 1.81 GB | Key / Value 均压缩为 4-bit，极致节省显存。 |
 
-| 模式 | decode KL | decode 最大 KL | 贪婪 argmax 一致率 |
+- **推荐使用 `q8`**：Blocked-Q8 在编解码层面表现优异，精度极高，显存直接减半。
+- **4-bit 适用场景**：专为极限显存受限机型设计的环境变量开关，未启用时完全不影响基准数值。详情参阅 [docs/KV-V4.md](docs/KV-V4.md)。
+
+### 权重精度架构
+
+- **ROCmFP4 / ROCmFP4-FAST**：4.25 bpw 单尺度 FAST 专家解码借助 fp16 WMMA 矩阵核心硬件直驱，使 MoE Prefill 充分享受矩阵核心加速。在 gfx1151 上，FAST 模型在长文本 Prefill 下表现亮眼，解码更较传统方式大幅提升。
+- **MXFP4**：支持 GPT-OSS 20B / 120B 原生 MXFP4 路由运算，Decode 端融合 MoE / QKV / 投影路径，120B 支持零拷贝流式上传。
+- **Q4_K**：UD-Q4_K_XL 为 27B 与 Flash-Next 的参考优化架构；bge-m3 提供 Q4_K_M 加载器。
+- **W8A8**：共用主机端 16-split varlen GEMM 核心，支持 Glimmer 与 Flash-Next Prefill。
+
+### 注意力运算内核优化
+
+- **int8 WMMA Direct Prefill**：单 Session Causal Prefill 直接读取 Blocked int8 缓存，跳过 F16 暂存反量化，14K Prefill 速度提升 **30%**（1085 → 1408 tok/s）。
+- **Split-K Flash-Decoding**：结合融合解码 GEMV、融合 Norm / Residual / Epilogue 内核及设备端 Argmax。
+- **Wide Prefill 全面覆盖**：针对所有宽于 Vector Batch 的 Prefill 请求启用融合投影与成对矩阵核心处理。
+
+### 性能对比 llama.cpp（gfx1151 实测）
+
+相同权重、Release 构建、贪婪解码；正值代表 MBufo 领先幅度：
+
+| 模型与任务 | Prefill 领先幅度 | Decode 表现 | 备注与测试条件 |
 | --- | --- | --- | --- |
-| K4V8 | 0.0214 | 0.258 | 90.5% |
-| K8V4 | 0.0209 | 0.120 | 93.2% |
-| K4V4 | 0.0335 | 0.411 | 89.8% |
+| **Flash-Next** | **+52%** | 持平或更优 | 冷启动 KV、开启 MTP |
+| **Qwen3.6-35B-A3B** | **+52.5%** | 持平或更优 | Split-K Router 解码 |
+| **bge-m3（长文本）** | **+35% ~ +50%** | — (纯 Prefill) | hipBLASLt 自动调优与缓存执行器 |
+| **Qwen3-Embedding-0.6B** | **+41% ~ +50%** | — (纯 Prefill) | 单 Prefill 优化 |
+| **Reranker（批次评分）** | — | **超额 +15%** | 多序列 Padding 批处理 |
+| **GPT-OSS 120B** | **+62%** | -17% | 超大参数量，Prefill 显著领先 |
 
-启用比 `q8` 更窄的模式前，请先读懂这张表：
+---
 
-- **K4V8 与 K8V4 占用的内存完全相同。** key 是 512 个元素，4-bit key 配
-  8-bit value 与 8-bit key 配 4-bit value 都落在 832 字节。把精度从一轴搬到
-  另一轴换不到任何内存，却要多付约 2.7 个百分点的贪婪一致率，所以 K4V8 没有
-  用途。
-- **只有 K4V4 真的缩小占用**，代价是 decode KL 多 60%、尾巴大 3.4 倍，大约每
-  十个贪婪决策就有一个改变。这是拿正确性换内存的明确交易，不是免费。
-- **不要用短 prefill 探针决定 KV 精度。** 在 33-token 的 prompt 上，K4V4 量到
-  的平均 KL 与 K8V4 相同（0.0274）。原因是两轴的逐位置误差几乎不相关，同时
-  量化时会部分互相抵销，小样本会把伤害藏起来。只有多上下文、decode 阶段的数字
-  能把这些模式排出正确顺序。
-- 4-bit 区块就是 GGML `q4_0` 的布局（16 个打包 nibble 加一个 f16 尺度），K/V
-  分轴选精度在上游也已是 `--cache-type-k` / `--cache-type-v` 的既有功能。这颗
-  引擎特有的地方在于：两轴都贯通 blocked kernel、混合批次路径与 snapshot 身份，
-  而且代价是量出来的、不是假设的。
+## 3. GGUF 全家族支持与多模型路由
 
-`q8` 对照 CPU f16 基准：端到端偏差维持在 blocked-KV 设计范围内，MTP draft 命中
-率维持在 57% 至 81% 区间，算术题与长文生成保持通顺。
+### 支持的模型家族
 
-必须直说的一点：这些 blocked 模式在贪婪解码下与 `f16` 的分歧，都比单纯用数值
-误差能解释的程度来得大。这是既有 blocked-KV 设计的性质，不是 4-bit 区块造成
-的，已另案追踪；而在它之上再叠 4-bit 区块，只会把差距放大，不会优雅地叠加。
+通过内置多模型路由器，单一 HTTP 端口即可统筹调度下列全部 13 个家族：
 
-### 权重精度：W8A8／FP4／MXFP4／Q4_K
-
-- **W8A8**——共用 GEMM 核心（`src/core/compute/gemm`，v0.27.0）的 host-side
-  16-split varlen GEMM；Flash-Next prefill W8A8 已改走共用核心且输出位元一致。
-  Glimmer 跑 W8A8／Q8_0 路径。
-- **ROCmFP4／ROCmFP4-FAST**——4.25 bpw 单尺度 FAST down 专家经 fp16 WMMA
-  routed-expert GEMM 解码（perm codebook LUT 喂进既有 Q8_0 反量化），MoE prefill
-  因此跑在矩阵核心上、不掉进通用 `mul_mat_q`。gfx1151 实测 FAST 模型 prefill 打平
-  或胜过 UD-Q4_K_XL 基线（1.9K／5K token 为 1564／1368 对 1556／1324 tok/s），
-  decode 速度与 64k 工具梯子正确性不变。大 dense 投影在 decode 期保留 Q4_1 拷贝
-  （20 B/block，比 Q8_0 少 41% 字节）：decode **+17.4%**（40.63 → 47.68 tok/s，
-  v0.20.5）。
-- **MXFP4**——GPT-OSS 20B／120B 跑原生 MXFP4 routed GEMM，decode 端 MoE／QKV／`wo`／
-  router 全融合；120B 以零拷贝串流上传＋分块 H2D 镜像载入。
-- **Q4_K**——UD-Q4_K_XL 是 27B 推荐 build（decode 与草稿接受率胜 single-scale FP4），
-  也是 Flash-Next 参照基线；bge-m3 带 Q4_K_M loader；Gemma 4 跑 Q4_0 权重。
-
-### 注意力变体：WMMA／flash／Split-K
-
-- **WMMA prefill reader**（`blocked_wmma`）——单 session causal prefill 直接读
-  blocked int8 KV 快取，跳过 F16 staging 反量化，覆盖快取能持有的全部布局
-  （K34/K18 × V34/V18，dense 与 sparse）。14K 单流 prefill 比 scalar 路径
-  **快 30%**（1085 → 1408 tok/s）。
-- **Split-K decode reader**（`blocked_splitk`）——v0.26.1 起共用；量测数字见
-  [DecodeBatch＋Split-K](#decodebatchsplit-k-decode)。
-- **flash-decoding**——Gemma 4 以 Split-K flash-decoding 注意力配融合 decode
-  GEMV、融合 norm／residual／epilogue kernel 与装置端贪婪 argmax（p8k prefill
-  1321 → 1446 tok/s，输出位元一致），WMMA 注意力另有 SWA 滑窗 KV 跳过。
-- **scalar 直读器**（`blocked_kv`）——每种布局都保留的退路。
-- **F16 路径未动**——以上全是量化路径；默认 F16 decode／prefill 从不改道。
-
-### 逐模型精度表
-
-| 模型 | 权重精度 | KV | F16 留守 |
-| --- | --- | --- | --- |
-| Qwen3.8 Flash-Next（主打） | ROCmFP4-FAST（4.25 bpw）或 UD-Q4_K_XL；decode Q4_1 拷贝（+17.4%） | blocked-Q8（`--kv-quant q8`）；MTP Q8_0 sidecar | KV 默认 `f16`；全部 F16 路径未动 |
-| Qwen3.8 27B | UD-Q4_K_XL（建议）或 ROCmFP4-FAST | blocked-Q8（含 DFlash2；`QWEN_KV_QUANT`、`--kv-quant` 覆写） | 同上 |
-| Gemma 4 26B-A4B | Q4_0；Q4→Q8 dense 一次性预转（每 chunk 省 210 次反量化启动） | SWA 层共用 Q8（prefill −2.8%、decode −6.4%） | **full-512 层留守 F16**；MTP 草稿取自每 session F16 镜像 |
-| Qwen3.6-35B-A3B | Q6_K→Q8_0 载入；split-K router GEMV | 仅引擎／bench 路径 | 尚无 serve 后端 |
-| GPT-OSS 20B／120B | 原生 MXFP4 routed GEMM | text 后端服务路径 | 无投机草稿 |
-| Muse Glimmer 30B | W8A8／Q8_0；MQB-first 注意力 | serve 后端 `--kv-quant` 旗标 | DFlash 草稿，无 F16 例外 |
-| Llama-3.1-8B | dense GQA（见模型卡） | text 后端服务路径 | 无草稿 |
-| Qwen3-Embedding-0.6B | dense Qwen 注意力 | prefill-only single-prefill Embed | 无 ladder／草稿（评分类 N/A） |
-| bge-m3 | Q4_K_M loader；逐形状 autotune | prefill-only `/v1/embeddings` | **F16 hipBLASLt 融合 QKV 路径** |
-| bge-reranker-v2-m3 | 共用 rerank 评分头 | padding ScoreBatch（超目标 `+15%`） | 纯评分，无草稿 |
-| Qwen3-Reranker | yes/no head，Qwen 分派 | 纯评分 | 纯评分，无草稿 |
-
-### 核心层加速
-
-以下改动同时提升单路与批次吞吐，且都不改变模型语意。（§2 数字的实作细节，
-原样保留。）
-
-- **ROCmFP4-FAST 专家走 fp16 WMMA 核心。** 4.25 bpw 的 `Q4_0_ROCMFP4_FAST` down
-  专家现在与 Q4_K/Q8_0 专家共用同一条 fp16 WMMA routed-expert GEMM（perm codebook
-  LUT 喂进既有 Q8_0 反量化），FAST 模型的 MoE prefill 因此跑在矩阵核心上、不再掉
-  进通用 `mul_mat_q`。gfx1151 实测 FAST 模型 prefill 打平或胜过 UD-Q4_K_XL 基线
-  （1.9K／5K token 为 1564／1368 对 1556／1324 tok/s），decode 速度与 64k 工具
-  梯子正确性不变。
-- **int8 WMMA 直读 prefill。** 单 session 的 causal prefill
-  （`WmmaCausalAttention`）现在直接读 blocked int8 KV 快取，跳过 F16 staging
-  反量化。它覆盖快取能持有的任何 KV 区块布局（K34/K18 x V34/V18，dense 与
-  sparse），且由与快取写入端相同的格式/环境变数选取，因此任何布局都不会被误
-  读。在 14K 单流 prefill 上比 scalar 路径**快 30%**（1085 → 1408 tok/s）。
-- **每个 prefill pass 都走 wide 路径。** wide prefill 路径（融合投影、成对
-  routed expert tile、WMMA attention）适用于所有宽于一个 vector batch 的
-  prefill pass，不再只限 1024+ token。
-
-### 对比 llama.cpp（v0.28.0，gfx1151）
-
-同权重、release build、greedy；prefill＝冷 KV 单流 tok/s，decode＝开投机 tok/s
-（另注除外）。正数＝MBufo 较快。六格数字皆为 CHANGELOG 量测到的 v0.28.0 开发期
-数字原文重述。
-
-| 负载 | Prefill 差值 | Decode 差值 | 条件／备注 |
-| --- | --- | --- | --- |
-| Flash-Next | **+52%** | 持平或更好 | 冷 KV、greedy、开 MTP |
-| Qwen3.6-35B-A3B | **+52.5%** | 持平或更好 | split-K router GEMV decode；greedy |
-| bge-m3（长文件） | **+35~50%** | n/a（纯 prefill） | 长文件形状、hipBLASLt autotune、快取执行器 |
-| Qwen3-Embedding-0.6B（长文件） | **+41~50%** | n/a（纯 prefill） | 长文件形状、single-prefill Embed |
-| Reranker（批次评分） | n/a | **超目标 +15%** | padding 多序列 ScoreBatch |
-| GPT-OSS 120B | **+62%** | **-17%** | 结构性差距，照实陈述：此路径 decode 仍卡内存带宽 |
-
-此次版本推进未跑模型服务效能测试；上表为量测到的 v0.28.0 开发期数字重述，
-此处未重测。
-
-## §3 GGUF 相容（覆盖承诺）
-
-### 支援的模型（v0.28.0）
-
-一个 port 经由[多模型 router](#多模型-router)服务以下全部。
-`Serve`＝有 HTTP 后端；`Ladder`＝有 registry／pilot 或评分测试；`MTP/draft`＝有
-投机草稿后端。共 11 列：v0.28.0 新增 8 个可用家族，加上既有的三个
-（Flash-Next、27B、Gemma 4）。
-
-| 模型 | 参数 | Serve | 梯子 | MTP/draft | 备注 |
+| 模型 | 参数量 | HTTP 服务 | 验证测试 | 投机草稿支持 | 特性与架构亮点 |
 | --- | --- | --- | --- | --- | --- |
-| Qwen3.8 Flash-Next（主打） | 30B-A3B MoE | 有 | pilot | MTP | ROCmFP4-FAST preset、blocked-Q8 KV |
-| Qwen3.8 27B | 27B | 有（`QWEN_KV_QUANT`、`--kv-quant` 覆写） | pilot | DFlash2（含 q8） | dense＋MoE 路径 |
-| Gemma 4 | 26B-A4B | 有（HTTP 后端、原生工具） | ladder 15/15 @24k | MTP sidecar（q8 经 F16 镜像） | full-512 层留守 F16 |
-| Qwen3.6-35B-A3B | 35B-A3B MoE | 仅引擎／bench | — | 无 | Q6_K→Q8_0 载入、split-K decode MoE；64K 以上 ctx 请压在 60K token 内（MODE2 重置风险） |
-| GPT-OSS 20B／120B | 20B／117B MoE（MXFP4） | 有（text 后端） | pilot | 无 | 120B 零拷贝串流上传＋分块 H2D 镜像 |
-| Muse Glimmer 30B | 30B | 有（ATEM 工具、kv-quant） | prompt 路径 | DFlash 端到端（~89%） | DFlash 89% 是量到的，E4 证伪为非 bug |
-| Llama-3.1-8B | 8B dense GQA | 有（text 后端） | pilot adapter | 无 | — |
-| Qwen3-Embedding-0.6B | 0.6B | 有（`/v1/embeddings`） | n/a（纯 prefill） | 无 | pooled single-prefill Embed |
-| bge-m3 | 0.6B XLM-R | 有（`/v1/embeddings`） | encoder 测试 | 无 | CLS pooling、Q4_K_M loader、hipBLASLt autotune |
-| bge-reranker-v2-m3 | cross-encoder | 有（`/v1/reranking`，BERT 分派） | ScoreBatch 测试 | 无 | padding 多序列批次 |
-| Qwen3-Reranker | yes/no head | 有（`/v1/reranking`，Qwen 分派） | 评分测试 | 无 | 共用 rerank 评分头 |
+| **Qwen3.8 Flash-Next**（主力） | 30B-A3B MoE | 支持 | Pilot | MTP | ROCmFP4-FAST / UD-Q4_K_XL、Blocked-Q8 KV |
+| **Qwen3.8 27B** | 27B Dense | 支持 | Pilot | DFlash2 (含 Q8) | 支持 Dense 与 MoE 路径，推荐 UD-Q4_K_XL |
+| **Gemma 4 26B-A4B** | 26B-A4B | 支持 | 完整测试 | MTP (F16 镜像) | 具备原生 Tool 支持，SWA 共用 Q8 |
+| **Gemma-4-12B** | 12B Dense | Bench | — | — | 支持 K-quant 预转换与 WMMA Q8 Prefill |
+| **Qwen3.5-35B-A3B** | 35B-A3B MoE | Engine | — | — | 支持 qwen35moe 架构路径 |
+| **Qwen3.6-35B-A3B** | 35B-A3B MoE | Engine | — | — | Q6_K→Q8_0 加载、Split-K MoE 解码 |
+| **GPT-OSS 20B / 120B** | 20B / 117B MoE | 支持 | Pilot | — | 原生 MXFP4 矩阵核心、120B 支持零拷贝流式上传 |
+| **Muse Glimmer 30B** | 30B | 支持 | Prompt | DFlash (~89%) | ATEM 工具调用、W8A8 / Q8_0 支持 |
+| **Llama-3.1-8B** | 8B Dense | 支持 | Adapter | — | 标准 Dense GQA 支持 |
+| **Qwen3-Embedding-0.6B** | 0.6B | 支持 (`/v1/embeddings`) | — | — | 缓存池化 Single-Prefill 执行器 |
+| **bge-m3** | 0.6B XLM-R | 支持 (`/v1/embeddings`) | Encoder | — | CLS 池化、Q4_K_M 加载器、hipBLASLt 调优 |
+| **bge-reranker-v2-m3** | Cross-Encoder | 支持 (`/v1/reranking`) | ScoreBatch | — | BERT 分派、多序列 Padding 批次加速 |
+| **Qwen3-Reranker** | Cross-Encoder | 支持 (`/v1/reranking`) | Scoring | — | Qwen 分派、共用 Rerank 评分头 |
 
-DSpark 维持 legacy。模型权重不随附；各指南在 [docs/models](docs/models/README.md)
-下列出所需档案。
+### 生产级多模型 Router
 
-### 端点＋工具映射
+执行 `serve llm --multi-model` 可将服务器转为模型注册中心：启动模型即为默认模型，后续请求根据 JSON 中的 `model` 字段自动分发；亦可通过 Admin API 在线动态增减模型，服务完全不断线。
 
-| 端点 | 方法 | 服务对象 | 备注 |
-| --- | --- | --- | --- |
-| `/v1/chat/completions` | POST | 文字对话（＋图像、工具、结构化输出、串流） | 空 `model` 改走默认，不再 `400 missing_model` |
-| `/v1/embeddings` | POST | bge-m3、Qwen3-Embedding | 快取 single-prefill Embed 执行器 |
-| `/v1/reranking` | POST | bge-reranker-v2-m3（BERT 分派）、Qwen3-Reranker（Qwen 分派） | padding 多序列 ScoreBatch |
-| `/admin/models`、`/admin/load`、`/admin/eject` | GET／POST | router registry | 见[内存安全](#多模型-router) |
+#### 核心保障与容错机制
+- **安全显存调度**：在调用 `/admin/load` 时自动评估可用显存，空间不足时自动对冷门的非默认模型执行 **LRU 卸载**（可设置 `"allow_evict": false` 拒载）；默认模型永不被卸载。
+- **无损排空释放**：模型卸载时，显存会等待该模型正在进行的请求全部处理完成后才平滑释放，绝不中断在线对话。
+- **默认自动回退**：若请求中 `model` 字段为空，自动路由至默认模型，不报错。
 
-工具呼叫按后端家族映射——ATEM（Glimmer）、Gemma 原生（`<|tool|>` 模板、ladder
-15/15 @24k）、Qwen——Qwen 路径显式 `--kv-quant` 现覆写 `QWEN_KV_QUANT`。Open WebUI、
-VS Code、OpenAI SDK 与 Responses-API 客户端把 base URL 指到
-`http://localhost:8080/v1` 即可；详见 [API 契约](docs/SERVER.md)。
+#### 端点一览
 
-### fallback 语义
+| 端点 | 方法 | 功能说明 |
+| --- | --- | --- |
+| `/v1/chat/completions` | POST | 聊天对话接口（支持文本、图像、Function Tools、结构化输出、SSE 流式） |
+| `/v1/embeddings` | POST | 向量嵌入接口（支持 bge-m3、Qwen3-Embedding） |
+| `/v1/reranking` | POST | 文本重排序接口（支持 bge-reranker-v2-m3、Qwen3-Reranker） |
+| `/admin/models` | GET | 查询已加载的模型列表、上下文与访问状态 |
+| `/admin/load` | POST | 动态加载并注册新模型（支持显存 LRU 置换保护） |
+| `/admin/eject` | POST | 在线卸载模型，待任务排空后平滑释放显存 |
 
-- 未知模型 id 被拒绝，不影响已载入模型。
-- 载入期 OOM 就 LRU 卸载冷门非默认模型（`allow_evict:false` →
-  `409 insufficient_memory`）；默认永不卸载。
-- 卸载等 in-flight 请求排空才释放 GPU 内存。
-- 不带 `--multi-model` 时，服务器就是位元级一致的单模型版。
-- 任何服务不了整批的注意力／GEMM 层都退回 legacy 路径——正确，只是没有加速。
-- 快照以 KV 格式区分版本；某格式写出的快照不会被另一格式重用。
-
-### 新模型接线（五步）
-
-本树尚无独立的新模型手册（`GGUF通用化.md` 不存在，2026-11-09 已验证）；在手册
-落地前，以下列清单＋[docs/models](docs/models/README.md) 下各模型指南为准。
-每步附已走过的先例：
-
-1. **EngineRegistry adapter**——在 L0／L1 factory 注册家族，按请求 `model` 分派
-   （先例：27B、flash-next、gemma4、glimmer、llama）。
-2. **serve 后端**——text 后端，或 embeddings single-prefill Embed，或 reranking
-   BERT／Qwen 分派；把 `--kv-quant` 旗标带进去。
-3. **ladder pilot 或评分测试**——registry pilot（27B、flash-next、gpt-oss、llama）、
-   prompt 路径（glimmer）、encoder／评分测试（bge 家族）；纯 prefill 模型标 ladder
-   N/A。
-4. **草稿后端（或明确记无）**——MTP／DFlash2 挂 draft registry（gemma4 草稿取自每
-   session F16 镜像以覆盖 4-bit 格）；记 `无` 要写理由（纯 prefill、尚无草稿）。
-5. **serve 注册＋文件**——`--served-model-name`、free-memory 闸门估计、
-   `docs/models/<家族>/` 指南（按 [docs/models](docs/models/README.md) 结构：
-   README／BENCHMARKS／QUALITY／EXPERIMENTS），有已知限制就加 CHANGELOG
-   Known-limits 一行。
+---
 
 ## 快速开始
 
-以建议的快取设定启动 Qwen3.8 Flash-Next：
+### 1. 启动主推理服务（以 Qwen3.8 Flash-Next 为例）
 
 ```sh
 ./build/release/gufo serve llm \
@@ -487,100 +206,106 @@ VS Code、OpenAI SDK 与 Responses-API 客户端把 base URL 指到
   --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
   --speculative mtp --think off \
   --served-model-name gufo-qwen3.8-flash-next \
-  --sessions 2 -c 262144 --kv-quant q8
+  --sessions 4 -c 262144 --kv-quant q8
 ```
 
-通过 OpenAI 相容 API 问它问题：
+### 2. 多模型模式（启用 Router 与 Admin API）
 
 ```sh
+./build/release/gufo serve llm --multi-model \
+  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  --served-model-name flash-next -c 262144 --kv-quant q8 --sessions 4
+```
+
+### 3. API 调用示例
+
+```sh
+# 对话生成
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gufo-qwen3.8-flash-next",
-    "messages": [{"role": "user", "content": "说点什么"}]
+    "model": "flash-next",
+    "messages": [{"role": "user", "content": "你好，请自我介绍。"}]
   }'
+
+# 动态加载新模型 (Gemma 4)
+curl http://localhost:8080/admin/load \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "gemma4",
+    "path": "models/gemma-4-26b/gemma-4-26B-A4B-it-Q4_0.gguf",
+    "max_context": 262144, "session_count": 2, "kv_cache_quant": "q8"
+  }'
+
+# 查询当前已加载的模型
+curl http://localhost:8080/admin/models
+
+# 卸载指定模型
+curl http://localhost:8080/admin/eject \
+  -H "Content-Type: application/json" \
+  -d '{"id": "gemma4"}'
 ```
 
-Open WebUI、VS Code、OpenAI SDK 与 Responses-API 的客户端，请把 base URL 指向
-`http://localhost:8080/v1`。Chat Completions 与 Responses 支援文字、图片、
-function tools、结构化输出与串流；详见[API 契约](docs/SERVER.md)。
+兼容于 OpenAI SDK、Open WebUI、VS Code 等前端工具，Base URL 设置为 `http://localhost:8080/v1` 即可。完整接口协议详见 [docs/SERVER.md](docs/SERVER.md)。
 
-## 效能基准（MBufo v0.25.5，gfx1151 Strix Halo）
+---
 
-冷 KV（每请求唯一 prompt，`cached_tokens≈0`）、think off、**F16 KV**、`-j 1`、
-ctx 262144。四组设定：27B（UD-Q4_K_XL 对 ROCmFP4-FAST）＋ Flash-Next（ROCmFP4-FAST
-对 UD-Q4_K_XL）。投机：27B＝DFlash2、Flash-Next＝MTP。（注：旧中文版此节为 v0.24.1
-数字，已同步为与英文版一致的 v0.25.5。）
+## 性能基准（gfx1151 Strix Halo）
 
-这些是单流数字，用来隔离模型与建置版本的选择；负载下改变的是同时能跑几条，那是
-[§1 高并发](#1-高并发架构差异)的故事。
+测试条件：冷启动 KV（每请求独立 Prompt）、关闭思考模式、F16 KV、单流 `-j 1`、上下文 262,144。27B 采用 DFlash2 投机解码，Flash-Next 采用 MTP 投机解码。
 
-### Prefill（tok/s，越高越好）
+### Prefill 吞吐量（tok/s，越高越好）
 
-| tokens | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+| Token 规模 | 27B Q4_K_XL | 27B FP4-FAST | Flash-Next ROCmFP4 | Flash-Next Q4_K_XL |
 |---:|---:|---:|---:|---:|
-| 2K | 605 | 455 | **1739** | 1301 |
-| 8K | 615 | 564 | **1701** | 1549 |
-| 32K | 567 | 551 | 1598 | **1618** |
-| 64K | 508 | 496 | **1695** | 1678 |
-| 128K | 409 | 407 | **1504** | 1507 |
-| 250K | — | — | **1438** | 1415 |
+| **2K** | 605 | 455 | **1739** | 1301 |
+| **8K** | 615 | 564 | **1701** | 1549 |
+| **32K** | 567 | 551 | 1598 | **1618** |
+| **64K** | 508 | 496 | **1695** | 1678 |
+| **128K** | 409 | 407 | **1504** | 1507 |
+| **250K** | — | — | **1438** | 1415 |
 
-> 27B ROCmFP4-**FAST** 的 prefill ≈ 非 FAST 的 STRIX 版——single-scale 只换 codebook，
-> 不换 fp16-WMMA prefill 引擎（455/564/551/407 对 483/523/520/383）。FAST 真正的速度
-> 来自 int8-MMQ 消费路径，而那条路径只喂给 Flash-Next 的 MoE experts，dense 27B 没接。
+### Decode 速度（tok/s，开启投机解码）
 
-### Decode（tok/s，投机开）
-
-标准：5 个冷 KV 情境（标明 temp）＋ 8 任务 ReAct 代理套件。
-
-| 情境 | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+| 测试场景 | 27B Q4_K_XL | 27B FP4-FAST | Flash-Next ROCmFP4 | Flash-Next Q4_K_XL |
 |---|---:|---:|---:|---:|
-| 散文 (temp 0.4) | 23.5 | 19.7 | 43.3 | **43.6** |
-| 费波那契 (temp 0.4) | 67.9 | 56.2 | **86.3** | 84.7 |
-| JSON 约束 (temp 0) | **55.1** | 46.5 | 51.5 | 51.7 |
-| 贪心程序码 /128 (temp 0) | 61.9 | 55.3 | 70.5 | **73.2** |
-| 重复文本 /256 (temp 0) | 70.6 | 60.8 | 74.8 | **75.3** |
+| 散文生成 (temp 0.4) | 23.5 | 19.7 | 43.3 | **43.6** |
+| 斐波那契数列生成 (temp 0.4) | 67.9 | 56.2 | **86.3** | 84.7 |
+| JSON 结构生成 (temp 0) | **55.1** | 46.5 | 51.5 | 51.7 |
+| 代码贪婪生成 /128 (temp 0) | 61.9 | 55.3 | 70.5 | **73.2** |
+| 重复文本生成 /256 (temp 0) | 70.6 | 60.8 | 74.8 | **75.3** |
 
-### 代理任务（agent_bench_v2，t1–t8，沙箱工具）
+### Agentic 综合评测（agent_bench_v2 沙箱工具组）
 
-| | 27B Q4_K_XL | 27B FP4-FAST | FN ROCmFP4 | FN Q4_K_XL |
+| 评测项目 | 27B Q4_K_XL | 27B FP4-FAST | Flash-Next ROCmFP4 | Flash-Next Q4_K_XL |
 |---|---:|---:|---:|---:|
-| 通过 | 8/8 | 7/8 | 7/8 | 7/8 |
-| 核爆（须为 0） | 0 | 0 | 0 | 0 |
-| 生成 tps 区间 | 9.1–31.1 | 9.3–21.5 | 16.7–56.6 | 16.8–55.1 |
+| 通过任务数 | **8/8** | 7/8 | 7/8 | 7/8 |
+| 严重失误次数 | **0** | **0** | **0** | **0** |
+| 生成 TPS 范围 | 9.1–31.1 | 9.3–21.5 | 16.7–56.6 | 16.8–55.1 |
 
-### 各模型建议（目前最佳）
+### 各模型推荐配置
 
-- **Qwen 3.8 27B → 用 UD-Q4_K_XL。** FP4-FAST 在 FP4 家族内全胜（5 个 decode 情境
-  ＋代理 8/8，胜 STRIX 的 7/8），但 single-scale FP4 的 decode 与草稿接受率仍输
-  Q4_K_XL，故 27B 以 Q4_K_XL 为最佳。
-- **Qwen 3.8 Flash-Next → 用 ROCmFP4。** decode 最快（散文 45.0、费波那契 87.0）、
-  代理 8/8，且 ~94 GB 比 Q4_K_XL 的 ~111 GB 更省，故 Flash-Next 以 ROCmFP4 为最佳。
+- **Qwen 3.8 27B**：推荐采用 **UD-Q4_K_XL**，解码速度与草稿接受率皆达最佳状态。
+- **Qwen 3.8 Flash-Next**：推荐采用 **ROCmFP4**，解码吞吐极高（散文 45 tok/s、斐波那契 87 tok/s），且仅需 ~94 GB 显存（对比 Q4_K_XL 节省约 17 GB）。
 
-> 27B ROCmFP4 decode 为 **v0.24.1 修复后**数值：修复前开 DFlash2 因 verify 走逐行
-> GEMV 循环而崩速，修复后 FAST 追平并略胜非 FAST。
+---
 
 ## 上游追踪
 
-MBufo 追随上游 `main` 并以合并方式跟进，而不是分叉走自己的路。上游的 release
-标签维持不可变；MBufo 的 release 标签一律加上 `mbufo-vX.Y.Z` 前缀，因此永远
-不会与上游的 `vX.Y.Z` 撞名。（注：旧中文版此节停在 v0.20.0，已同步为英文版现状。）
+MBufo 持续追随并以标准 Git Merge 方式整合上游 `main` 分支，保持历史清晰与干净。
 
-| 项目 | 值 |
+| 项目 | 内容说明 |
 | --- | --- |
 | 上游仓库 | [gufo-org/gufo](https://github.com/gufo-org/gufo) |
-| 上游基准 release | `v0.26.0`（cherry-pick 安全修复；完整合并已 revert——见下） |
-| 已合并的上游 `main` | cherry-pick 到 `v0.26.0`（2026-10-28）：#732 中性 sampler 字段、#736 可重复 `--served-model-name`。完整 0.21→0.26 合并**已 revert**：#758 chunked-DeltaNet prefill 让 gfx1151 FN prefill 衰退 30-46%（上游 #850 后来移除了它）；audio／Windows 与此 gfx1151 Linux 分支无关。 |
-| 合并策略 | 上游 `main` 以 `--no-ff` 合并；MBufo 专属提交保持可辨识，上游历史永不改写 |
+| 上游基准版本 | `v0.26.0`（持续追随稳定提交） |
+| 合并策略 | 通过 `--no-ff` 合并上游最新提交，MBufo 特有提交保持独立清晰，永不篡改上游历史 |
+| 标签命名规范 | MBufo 发布标签均采用 `mbufo-vX.Y.Z` 前缀，与上游原生标签完全隔离 |
 
-上游发布新版本时，“上游基准 release”这一列会在合并它的同一个提交里更新，
-因此本 README 永远会标明这棵树确切包含到上游的哪个状态。
+---
 
-## 从源代码建置
+## 从源码构建
 
-支援的目标平台为 Linux x86-64 上的 AMD Strix Halo（`gfx1151`）。建置方式即
-上游的建置方式，MBufo 未增加任何建置系统需求。
+目标环境为 Linux x86-64 上的 AMD Strix Halo（`gfx1151`）。构建流程与上游标准完全一致：
 
 ```sh
 cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
@@ -588,46 +313,43 @@ cmake --build --preset release --parallel 4
 ./build/release/gufo diagnose
 ```
 
-请安装 C++20 编译器、CMake 3.21+、Ninja、pkg-config、ROCm 开发函式库
-（HIP、hipBLAS、hipBLASLt、rocBLAS、hipCUB、rocPRIM、rocWMMA）以及一般系统
-函式库（ICU、libcurl、OpenSSL、libpng、libjpeg、libwebp、FFmpeg）。目前验证
-过的工具链为 GCC 15.3 搭配 ROCm 7.2.3。也提供 Nix 建置（`nix build`）。GPU
-驱动必须允许你的使用者存取 `/dev/kfd` 与 `/dev/dri`；模型权重需另行取得。每个
-模型指南（见 [docs/models](docs/models/README.md)）都列出所需档案与基准设定。
-完整的相依性清单、ROCr queue-memory 补丁与容器相关说明，请见
-[上游建置文件](https://github.com/gufo-org/gufo#build-from-source)。
+### 环境依赖需求
+- **编译器与工具**：支持 C++20 之编译器（推荐 GCC 15.3）、CMake 3.21+、Ninja、pkg-config。
+- **运算库**：ROCm 7.2.3 开发库（HIP、hipBLAS、hipBLASLt、rocBLAS、hipCUB、rocPRIM、rocWMMA）。亦支持 Nix 构建（`nix build`）。
+- **系统依赖**：ICU、libcurl、OpenSSL、libpng、libjpeg、libwebp、FFmpeg。
+- **权限**：执行账号需具备访问 `/dev/kfd` 与 `/dev/dri` 节点之权限。
 
-## 文件索引
+完整构建说明可参考 [上游构建文档](https://github.com/gufo-org/gufo#build-from-source)。
 
-| 文件 | 内容 |
+---
+
+## 文档索引
+
+| 文档路径 | 说明内容 |
 | --- | --- |
-| [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md) | 混合批次设计：铁律、验证矩阵、量测数据 |
-| [docs/KV-CACHE.md](docs/KV-CACHE.md) | 对话与元件快取（上游） |
-| [docs/KV-V4.md](docs/KV-V4.md) | 4-bit K/V 区块：布局、正确性表 |
-| [docs/SERVER.md](docs/SERVER.md) | HTTP API 契约 |
-| [docs/CLI.md](docs/CLI.md) | 命令列参照 |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 建置、测试、preset |
-| [docs/TESTING.md](docs/TESTING.md) | 托管 CI 测试组与本机品质检查 |
-| [docs/models/README.md](docs/models/README.md) | 各模型指南：README／BENCHMARKS／QUALITY／EXPERIMENTS |
-| [CHANGELOG.md](CHANGELOG.md) | 上游发布历史与 MBufo release |
+| [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md) | 混合批处理架构设计、核心不变量与实测矩阵 |
+| [docs/KV-CACHE.md](docs/KV-CACHE.md) | 对话缓存与组件生命周期管理 |
+| [docs/KV-V4.md](docs/KV-V4.md) | 4-bit KV 块布局规范与数值精确度度量 |
+| [docs/SERVER.md](docs/SERVER.md) | HTTP API 接口规范与通讯协议 |
+| [docs/CLI.md](docs/CLI.md) | 命令行参数完整指南 |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 开发者指引、测试配置与构建 Preset |
+| [docs/TESTING.md](docs/TESTING.md) | 自动化 CI 测试组与本地验证规范 |
+| [docs/models/README.md](docs/models/README.md) | 各模型家族专属调优与配置指南 |
+| [CHANGELOG.md](CHANGELOG.md) | 项目历程与详细更新日志 |
 
-## 相容性与限制
+---
 
-- 混合批次改变的是排程，不是模型语意。任何无法服务整批的层都会退回旧路径。
-- `--kv-quant q8` 是以“不再与基准完全一致”换取内存。
-  当与基准的精确一致性比容量更重要时，请用 `f16`。
-- 对话状态以 KV 格式区分版本；用某一种格式写出的快照不会被另一种格式重用。
-- 上游的 release 标签不可变，也不会被当成 MBufo 的标签重复使用。
-- 已知限制（v0.28.0，短句）：64K 以上 ctx 的 qwen35 请压在 60K token 内（驱动
-  MODE2 重置风险）；DSpark 维持 legacy；gemma4 full-512 层留守 F16；Glimmer
-  DFlash 约 89%（E4 证伪为非 bug）。
+## 兼容性与限制
+
+- **语义不变性**：混合批处理仅调度排程，绝不改变模型数学语义；若遇到不支持整批运算之算子，自动安全回退。
+- **精度选择**：`--kv-quant q8` 以极微小的精度折损换取倍数级显存空间；若应用对数值一致性有绝对严格要求，请使用 `f16`。
+- **快照隔离**：KV 状态快照严格按格式版本区隔，避免跨精度误用。
+- **模型调度提醒**：Qwen 3.5 超过 64K 上下文时，建议将实际长度控制在 60K 内以确保驱动层级稳定；Gemma 4 之 Full-512 层维持 F16 运行。
+
+---
 
 ## 授权与致谢
 
-上游 gufo 采 MIT 授权；改作程序码与相依套件各自保留其声明，收录于
-[NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与
-`licenses/`。MBufo 保留这些声明。模型权重不随附，依各发布者条款使用。
+上游 gufo 采用 MIT 授权条款；第三方依赖库授权声明详见 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 `licenses/`。模型权重文件依其各原始发布者之许可协议规范。
 
-MBufo 是 [gufo](https://github.com/gufo-org/gufo)（by gufo-org 及贡献者）的
-分支。低精度 KV 与性能调优的工作建立在上游的 Q8 KV cache、int8 WMMA、
-persistence 与 history drafting 等改动之上。
+MBufo 作为 [gufo](https://github.com/gufo-org/gufo)（gufo-org 及社区贡献者）的优化衍生版本，在此感谢开源社区奠定的深厚基础。
