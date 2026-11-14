@@ -246,22 +246,23 @@ public:
   return KvValueIs4Bit(format) ? kKvValue4BitBlockBytes : kKvKeyBlockBytes;
 }
 
-/// int8 WMMA causal path: reads blocked int8 caches directly (no F16
-/// staging). Gated behind GUFO_KV_I8; only the int8 codec qualifies.
-[[nodiscard]] bool UseWmmaI8() {
-  const char* e = std::getenv("GUFO_KV_I8");
-  return e != nullptr && *e != '\0' && e[0] != '0';
-}
-
-/// WmmaCausalAttention's blocked mode: 1 keeps int8 codes for an int8 WMMA
-/// score pass; 2 (GUFO_KV_I8=2) reads the same blocks in place but
-/// dequantizes K and V to F16 in registers and runs the F16 score path.
+/// Blocked-cache WMMA attention mode (GUFO_KV_I8):
+///   2 (default, unset) reads the blocked K/V in place and dequantizes them
+///     to F16 in registers; outputs equal the F16 staging route byte for
+///     byte, without the context-sized staging copy.
+///   1 keeps int8 codes for an int8 WMMA score pass.
+///   0 restores the transient F16 staging route.
+/// Only the int8 codec layout qualifies.
 [[nodiscard]] std::uint32_t WmmaI8Mode() {
   const char* e = std::getenv("GUFO_KV_I8");
-  if (e == nullptr || *e == '\0' || e[0] == '0')
-    return 0;
-  return e[0] == '2' ? 2U : 1U;
+  if (e == nullptr || *e == '\0')
+    return 2U;
+  if (e[0] == '0')
+    return 0U;
+  return e[0] == '1' ? 1U : 2U;
 }
+
+[[nodiscard]] bool UseWmmaI8() { return WmmaI8Mode() != 0; }
 }  // namespace
 // Legacy hipFree synchronizes unrelated inference streams. Pool allocations
 // have stream-ordered release, so evicting a checkpoint cannot stall a peer.

@@ -42,10 +42,11 @@ bool UseMixedBatch() {
 // Gated behind GUFO_KV_I8 (separate from GUFO_KV_WMMA so single-session
 // routing is untouched during validation); only the int8 codec layout is
 // supported (E4M3 bytes are not int8 codes, so kFp8 keeps staging).
+// Default on (GUFO_KV_I8 unset or nonzero); GUFO_KV_I8=0 restores staging.
 bool UseWmmaI8() {
   static const bool on = [] {
     const char* e = std::getenv("GUFO_KV_I8");
-    return e != nullptr && e[0] != '\0' && e[0] != '0';
+    return e == nullptr || e[0] == '\0' || e[0] != '0';
   }();
   return on;
 }
