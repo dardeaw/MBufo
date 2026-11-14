@@ -586,6 +586,21 @@ private:
   /// Runs routed experts after the router and shared expert are ready.
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
                   std::uint32_t n_tokens, std::string* error_msg) const;
+  /// Wide ForwardBatch pieces for a batch carrying a trailing prefill chunk.
+  /// Each scopes the prefill phase to itself and runs ForwardBody's fused
+  /// prefill arithmetic. WideMixer: the attention mixer over all rows of
+  /// s_.res (F32 and F16 outputs). WideChunkCore: the chunk's own
+  /// attention / GDN with its projections and output projection, on the
+  /// caller's row view. WideFfn: ForwardBody's FFN (combine, mixer, MoE,
+  /// combine into the next mixer's norm) over all rows; *next_normed says
+  /// whether the next mixer receives that norm.
+  bool WideMixer(const DeviceMixer& m, bool normed, std::uint32_t rows,
+                 std::string* error_msg) const;
+  bool WideChunkCore(const DeviceLayer& l, std::uint32_t il, Session& session,
+                     std::uint32_t n_tokens, bool sparse, std::uint32_t pool,
+                     std::string* error_msg) const;
+  bool WideFfn(const DeviceLayer& l, std::uint32_t il, std::uint32_t rows,
+               bool* next_normed, std::string* error_msg) const;
   /// MoeExperts with the prefill phase scoped to this call: wide routed
   /// tiles (64-row down, paired 128-row gate/up) for batches that carry a
   /// prefill chunk.

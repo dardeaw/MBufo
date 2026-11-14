@@ -1960,20 +1960,34 @@ struct TextGenerationScheduler::Impl {
   // prefill-chunk / decode-step pair while a prefill and decoders coexist.
   // Returns false, with the decoders back in `decoding` untouched, when the
   // merge is refused; the caller then runs the ordinary pair.
-  // Opt-in (GUFO_MIXED_MTP=1): correct, but ForwardBatch lacks the fused
-  // prefill routes, so a 512-token chunk with three decoders takes ~660 ms
-  // against ~530 ms for the chunk alone plus a decode step.
+  // On by default; GUFO_MIXED_MTP=0 restores the alternating pair. The chunk
+  // runs ForwardBatch's wide mode (fused prefill arithmetic), so a 512-token
+  // chunk with three decoders takes ~523 ms against ~530 ms for the chunk
+  // alone plus a decode step: during another request's prefill, decoders
+  // emit ~33% more tokens and their mean inter-token gap falls ~20%; the
+  // prefilling request's first token comes 2-5% later.
   bool TryStepMixedMtp(
       std::deque<std::shared_ptr<ScheduledRequest>>& prefilling,
       std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
       std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
     static const bool enabled = [] {
       const char* e = std::getenv("GUFO_MIXED_MTP");
-      return e != nullptr && e[0] == '1';
+      return e == nullptr || e[0] == '\0' || e[0] != '0';
     }();
     if (!enabled || prefilling.empty() || decoding.empty())
       return false;
-    auto prefill_req = prefilling.front();
+    // Same service order as the unmerged path: a prefill that finishes in
+    // one chunk goes ahead of a long prompt's later chunks.
+    const auto chosen = PickPrefill(prefilling);
+    auto prefill_req = *chosen;
+    // Removes the chosen request from `prefilling` (its position may have
+    // moved only through this function's own erase).
+    const auto drop_prefill = [&] {
+      const auto it =
+          std::find(prefilling.begin(), prefilling.end(), prefill_req);
+      if (it != prefilling.end())
+        prefilling.erase(it);
+    };
     if (!prefill_req->runner_request ||
         prefill_req->runner_request.SnapshotPending() ||
         CompleteIfStopped(prefill_req))
@@ -2052,7 +2066,7 @@ struct TextGenerationScheduler::Impl {
         if (!CompleteIfStopped(item.request))
           CompleteFailure(item.request, failure);
       }
-      prefilling.pop_front();
+      drop_prefill();
       if (!CompleteIfStopped(prefill_req))
         CompleteFailure(prefill_req, failure);
       for (auto& request : taken)
@@ -2071,7 +2085,7 @@ struct TextGenerationScheduler::Impl {
     if (device_lost.load(std::memory_order_acquire)) {
       for (const auto& item : prepared)
         CompleteFailure(item.request, device_lost_failure);
-      prefilling.pop_front();
+      drop_prefill();
       CompleteFailure(prefill_req, device_lost_failure);
       return true;
     }
@@ -2141,7 +2155,7 @@ struct TextGenerationScheduler::Impl {
     // Chunk: a prefill step. Attribute wall time by rows.
     const double elapsed_ms =
         std::chrono::duration<double, std::milli>(Clock::now() - start).count();
-    prefilling.pop_front();
+    drop_prefill();
     if (chunk->interrupted) {
       if (!CompleteIfStopped(prefill_req))
         CompleteFailure(prefill_req,

@@ -1063,6 +1063,27 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       items.back().tokens.size() > options_.max_speculative;
   const std::uint32_t logit_rows =
       trailing_chunk ? offsets[items.size() - 1] + 1 : rows;
+  // Wide mode: a trailing prefill chunk runs ForwardBody's fused prefill
+  // arithmetic (row-wise mixers, combines and MoE over every row in the
+  // prefill phase; its own attention / GDN with fused projections), while
+  // the leading decode / verify items keep their batched per-item cores in
+  // the decode phase. GUFO_BATCH_WIDE_CHUNK=0 keeps the decode-family path.
+  static const bool wide_chunk_enabled = [] {
+    const char* e = std::getenv("GUFO_BATCH_WIDE_CHUNK");
+    return e == nullptr || e[0] == '\0' || e[0] != '0';
+  }();
+  const std::size_t chunk_index = items.size() - 1;
+  const bool wide = wide_chunk_enabled && trailing_chunk && rows > 64 &&
+                    items.back().tokens.size() > kDecodeRows;
+  const std::uint32_t lead = offsets[chunk_index];
+  std::uint32_t gdn_max_tokens = max_tokens;
+  if (wide) {
+    gdn_max_tokens = 0;
+    for (std::size_t i = 0; i < chunk_index; ++i)
+      gdn_max_tokens = std::max(
+          gdn_max_tokens, static_cast<std::uint32_t>(items[i].tokens.size()));
+  }
+  const std::uint32_t proj_rows = wide ? lead : rows;
   // MTP parity with single Forward (kPrefill): a non-speculative multi-row
   // item is a prefill chunk, which requires a consumed predictor frontier and
   // a predictor-KV feed below. Legacy refuses loudly here, before any GPU
@@ -1203,39 +1224,50 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       const auto& l = layers[il];
       if (c.IsPleLayer(il) && !WaitPle(error))
         return false;
-      for (std::size_t i = 0; i < items.size(); ++i) {
-        const auto& item = items[i];
-        const auto n = static_cast<std::uint32_t>(item.tokens.size());
-        UseScratch(RowScratch(base, offsets[i]));
-        if (!item.session->Cancelled() && c.IsPleLayer(il) &&
-            !Ple(l, *item.session, n, s_.res, item.speculative, error, true)) {
-          return false;
+      // Wide mode keeps the scratch view (and the F16 norm the previous
+      // combine handed to this mixer) untouched outside the PLE layer.
+      if (!wide || c.IsPleLayer(il)) {
+        for (std::size_t i = 0; i < items.size(); ++i) {
+          const auto& item = items[i];
+          const auto n = static_cast<std::uint32_t>(item.tokens.size());
+          UseScratch(RowScratch(base, offsets[i]));
+          if (!item.session->Cancelled() && c.IsPleLayer(il) &&
+              !Ple(l, *item.session, n, s_.res, item.speculative, error,
+                   true)) {
+            return false;
+          }
         }
+        UseScratch(base);
       }
-      UseScratch(base);
-      if (!HcMixBatch(l.hc_attn, base.res, normed, base.mixed, base.inject,
-                      rows, error))
+      if (wide ? !WideMixer(l.hc_attn, normed, rows, error)
+               : !HcMixBatch(l.hc_attn, base.res, normed, base.mixed,
+                             base.inject, rows, error))
         return false;
-      if (l.linear) {
+      // Wide mode projects only the leading decode rows here; the chunk
+      // projects its own rows inside WideChunkCore.
+      if (proj_rows == 0) {
+      } else if (l.linear) {
         if ((!l.ssm_in.empty()
-                 ? !DenseBatch(l.ssm_in, base.mixed, base.qkvz, rows, error)
-                 : (!DenseBatch(l.ssm_qkv, base.mixed, base.qkv, rows, error) ||
-                    !DenseBatch(l.ssm_gate, base.mixed, base.z, rows,
+                 ? !DenseBatch(l.ssm_in, base.mixed, base.qkvz, proj_rows,
+                               error)
+                 : (!DenseBatch(l.ssm_qkv, base.mixed, base.qkv, proj_rows,
+                                error) ||
+                    !DenseBatch(l.ssm_gate, base.mixed, base.z, proj_rows,
                                 error))) ||
-            !DenseBatch(l.ssm_alpha_beta, base.mixed, base.alpha_beta, rows,
-                        error)) {
+            !DenseBatch(l.ssm_alpha_beta, base.mixed, base.alpha_beta,
+                        proj_rows, error)) {
           return false;
         }
       } else if (!l.attn_qkv.empty()) {
-        if (!DenseBatch(l.attn_qkv, base.mixed, base.qg, rows, error)) {
+        if (!DenseBatch(l.attn_qkv, base.mixed, base.qg, proj_rows, error)) {
           return false;
         }
       } else {
         // Separate Q/gate has a shorter row stride than the stacked buffer.
         // This model normally stacks QKV; keep the separate shape explicit.
-        if (!DenseBatch(l.attn_q, base.mixed, base.qg, rows, error) ||
-            !DenseBatch(l.attn_k, base.mixed, base.k, rows, error) ||
-            !DenseBatch(l.attn_v, base.mixed, base.v, rows, error)) {
+        if (!DenseBatch(l.attn_q, base.mixed, base.qg, proj_rows, error) ||
+            !DenseBatch(l.attn_k, base.mixed, base.k, proj_rows, error) ||
+            !DenseBatch(l.attn_v, base.mixed, base.v, proj_rows, error)) {
           return false;
         }
       }
@@ -1244,7 +1276,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       // keep the per-item cores). Speculative verify chains are included
       // unless GUFO_MIXED_SPEC=0 (see MixedSpec()).
       bool use_mixed =
-          !l.linear && UseMixedBatch() && items.size() >= 2 &&
+          !wide && !l.linear && UseMixedBatch() && items.size() >= 2 &&
           (MixedSpec() ||
            !std::any_of(items.begin(), items.end(),
                         [](const BatchItem& it) { return it.speculative; }));
@@ -1265,6 +1297,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       const std::uint32_t i8_kbb = MixedKvKeyBytes();
       const std::uint32_t i8_vbb = MixedKvValueBytes();
       for (std::size_t i = 0; i < items.size(); ++i) {
+        if (wide && i == chunk_index)
+          continue;
         const auto& item = items[i];
         auto& session = *item.session;
         const auto n = static_cast<std::uint32_t>(item.tokens.size());
@@ -1526,10 +1560,34 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         }
         UseScratch(base);
       }
+      if (wide) {
+        // The chunk: its own fused projections, core and output projection
+        // on its row view, in the prefill phase.
+        const auto& item = items[chunk_index];
+        auto& session = *item.session;
+        const auto n = static_cast<std::uint32_t>(item.tokens.size());
+        UseScratch(RowScratch(base, lead));
+        if (session.CheckCancellation(nullptr)) {
+          const auto pool =
+              sparse[chunk_index] && complete[chunk_index] > session.blocks_
+                  ? complete[chunk_index] - session.blocks_
+                  : 0;
+          if (!WideChunkCore(l, il, session, n, sparse[chunk_index], pool,
+                             error))
+            return false;
+        } else if (!Check(hipMemsetAsync(s_.block_out, 0,
+                                         std::size_t{n} * c.hidden_size *
+                                             sizeof(float),
+                                         stream_),
+                          error)) {
+          return false;
+        }
+        UseScratch(base);
+      }
       if (l.linear && batch_gdn && gdn_active != 0) {
         const auto offset = il * kBatchSessions;
         if (!GatedDeltaNetBatch(
-                batch_gdn_ + offset, items.size(), max_tokens, gdn_active,
+                batch_gdn_ + offset, items.size(), gdn_max_tokens, gdn_active,
                 l.ssm_in.empty() ? c.SsmConvChannels() : l.ssm_in.rows,
                 l.ssm_in.empty() ? c.SsmValueDim() : l.ssm_in.rows,
                 l.ssm_conv1d.f32(), l.ssm_a.f32(), l.ssm_dt.f32(),
@@ -1538,10 +1596,18 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           return Fail(error, "batched GatedDeltaNet launch failed");
       }
       UseScratch(base);
-      if (!DenseBatch(l.linear ? l.ssm_out : l.attn_out,
-                      l.linear ? base.gdn_out : base.ctx, base.block_out, rows,
-                      error)) {
+      if (proj_rows != 0 &&
+          !DenseBatch(l.linear ? l.ssm_out : l.attn_out,
+                      l.linear ? base.gdn_out : base.ctx, base.block_out,
+                      proj_rows, error)) {
         return false;
+      }
+      if (wide) {
+        bool next_normed = false;
+        if (!WideFfn(l, il, rows, &next_normed, error))
+          return false;
+        normed = next_normed;
+        continue;
       }
       CombineBatch(base.res, l.hc_ffn.norm.f32(), rows);
       if (!HcMixBatch(l.hc_ffn, base.res, true, base.mixed, base.inject, rows,

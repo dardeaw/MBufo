@@ -3351,6 +3351,56 @@ bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
          c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
 }
 
+bool Executor::WideMixer(const DeviceMixer& m, bool normed, std::uint32_t rows,
+                         std::string* error_msg) const {
+  PrefillPhase phase(true);
+  return HcMix(m, s_.res, normed, s_.mixed, s_.inject, rows, error_msg);
+}
+
+bool Executor::WideChunkCore(const DeviceLayer& l, std::uint32_t il,
+                             Session& session, std::uint32_t n_tokens,
+                             bool sparse, std::uint32_t pool,
+                             std::string* error_msg) const {
+  PrefillPhase phase(true);
+  if (l.linear) {
+    return LinearAttention(l, session.linear_[il], s_.mixed, s_.block_out,
+                           n_tokens, false, error_msg, false, true);
+  }
+  return Attention(l, session.attention_[il], s_.mixed, s_.block_out, n_tokens,
+                   &session.control_->position, &session.control_->blocks,
+                   session.position_, pool, session.max_context_, sparse,
+                   error_msg, false, false, true, 0, session, false, false);
+}
+
+bool Executor::WideFfn(const DeviceLayer& l, std::uint32_t il,
+                       std::uint32_t rows, bool* next_normed,
+                       std::string* error_msg) const {
+  PrefillPhase phase(true);
+  const Config& c = config();
+  const auto& layers = model_->layers();
+  const float* next_norm =
+      il + 1 < c.num_layers
+          ? (c.IsPleLayer(il + 1) ? nullptr : layers[il + 1].hc_attn.norm.f32())
+          : nullptr;
+  const float* next_inject =
+      next_norm != nullptr ? InjectWeights(layers[il + 1].hc_attn) : nullptr;
+  // ForwardBody's `finish`: the combine defers the residual update into the
+  // MoE combine when the routed experts take the WMMA route.
+  defer_residual_ = WmmaExperts(l, rows);
+  const bool no_f32 = defer_residual_ && rows <= options_.max_batch &&
+                      l.router.type == GgmlType::kF16 &&
+                      l.shexp_gate.type == GgmlType::kQ8_0 &&
+                      l.shexp_up.type == GgmlType::kQ8_0;
+  Combine(s_.res, l.hc_ffn.norm.f32(), rows, InjectWeights(l.hc_ffn));
+  if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows, error_msg,
+             false, no_f32) ||
+      !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
+    return false;
+  Combine(s_.res, next_norm, rows, next_inject);
+  *next_normed = next_norm != nullptr;
+  return true;
+}
+
 bool Executor::MoeExpertsWide(const DeviceLayer& l, const float* x,
                               float* out, std::uint32_t n_tokens,
                               std::string* error_msg) const {
