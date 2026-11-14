@@ -571,7 +571,7 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t ratio, hipStream_t stream,
                          bool last_only = false,
                          std::uint32_t k_block_bytes = 0,
-                         std::uint32_t v_block_bytes = 0, bool i8 = false);
+                         std::uint32_t v_block_bytes = 0, std::uint32_t i8 = 0);
 
 /// counts[e] = number of (token, slot) pairs routed to expert e.
 void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,

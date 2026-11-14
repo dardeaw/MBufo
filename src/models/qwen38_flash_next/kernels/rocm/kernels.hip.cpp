@@ -3962,8 +3962,12 @@ __device__ __forceinline__ int32x8_t WmmaI8(int32x4_t a, int32x4_t b,
   return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
 }
 
+/// `kBlkF16` reads the blocked (int8 or packed 4-bit) K/V caches in place and
+/// dequantizes both to F16 in registers, then runs the unchanged F16 score,
+/// softmax and PV sequence. The values equal DequantizeKvRows' staging output
+/// (float(code) * scale narrowed to F16), without the context-sized F16 copy.
 template<std::uint32_t kQueryRows, std::uint32_t kKeys, bool kPackHeads,
-         bool kI8Mma>
+         bool kI8Mma, bool kBlkF16 = false>
 __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
     const float* __restrict__ q, const float* __restrict__ gate,
     const __half* __restrict__ k_cache, const __half* __restrict__ v_cache,
@@ -4395,7 +4399,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   const auto* k_base = k_cache + (static_cast<std::size_t>(kv_head) * kHeadDim);
 
   const auto load_v = [&](const Tile& tile, uint4* dst) {
-    if constexpr (kI8Mma) {
+    if constexpr (kI8Mma || kBlkF16) {
       if (v_block_bytes == 18 || v_block_bytes == 34) {
         const std::uint32_t key_position = tile_key(tile, v_key);
         const bool live = key_position < context_end;
@@ -4500,6 +4504,59 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       }
       if ((slice % 32) == 0) {
         k_scl[(kbank * kKeys * 8) + (key * 8) + (slice / 32)] = sc;
+      }
+      return;
+    }
+    if constexpr (kBlkF16) {
+      (void)kbank;
+      // Same thread-to-element map as the F16 load below: eight dims of one
+      // key per register, decoded from their 32-element block in place.
+      const std::size_t head_bytes =
+          (static_cast<std::size_t>(kHeadDim) / 32) * k_block_bytes;
+      const std::size_t row_bytes = head_bytes * kWmmaKvHeads;
+      const std::uint8_t* k_blk_base =
+          reinterpret_cast<const std::uint8_t*>(k_cache) +
+          (static_cast<std::size_t>(kv_head) * head_bytes);
+#pragma unroll
+      for (std::uint32_t n = 0; n < kKRegs; ++n) {
+        const std::uint32_t idx = tid + (n * 256);
+        const std::uint32_t key_position =
+            tile_key(tile, idx / (kHeadDim / 8));
+        const std::uint32_t d8 = (idx % (kHeadDim / 8)) * 8;
+        const bool live = key_position < context_end;
+        uint4 reg = make_uint4(0u, 0u, 0u, 0u);
+        if (live) {
+          const std::uint8_t* kent =
+              k_blk_base +
+              (static_cast<std::size_t>(key_position) * row_bytes) +
+              ((d8 / 32) * k_block_bytes);
+          auto* hp = reinterpret_cast<__half*>(&reg);
+          if (k_block_bytes == 34) {
+            const float sc =
+                __half2float(*reinterpret_cast<const __half*>(kent + 32));
+            std::uint64_t codes = 0;
+            __builtin_memcpy(&codes, kent + (d8 % 32), sizeof(codes));
+#pragma unroll
+            for (std::uint32_t i = 0; i < 8; ++i) {
+              const int qc = static_cast<int>(
+                  static_cast<std::int8_t>((codes >> (8 * i)) & 0xFFu));
+              hp[i] = __float2half(static_cast<float>(qc) * sc);
+            }
+          } else {
+            const float sc =
+                __half2float(*reinterpret_cast<const __half*>(kent + 16));
+            std::uint32_t packed = 0;
+            __builtin_memcpy(&packed, kent + ((d8 % 32) / 2),
+                             sizeof(std::uint32_t));
+#pragma unroll
+            for (std::uint32_t i = 0; i < 8; ++i) {
+              const int qc = static_cast<int>((packed >> (4 * i)) & 0xFu);
+              const int val = qc - (qc & 8 ? 16 : 0);
+              hp[i] = __float2half(static_cast<float>(val) * sc);
+            }
+          }
+        }
+        dst[n] = reg;
       }
       return;
     }
@@ -9204,9 +9261,15 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t kv_heads, std::uint32_t d,
                          std::uint32_t ratio, hipStream_t stream,
                          bool last_only, std::uint32_t k_block_bytes,
-                         std::uint32_t v_block_bytes, bool i8) {
+                         std::uint32_t v_block_bytes, std::uint32_t i8) {
   if (WmmaCausalAttentionContextLimit(heads, kv_heads, d, ratio) == 0 ||
       n_tokens == 0) {
+    return false;
+  }
+  // i8 == 2: blocked caches read in place, dequantized to F16 in registers.
+  const bool blk_f16 = i8 == 2;
+  if (blk_f16 && ((k_block_bytes != 34 && k_block_bytes != 18) ||
+                  (v_block_bytes != 34 && v_block_bytes != 18))) {
     return false;
   }
   if (mask != nullptr) {
@@ -9226,7 +9289,14 @@ bool WmmaCausalAttention(const float* q, const float* gate,
     const dim3 grid(
         (n_tokens + kPackedQueries - 1) / kPackedQueries - first_group,
         kWmmaKvHeads);
-    if (i8) {
+    if (blk_f16) {
+      hipLaunchKernelGGL(
+          (WmmaCausalAttentionKernel<kPackedQueries, kWmmaKeys, true, false,
+                                     true>),
+          grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask,
+          mask_words, out, start_pos, n_tokens, first_group, k_block_bytes,
+          v_block_bytes);
+    } else if (i8) {
       hipLaunchKernelGGL(
           (WmmaCausalAttentionKernel<kPackedQueries, kWmmaKeys, true, true>),
           grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask,
@@ -9245,7 +9315,14 @@ bool WmmaCausalAttention(const float* q, const float* gate,
   const dim3 grid(
       (n_tokens + kWmmaQueryRows - 1) / kWmmaQueryRows - first_group,
       kWmmaKvHeads * (kWmmaGqa / kWmmaHeads));
-  if (i8) {
+  if (blk_f16) {
+    hipLaunchKernelGGL(
+        (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false, false,
+                                   true>),
+        grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask,
+        mask_words, out, start_pos, n_tokens, first_group, k_block_bytes,
+        v_block_bytes);
+  } else if (i8) {
     hipLaunchKernelGGL(
         (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false, true>),
         grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask,

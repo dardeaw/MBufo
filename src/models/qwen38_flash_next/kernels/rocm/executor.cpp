@@ -252,6 +252,16 @@ public:
   const char* e = std::getenv("GUFO_KV_I8");
   return e != nullptr && *e != '\0' && e[0] != '0';
 }
+
+/// WmmaCausalAttention's blocked mode: 1 keeps int8 codes for an int8 WMMA
+/// score pass; 2 (GUFO_KV_I8=2) reads the same blocks in place but
+/// dequantizes K and V to F16 in registers and runs the F16 score path.
+[[nodiscard]] std::uint32_t WmmaI8Mode() {
+  const char* e = std::getenv("GUFO_KV_I8");
+  if (e == nullptr || *e == '\0' || e[0] == '0')
+    return 0;
+  return e[0] == '2' ? 2U : 1U;
+}
 }  // namespace
 // Legacy hipFree synchronizes unrelated inference streams. Pool allocations
 // have stream-ordered release, so evicting a checkpoint cannot stall a peer.
@@ -3058,13 +3068,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                         : nullptr,
                    mask_words_, s_.ctx + at(dense_rows), rows - dense_rows,
                    pos0 + dense_rows, c.num_heads, c.num_kv_heads, c.head_dim,
-                   c.compress_ratio, stream_, last, kbb, vbb, i8_kv)) &&
+                   c.compress_ratio, stream_, last, kbb, vbb, i8_kv ? WmmaI8Mode() : 0U)) &&
               (dense_rows == 0 || (last && dense_rows != rows) ||
                WmmaCausalAttention(s_.q + at(0), s_.attn_gate + at(0), kk, vv,
                                    nullptr, mask_words_, s_.ctx + at(0),
                                    dense_rows, pos0, c.num_heads,
                                    c.num_kv_heads, c.head_dim, c.compress_ratio,
-                                   stream_, last, kbb, vbb, i8_kv));
+                                   stream_, last, kbb, vbb, i8_kv ? WmmaI8Mode() : 0U));
         }
         return ok;
       };
