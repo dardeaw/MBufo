@@ -39,6 +39,11 @@ public:
   /// Returns false when no primary id matches.
   [[nodiscard]] bool Remove(const std::string& id, std::string* error);
 
+  /// Promotes the loaded model whose primary id is `id` to the default
+  /// (primary) position, protecting it from LRU eviction and routing requests
+  /// that omit `model` to it.
+  [[nodiscard]] bool SetDefault(const std::string& id, std::string* error);
+
   /// Resolves a requested name (primary id or alias). Null = not loaded.
   /// Empty name returns the default model. Touches last_used for accounting.
   [[nodiscard]] std::shared_ptr<TextGenerationBackend> Resolve(
@@ -55,7 +60,14 @@ public:
     std::vector<std::string> names;  // primary + aliases
     std::uint32_t max_context{0};
     std::uint64_t last_used_ms{0};
+    std::uint64_t idle_ms{0};
     bool ready{false};
+    bool is_default{false};
+    bool supports_images{false};
+    bool speculative{false};
+    std::size_t total_sessions{0};
+    std::size_t active_sessions{0};
+    std::vector<TextGenerationBackend::SessionState> sessions;
   };
   [[nodiscard]] std::vector<Info> List() const;
 

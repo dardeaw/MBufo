@@ -1588,13 +1588,37 @@ int RunServe(std::span<const char* const> args) {
            max_pending_requests_per_client, max_output_bytes,
            max_buffered_output_bytes, max_buffered_output_bytes_total,
            request_timeout_ms, stall_timeout_ms, log_progress,
-           speculative_config, cache_disk_directory, cache_disk_bytes,
+           cache_disk_directory, cache_disk_bytes,
            cache_disk_staging_bytes, cache_ram_bytes, max_tokens,
-           sampling_config,
+           sampling_config, reasoning_defaults,
            build_artifact = std::string(GUFO_RELEASE_VERSION " (" GUFO_REVISION ")")](
               const server::AdminLoadRequest& spec,
               std::string* error)
               -> std::shared_ptr<server::TextGenerationBackend> {
+        server::TextSpeculativeConfig req_spec{};
+        if (spec.speculative == "mtp") {
+          req_spec.backend = server::TextSpeculativeBackend::kMtp;
+          req_spec.draft_model_path = spec.draft_model_path;
+          req_spec.max_draft_tokens = spec.max_draft_tokens;
+        } else if (spec.speculative == "dflash2") {
+          req_spec.backend = server::TextSpeculativeBackend::kDFlash;
+          req_spec.draft_model_path = spec.draft_model_path;
+          req_spec.max_draft_tokens = spec.max_draft_tokens;
+        } else if (spec.speculative == "dspark") {
+          req_spec.backend = server::TextSpeculativeBackend::kDSpark;
+          req_spec.draft_model_path = spec.draft_model_path;
+          req_spec.max_draft_tokens = spec.max_draft_tokens;
+        } else {
+          req_spec.backend = server::TextSpeculativeBackend::kDisabled;
+        }
+
+        server::TextDiskCacheConfig req_disk{};
+        if (spec.enable_disk_cache && !cache_disk_directory.empty()) {
+          req_disk.directory = cache_disk_directory;
+          req_disk.capacity_bytes = cache_disk_bytes;
+          req_disk.staging_capacity_bytes = cache_disk_staging_bytes;
+        }
+
         auto fresh = std::make_shared<server::InferenceBackend>();
         if (!fresh->load(
                 spec.path, error, spec.max_context, spec.session_count,
@@ -1616,38 +1640,52 @@ int RunServe(std::span<const char* const> args) {
                         static_cast<std::chrono::milliseconds::rep>(
                             stall_timeout_ms)},
                     .log_progress = log_progress},
-                speculative_config,
-                server::TextDiskCacheConfig{
-                    .directory = cache_disk_directory,
-                    .capacity_bytes = cache_disk_bytes,
-                    .staging_capacity_bytes = cache_disk_staging_bytes,
-                    .model_artifact_fingerprint = {}},
-                spec.vision_model_path,
+                req_spec, req_disk, spec.vision_model_path,
                 server::TextRunnerRamCacheOptions{
                     .capacity_bytes = cache_ram_bytes},
                 spec.kv_cache_quant, spec.enable_yarn,
                 spec.kv_cache_quant_supplied)) {
           return nullptr;
         }
-        // Advertise the registry id so the handler's serves_model() check
-        // accepts requests that name this model by its admin-assigned id.
-        fresh->set_model_ids({spec.id});
+        // Advertise the registry id + aliases so serves_model() accepts them.
+        std::vector<std::string> ids{spec.id};
+        for (const auto& a : spec.aliases) {
+          if (!a.empty() && a != spec.id) ids.push_back(a);
+        }
+        fresh->set_model_ids(std::move(ids));
         fresh->set_served_artifact(spec.path, build_artifact);
         fresh->set_sampling_defaults(
             max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
             sampling_config);
+        if (reasoning_defaults.has_value()) {
+          fresh->set_reasoning_defaults(*reasoning_defaults);
+        }
         return fresh;
       };
-      // Free-memory probe for the load gate + LRU eviction. hipMemGetInfo
-      // reports device heap free; on a unified-memory APU this tracks the
-      // same pool weights and KV are carved from.
+      // Free-memory probe for the load gate + LRU eviction. Combine
+      // hipMemGetInfo with /proc/meminfo MemAvailable so unified-memory APUs
+      // (Strix Halo) accurately reflect host+GTT memory pressure.
       const auto probe = []() -> std::optional<std::size_t> {
+        std::optional<std::size_t> best;
 #if defined(ENGINE_ENABLE_HIP)
         std::size_t free_bytes = 0, total_bytes = 0;
         if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess)
-          return free_bytes;
+          best = free_bytes;
 #endif
-        return std::nullopt;
+        std::ifstream meminfo("/proc/meminfo");
+        std::string line;
+        while (std::getline(meminfo, line)) {
+          if (line.rfind("MemAvailable:", 0) == 0) {
+            std::istringstream iss(line.substr(13));
+            std::size_t kib = 0;
+            if (iss >> kib) {
+              const std::size_t host_avail = kib * 1024ULL;
+              best = best.has_value() ? std::min(*best, host_avail) : host_avail;
+            }
+            break;
+          }
+        }
+        return best;
       };
       admin =
           std::make_shared<server::ModelAdminService>(registry, loader, probe);

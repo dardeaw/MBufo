@@ -688,7 +688,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
   if (const auto* model = body.find("model"); model != nullptr) {
     if (!model->is_string())
       return InvalidCompatibilityRequest("'model' must be a string");
-    if (!backend.serves_model(model->str()))
+    if (!model->str().empty() && !backend.serves_model(model->str()))
       return Err(404, "Not Found", "requested model is not loaded",
                  "invalid_request_error", "model_not_found");
   }
@@ -2304,7 +2304,9 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     response.headers.emplace_back("WWW-Authenticate", "Bearer");
     return response;
   }
-  if (admin_ != nullptr && req.path.rfind("/admin/", 0) == 0) {
+  if (admin_ != nullptr &&
+      (req.path == "/admin" || req.path.rfind("/admin/", 0) == 0 ||
+       (req.method == "GET" && req.path == "/"))) {
     return admin_->Handle(req);
   }
   // `/health` and `/ready` are the native spelling and match llama-server's
@@ -2323,7 +2325,9 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                               req.path == "/readyz")) {
     if (device_lost())
       return DeviceLost();
-    const bool ready = (backend_ != nullptr && backend_->ready()) ||
+    const auto active_backend =
+        registry_ != nullptr ? registry_->Default() : backend_;
+    const bool ready = (active_backend != nullptr && active_backend->ready()) ||
                        (video_jobs_ != nullptr && video_jobs_->ready()) ||
                        (tts_ != nullptr && tts_->ready()) ||
                        (asr_ != nullptr && asr_->ready()) || images_ != nullptr;
@@ -2333,8 +2337,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     }
     json::Value body = json::Value::object();
     body["status"] = "ready";
-    if (backend_ != nullptr && backend_->ready()) {
-      body["model"] = backend_->model_id();
+    if (active_backend != nullptr && active_backend->ready()) {
+      body["model"] = active_backend->model_id();
     } else if (asr_ != nullptr && asr_->ready()) {
       body["model"] = asr_->model_id();
     } else if (tts_ != nullptr && tts_->ready()) {

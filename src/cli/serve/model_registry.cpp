@@ -60,6 +60,21 @@ bool ModelRegistry::Remove(const std::string& id, std::string* error) {
   return false;
 }
 
+bool ModelRegistry::SetDefault(const std::string& id, std::string* error) {
+  std::lock_guard lock(mutex_);
+  for (std::size_t i = 0; i < order_.size(); ++i) {
+    if (order_[i]->id != id) continue;
+    if (i > 0) {
+      auto entry = std::move(order_[i]);
+      order_.erase(order_.begin() + static_cast<std::ptrdiff_t>(i));
+      order_.insert(order_.begin(), std::move(entry));
+    }
+    return true;
+  }
+  if (error != nullptr) *error = "model '" + id + "' is not loaded";
+  return false;
+}
+
 std::shared_ptr<TextGenerationBackend> ModelRegistry::Resolve(
     std::string_view name) {
   std::shared_ptr<Entry> entry;
@@ -87,6 +102,14 @@ std::shared_ptr<TextGenerationBackend> ModelRegistry::Default() {
 
 std::vector<ModelRegistry::Info> ModelRegistry::List() const {
   std::lock_guard lock(mutex_);
+  const std::uint64_t now_ms = NowMs();
+  std::string default_id;
+  for (const auto& entry : order_) {
+    if (entry->backend && entry->backend->ready()) {
+      default_id = entry->id;
+      break;
+    }
+  }
   std::vector<Info> out;
   out.reserve(order_.size());
   for (const auto& entry : order_) {
@@ -95,8 +118,20 @@ std::vector<ModelRegistry::Info> ModelRegistry::List() const {
     info.names = entry->names;
     info.max_context = entry->backend ? entry->backend->max_context() : 0;
     info.last_used_ms = entry->last_used.load(std::memory_order_relaxed);
+    info.idle_ms =
+        now_ms >= info.last_used_ms ? (now_ms - info.last_used_ms) : 0;
     info.ready = entry->backend != nullptr && entry->backend->ready();
-    if (entry->backend) info.path = entry->backend->model_path();
+    info.is_default = (entry->id == default_id);
+    if (entry->backend) {
+      info.path = entry->backend->model_path();
+      info.supports_images = entry->backend->supports_images();
+      info.sessions = entry->backend->session_states();
+      info.total_sessions = info.sessions.size();
+      for (const auto& s : info.sessions) {
+        if (s.processing) ++info.active_sessions;
+        if (s.speculative) info.speculative = true;
+      }
+    }
     out.push_back(std::move(info));
   }
   std::sort(out.begin(), out.end(),
