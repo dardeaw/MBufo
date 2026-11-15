@@ -1,4 +1,5 @@
 #include "src/cli/serve/http_server.hpp"
+#include "src/cli/serve/model_admin_ui.hpp"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -1953,6 +1954,13 @@ void LoadingResponder::serve() {
                              "unavailable_error", "loading");
   loading.headers.emplace_back("Retry-After", "1");
   const std::string reply = BuildResponse(loading);
+  HttpResponse admin_ui;
+  admin_ui.status = 200;
+  admin_ui.reason = "OK";
+  admin_ui.headers.emplace_back("Content-Type", "text/html; charset=utf-8");
+  admin_ui.headers.emplace_back("Cache-Control", "no-store");
+  admin_ui.body = std::string(kModelAdminUiHtml);
+  const std::string admin_reply = BuildResponse(admin_ui);
   // One connection at a time is enough for probes. Read the request head
   // before replying so closing does not reset an unread request, but bound
   // the wait: a client that connects and sends nothing must not delay stop().
@@ -1982,7 +1990,12 @@ void LoadingResponder::serve() {
         break;
       head.append(buffer, static_cast<std::size_t>(received));
     }
-    (void)SendAll(client_fd, reply);
+    const bool is_admin_html =
+        head.rfind("GET /admin ", 0) == 0 ||
+        head.rfind("GET /admin/ ", 0) == 0 ||
+        head.rfind("GET /admin/ui ", 0) == 0 ||
+        head.rfind("GET /admin?", 0) == 0;
+    (void)SendAll(client_fd, is_admin_html ? admin_reply : reply);
     ::shutdown(client_fd, SHUT_WR);
     net::CloseSocket(client_fd);
   }

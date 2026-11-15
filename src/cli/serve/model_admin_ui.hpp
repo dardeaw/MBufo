@@ -212,16 +212,33 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
     }
     .gate-banner {
       margin-top: 10px;
-      padding: 8px 12px;
+      padding: 0 12px;
       border-radius: 8px;
       font-size: 12px;
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 12px;
+      height: 36px;
       min-height: 36px;
+      max-height: 36px;
+      white-space: nowrap;
+      overflow: hidden;
       background: rgba(148, 163, 184, 0.06);
       border: 1px solid var(--border);
       color: var(--muted);
+    }
+    .gate-banner > span:first-child {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .gate-banner > span:last-child {
+      flex-shrink: 0;
+      white-space: nowrap;
+      font-family: var(--mono);
     }
     .mem-card-sticky {
       position: sticky;
@@ -421,7 +438,18 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       display: flex;
       align-items: center;
       gap: 6px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .cat-name > span:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .cat-name > .badge {
+      flex-shrink: 0;
     }
     .cat-rel {
       font-family: var(--mono);
@@ -849,6 +877,14 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
     async function fetchStatus() {
       try {
         const res = await fetch('/admin/models');
+        if (res.status === 503) {
+          const b = document.getElementById('loading-banner');
+          b.style.display = 'flex';
+          document.getElementById('loading-title').textContent = 'Starting gufo service & loading primary model into GPU/UMA...';
+          document.getElementById('loading-sub').textContent = 'Admin API will activate automatically once startup model finishes loading';
+          document.getElementById('conn-pill').style.color = 'var(--amber)';
+          return;
+        }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         stateModels = await res.json();
         document.getElementById('conn-pill').style.color = 'var(--green)';
@@ -963,17 +999,22 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
           bar.appendChild(seg);
         }
         if (needMib <= safeAvail) {
+          const msg = `✓ ${previewModel.name} (~${fmtGiB(needMib)}) fits alongside currently loaded models without eviction!`;
+          gateBanner.title = msg;
           gateBanner.style.borderColor = 'rgba(16,185,129,0.4)';
           gateBanner.style.background = 'rgba(16,185,129,0.1)';
           gateBanner.style.color = '#6ee7b7';
           gateBanner.innerHTML = `<span>✓ <strong>${previewModel.name}</strong> (~${fmtGiB(needMib)}) fits alongside currently loaded models without eviction!</span><span>Free after load: ~${fmtGiB(safeAvail - needMib)}</span>`;
         } else {
+          const msg = `⚠ ${previewModel.name} needs ~${fmtGiB(needMib)} (Safe free: ${fmtGiB(safeAvail)}). Loading will trigger LRU eviction of idle models if allow_evict=true.`;
+          gateBanner.title = msg;
           gateBanner.style.borderColor = 'rgba(245,158,11,0.45)';
           gateBanner.style.background = 'rgba(245,158,11,0.12)';
           gateBanner.style.color = '#fcd34d';
           gateBanner.innerHTML = `<span>⚠ <strong>${previewModel.name}</strong> needs ~${fmtGiB(needMib)} (Safe free: ${fmtGiB(safeAvail)}). Loading will trigger LRU eviction of idle models if allow_evict=true.</span><span>Shortfall: ~${fmtGiB(needMib - safeAvail)}</span>`;
         }
       } else {
+        gateBanner.title = '';
         gateBanner.style.borderColor = 'var(--border)';
         gateBanner.style.background = 'rgba(148, 163, 184, 0.06)';
         gateBanner.style.color = 'var(--muted)';
