@@ -215,12 +215,19 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       padding: 8px 12px;
       border-radius: 8px;
       font-size: 12px;
-      display: none;
+      display: flex;
       align-items: center;
       justify-content: space-between;
-      background: rgba(245, 158, 11, 0.1);
-      border: 1px solid rgba(245, 158, 11, 0.35);
-      color: #fcd34d;
+      min-height: 36px;
+      background: rgba(148, 163, 184, 0.06);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .mem-card-sticky {
+      position: sticky;
+      top: 63px;
+      z-index: 15;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
     }
 
     /* Main Grid */
@@ -611,7 +618,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
     </div>
 
     <!-- LM Studio Style Unified Memory / VRAM Gate Bar -->
-    <div class="card">
+    <div class="card mem-card-sticky">
       <div class="card-header" style="margin-bottom:8px;">
         <div class="card-title">
           <span>Unified Memory & VRAM Gate (Strix Halo UMA / HIP)</span>
@@ -623,7 +630,10 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       </div>
       <div class="mem-bar-outer" id="mem-bar"></div>
       <div class="mem-legend" id="mem-legend"></div>
-      <div class="gate-banner" id="gate-banner"></div>
+      <div class="gate-banner" id="gate-banner">
+        <span>Hover over any model in the Catalog to preview memory fit & LRU eviction impact</span>
+        <span>Safe Free Pool: -- GiB</span>
+      </div>
     </div>
 
     <!-- Active Loaded Models + Model Catalog -->
@@ -941,6 +951,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       }
 
       const gateBanner = document.getElementById('gate-banner');
+      const safeAvail = Math.max(0, availMib - (mem.safety_margin_mib || 2048));
       if (previewModel) {
         const needMib = previewModel.estMib;
         const pct = Math.min((availMib / scaleDenom) * 100, (needMib / scaleDenom) * 100);
@@ -951,8 +962,6 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
           seg.textContent = '+' + fmtGiB(needMib);
           bar.appendChild(seg);
         }
-        const safeAvail = Math.max(0, availMib - (mem.safety_margin_mib || 2048));
-        gateBanner.style.display = 'flex';
         if (needMib <= safeAvail) {
           gateBanner.style.borderColor = 'rgba(16,185,129,0.4)';
           gateBanner.style.background = 'rgba(16,185,129,0.1)';
@@ -962,10 +971,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
           gateBanner.style.borderColor = 'rgba(245,158,11,0.45)';
           gateBanner.style.background = 'rgba(245,158,11,0.12)';
           gateBanner.style.color = '#fcd34d';
-          gateBanner.innerHTML = `<span>⚠ <strong>${previewModel.name}</strong> needs ~${fmtGiB(needMib)} (Safe free: ${fmtGiB(safeAvail)}). Loading will trigger LRU eviction of idle models if allow_evict=true.</span>`;
+          gateBanner.innerHTML = `<span>⚠ <strong>${previewModel.name}</strong> needs ~${fmtGiB(needMib)} (Safe free: ${fmtGiB(safeAvail)}). Loading will trigger LRU eviction of idle models if allow_evict=true.</span><span>Shortfall: ~${fmtGiB(needMib - safeAvail)}</span>`;
         }
       } else {
-        gateBanner.style.display = 'none';
+        gateBanner.style.borderColor = 'var(--border)';
+        gateBanner.style.background = 'rgba(148, 163, 184, 0.06)';
+        gateBanner.style.color = 'var(--muted)';
+        gateBanner.innerHTML = `<span>Hover over any model in the Catalog to preview memory fit & LRU eviction impact</span><span>Safe Free Pool: ${fmtGiB(safeAvail)}</span>`;
       }
 
       const freeItem = document.createElement('div');

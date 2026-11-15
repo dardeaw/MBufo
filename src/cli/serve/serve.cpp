@@ -1468,120 +1468,125 @@ int RunServe(std::span<const char* const> args) {
         static_cast<std::uint32_t>(draft_tokens);
     speculative_config.min_draft_tokens =
         static_cast<std::uint32_t>(min_draft_tokens);
-    if (model.empty()) {
-      std::cerr << "Error: --model <PATH> is required\n";
+    if (model.empty() && !multi_model) {
+      std::cerr << "Error: --model <PATH> is required (or pass --multi-model)\n";
       return 2;
     }
-    std::string err;
-    ModelLoadLog load_log("text", model);
-    backend = std::make_shared<server::InferenceBackend>();
-    // The disk snapshot tier is walked during load, which can take minutes.
-    // Answer 503 `Loading model` on the port meanwhile, as llama-server does,
-    // so supervisors see a loading server rather than a refused connection.
-    server::LoadingResponder loading(host, port);
-    const bool load_ok = backend->load(
-        model, &err, max_context, session_count,
-        server::TextPrefillPolicy{
-            .decode_active_tokens = prefill_chunk_tokens,
-        },
-        server::TextSchedulerPolicy{
-            .max_pending_requests = max_pending_requests,
-            .max_pending_requests_per_client = max_pending_requests_per_client,
-            .max_output_bytes_per_request = max_output_bytes,
-            .max_buffered_output_bytes_per_request = max_buffered_output_bytes,
-            .max_buffered_output_bytes_total = max_buffered_output_bytes_total,
-            .request_timeout =
-                std::chrono::milliseconds{
-                    static_cast<std::chrono::milliseconds::rep>(
-                        request_timeout_ms)},
-            .stall_timeout =
-                std::chrono::milliseconds{
-                    static_cast<std::chrono::milliseconds::rep>(
-                        stall_timeout_ms)},
-            .log_progress = log_progress,
-        },
-        speculative_config,
-        server::TextDiskCacheConfig{
-            .directory = cache_disk_directory,
-            .capacity_bytes = cache_disk_bytes,
-            .staging_capacity_bytes = cache_disk_staging_bytes,
-            .model_artifact_fingerprint = {},
-        },
-        vision_model_path,
-        server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes},
-        kv_cache_quant, enable_yarn,
-        llm_parser.WasSupplied("--kv-quant"));
-    loading.stop();
-    if (!load_ok) {
-      std::cerr << "Error loading model '" << model << "': " << err << "\n";
-      return 1;
+    if (!model.empty()) {
+      std::string err;
+      ModelLoadLog load_log("text", model);
+      backend = std::make_shared<server::InferenceBackend>();
+      // The disk snapshot tier is walked during load, which can take minutes.
+      // Answer 503 `Loading model` on the port meanwhile, as llama-server does,
+      // so supervisors see a loading server rather than a refused connection.
+      server::LoadingResponder loading(host, port);
+      const bool load_ok = backend->load(
+          model, &err, max_context, session_count,
+          server::TextPrefillPolicy{
+              .decode_active_tokens = prefill_chunk_tokens,
+          },
+          server::TextSchedulerPolicy{
+              .max_pending_requests = max_pending_requests,
+              .max_pending_requests_per_client = max_pending_requests_per_client,
+              .max_output_bytes_per_request = max_output_bytes,
+              .max_buffered_output_bytes_per_request = max_buffered_output_bytes,
+              .max_buffered_output_bytes_total = max_buffered_output_bytes_total,
+              .request_timeout =
+                  std::chrono::milliseconds{
+                      static_cast<std::chrono::milliseconds::rep>(
+                          request_timeout_ms)},
+              .stall_timeout =
+                  std::chrono::milliseconds{
+                      static_cast<std::chrono::milliseconds::rep>(
+                          stall_timeout_ms)},
+              .log_progress = log_progress,
+          },
+          speculative_config,
+          server::TextDiskCacheConfig{
+              .directory = cache_disk_directory,
+              .capacity_bytes = cache_disk_bytes,
+              .staging_capacity_bytes = cache_disk_staging_bytes,
+              .model_artifact_fingerprint = {},
+          },
+          vision_model_path,
+          server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes},
+          kv_cache_quant, enable_yarn,
+          llm_parser.WasSupplied("--kv-quant"));
+      loading.stop();
+      if (!load_ok) {
+        std::cerr << "Error loading model '" << model << "': " << err << "\n";
+        return 1;
+      }
+      backend->set_model_ids(std::move(served_model_names));
+      // As `gufo --version` prints it; CMake defines both for this target.
+      backend->set_served_artifact(model,
+                                   GUFO_RELEASE_VERSION " (" GUFO_REVISION ")");
+      backend->set_sampling_defaults(
+          max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
+          sampling_config, SamplingOptionsSupplied(llm_parser));
+      backend->set_reasoning_defaults(*reasoning_defaults);
+      const auto effective_sampling =
+          backend->sampling_defaults().Resolve(reasoning_defaults->enabled);
+      server::ChatRequest default_request;
+      default_request.reasoning = *reasoning_defaults;
+      const auto initial_output = backend->initial_output_state(default_request);
+      std::ostringstream sampling_log;
+      sampling_log
+          << "event=defaults thinking="
+          << (initial_output == server::TextGenerationBackend::
+                                    InitialOutputState::kReasoning
+                  ? "on"
+              : initial_output ==
+                      server::TextGenerationBackend::InitialOutputState::kContent
+                  ? "off"
+                  : "auto")
+          << " temperature=" << effective_sampling.temperature
+          << " top_k=" << effective_sampling.top_k
+          << " top_p=" << effective_sampling.top_p
+          << " min_p=" << effective_sampling.min_p
+          << " min_keep=" << effective_sampling.min_keep
+          << " seed=" << effective_sampling.seed
+          << " repeat_penalty=" << effective_sampling.repeat_penalty
+          << " repeat_last_n=" << effective_sampling.repeat_last_n
+          << " frequency_penalty=" << effective_sampling.frequency_penalty
+          << " presence_penalty=" << effective_sampling.presence_penalty;
+      server::Logger::Info("sampling", sampling_log.str());
+      const char* speculation =
+          speculative_config.backend == server::TextSpeculativeBackend::kDFlash
+              ? "dflash2"
+          : speculative_config.backend == server::TextSpeculativeBackend::kDSpark
+              ? "dspark"
+          : speculative_config.backend == server::TextSpeculativeBackend::kMtp
+              ? "mtp"
+              : "off";
+      std::string served_names;
+      if (const auto ids = backend->model_ids(); ids.size() > 1) {
+        served_names = " served_names=" + ids.front();
+        for (std::size_t i = 1; i < ids.size(); ++i)
+          served_names += "," + ids[i];
+      }
+      load_log.Complete(
+          "model=" + backend->model_id() +
+          " sessions=" + std::to_string(session_count) + " context_tokens=" +
+          std::to_string(backend->max_context()) + " speculative=" + speculation +
+          " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
+          " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled") +
+          served_names);
     }
-    backend->set_model_ids(std::move(served_model_names));
-    // As `gufo --version` prints it; CMake defines both for this target.
-    backend->set_served_artifact(model,
-                                 GUFO_RELEASE_VERSION " (" GUFO_REVISION ")");
-    backend->set_sampling_defaults(
-        max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
-        sampling_config, SamplingOptionsSupplied(llm_parser));
-    backend->set_reasoning_defaults(*reasoning_defaults);
-    const auto effective_sampling =
-        backend->sampling_defaults().Resolve(reasoning_defaults->enabled);
-    server::ChatRequest default_request;
-    default_request.reasoning = *reasoning_defaults;
-    const auto initial_output = backend->initial_output_state(default_request);
-    std::ostringstream sampling_log;
-    sampling_log
-        << "event=defaults thinking="
-        << (initial_output == server::TextGenerationBackend::
-                                  InitialOutputState::kReasoning
-                ? "on"
-            : initial_output ==
-                    server::TextGenerationBackend::InitialOutputState::kContent
-                ? "off"
-                : "auto")
-        << " temperature=" << effective_sampling.temperature
-        << " top_k=" << effective_sampling.top_k
-        << " top_p=" << effective_sampling.top_p
-        << " min_p=" << effective_sampling.min_p
-        << " min_keep=" << effective_sampling.min_keep
-        << " seed=" << effective_sampling.seed
-        << " repeat_penalty=" << effective_sampling.repeat_penalty
-        << " repeat_last_n=" << effective_sampling.repeat_last_n
-        << " frequency_penalty=" << effective_sampling.frequency_penalty
-        << " presence_penalty=" << effective_sampling.presence_penalty;
-    server::Logger::Info("sampling", sampling_log.str());
-    const char* speculation =
-        speculative_config.backend == server::TextSpeculativeBackend::kDFlash
-            ? "dflash2"
-        : speculative_config.backend == server::TextSpeculativeBackend::kDSpark
-            ? "dspark"
-        : speculative_config.backend == server::TextSpeculativeBackend::kMtp
-            ? "mtp"
-            : "off";
-    std::string served_names;
-    if (const auto ids = backend->model_ids(); ids.size() > 1) {
-      served_names = " served_names=" + ids.front();
-      for (std::size_t i = 1; i < ids.size(); ++i)
-        served_names += "," + ids[i];
-    }
-    load_log.Complete(
-        "model=" + backend->model_id() +
-        " sessions=" + std::to_string(session_count) + " context_tokens=" +
-        std::to_string(backend->max_context()) + " speculative=" + speculation +
-        " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
-        " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled") +
-        served_names);
 
     if (multi_model) {
       registry = std::make_shared<server::ModelRegistry>();
-      std::string reg_err;
-      const auto ids = backend->model_ids();
-      const std::string primary = ids.empty() ? backend->model_id() : ids.front();
-      std::vector<std::string> aliases(ids.begin() + (ids.empty() ? 0 : 1),
-                                       ids.end());
-      if (!registry->Add(primary, std::move(aliases), backend, &reg_err)) {
-        std::cerr << "Error: registry add failed: " << reg_err << "\n";
-        return 1;
+      std::string primary = "none";
+      if (backend != nullptr) {
+        std::string reg_err;
+        const auto ids = backend->model_ids();
+        primary = ids.empty() ? backend->model_id() : ids.front();
+        std::vector<std::string> aliases(ids.begin() + (ids.empty() ? 0 : 1),
+                                         ids.end());
+        if (!registry->Add(primary, std::move(aliases), backend, &reg_err)) {
+          std::cerr << "Error: registry add failed: " << reg_err << "\n";
+          return 1;
+        }
       }
       const auto loader =
           [prefill_chunk_tokens, max_pending_requests,
