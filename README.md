@@ -173,25 +173,34 @@ A single HTTP port hosts and routes across all 13 supported families:
 | **bge-reranker-v2-m3** | Cross-Encoder | Supported (`/v1/reranking`) | ScoreBatch | — | BERT dispatch, padded batching |
 | **Qwen3-Reranker** | Cross-Encoder | Supported (`/v1/reranking`) | Scoring | — | Qwen dispatch, shared scoring heads |
 
-### Production Multi-Model Router
+### Production Multi-Model Co-Residency & `/admin` Control Plane
 
-Running `serve llm --multi-model` turns the engine into an active model registry: the initial startup model acts as the default, and requests automatically route based on their payload's `model` field. Models can be added or ejected dynamically at runtime via Admin API with zero server restarts.
+Running `serve llm --multi-model` turns MBufo into a **multi-model co-resident server** on a single unified port (e.g. `:8741` or `:8080`). Multiple heterogeneous GGUF models (MoE + Dense + Vision `mmproj` + Speculative `MTP`/`DFlash2` sidecars) remain **simultaneously resident in Strix Halo Unified Memory (UMA)** and serve concurrent requests in parallel without unloading each other.
 
-#### Safety & Fault-Tolerance
-- **Memory Safety & Eviction**: `/admin/load` checks available GPU memory before loading. If resources are tight, cold non-default models are **LRU-evicted** (or refused with `409 insufficient_memory` if `"allow_evict": false`); the default model is never evicted.
-- **Graceful Draining**: Ejecting a model delays memory deallocation until all in-flight requests complete, ensuring ongoing responses are never interrupted.
-- **Fallback Handling**: If a request omits the `model` parameter, it routes cleanly to the default model.
+#### Key Capabilities
+- **Simultaneous Multi-Model Co-Residency**: Keep a flagship model (e.g. `Qwen3.8-Flash-Next` 94 GiB ROCmFP4-FAST) and fast secondary models (e.g. `Qwen3.8-27B` 13 GiB or `Gemma-4-26B`) loaded in UMA at the same time. Requests route dynamically by `"model"` ID or alias across both `/v1/chat/completions` and `/v1/messages`.
+- **Embedded `/admin` Web UI Dashboard**: Open `http://<host>:<port>/admin` in any browser for:
+  - **Sticky Unified Memory & VRAM Gate**: Real-time Strix Halo UMA breakdown (per-model footprint, KV/system pools, safety reserve) and single-line hover preview showing whether any catalog model fits alongside currently loaded models or requires LRU eviction.
+  - **Live Session Slot Telemetry**: Inspect per-model session slots (`BUSY` / `IDLE`, cached KV tokens, idle duration), switch the Primary Default model with one click, or eject models gracefully.
+  - **Local GGUF Catalog (`/admin/catalog`)**: Automatically scans `GUFO_MODELS_DIR` (or model parent directories), groups multi-shard GGUFs, and auto-pairs Vision `mmproj` and `MTP`/`DFlash2` draft sidecars.
+  - **Built-in Streaming Playground**: Test concurrent routing across loaded models in real time with TTFT and decode tok/s metrics.
+- **Zero-Model Standby Startup**: Launch `gufo serve llm --multi-model -p 8741` *without* `--model` (~86 MiB RSS) to start an empty control plane and load models on demand from `/admin`.
+- **Memory Safety & Graceful Draining**: `/admin/load` enforces a UMA safety reserve (`GUFO_MULTI_SAFETY_MIB`, default `2048` MiB). When memory is full, idle non-primary models are **LRU-evicted** automatically (or rejected with `409 insufficient_memory` if `"allow_evict": false`); the primary default model is protected. Ejected models drain in-flight requests before freeing GPU memory.
 
 #### Available Endpoints
 
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
-| `/v1/chat/completions` | POST | Chat completions (text, vision, function tools, structured output, SSE streaming) |
+| `/admin` | GET | Embedded Multi-Model Web UI Dashboard & Live Playground |
+| `/v1/chat/completions` | POST | OpenAI Chat completions (routes by `"model"` ID/alias or falls back to Primary) |
+| `/v1/messages` | POST | Anthropic Messages API (routes by `"model"` ID/alias or falls back to Primary) |
 | `/v1/embeddings` | POST | Embeddings (bge-m3, Qwen3-Embedding) |
 | `/v1/reranking` | POST | Reranking (bge-reranker-v2-m3, Qwen3-Reranker) |
-| `/admin/models` | GET | List loaded models, context sizes, and access times |
-| `/admin/load` | POST | Load and register a model at runtime (with LRU eviction safety) |
-| `/admin/eject` | POST | Unload a model gracefully after in-flight requests finish |
+| `/admin/models` | GET | List co-resident models, per-slot session telemetry, and UMA memory status |
+| `/admin/catalog` | GET | Scan local GGUF repository and auto-discover `mmproj` / draft sidecars |
+| `/admin/load` | POST | Hot-load a model into UMA alongside existing models (with optional LRU eviction) |
+| `/admin/default` | POST | Switch the primary default model (`{"id": "<model-id>"}`) |
+| `/admin/eject` | POST | Unload a model gracefully after in-flight requests finish (`{"id": "<model-id>"}`) |
 
 ---
 
@@ -201,49 +210,62 @@ Running `serve llm --multi-model` turns the engine into an active model registry
 
 ```sh
 ./build/release/gufo serve llm \
-  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
   --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
   --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
   --speculative mtp --think off \
   --served-model-name gufo-qwen3.8-flash-next \
-  --sessions 4 -c 262144 --kv-quant q8
+  --sessions 2 -c 262144 --kv-quant q8 -p 8741
 ```
 
-### 2. Multi-Model Mode (Router & Admin API Enabled)
+### 2. Multi-Model Co-Residency Mode (`--multi-model` + `/admin` Web UI)
 
 ```sh
+# Option A: Start with a primary model + enable multi-model router & /admin UI on :8741
 ./build/release/gufo serve llm --multi-model \
-  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
-  --served-model-name flash-next -c 262144 --kv-quant q8 --sessions 4
+  --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
+  --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
+  --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
+  --speculative mtp --think off \
+  --served-model-name gufo-qwen3.8-flash-next \
+  --sessions 2 -c 262144 --kv-quant q8 -i 0.0.0.0 -p 8741
+
+# Option B: Zero-VRAM standby mode (no initial model; load everything from http://localhost:8741/admin)
+GUFO_MODELS_DIR=/mnt/nvme-data/gufo-models ./build/release/gufo serve llm --multi-model -i 0.0.0.0 -p 8741
 ```
 
-### 3. API Examples
+Open **`http://localhost:8741/admin`** in your browser to inspect Strix Halo unified memory, browse discovered GGUFs, hot-load co-resident models, and test live routing.
+
+### 3. Multi-Model Co-Residency API Examples
 
 ```sh
-# Chat completion request
-curl http://localhost:8080/v1/chat/completions \
+# Hot-load a second model (Qwen3.8-27B) to co-reside alongside Flash-Next without evicting anything
+curl http://localhost:8741/admin/load \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "flash-next",
-    "messages": [{"role": "user", "content": "Hello, introduce yourself."}]
+    "id": "qwen3.8-27b",
+    "aliases": ["27b", "fast-dense"],
+    "path": "models/qwen3.8-27b/Qwen3.8-27B-Q4_0_ROCMFP4_FAST.gguf",
+    "max_context": 32768,
+    "session_count": 1,
+    "kv_cache_quant": "q8",
+    "speculative": "off",
+    "allow_evict": false
   }'
 
-# Load an additional model dynamically (e.g. Gemma 4)
-curl http://localhost:8080/admin/load \
+# Query both co-resident models simultaneously on the same port (:8741)
+curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "id": "gemma4",
-    "path": "models/gemma-4-26b/gemma-4-26B-A4B-it-Q4_0.gguf",
-    "max_context": 262144, "session_count": 2, "kv_cache_quant": "q8"
-  }'
+  -d '{"model": "gufo-qwen3.8-flash-next", "messages": [{"role": "user", "content": "Hello from Flash-Next!"}]}'
 
-# List active models
-curl http://localhost:8080/admin/models
-
-# Eject a model
-curl http://localhost:8080/admin/eject \
+curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"id": "gemma4"}'
+  -d '{"model": "27b", "messages": [{"role": "user", "content": "Hello from co-resident 27B!"}]}'
+
+# Switch primary default model, inspect loaded models & UMA telemetry, or eject a model
+curl http://localhost:8741/admin/default -H "Content-Type: application/json" -d '{"id": "qwen3.8-27b"}'
+curl http://localhost:8741/admin/models
+curl http://localhost:8741/admin/eject -H "Content-Type: application/json" -d '{"id": "qwen3.8-27b"}'
 ```
 
 MBufo is fully compatible with OpenAI SDKs, Open WebUI, and VS Code extensions. Point the base URL to `http://localhost:8080/v1`. Full API details are in [docs/SERVER.md](docs/SERVER.md).

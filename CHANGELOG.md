@@ -3,6 +3,16 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork (`dardeaw/MBufo`) only, never upstream.
 
+## v0.30.0 (2026-11-15)
+- **Heterogeneous Multi-Model Co-Residency & Dynamic Hot-Loading (`--multi-model`)**:
+  - Unlocked full heterogeneous GGUF co-residency on a single unified port (`:8741` / `:8080`): multiple distinct model families (e.g., `Qwen3.8-Flash-Next` MoE + `Qwen3.8-27B` Dense + `Gemma-4-26B-A4B` + `Muse-Glimmer-30B`) can remain simultaneously loaded in Strix Halo Unified Memory (UMA) and serve concurrent requests via OpenAI `/v1/chat/completions` and Anthropic `/v1/messages` based on the request `"model"` ID or alias.
+  - Added per-model runtime configuration on `POST /admin/load`, including custom `aliases`, context length (`max_context`), parallel session count (`session_count`), KV cache quantization (`kv_cache_quant`: `q8`/`fp16`/`fp8`), Vision `mmproj` sidecar, Speculative Decoding mode (`mtp`/`dflash2`/`dspark`/`off`) with `draft_model` sidecar, and primary model promotion (`set_default` / `POST /admin/default`).
+  - Added zero-model standby mode: `gufo serve llm --multi-model` can start without `--model` (~86 MiB RSS) and load/manage all models on demand via the Web UI or Admin API.
+  - Refined UMA resident memory estimation and safety gate (`GUFO_MULTI_SAFETY_MIB`, default 2048 MiB) with automatic LRU eviction of idle non-primary models when `"allow_evict": true`.
+- **Embedded `/admin` Web UI Control Plane & Local GGUF Catalog**:
+  - Built-in dark-mode management dashboard at `GET /admin` (also served by `LoadingResponder` during initial model startup).
+  - Features a sticky Unified Memory & VRAM Gate bar with live per-model UMA segments and single-line hover fit/eviction preview, real-time per-slot session telemetry, recursive local GGUF catalog scanner (`GET /admin/catalog`, `GUFO_MODELS_DIR`) with automatic `mmproj` and `MTP`/`DFlash2` sidecar pairing, and an interactive multi-model streaming Playground.
+
 ## v0.29.1 (2026-11-13)
 - **Qwen3.8-Flash-Next Q8 KV Prefill Acceleration (131K Context)**:
   - Fixed quadratic redundant dequantization in chunked prefill: moved KV staging buffers from shared `Session` scope into per-layer `Session::AttentionState`. Each of the 9 full-attention layers now maintains its own buffer and `kv_stage_valid_` cursor, eliminating ~17M redundant token dequantizations across 30 chunks at 131K context.

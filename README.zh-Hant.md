@@ -173,25 +173,34 @@ MBufo 主張精度與效能之間的平衡需經嚴格量測。推薦基準配�
 | **bge-reranker-v2-m3** | Cross-Encoder | 支援 (`/v1/reranking`) | ScoreBatch | — | BERT 分派、多序列 Padding 批次加速 |
 | **Qwen3-Reranker** | Cross-Encoder | 支援 (`/v1/reranking`) | Scoring | — | Qwen 分派、共用 Rerank 評分頭 |
 
-### 生產級多模型 Router
+### 生產級異質多模型並駐（Multi-Model Co-Residency）與 `/admin` 控制台
 
-執行 `serve llm --multi-model` 可將伺服器轉為模型註冊中心：啟動模型即為預設模型，後續請求根據 JSON 中的 `model` 欄位自動分發；亦可透過 Admin API 在線上動態增減模型，服務完全不斷線。
+執行 `serve llm --multi-model` 可將 MBufo 轉為單一端口（如 `:8741` 或 `:8080`）的**異質多模型並駐伺服器**。多顆不同架構的 GGUF 模型（MoE 主力模型 + Dense 次要模型 + Vision `mmproj` 視覺掛件 + `MTP`/`DFlash2` 投機解碼草稿模型）可**同時常駐於 Strix Halo 統一記憶體（UMA）中並發服務**，無須反覆卸載重載。
 
-#### 核心保障與容錯機制
-- **安全記憶體調度**：在呼叫 `/admin/load` 時自動評估可用顯存，空間不足時自動對冷門的非預設模型執行 **LRU 卸載**（可設定 `"allow_evict": false` 拒載）；預設模型永不被卸載。
-- **無損排空釋放**：模型卸載時，顯存會等待該模型正在進行的請求全數處理完成後才平滑釋放，絕不中斷線上對話。
-- **預設自動回退**：若請求中 `model` 欄位為空，自動路由至預設模型，不報錯。
+#### 核心能力與架構亮點
+- **異質多模型同時並駐**：只要統一記憶體容量允許（例如 128 GB UMA 同時載入 94 GiB `Qwen3.8-Flash-Next` 與 13 GiB `Qwen3.8-27B`），多顆模型可同時在線並各自擁有獨立的 Session Slots 與 KV 快取池。客户端只需在 `/v1/chat/completions` 或 `/v1/messages` 的 JSON payload 指定 `"model"`（支援 ID 或自訂別名 `aliases`）即可精準路由。
+- **內建 `/admin` Web UI 管理控制台**：瀏覽器直接開啟 `http://<host>:<port>/admin` 即可使用：
+  - **頂部固定式 Unified Memory & VRAM Gate**：即時顯示 Strix Halo UMA 各模型常駐佔用、System/KV 緩衝池與安全保留區；滑鼠懸停在目錄模型上時，以單行即時預覽「可直接並駐」或「需觸發 LRU 置換」的記憶體差額。
+  - **已載入模型與即時 Slot 監控**：即時查看每顆模型的每個 Session Slot 狀態（`BUSY` / `IDLE`、KV 快取 Token 數、閒置時間），一鍵切換 Primary 預設模型或無損卸載。
+  - **本地 GGUF 模型目錄自動掃描（`/admin/catalog`）**：自動遞迴掃描 `GUFO_MODELS_DIR`（或模型所在母目錄），自動合併多分割檔（shards）並自動配對同目錄下的 `mmproj` 視覺權重與 `MTP`/`DFlash2` 草稿模型。
+  - **內建多模型串流 Playground**：直接在網頁上選擇任一並駐模型發送 OpenAI / Anthropic 串流請求，即時量測 TTFT 與 Decode tok/s。
+- **零模型待機啟動（Zero-Model Standby）**：支援不帶 `--model` 直接執行 `gufo serve llm --multi-model -p 8741`（僅佔用約 86 MiB RSS），啟動後直接從 `/admin` 網頁點選載入所需模型。
+- **安全記憶體閘門與無損排空**：`/admin/load` 自動保留安全邊界（`GUFO_MULTI_SAFETY_MIB`，預設 `2048` MiB）。空間不足時可自動對閒置的非預設模型執行 **LRU 置換卸載**（若設 `"allow_evict": false` 則回傳 `409 insufficient_memory` 拒絕載入以保護現有並駐模型）；卸載模型時會等待進行中的請求生成完畢才釋放記憶體。
 
 #### 端點一覽
 
 | 端點 | 方法 | 功能說明 |
 | --- | --- | --- |
-| `/v1/chat/completions` | POST | 聊天對話介面（支援文字、影像、Function Tools、結構化輸出、SSE 串流） |
+| `/admin` | GET | 內建多模型並駐管理 Web UI 儀表板與即時測試 Playground |
+| `/v1/chat/completions` | POST | OpenAI 聊天對話介面（依 `"model"` ID/別名自動路由，未填則回退至預設模型） |
+| `/v1/messages` | POST | Anthropic Messages 介面（依 `"model"` ID/別名自動路由，支援 Claude Code 等工具） |
 | `/v1/embeddings` | POST | 向量嵌入介面（支援 bge-m3、Qwen3-Embedding） |
 | `/v1/reranking` | POST | 文本重排序介面（支援 bge-reranker-v2-m3、Qwen3-Reranker） |
-| `/admin/models` | GET | 查詢已載入的模型清單、上下文與存取狀態 |
-| `/admin/load` | POST | 動態載入並註冊新模型（支援顯存 LRU 置換保護） |
-| `/admin/eject` | POST | 線上卸載模型，待任務清空後平滑釋放顯存 |
+| `/admin/models` | GET | 查詢目前並駐模型清單、各 Slot 狀態與 UMA 記憶體遙測數據 |
+| `/admin/catalog` | GET | 掃描本地 GGUF 模型庫並自動配對 `mmproj` 與 `MTP`/`DFlash2` 附屬權重 |
+| `/admin/load` | POST | 動態熱載入新模型並駐（支援自訂別名、Speculative、Vision 與 LRU 保護） |
+| `/admin/default` | POST | 動態切換預設主模型（`{"id": "<model-id>"}`） |
+| `/admin/eject` | POST | 線上無損卸載指定模型，待任務清空後平滑釋放記憶體 |
 
 ---
 
@@ -201,49 +210,62 @@ MBufo 主張精度與效能之間的平衡需經嚴格量測。推薦基準配�
 
 ```sh
 ./build/release/gufo serve llm \
-  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
   --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
   --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
   --speculative mtp --think off \
   --served-model-name gufo-qwen3.8-flash-next \
-  --sessions 4 -c 262144 --kv-quant q8
+  --sessions 2 -c 262144 --kv-quant q8 -p 8741
 ```
 
-### 2. 多模型模式（啟用 Router 與 Admin API）
+### 2. 多模型並駐模式（啟用 `--multi-model` 與 `/admin` Web UI）
 
 ```sh
+# 方式 A：帶預設主力模型啟動，並開啟多模型並駐與 /admin 控制台
 ./build/release/gufo serve llm --multi-model \
-  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
-  --served-model-name flash-next -c 262144 --kv-quant q8 --sessions 4
+  --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
+  --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
+  --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
+  --speculative mtp --think off \
+  --served-model-name gufo-qwen3.8-flash-next \
+  --sessions 2 -c 262144 --kv-quant q8 -i 0.0.0.0 -p 8741
+
+# 方式 B：零模型待機啟動（不預載模型，直接由 http://localhost:8741/admin 網頁選單載入）
+GUFO_MODELS_DIR=/mnt/nvme-data/gufo-models ./build/release/gufo serve llm --multi-model -i 0.0.0.0 -p 8741
 ```
 
-### 3. API 呼叫示範
+啟動後直接以瀏覽器開啟 **`http://localhost:8741/admin`** 即可透過圖形化介面管理多模型並駐。
+
+### 3. 多模型並駐 API 呼叫示範
 
 ```sh
-# 對話生成
-curl http://localhost:8080/v1/chat/completions \
+# 動態熱載入第二顆模型（Qwen3.8-27B）與主力模型同時並駐（設定 allow_evict: false 確保不踢除現有模型）
+curl http://localhost:8741/admin/load \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "flash-next",
-    "messages": [{"role": "user", "content": "你好，請自我介紹。"}]
+    "id": "qwen3.8-27b",
+    "aliases": ["27b", "fast-dense"],
+    "path": "models/qwen3.8-27b/Qwen3.8-27B-Q4_0_ROCMFP4_FAST.gguf",
+    "max_context": 32768,
+    "session_count": 1,
+    "kv_cache_quant": "q8",
+    "speculative": "off",
+    "allow_evict": false
   }'
 
-# 動態載入新模型 (Gemma 4)
-curl http://localhost:8080/admin/load \
+# 同一端口 (:8741) 同時對兩顆並駐模型發送推論請求
+curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "id": "gemma4",
-    "path": "models/gemma-4-26b/gemma-4-26B-A4B-it-Q4_0.gguf",
-    "max_context": 262144, "session_count": 2, "kv_cache_quant": "q8"
-  }'
+  -d '{"model": "gufo-qwen3.8-flash-next", "messages": [{"role": "user", "content": "請用一句話自我介紹。"}]}'
 
-# 查詢目前已載入的模型
-curl http://localhost:8080/admin/models
-
-# 卸載指定模型
-curl http://localhost:8080/admin/eject \
+curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"id": "gemma4"}'
+  -d '{"model": "27b", "messages": [{"role": "user", "content": "請用一句話自我介紹。"}]}'
+
+# 切換預設模型、查詢並駐狀態與記憶體佔用、或卸載指定模型
+curl http://localhost:8741/admin/default -H "Content-Type: application/json" -d '{"id": "qwen3.8-27b"}'
+curl http://localhost:8741/admin/models
+curl http://localhost:8741/admin/eject -H "Content-Type: application/json" -d '{"id": "qwen3.8-27b"}'
 ```
 
 相容於 OpenAI SDK、Open WebUI、VS Code 等前端工具，Base URL 設定為 `http://localhost:8080/v1` 即可。完整介面協議詳見 [docs/SERVER.md](docs/SERVER.md)。

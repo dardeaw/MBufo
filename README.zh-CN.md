@@ -173,25 +173,34 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 | **bge-reranker-v2-m3** | Cross-Encoder | 支持 (`/v1/reranking`) | ScoreBatch | — | BERT 分派、多序列 Padding 批次加速 |
 | **Qwen3-Reranker** | Cross-Encoder | 支持 (`/v1/reranking`) | Scoring | — | Qwen 分派、共用 Rerank 评分头 |
 
-### 生产级多模型 Router
+### 生产级异构多模型并驻（Multi-Model Co-Residency）与 `/admin` 控制台
 
-执行 `serve llm --multi-model` 可将服务器转为模型注册中心：启动模型即为默认模型，后续请求根据 JSON 中的 `model` 字段自动分发；亦可通过 Admin API 在线动态增减模型，服务完全不断线。
+执行 `serve llm --multi-model` 可将 MBufo 转为单一端口（如 `:8741` 或 `:8080`）的**异构多模型并驻服务器**。多颗不同架构的 GGUF 模型（MoE 主力模型 + Dense 次要模型 + Vision `mmproj` 视觉挂件 + `MTP`/`DFlash2` 投机解码草稿模型）可**同时常驻于 Strix Halo 统一内存（UMA）中并发服务**，无须反复卸载重载。
 
-#### 核心保障与容错机制
-- **安全显存调度**：在调用 `/admin/load` 时自动评估可用显存，空间不足时自动对冷门的非默认模型执行 **LRU 卸载**（可设置 `"allow_evict": false` 拒载）；默认模型永不被卸载。
-- **无损排空释放**：模型卸载时，显存会等待该模型正在进行的请求全部处理完成后才平滑释放，绝不中断在线对话。
-- **默认自动回退**：若请求中 `model` 字段为空，自动路由至默认模型，不报错。
+#### 核心能力与架构亮点
+- **异构多模型同时并驻**：只要统一内存容量允许（例如 128 GB UMA 同时加载 94 GiB `Qwen3.8-Flash-Next` 与 13 GiB `Qwen3.8-27B`），多颗模型可同时在线并各自拥有独立的 Session Slots 与 KV 缓存池。客户端只需在 `/v1/chat/completions` 或 `/v1/messages` 的 JSON payload 指定 `"model"`（支持 ID 或自定义别名 `aliases`）即可精准路由。
+- **内置 `/admin` Web UI 管理控制台**：浏览器直接打开 `http://<host>:<port>/admin` 即可使用：
+  - **顶部固定式 Unified Memory & VRAM Gate**：实时显示 Strix Halo UMA 各模型常驻占用、System/KV 缓冲池与安全保留区；鼠标悬停在目录模型上时，以单行实时预览“可直接并驻”或“需触发 LRU 置换”的内存差额。
+  - **已加载模型与实时 Slot 监控**：实时查看每颗模型的每个 Session Slot 状态（`BUSY` / `IDLE`、KV 缓存 Token 数、闲置时间），一键切换 Primary 默认模型或无损卸载。
+  - **本地 GGUF 模型目录自动扫描（`/admin/catalog`）**：自动递归扫描 `GUFO_MODELS_DIR`（或模型所在母目录），自动合并多分割文件（shards）并自动配对同目录下的 `mmproj` 视觉权重与 `MTP`/`DFlash2` 草稿模型。
+  - **内置多模型流式 Playground**：直接在网页上选择任一并驻模型发送 OpenAI / Anthropic 流式请求，实时测量 TTFT 与 Decode tok/s。
+- **零模型待机启动（Zero-Model Standby）**：支持不带 `--model` 直接执行 `gufo serve llm --multi-model -p 8741`（仅占用约 86 MiB RSS），启动后直接从 `/admin` 网页点选加载所需模型。
+- **安全内存闸门与无损排空**：`/admin/load` 自动保留安全边界（`GUFO_MULTI_SAFETY_MIB`，默认 `2048` MiB）。空间不足时可自动对闲置的非默认模型执行 **LRU 置换卸载**（若设 `"allow_evict": false` 则返回 `409 insufficient_memory` 拒绝加载以保护现有并驻模型）；卸载模型时会等待进行中的请求生成完毕才释放内存。
 
 #### 端点一览
 
 | 端点 | 方法 | 功能说明 |
 | --- | --- | --- |
-| `/v1/chat/completions` | POST | 聊天对话接口（支持文本、图像、Function Tools、结构化输出、SSE 流式） |
+| `/admin` | GET | 内置多模型并驻管理 Web UI 仪表盘与实时测试 Playground |
+| `/v1/chat/completions` | POST | OpenAI 聊天对话接口（依 `"model"` ID/别名自动路由，未填则回退至默认模型） |
+| `/v1/messages` | POST | Anthropic Messages 接口（依 `"model"` ID/别名自动路由，支持 Claude Code 等工具） |
 | `/v1/embeddings` | POST | 向量嵌入接口（支持 bge-m3、Qwen3-Embedding） |
 | `/v1/reranking` | POST | 文本重排序接口（支持 bge-reranker-v2-m3、Qwen3-Reranker） |
-| `/admin/models` | GET | 查询已加载的模型列表、上下文与访问状态 |
-| `/admin/load` | POST | 动态加载并注册新模型（支持显存 LRU 置换保护） |
-| `/admin/eject` | POST | 在线卸载模型，待任务排空后平滑释放显存 |
+| `/admin/models` | GET | 查询当前并驻模型列表、各 Slot 状态与 UMA 内存遥测数据 |
+| `/admin/catalog` | GET | 扫描本地 GGUF 模型库并自动配对 `mmproj` 与 `MTP`/`DFlash2` 附属权重 |
+| `/admin/load` | POST | 动态热加载新模型并驻（支持自定义别名、Speculative、Vision 与 LRU 保护） |
+| `/admin/default` | POST | 动态切换默认主模型（`{"id": "<model-id>"}`） |
+| `/admin/eject` | POST | 在线无损卸载指定模型，待任务排空后平滑释放内存 |
 
 ---
 
@@ -201,49 +210,62 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 
 ```sh
 ./build/release/gufo serve llm \
-  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
   --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
   --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
   --speculative mtp --think off \
   --served-model-name gufo-qwen3.8-flash-next \
-  --sessions 4 -c 262144 --kv-quant q8
+  --sessions 2 -c 262144 --kv-quant q8 -p 8741
 ```
 
-### 2. 多模型模式（启用 Router 与 Admin API）
+### 2. 多模型并驻模式（启用 `--multi-model` 与 `/admin` Web UI）
 
 ```sh
+# 方式 A：带默认主力模型启动，并开启多模型并驻与 /admin 控制台
 ./build/release/gufo serve llm --multi-model \
-  --model models/qwen3.8-flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
-  --served-model-name flash-next -c 262144 --kv-quant q8 --sessions 4
+  --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
+  --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
+  --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
+  --speculative mtp --think off \
+  --served-model-name gufo-qwen3.8-flash-next \
+  --sessions 2 -c 262144 --kv-quant q8 -i 0.0.0.0 -p 8741
+
+# 方式 B：零模型待机启动（不预载模型，直接由 http://localhost:8741/admin 网页菜单加载）
+GUFO_MODELS_DIR=/mnt/nvme-data/gufo-models ./build/release/gufo serve llm --multi-model -i 0.0.0.0 -p 8741
 ```
 
-### 3. API 调用示例
+启动后直接用浏览器打开 **`http://localhost:8741/admin`** 即可通过图形化界面管理多模型并驻。
+
+### 3. 多模型并驻 API 调用示例
 
 ```sh
-# 对话生成
-curl http://localhost:8080/v1/chat/completions \
+# 动态热加载第二颗模型（Qwen3.8-27B）与主力模型同时并驻（设置 allow_evict: false 确保不踢除现有模型）
+curl http://localhost:8741/admin/load \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "flash-next",
-    "messages": [{"role": "user", "content": "你好，请自我介绍。"}]
+    "id": "qwen3.8-27b",
+    "aliases": ["27b", "fast-dense"],
+    "path": "models/qwen3.8-27b/Qwen3.8-27B-Q4_0_ROCMFP4_FAST.gguf",
+    "max_context": 32768,
+    "session_count": 1,
+    "kv_cache_quant": "q8",
+    "speculative": "off",
+    "allow_evict": false
   }'
 
-# 动态加载新模型 (Gemma 4)
-curl http://localhost:8080/admin/load \
+# 同一端口 (:8741) 同时对两颗并驻模型发送推理请求
+curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "id": "gemma4",
-    "path": "models/gemma-4-26b/gemma-4-26B-A4B-it-Q4_0.gguf",
-    "max_context": 262144, "session_count": 2, "kv_cache_quant": "q8"
-  }'
+  -d '{"model": "gufo-qwen3.8-flash-next", "messages": [{"role": "user", "content": "请用一句话自我介绍。"}]}'
 
-# 查询当前已加载的模型
-curl http://localhost:8080/admin/models
-
-# 卸载指定模型
-curl http://localhost:8080/admin/eject \
+curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"id": "gemma4"}'
+  -d '{"model": "27b", "messages": [{"role": "user", "content": "请用一句话自我介绍。"}]}'
+
+# 切换默认模型、查询并驻状态与内存占用、或卸载指定模型
+curl http://localhost:8741/admin/default -H "Content-Type: application/json" -d '{"id": "qwen3.8-27b"}'
+curl http://localhost:8741/admin/models
+curl http://localhost:8741/admin/eject -H "Content-Type: application/json" -d '{"id": "qwen3.8-27b"}'
 ```
 
 兼容于 OpenAI SDK、Open WebUI、VS Code 等前端工具，Base URL 设置为 `http://localhost:8080/v1` 即可。完整接口协议详见 [docs/SERVER.md](docs/SERVER.md)。
