@@ -199,6 +199,70 @@ GgufRole ClassifyGguf(const std::filesystem::path& p) {
   return GgufRole::kMainModel;
 }
 
+struct CapabilityProfile {
+  std::string task{"decide"};
+  bool has_vision{false};
+  bool has_audio{false};
+  bool has_tools{false};
+  std::vector<std::string> badges;
+};
+
+CapabilityProfile AnalyzeCapabilities(std::string_view id_or_name,
+                                      std::string_view family,
+                                      std::string_view path,
+                                      bool has_mmproj,
+                                      std::string_view spec_kind) {
+  CapabilityProfile prof;
+  const std::string hay = ToLowerAscii(std::string(id_or_name) + " " +
+                                       std::string(family) + " " +
+                                       std::string(path));
+  if (hay.find("rerank") != std::string::npos) {
+    prof.task = "reranker";
+    prof.badges.push_back("RERANKER");
+  } else if (hay.find("embed") != std::string::npos ||
+             hay.find("bge-m3") != std::string::npos) {
+    prof.task = "embedding";
+    prof.badges.push_back("EMBEDDING");
+  } else if (hay.find("asr") != std::string::npos ||
+             hay.find("whisper") != std::string::npos) {
+    prof.task = "audio";
+    prof.has_audio = true;
+    prof.badges.push_back("AUDIO");
+  } else if (hay.find("tts") != std::string::npos) {
+    prof.task = "tts";
+    prof.has_audio = true;
+    prof.badges.push_back("SPEECH");
+  } else {
+    prof.task = "decide";
+    prof.badges.push_back("DECIDE");
+  }
+
+  if (has_mmproj || hay.find("-vl") != std::string::npos ||
+      hay.find("vision") != std::string::npos) {
+    prof.has_vision = true;
+    prof.badges.push_back("VISION");
+  }
+  if (hay.find("audio") != std::string::npos ||
+      hay.find("omni") != std::string::npos ||
+      hay.find("asr") != std::string::npos ||
+      hay.find("whisper") != std::string::npos) {
+    prof.has_audio = true;
+    if (prof.task != "audio") prof.badges.push_back("AUDIO");
+  }
+  if (prof.task == "decide") {
+    prof.has_tools = true;
+    prof.badges.push_back("TOOLS");
+  }
+  if (!spec_kind.empty() && spec_kind != "off") {
+    std::string upper_spec(spec_kind);
+    for (char& c : upper_spec) {
+      c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    prof.badges.push_back(upper_spec);
+  }
+  return prof;
+}
+
 }  // namespace
 
 HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
@@ -251,6 +315,18 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["idle_ms"] = static_cast<std::size_t>(info.idle_ms);
     row["supports_images"] = info.supports_images;
     row["speculative"] = info.speculative;
+    {
+      const std::string spec_s = info.speculative ? "mtp" : "";
+      const auto prof = AnalyzeCapabilities(info.id, "", info.path,
+                                            info.supports_images, spec_s);
+      row["task"] = prof.task;
+      row["has_vision"] = prof.has_vision;
+      row["has_audio"] = prof.has_audio;
+      row["has_tools"] = prof.has_tools;
+      json::Value caps = json::Value::array();
+      for (const auto& b : prof.badges) caps.push_back(b);
+      row["capabilities"] = std::move(caps);
+    }
     row["total_sessions"] = info.total_sessions;
     row["active_sessions"] = info.active_sessions;
     row["busy"] = info.active_sessions > 0;
@@ -359,7 +435,10 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       continue;
     }
     std::filesystem::recursive_directory_iterator it(
-        root, std::filesystem::directory_options::skip_permission_denied, ec);
+        root,
+        std::filesystem::directory_options::skip_permission_denied |
+            std::filesystem::directory_options::follow_directory_symlink,
+        ec);
     std::filesystem::recursive_directory_iterator end;
     for (; !ec && it != end; it.increment(ec)) {
       if (it.depth() > 4) {
@@ -424,6 +503,11 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
   }
 
   auto find_sidecar = [&](const std::string& family, GgufRole role) -> std::string {
+    // In gufo serve llm, --mmproj vision is supported on Qwen3.8-Flash-Next
+    // and Qwen3.8-27B; other families (gemma4, muse-glimmer) reject --mmproj.
+    if (role == GgufRole::kMmproj && family.rfind("qwen3.8-", 0) != 0) {
+      return {};
+    }
     for (const auto& f : files) {
       if (f.role == role && f.family == family) return f.path.string();
     }
@@ -476,6 +560,22 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     item["id"] = derived_id;
     item["id_suggestion"] = derived_id;
     item["name"] = f.path.filename().string();
+    {
+      const std::string sug_mm = find_sidecar(f.family, GgufRole::kMmproj);
+      const std::string spec_k = !sug_mtp.empty()      ? "mtp"
+                                 : !sug_dflash.empty() ? "dflash2"
+                                 : !sug_dspark.empty() ? "dspark"
+                                                       : "";
+      const auto prof = AnalyzeCapabilities(derived_id, f.family, full_path,
+                                            !sug_mm.empty(), spec_k);
+      item["task"] = prof.task;
+      item["has_vision"] = prof.has_vision;
+      item["has_audio"] = prof.has_audio;
+      item["has_tools"] = prof.has_tools;
+      json::Value caps = json::Value::array();
+      for (const auto& b : prof.badges) caps.push_back(b);
+      item["capabilities"] = std::move(caps);
+    }
     item["family"] = f.family;
     item["path"] = full_path;
     item["relative_path"] = rel_path;

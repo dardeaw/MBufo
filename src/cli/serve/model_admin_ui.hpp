@@ -146,6 +146,26 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
     .badge-purple { background: rgba(139,92,246,0.15); color: #a78bfa; border-color: rgba(139,92,246,0.35); }
     .badge-cyan { background: rgba(6,182,212,0.15); color: #22d3ee; border-color: rgba(6,182,212,0.35); }
     .badge-red { background: rgba(239,68,68,0.15); color: #f87171; border-color: rgba(239,68,68,0.35); }
+    .cap-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      font-family: var(--mono);
+      letter-spacing: 0.2px;
+      flex-shrink: 0;
+      border: 1px solid transparent;
+    }
+    .cap-decide { background: rgba(99,102,241,0.18); color: #a5b4fc; border-color: rgba(99,102,241,0.45); }
+    .cap-embed  { background: rgba(16,185,129,0.18); color: #34d399; border-color: rgba(16,185,129,0.45); }
+    .cap-rerank { background: rgba(245,158,11,0.18); color: #fbbf24; border-color: rgba(245,158,11,0.45); }
+    .cap-vision { background: rgba(168,85,247,0.20); color: #d8b4fe; border-color: rgba(168,85,247,0.48); }
+    .cap-audio  { background: rgba(236,72,153,0.20); color: #f472b6; border-color: rgba(236,72,153,0.48); }
+    .cap-tools  { background: rgba(14,165,233,0.15); color: #7dd3fc; border-color: rgba(14,165,233,0.38); }
+    .cap-spec   { background: rgba(6,182,212,0.18); color: #22d3ee; border-color: rgba(6,182,212,0.42); }
 
     /* LM Studio style Segmented Memory Bar */
     .mem-summary {
@@ -690,8 +710,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
           <span style="font-size:11px;font-family:var(--mono);color:var(--muted);">/mnt/nvme-data/gufo-models</span>
         </div>
         <div class="catalog-controls">
-          <input type="text" id="cat-search" placeholder="Search model name, quant (e.g. Q4_K, 27B, gemma, coder)..." oninput="renderCatalog()" />
+          <input type="text" id="cat-search" placeholder="Search model name, quant, capability (e.g. bge, rerank, vision, 27B)..." oninput="renderCatalog()" />
         </div>
+        <div class="family-pills" id="cap-pills" style="margin-bottom:8px;"></div>
         <div class="family-pills" id="family-pills"></div>
         <div class="catalog-list" id="catalog-list"></div>
       </div>
@@ -717,8 +738,10 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
           <div>
             <label class="field-label">API Endpoint Format</label>
             <select id="pg-endpoint" style="width:100%;">
-              <option value="/v1/chat/completions">OpenAI (/v1/chat/completions)</option>
-              <option value="/v1/messages">Anthropic (/v1/messages)</option>
+              <option value="/v1/chat/completions">Decide / Chat: OpenAI (/v1/chat/completions)</option>
+              <option value="/v1/messages">Decide / Chat: Anthropic (/v1/messages)</option>
+              <option value="/v1/embeddings">Embedding (/v1/embeddings)</option>
+              <option value="/v1/reranking">Reranker (/v1/reranking)</option>
             </select>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
@@ -848,7 +871,23 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
     let stateModels = { models: [], memory: {}, loading: { active: false } };
     let stateCatalog = { models: [], mmproj_files: [], draft_files: [] };
     let selectedFamily = 'ALL';
+    let selectedCap = 'ALL';
     let previewModel = null;
+
+    function renderCapabilityBadges(caps) {
+      const list = Array.isArray(caps) ? caps : [];
+      return list.map(c => {
+        if (c === 'DECIDE')    return `<span class="cap-pill cap-decide" title="Decide / Reasoning / Chat LLM">🧠 DECIDE</span>`;
+        if (c === 'EMBEDDING') return `<span class="cap-pill cap-embed" title="Vector Embeddings (/v1/embeddings)">🧬 EMBEDDING</span>`;
+        if (c === 'RERANKER')  return `<span class="cap-pill cap-rerank" title="Cross-Encoder / Relevance Reranker (/v1/reranking)">🎯 RERANKER</span>`;
+        if (c === 'VISION')    return `<span class="cap-pill cap-vision" title="Multimodal Vision (Image Input)">👁 VISION</span>`;
+        if (c === 'AUDIO' || c === 'SPEECH') return `<span class="cap-pill cap-audio" title="Multimodal Audio / Hearing (聽力/語音)">🎧 AUDIO</span>`;
+        if (c === 'TOOLS')     return `<span class="cap-pill cap-tools" title="Function & Tool Calling">🛠 TOOLS</span>`;
+        if (c === 'MTP' || c === 'DFLASH2' || c === 'DSPARK')
+          return `<span class="cap-pill cap-spec" title="Speculative Decoding (${c})">⚡ ${c}</span>`;
+        return `<span class="cap-pill">${c}</span>`;
+      }).join('');
+    }
 
     function showToast(msg, isError = false) {
       const t = document.getElementById('toast');
@@ -1046,9 +1085,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
         if (m.is_default) badges.push(`<span class="badge badge-primary">★ PRIMARY DEFAULT</span>`);
         else if (m.lru_rank > 0) badges.push(`<span class="badge">LRU #${m.lru_rank}</span>`);
         if (m.ready) badges.push(`<span class="badge badge-green">READY</span>`);
-        if (m.supports_images) badges.push(`<span class="badge badge-purple">VISION</span>`);
-        const specStr = typeof m.speculative === 'string' ? m.speculative : (m.speculative ? 'mtp' : 'off');
-        if (specStr && specStr !== 'off') badges.push(`<span class="badge badge-cyan">SPEC: ${specStr.toUpperCase()}</span>`);
+        badges.push(renderCapabilityBadges(m.capabilities || []));
         badges.push(`<span class="badge">CTX: ${(m.context_length / 1024).toFixed(0)}K</span>`);
         badges.push(`<span class="badge">~${fmtGiB(m.file_size_mib || m.estimated_resident_mib)}</span>`);
 
@@ -1085,8 +1122,31 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
     }
 
     function renderFamilyPills() {
-      const pills = document.getElementById('family-pills');
+      const capContainer = document.getElementById('cap-pills');
       const models = stateCatalog.models || [];
+      const capDefs = [
+        { key: 'ALL',       label: 'All Capabilities', match: () => true },
+        { key: 'DECIDE',    label: '🧠 Decide / Chat', match: m => (m.capabilities || []).includes('DECIDE') },
+        { key: 'EMBEDDING', label: '🧬 Embedding',     match: m => (m.capabilities || []).includes('EMBEDDING') },
+        { key: 'RERANKER',  label: '🎯 Reranker',      match: m => (m.capabilities || []).includes('RERANKER') },
+        { key: 'VISION',    label: '👁 Vision',        match: m => (m.capabilities || []).includes('VISION') },
+        { key: 'AUDIO',     label: '🎧 Audio / 聽力',  match: m => (m.capabilities || []).includes('AUDIO') },
+        { key: 'TOOLS',     label: '🛠 Tools',         match: m => (m.capabilities || []).includes('TOOLS') }
+      ];
+      if (capContainer) {
+        capContainer.innerHTML = '';
+        capDefs.forEach(cd => {
+          const cnt = models.filter(cd.match).length;
+          if (cd.key !== 'ALL' && cnt === 0 && cd.key !== 'AUDIO') return;
+          const el = document.createElement('span');
+          el.className = 'family-pill' + (selectedCap === cd.key ? ' active' : '');
+          el.textContent = `${cd.label} (${cnt})`;
+          el.onclick = () => { selectedCap = cd.key; renderFamilyPills(); renderCatalog(); };
+          capContainer.appendChild(el);
+        });
+      }
+
+      const pills = document.getElementById('family-pills');
       const counts = { ALL: models.length };
       models.forEach(m => { counts[m.family] = (counts[m.family] || 0) + 1; });
 
@@ -1108,10 +1168,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
 
       const filtered = (stateCatalog.models || []).filter(m => {
         if (selectedFamily !== 'ALL' && m.family !== selectedFamily) return false;
+        if (selectedCap !== 'ALL' && !(m.capabilities || []).includes(selectedCap)) return false;
         if (!q) return true;
+        const capsStr = (m.capabilities || []).join(' ').toLowerCase();
         return m.id_suggestion.toLowerCase().includes(q) ||
                m.relative_path.toLowerCase().includes(q) ||
-               m.family.toLowerCase().includes(q);
+               m.family.toLowerCase().includes(q) ||
+               capsStr.includes(q);
       });
 
       document.getElementById('catalog-count').textContent = filtered.length + ' GGUFs';
@@ -1122,7 +1185,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
         const item = document.createElement('div');
         item.className = 'cat-item';
         item.onmouseenter = () => {
-          previewModel = { name: m.id_suggestion, estMib: m.size_mib + 1536 };
+          previewModel = { name: m.id_suggestion, estMib: m.size_mib + 512 };
           renderMemoryBar();
         };
         item.onmouseleave = () => {
@@ -1130,10 +1193,11 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
           renderMemoryBar();
         };
 
-        const badges = [`<span class="badge">${fmtGiB(m.size_mib)}</span>`];
+        const badges = [
+          renderCapabilityBadges(m.capabilities || []),
+          `<span class="badge">${fmtGiB(m.size_mib)}</span>`
+        ];
         if (m.shards > 1) badges.push(`<span class="badge">${m.shards} shards</span>`);
-        if (m.suggested_mmproj) badges.push(`<span class="badge badge-purple" title="${m.suggested_mmproj}">+mmproj</span>`);
-        if (m.suggested_draft) badges.push(`<span class="badge badge-cyan" title="${m.suggested_draft}">+MTP/Draft</span>`);
         if (isLoaded) badges.push(`<span class="badge badge-green">LOADED</span>`);
 
         item.innerHTML = `
@@ -1161,9 +1225,10 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       document.getElementById('lm-id').value = m.id_suggestion;
       document.getElementById('lm-aliases').value = '';
       document.getElementById('lm-path').value = m.path;
-      document.getElementById('lm-ctx').value = m.size_mib > 30000 ? '32768' : '32768';
+      const isEnc = (m.task === 'embedding' || m.task === 'reranker');
+      document.getElementById('lm-ctx').value = isEnc ? '8192' : '32768';
       document.getElementById('lm-sessions').value = '1';
-      document.getElementById('lm-kv').value = 'q8';
+      document.getElementById('lm-kv').value = isEnc ? 'fp16' : 'q8';
       document.getElementById('lm-spec').value = 'off';
       document.getElementById('lm-default').checked = false;
       document.getElementById('lm-evict').checked = true;
@@ -1209,14 +1274,15 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
     }
 
     async function quickLoadModel(m) {
+      const isEnc = (m.task === 'embedding' || m.task === 'reranker');
       const payload = {
         id: m.id_suggestion,
         path: m.path,
-        context_length: 32768,
+        context_length: isEnc ? 0 : 32768,
         sessions: 1,
-        kv_quant: 'q8',
+        kv_quant: isEnc ? 'fp16' : 'q8',
         speculative: 'off',
-        mmproj_path: m.suggested_mmproj || '',
+        mmproj_path: (!isEnc && m.suggested_mmproj) ? m.suggested_mmproj : '',
         allow_evict: true,
         set_default: false
       };
@@ -1338,6 +1404,14 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
     function selectInPlayground(id) {
       const sel = document.getElementById('pg-model');
       sel.value = id;
+      const m = (stateModels.models || []).find(x => x.id === id);
+      if (m) {
+        const epSel = document.getElementById('pg-endpoint');
+        if (m.task === 'embedding') epSel.value = '/v1/embeddings';
+        else if (m.task === 'reranker') epSel.value = '/v1/reranking';
+        else if (epSel.value === '/v1/embeddings' || epSel.value === '/v1/reranking')
+          epSel.value = '/v1/chat/completions';
+      }
       updateCurlSnippet();
       document.getElementById('pg-input').focus();
     }
@@ -1346,10 +1420,22 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       const model = document.getElementById('pg-model').value || (stateModels.default_model || 'default');
       const ep = document.getElementById('pg-endpoint').value;
       const host = window.location.origin;
-      document.getElementById('pg-curl').textContent =
+      if (ep === '/v1/embeddings') {
+        document.getElementById('pg-curl').textContent =
+`curl ${host}/v1/embeddings \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "${model}", "input": "MBufo Strix Halo unified memory inference"}'`;
+      } else if (ep === '/v1/reranking') {
+        document.getElementById('pg-curl').textContent =
+`curl ${host}/v1/reranking \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "${model}", "query": "GPU memory", "documents": ["UMA shares 128GB RAM", "Apples are red"]}'`;
+      } else {
+        document.getElementById('pg-curl').textContent =
 `curl ${host}${ep} \\
   -H "Content-Type: application/json" \\
   -d '{"model": "${model}", "messages": [{"role": "user", "content": "Hello!"}]}'`;
+      }
     }
 
     document.getElementById('pg-model').addEventListener('change', updateCurlSnippet);
@@ -1393,6 +1479,57 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       document.getElementById('m-tokens').textContent = '...';
 
       try {
+        if (ep === '/v1/embeddings') {
+          const body = { input: prompt };
+          if (model) body.model = model;
+          const res = await fetch(ep, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          const data = await res.json();
+          const dt = (performance.now() - t0).toFixed(1);
+          document.getElementById('m-ttft').textContent = dt + ' ms';
+          if (!res.ok || data.error) {
+            botDiv.textContent = 'Error: ' + (data.error ? data.error.message : res.statusText);
+            return;
+          }
+          const vec = (data.data && data.data[0] && data.data[0].embedding) || [];
+          const tok = (data.usage && data.usage.prompt_tokens) || '-';
+          document.getElementById('m-tokens').textContent = tok + ' prompt tok';
+          document.getElementById('m-tps').textContent = 'dim=' + vec.length;
+          botDiv.textContent = `Embedding Vector (dim=${vec.length}, ${dt} ms):\n[` +
+            vec.slice(0, 8).map(v => v.toFixed(6)).join(', ') + ', ...]';
+          return;
+        }
+        if (ep === '/v1/reranking') {
+          const parts = prompt.split('|').map(s => s.trim()).filter(Boolean);
+          const qText = parts[0] || prompt;
+          const docs = parts.length > 1 ? parts.slice(1) : [
+            'Strix Halo gfx1151 unified memory supports multi-model co-residency.',
+            'Bananas and oranges are tropical fruits.'
+          ];
+          const body = { query: qText, documents: docs };
+          if (model) body.model = model;
+          const res = await fetch(ep, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          const data = await res.json();
+          const dt = (performance.now() - t0).toFixed(1);
+          document.getElementById('m-ttft').textContent = dt + ' ms';
+          if (!res.ok || data.error) {
+            botDiv.textContent = 'Error: ' + (data.error ? data.error.message : res.statusText);
+            return;
+          }
+          const results = data.results || [];
+          document.getElementById('m-tokens').textContent = ((data.usage && data.usage.prompt_tokens) || '-') + ' tok';
+          document.getElementById('m-tps').textContent = results.length + ' docs scored';
+          botDiv.textContent = `Rerank Results (query: "${qText}", ${dt} ms):\n` +
+            results.map(r => `  #${r.index} [score=${Number(r.relevance_score).toFixed(4)}] ${docs[r.index] || ''}`).join('\n');
+          return;
+        }
         const body = {
           messages: [{ role: 'user', content: prompt }],
           max_tokens: maxTokens,

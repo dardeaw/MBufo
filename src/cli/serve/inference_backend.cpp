@@ -57,6 +57,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/bge_m3/engine.hpp"
 #include "src/models/bge_reranker/engine.hpp"
 #include "src/models/qwen_reranker/engine.hpp"
 #endif
@@ -5249,6 +5250,8 @@ struct InferenceBackend::Impl {
   std::shared_ptr<const hip::QwenGpuModel> embed_model;
   std::unique_ptr<hip::QwenGpuExecutor> embed_executor;
   std::uint32_t embed_context{0};
+  std::unique_ptr<models::bge_m3::EngineModel> bge_embed_model;
+  std::unique_ptr<models::bge_m3::EngineSession> bge_embed_session;
   // Rerank state: one cached session per loaded reranker kind (sessions are
   // not thread-safe; rerank_mutex serializes use, mirroring embed_mutex).
   mutable std::mutex rerank_mutex;
@@ -5507,9 +5510,6 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
   if (architecture == "bert") {
-    // Rerank-only encoder model: no text runner, no scheduler, no disk
-    // cache. chat/complete refuse explicitly; Rerank + /v1/reranking serve
-    // it. served_model_names/build_info are set by the caller as usual.
     if (!vision_model_path.empty()) {
       SetError(error, "BERT reranker models do not support --mmproj");
       return false;
@@ -5525,6 +5525,42 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                "BERT reranker models do not support speculative decoding");
       return false;
     }
+    if (reader->GetMetadataUint32("bert.pooling_type").has_value()) {
+      // BERT embedding encoder (e.g. bge-m3): serves /v1/embeddings.
+      std::string bge_error;
+      auto bge_model =
+          models::bge_m3::EngineModel::Create(model_path, &bge_error);
+      if (bge_model == nullptr) {
+        SetError(error, "Failed to create BERT embedding model: " + bge_error);
+        return false;
+      }
+      const std::uint32_t native_context =
+          bge_model->Config().max_position_embeddings;
+      if (max_context == 0 || max_context > native_context) {
+        max_context = native_context;
+      }
+      if (max_context < 2) {
+        SetError(error, "HTTP context exceeds the BERT embedding context");
+        return false;
+      }
+      {
+        auto new_state = std::make_shared<Impl::State>();
+        new_state->model_id = bge_model->Config().model_name;
+        new_state->max_context = max_context;
+        new_state->model_path = model_path;
+        const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+        impl_->state = std::move(new_state);
+      }
+      {
+        const std::lock_guard<std::mutex> lock(impl_->embed_mutex);
+        impl_->bge_embed_model = std::move(bge_model);
+        impl_->bge_embed_session.reset();
+      }
+      return true;
+    }
+    // Rerank-only encoder model: no text runner, no scheduler, no disk
+    // cache. chat/complete refuse explicitly; Rerank + /v1/reranking serve
+    // it. served_model_names/build_info are set by the caller as usual.
     std::string rerank_error;
     auto rerank_model =
         models::bge_reranker::EngineModel::Create(model_path, &rerank_error);
@@ -5785,6 +5821,10 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
   if (qwen_kv_quant != "f16" && qwen_kv_quant != "q8") {
     SetError(error, "kv_cache_quant must be f16 or q8 (flag or QWEN_KV_QUANT)");
     return false;
+  }
+  if (qwen_kv_quant == "q8" && model->GetConfig().head_dim != 256) {
+    qwen_kv_quant = "f16";
+    qwen_kv_source = "auto-f16(head_dim!=256)";
   }
   qwen_policy.blocked_q8_attention = (qwen_kv_quant == "q8");
   std::cerr << "[qwen] kv_cache_quant=" << qwen_kv_quant
@@ -6818,9 +6858,31 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
   };
   const auto current = impl_->Snapshot();
   if (current == nullptr) return refuse("no model is loaded");
+  {
+    const std::lock_guard<std::mutex> lock(impl_->embed_mutex);
+    if (impl_->bge_embed_model != nullptr) {
+      if (impl_->bge_embed_session == nullptr) {
+        impl_->bge_embed_session =
+            std::make_unique<models::bge_m3::EngineSession>(
+                impl_->bge_embed_model.get());
+      }
+      auto encoded = impl_->bge_embed_model->Tokenizer().Encode(
+          text, models::bge_m3::kBgeM3Leg1MaxTokens);
+      if (!encoded.has_value()) {
+        return refuse("bge-m3 tokenize failed or input exceeds context window");
+      }
+      auto sync = impl_->bge_embed_session->Sync(*encoded, true, error);
+      if (!sync.has_value()) return std::nullopt;
+      EmbeddingResult result;
+      result.values = std::move(sync->values);
+      result.prompt_tokens = encoded->size();
+      result.prefill_ms = sync->prefill_ms;
+      return result;
+    }
+  }
   if (current->scheduler == nullptr) {
     return refuse(
-        "embeddings require a Qwen dense model; this backend serves a "
+        "embeddings require a Qwen dense or BGE-M3 model; this backend serves a "
         "reranker-only model kind");
   }
   const auto* qwen =
