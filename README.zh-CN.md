@@ -63,9 +63,9 @@ MBufo 将 Prefill Chunk 与 Decode 步骤合并至同一个 `ForwardBatch` 与�
 
 | 评测指标（gfx1151，FP4 + f16 + MTP + 4 sessions） | 实测表现 |
 | --- | --- |
-| Fairness-A 退化比 | **160 → 7.32** |
-| Fairness-B 退化比 | **856 → 191** |
-| 短请求 TTFT（首字延迟） | **3.4 秒 → 0.7 秒** |
+| Fairness-A 退化比 | **160 → 0.7** |
+| Fairness-B 退化比 | **856 → 105** |
+| 短请求 TTFT（首字延迟） | **3.4 秒 → 0.1 秒** |
 | ITL（Token 间延迟） | 稳定不增加 |
 | 贪婪输出正确性 | 位元一致（SHA 对比通过） |
 
