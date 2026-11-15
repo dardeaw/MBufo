@@ -267,14 +267,22 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
     }
 
-    /* Main Grid */
+    /* Main Grid — strictly locked column widths (no content-driven width jumping) */
     .main-grid {
       display: grid;
-      grid-template-columns: 1.15fr 1fr;
+      grid-template-columns: minmax(0, 46%) minmax(0, 54%);
       gap: 20px;
+      align-items: stretch;
+      width: 100%;
+    }
+    .main-grid > .card {
+      min-width: 0;
+      max-width: 100%;
+      width: 100%;
+      overflow: hidden;
     }
     @media (max-width: 1120px) {
-      .main-grid { grid-template-columns: 1fr; }
+      .main-grid { grid-template-columns: minmax(0, 1fr); }
     }
 
     /* Active Models */
@@ -519,9 +527,14 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       display: flex;
       flex-direction: column;
       gap: 8px;
+      height: 540px;
+      min-height: 540px;
       max-height: 540px;
-      overflow-y: auto;
+      overflow-y: scroll;
+      scrollbar-gutter: stable;
       padding-right: 4px;
+      width: 100%;
+      min-width: 0;
     }
     .cat-item {
       background: var(--panel-alt);
@@ -532,6 +545,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+      width: 100%;
+      min-width: 0;
+      flex-shrink: 0;
       transition: border-color 0.15s;
     }
     .cat-item:hover { border-color: #3b4b6b; }
