@@ -601,6 +601,16 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
       v_cache + (static_cast<std::size_t>(kv_head) * kHeadDim) + v_slice;
   const auto* k_base = k_cache + (static_cast<std::size_t>(kv_head) * kHeadDim);
 
+  // Perf note (2026-11-15): a 34-byte block start is only 2-byte aligned, so
+  // the per-byte code reads below look as if they must lose to the F16
+  // staging route. They do not. Replacing each group of eight 1-byte loads
+  // with four 16-bit loads (decode unchanged, byte-identical output) left
+  // pp2048 unchanged in ABBA runs with QWEN_KV_QUANT=q8 GUFO_KV_WMMA=1:
+  // d2048 1706-1708 (before) vs 1704.6-1704.8 (after) vs 1704.3 (staging,
+  // GUFO_KV_I8=0) tok/s; d16384 1627-1640 vs 1628-1630 vs 1628. The earlier
+  // claim that I8=2 trails staging by ~5% at a 2K increment did not
+  // reproduce with `gufo bench -p 2048 -d 2048`. Do not change the KV layout
+  // on that claim without a fresh measurement that does reproduce it.
   const auto load_v = [&](const Tile& tile, uint4* dst) {
     if constexpr (kBlockedKv) {
       // Blocked Q8 rows (34-byte blocks: 32 int8 codes, f16 scale at +32)

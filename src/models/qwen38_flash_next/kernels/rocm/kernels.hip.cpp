@@ -6392,6 +6392,19 @@ __device__ __forceinline__ int2 FastTable16(std::uint32_t q4) {
                    __builtin_amdgcn_perm(vo_high, vo_low, mask_odd));
 }
 
+// Tuning notes (2026-11-15), from qwen38_flash_next_routed_gemm_bench with
+// 512 active experts, one layer (configure with -DBUILD_TESTING=ON, run with
+// LD_LIBRARY_PATH=/opt/rocm/lib):
+//   2048 tokens: gate/up 6.195 ms (152 GB/s), down 4.001 ms (157 GB/s)
+//   4096 tokens: gate/up 10.111 ms (93 GB/s),  down 6.231 ms (101 GB/s)
+// At 4096 tokens the kernels are bound by WMMA and activation gathers, not by
+// the weight stream. At 2048 the gap to ~200 GB/s is at most ~20% of a ~35%
+// share, i.e. 3-4% of pp2048, inside the 2-5% run-to-run noise. The obvious
+// levers are already recorded as rejected in
+// docs/models/qwen3.8-flash-next/EXPERIMENTS.md ("Routed GEMM bounding",
+// "Prefill tiling and bandwidth limits"): register double buffers, per-expert
+// tile dispatch order, non-temporal loads, LDS fragment prefetch, 128-token
+// down tiles. Read those before trying another.
 template<WeightType kType, int BM, int BN, int BK, bool kPair = false>
 __launch_bounds__(256) __global__
     void RoutedF16GEMMKernel(const void* __restrict__ w,

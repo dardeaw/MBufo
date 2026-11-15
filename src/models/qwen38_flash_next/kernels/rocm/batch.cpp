@@ -1068,6 +1068,33 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   // prefill phase; its own attention / GDN with fused projections), while
   // the leading decode / verify items keep their batched per-item cores in
   // the decode phase. GUFO_BATCH_WIDE_CHUNK=0 keeps the decode-family path.
+  //
+  // Cost of merging, measured 2026-11-15 (rocprofv3 --kernel-trace
+  // --hip-runtime-trace; passes sliced at hipStreamSynchronize). A 512-row
+  // chunk plus 3 decoders' 6 verify rows takes 506 ms of GPU time against 454 ms
+  // for the same chunk step with GUFO_MIXED_MTP=0 (another pair: 516 vs 462).
+  // Breakdown of the first pair: routed GEMM +14, mul_mat_vec_q_dense +12
+  // (new kernel: the decode rows likely re-stream the dense weights through
+  // the MMQ GEMV), W8A8 +7 and GDN +4 (launch counts double: 384 vs 192 and
+  // 288 vs 144, the decode rows run their own pass), prefill attention +6
+  // (only +1.5 in the second pair), HC combine +3, the rest +6. A standalone
+  // pp512 is 410-415 ms (`gufo bench -p 512`, MTP on or off), so the merged
+  // step sits 70-100 ms above "chunk plus a few rows"; alternating mode also
+  // pays a separate ~100 ms decode step, so merging wins only ~0-30 ms of GPU
+  // time per step and its value is the smoother ITL. One decoder with 6 rows
+  // costs the same as three decoders with 6 rows: the overhead follows the
+  // decode phase existing, not the decoder count. Running the decode rows
+  // through the chunk's own projection GEMMs would remove most of it (about
+  // 4-5% of the step) but changes the verify rows' numerics; not done.
+  // Re-measuring this: `gufo serve --sessions 4` (with 2 the third concurrent
+  // request gets 503); wait for the loader's load_completed log line
+  // (/v1/models answers earlier); start 3 streaming decoders, then a
+  // ~10K-token prompt whose first line is a unique nonce (otherwise the prefix
+  // cache hides the prefill); do not name a shell variable LINES (bash sets it
+  // to the terminal height). Under rocprofv3 the server hangs at exit after
+  // flushing its db: send TERM, wait ~60 s, then KILL. The production unit
+  // holds ~100 GB, so stop it first and make sure it is started again; match
+  // the test process by its port, not by its binary name.
   static const bool wide_chunk_enabled = [] {
     const char* e = std::getenv("GUFO_BATCH_WIDE_CHUNK");
     return e == nullptr || e[0] == '\0' || e[0] != '0';

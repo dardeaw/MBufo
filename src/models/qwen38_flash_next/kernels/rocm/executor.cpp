@@ -1766,6 +1766,17 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
     // 2026-11-03 and reverted (tg32 34.2 -> 30.6 tok/s, -10.6%); this route
     // reuses the winning narrow kernel instead of replacing it.
     //
+    // The 248,320 x 2560 vocabulary head (about 675 MB of Q8) runs through
+    // this route. Measured 2026-11-15 (rocprofv3, decode): 2.99 ms per call
+    // (2.944-3.028 ms over 99 calls) = about 226 GB/s, already above the
+    // ~200 GB/s sustained LPDDR5X figure used elsewhere in these notes, so
+    // the kernel has no bandwidth left to win. Do not spend time on it. The
+    // only lever left is reading fewer bytes (Q4 head or a shortlist), which
+    // is lossy and was removed upstream (f6d3bbb7). Q8-head prefetch, grouped
+    // vocabulary rows and a planar head are recorded as rejected in
+    // docs/models/qwen3.8-flash-next/EXPERIMENTS.md (planar: +0.8% for
+    // +644 MiB).
+    //
     // Model-local exclusions first: the HC 320x10240 down projection and
     // the single-row latency specialization (rows <= 64, K % 5120 == 0)
     // use different accumulation order and stay on MMQ.
