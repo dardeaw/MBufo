@@ -63,9 +63,9 @@ To prevent long prefills from degrading the responsiveness of short requests, MB
 
 | Metric (gfx1151, FP4 + f16 + MTP + 4 sessions) | Result |
 | --- | --- |
-| Fairness-A degradation ratio | **160 → 7.32** |
-| Fairness-B degradation ratio | **856 → 191** |
-| Short-request TTFT | **3.4 s → 0.7 s** |
+| Fairness-A degradation ratio | **160 → 0.7** |
+| Fairness-B degradation ratio | **856 → 105** |
+| Short-request TTFT | **3.4 s → 0.1 s** |
 | ITL | Stable / Unchanged |
 | Greedy output correctness | Bit-identical (verified by SHA checksums) |
 
