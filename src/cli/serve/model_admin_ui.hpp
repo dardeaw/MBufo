@@ -409,25 +409,110 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       flex-wrap: wrap;
     }
     .catalog-controls input { flex: 1; min-width: 180px; }
-    .family-pills {
+    .filter-panel {
+      background: #0c1017;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .filter-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .filter-row + .filter-row {
+      padding-top: 9px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.08);
+    }
+    .filter-dim-label {
+      font-size: 10px;
+      font-weight: 700;
+      font-family: var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: #64748b;
+      min-width: 78px;
+      padding-top: 5px;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    /* Dimension 1: Capability & Modality Segmented Tabs */
+    .cap-tabs {
       display: flex;
       gap: 6px;
-      margin-bottom: 12px;
       flex-wrap: wrap;
+      flex: 1;
+    }
+    .cap-tab {
+      padding: 5px 11px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      background: #151c28;
+      border: 1px solid #263248;
+      color: #cbd5e1;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+    }
+    .cap-tab:hover {
+      border-color: #475569;
+      background: #1e293b;
+      color: #fff;
+    }
+    .cap-tab .cap-cnt {
+      font-family: var(--mono);
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.35);
+      color: #94a3b8;
+    }
+    .cap-tab.active[data-cap="ALL"]       { background: rgba(59,130,246,0.22); border-color: #3b82f6; color: #93c5fd; box-shadow: 0 0 12px rgba(59,130,246,0.2); }
+    .cap-tab.active[data-cap="DECIDE"]    { background: rgba(99,102,241,0.25); border-color: #6366f1; color: #c7d2fe; box-shadow: 0 0 12px rgba(99,102,241,0.22); }
+    .cap-tab.active[data-cap="EMBEDDING"] { background: rgba(16,185,129,0.22); border-color: #10b981; color: #6ee7b7; box-shadow: 0 0 12px rgba(16,185,129,0.2); }
+    .cap-tab.active[data-cap="RERANKER"]  { background: rgba(245,158,11,0.22); border-color: #f59e0b; color: #fde68a; box-shadow: 0 0 12px rgba(245,158,11,0.2); }
+    .cap-tab.active[data-cap="VISION"]    { background: rgba(168,85,247,0.25); border-color: #a855f7; color: #e9d5ff; box-shadow: 0 0 12px rgba(168,85,247,0.22); }
+    .cap-tab.active[data-cap="AUDIO"]     { background: rgba(236,72,153,0.25); border-color: #ec4899; color: #fbcfe8; box-shadow: 0 0 12px rgba(236,72,153,0.22); }
+    .cap-tab.active[data-cap="TOOLS"]     { background: rgba(14,165,233,0.22); border-color: #0ea5e9; color: #bae6fd; box-shadow: 0 0 12px rgba(14,165,233,0.2); }
+    .cap-tab.active .cap-cnt {
+      background: rgba(255, 255, 255, 0.16);
+      color: #fff;
+    }
+
+    /* Dimension 2: Model Family / Directory Compact Monospace Chips */
+    .family-pills {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      flex: 1;
     }
     .family-pill {
-      padding: 3px 10px;
-      border-radius: 999px;
+      padding: 2px 8px;
+      border-radius: 4px;
       font-size: 11px;
+      font-family: var(--mono);
       cursor: pointer;
-      background: var(--panel-alt);
-      border: 1px solid var(--border);
-      color: var(--muted);
+      background: transparent;
+      border: 1px solid #222c3c;
+      color: #64748b;
+      transition: all 0.12s ease;
+    }
+    .family-pill:hover {
+      border-color: #3b4b6b;
+      color: #cbd5e1;
+      background: rgba(255, 255, 255, 0.03);
     }
     .family-pill.active {
-      background: rgba(59,130,246,0.2);
-      border-color: var(--accent);
-      color: #60a5fa;
+      background: #1e293b;
+      border-color: #64748b;
+      color: #f8fafc;
       font-weight: 600;
     }
     .catalog-list {
@@ -712,8 +797,16 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
         <div class="catalog-controls">
           <input type="text" id="cat-search" placeholder="Search model name, quant, capability (e.g. bge, rerank, vision, 27B)..." oninput="renderCatalog()" />
         </div>
-        <div class="family-pills" id="cap-pills" style="margin-bottom:8px;"></div>
-        <div class="family-pills" id="family-pills"></div>
+        <div class="filter-panel">
+          <div class="filter-row">
+            <div class="filter-dim-label">CAPABILITY</div>
+            <div class="cap-tabs" id="cap-pills"></div>
+          </div>
+          <div class="filter-row">
+            <div class="filter-dim-label">FAMILY</div>
+            <div class="family-pills" id="family-pills"></div>
+          </div>
+        </div>
         <div class="catalog-list" id="catalog-list"></div>
       </div>
     </div>
@@ -881,7 +974,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
         if (c === 'EMBEDDING') return `<span class="cap-pill cap-embed" title="Vector Embeddings (/v1/embeddings)">🧬 EMBEDDING</span>`;
         if (c === 'RERANKER')  return `<span class="cap-pill cap-rerank" title="Cross-Encoder / Relevance Reranker (/v1/reranking)">🎯 RERANKER</span>`;
         if (c === 'VISION')    return `<span class="cap-pill cap-vision" title="Multimodal Vision (Image Input)">👁 VISION</span>`;
-        if (c === 'AUDIO' || c === 'SPEECH') return `<span class="cap-pill cap-audio" title="Multimodal Audio / Hearing (聽力/語音)">🎧 AUDIO</span>`;
+        if (c === 'AUDIO' || c === 'SPEECH') return `<span class="cap-pill cap-audio" title="Multimodal Audio">🎧 AUDIO</span>`;
         if (c === 'TOOLS')     return `<span class="cap-pill cap-tools" title="Function & Tool Calling">🛠 TOOLS</span>`;
         if (c === 'MTP' || c === 'DFLASH2' || c === 'DSPARK')
           return `<span class="cap-pill cap-spec" title="Speculative Decoding (${c})">⚡ ${c}</span>`;
@@ -1130,31 +1223,40 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
         { key: 'EMBEDDING', label: '🧬 Embedding',     match: m => (m.capabilities || []).includes('EMBEDDING') },
         { key: 'RERANKER',  label: '🎯 Reranker',      match: m => (m.capabilities || []).includes('RERANKER') },
         { key: 'VISION',    label: '👁 Vision',        match: m => (m.capabilities || []).includes('VISION') },
-        { key: 'AUDIO',     label: '🎧 Audio / 聽力',  match: m => (m.capabilities || []).includes('AUDIO') },
+        { key: 'AUDIO',     label: '🎧 Audio',  match: m => (m.capabilities || []).includes('AUDIO') },
         { key: 'TOOLS',     label: '🛠 Tools',         match: m => (m.capabilities || []).includes('TOOLS') }
       ];
       if (capContainer) {
         capContainer.innerHTML = '';
         capDefs.forEach(cd => {
           const cnt = models.filter(cd.match).length;
-          if (cd.key !== 'ALL' && cnt === 0 && cd.key !== 'AUDIO') return;
+          if (cd.key !== 'ALL' && cnt === 0) return;
           const el = document.createElement('span');
-          el.className = 'family-pill' + (selectedCap === cd.key ? ' active' : '');
-          el.textContent = `${cd.label} (${cnt})`;
-          el.onclick = () => { selectedCap = cd.key; renderFamilyPills(); renderCatalog(); };
+          el.className = 'cap-tab' + (selectedCap === cd.key ? ' active' : '');
+          el.setAttribute('data-cap', cd.key);
+          el.innerHTML = `<span>${cd.label}</span><span class="cap-cnt">${cnt}</span>`;
+          el.onclick = () => {
+            selectedCap = cd.key;
+            selectedFamily = 'ALL';
+            renderFamilyPills();
+            renderCatalog();
+          };
           capContainer.appendChild(el);
         });
       }
 
+      const capFilteredModels = models.filter(m =>
+        selectedCap === 'ALL' ? true : (m.capabilities || []).includes(selectedCap)
+      );
       const pills = document.getElementById('family-pills');
-      const counts = { ALL: models.length };
-      models.forEach(m => { counts[m.family] = (counts[m.family] || 0) + 1; });
+      const counts = { ALL: capFilteredModels.length };
+      capFilteredModels.forEach(m => { counts[m.family] = (counts[m.family] || 0) + 1; });
 
       pills.innerHTML = '';
       Object.keys(counts).forEach(fam => {
         const el = document.createElement('span');
         el.className = 'family-pill' + (selectedFamily === fam ? ' active' : '');
-        el.textContent = `${fam} (${counts[fam]})`;
+        el.textContent = fam === 'ALL' ? `All Families (${counts[fam]})` : `${fam} · ${counts[fam]}`;
         el.onclick = () => { selectedFamily = fam; renderFamilyPills(); renderCatalog(); };
         pills.appendChild(el);
       });

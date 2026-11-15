@@ -237,12 +237,19 @@ CapabilityProfile AnalyzeCapabilities(std::string_view id_or_name,
     prof.badges.push_back("DECIDE");
   }
 
-  if (has_mmproj || hay.find("-vl") != std::string::npos ||
+  const bool is_gemma4 = hay.find("gemma-4") != std::string::npos ||
+                         hay.find("gemma4") != std::string::npos;
+  const bool is_glimmer = hay.find("muse-glimmer") != std::string::npos ||
+                          hay.find("glimmer") != std::string::npos;
+  const bool is_qwen38 = hay.find("qwen3.8") != std::string::npos;
+
+  if (has_mmproj || is_gemma4 || is_glimmer || is_qwen38 ||
+      hay.find("-vl") != std::string::npos ||
       hay.find("vision") != std::string::npos) {
     prof.has_vision = true;
     prof.badges.push_back("VISION");
   }
-  if (hay.find("audio") != std::string::npos ||
+  if (is_gemma4 || hay.find("audio") != std::string::npos ||
       hay.find("omni") != std::string::npos ||
       hay.find("asr") != std::string::npos ||
       hay.find("whisper") != std::string::npos) {
