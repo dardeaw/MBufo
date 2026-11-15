@@ -1022,42 +1022,87 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       return h + 'h ' + (m % 60) + 'm';
     }
 
+    let isServerOnline = true;
+
+    function setConnStatus(mode, text) {
+      const pill = document.getElementById('conn-pill');
+      if (mode === 'online') {
+        pill.style.color = 'var(--green)';
+        pill.style.background = 'rgba(16, 185, 129, 0.12)';
+        pill.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+      } else if (mode === 'starting') {
+        pill.style.color = 'var(--amber)';
+        pill.style.background = 'rgba(245, 158, 11, 0.14)';
+        pill.style.borderColor = 'rgba(245, 158, 11, 0.38)';
+      } else {
+        pill.style.color = 'var(--red)';
+        pill.style.background = 'rgba(239, 68, 68, 0.15)';
+        pill.style.borderColor = 'rgba(239, 68, 68, 0.42)';
+      }
+      pill.innerHTML = `<span class="status-dot"></span> ${text}`;
+    }
+
     async function fetchStatus() {
       try {
-        const res = await fetch('/admin/models');
+        const res = await fetch('/admin/models', { cache: 'no-store' });
         if (res.status === 503) {
+          isServerOnline = false;
+          setConnStatus('starting', 'Starting (:8741)');
           const b = document.getElementById('loading-banner');
           b.style.display = 'flex';
           document.getElementById('loading-title').textContent = 'Starting gufo service & loading primary model into GPU/UMA...';
           document.getElementById('loading-sub').textContent = 'Admin API will activate automatically once startup model finishes loading';
-          document.getElementById('conn-pill').style.color = 'var(--amber)';
-          return;
+          document.getElementById('loading-elapsed').textContent = 'BOOTING';
+          return false;
         }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         stateModels = await res.json();
-        document.getElementById('conn-pill').style.color = 'var(--green)';
+        isServerOnline = true;
+        setConnStatus('online', 'Online (:8741)');
         renderLoadingBanner();
         renderMemoryBar();
         renderLoadedModels();
         updatePlaygroundModelSelect();
+        return true;
       } catch (e) {
-        document.getElementById('conn-pill').style.color = 'var(--red)';
+        isServerOnline = false;
+        setConnStatus('offline', 'Offline (:8741 Stopped)');
+        stateModels = { models: [], memory: {}, loading: { active: false } };
+        const b = document.getElementById('loading-banner');
+        b.style.display = 'flex';
+        document.getElementById('loading-title').textContent = 'gufo.service (:8741) is currently stopped or unreachable';
+        document.getElementById('loading-sub').textContent = 'Another benchmark/process may have stopped gufo.service. Dashboard will reconnect automatically when :8741 restarts.';
+        document.getElementById('loading-elapsed').textContent = 'OFFLINE';
+        document.getElementById('mem-rss-badge').textContent = 'gufo RSS: OFFLINE';
+        document.getElementById('mem-numbers').textContent = 'Service :8741 unreachable — cached telemetry cleared';
+        document.getElementById('mem-bar').innerHTML = '';
+        document.getElementById('mem-legend').innerHTML = '';
+        document.getElementById('loaded-count').textContent = '0 loaded (offline)';
+        document.getElementById('loaded-list').innerHTML =
+          `<div style="padding:24px;text-align:center;color:var(--red);border:1px dashed rgba(239,68,68,0.4);border-radius:8px;">gufo.service (:8741) is offline. Stale model cards cleared.</div>`;
+        return false;
       }
     }
 
     async function fetchCatalog() {
       try {
-        const res = await fetch('/admin/catalog');
-        if (!res.ok) return;
+        const res = await fetch('/admin/catalog', { cache: 'no-store' });
+        if (!res.ok) return false;
         stateCatalog = await res.json();
         renderFamilyPills();
         renderCatalog();
-      } catch (e) {}
+        return true;
+      } catch (e) {
+        return false;
+      }
     }
 
     async function refreshAll(manual = false) {
-      await Promise.all([fetchStatus(), fetchCatalog()]);
-      if (manual) showToast('Dashboard state refreshed');
+      const [okStatus] = await Promise.all([fetchStatus(), fetchCatalog()]);
+      if (manual) {
+        if (okStatus) showToast('Dashboard state refreshed');
+        else showToast('Cannot reach :8741 — gufo.service is currently stopped', true);
+      }
     }
 
     function renderLoadingBanner() {

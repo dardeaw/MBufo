@@ -28,7 +28,10 @@ std::uint64_t NowSteadyMs() {
 }
 
 HttpResponse AdminOk(json::Value body) {
-  return {.status = 200, .reason = "OK", .body = body.dump()};
+  return {.status = 200,
+          .reason = "OK",
+          .body = body.dump(),
+          .headers = {{"Cache-Control", "no-store, no-cache, must-revalidate"}}};
 }
 
 HttpResponse AdminErr(int status, const std::string& reason,
