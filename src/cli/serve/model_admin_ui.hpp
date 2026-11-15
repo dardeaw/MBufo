@@ -897,10 +897,16 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
 
       let modelsSumMib = 0;
       const models = stateModels.models || [];
+      models.forEach(m => {
+        modelsSumMib += (m.file_size_mib || m.estimated_resident_mib || 2048);
+      });
+
+      const usedTotalMib = Math.max(0, totalMib - availMib);
+      const scaleDenom = Math.max(totalMib, modelsSumMib + availMib);
+
       models.forEach((m, idx) => {
-        const est = m.estimated_resident_mib || m.file_size_mib || 2048;
-        modelsSumMib += est;
-        const pct = Math.max(1.5, Math.min(100, (est / totalMib) * 100));
+        const est = m.file_size_mib || m.estimated_resident_mib || 2048;
+        const pct = Math.max(1.5, Math.min(100, (est / scaleDenom) * 100));
         const color = MODEL_COLORS[idx % MODEL_COLORS.length];
 
         const seg = document.createElement('div');
@@ -917,10 +923,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
         legend.appendChild(item);
       });
 
-      const usedTotalMib = Math.max(modelsSumMib, totalMib - availMib);
       const otherSystemMib = Math.max(0, usedTotalMib - modelsSumMib);
       if (otherSystemMib > 512) {
-        const pct = Math.max(1, (otherSystemMib / totalMib) * 100);
+        const pct = Math.max(1, (otherSystemMib / scaleDenom) * 100);
         const seg = document.createElement('div');
         seg.className = 'mem-seg';
         seg.style.width = pct + '%';
@@ -938,7 +943,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       const gateBanner = document.getElementById('gate-banner');
       if (previewModel) {
         const needMib = previewModel.estMib;
-        const pct = Math.min(100 - ((usedTotalMib / totalMib) * 100), (needMib / totalMib) * 100);
+        const pct = Math.min((availMib / scaleDenom) * 100, (needMib / scaleDenom) * 100);
         if (pct > 0.5) {
           const seg = document.createElement('div');
           seg.className = 'mem-seg mem-seg-preview';
@@ -986,12 +991,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
 
         const badges = [];
         if (m.is_default) badges.push(`<span class="badge badge-primary">★ PRIMARY DEFAULT</span>`);
-        else badges.push(`<span class="badge">LRU #${m.lru_rank}</span>`);
+        else if (m.lru_rank > 0) badges.push(`<span class="badge">LRU #${m.lru_rank}</span>`);
         if (m.ready) badges.push(`<span class="badge badge-green">READY</span>`);
         if (m.supports_images) badges.push(`<span class="badge badge-purple">VISION</span>`);
-        if (m.speculative && m.speculative !== 'off') badges.push(`<span class="badge badge-cyan">SPEC: ${m.speculative.toUpperCase()}</span>`);
+        const specStr = typeof m.speculative === 'string' ? m.speculative : (m.speculative ? 'mtp' : 'off');
+        if (specStr && specStr !== 'off') badges.push(`<span class="badge badge-cyan">SPEC: ${specStr.toUpperCase()}</span>`);
         badges.push(`<span class="badge">CTX: ${(m.context_length / 1024).toFixed(0)}K</span>`);
-        badges.push(`<span class="badge">~${fmtGiB(m.estimated_resident_mib || m.file_size_mib)}</span>`);
+        badges.push(`<span class="badge">~${fmtGiB(m.file_size_mib || m.estimated_resident_mib)}</span>`);
 
         const slotsHtml = (m.sessions || []).map(s => {
           const cls = s.busy ? 'slot-pill busy' : 'slot-pill';

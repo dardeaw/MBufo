@@ -100,13 +100,13 @@ std::size_t TotalGgufBytes(const std::string& path) {
 }
 
 // GGUF file size is a lower bound on resident weight bytes; KV cache and
-// scratch add on top. A 1.25x factor plus a fixed floor gives a conservative
+// scratch add on top. A ~6% factor plus a 512 MiB floor gives a realistic
 // estimate that avoids over-committing while not rejecting viable loads.
 std::size_t EstimateResidentBytes(const std::string& path) {
   const std::size_t size = TotalGgufBytes(path);
   if (size == 0) return 0;  // unknown; caller treats 0 as "cannot gate"
   constexpr std::size_t kMib = 1024ull * 1024ull;
-  return static_cast<std::size_t>(size + size / 4 + 512 * kMib);
+  return static_cast<std::size_t>(size + size / 16 + 512 * kMib);
 }
 
 std::size_t ReadProcMemKiB(const char* file_path, std::string_view key) {
