@@ -340,6 +340,10 @@ bool EmbedGather(const void* table, int type, const std::int32_t* ids,
 /// EmbedGather with every element multiplied by `scale` (embedding scaling).
 bool EmbedGatherScaled(const void* table, int type, const std::int32_t* ids, float* out,
                        std::size_t n_tokens, std::size_t hidden, float scale, hipStream_t stream);
+/// EmbedGather writing every row `streams` times: out[(t * streams + s) * hidden + i] (the multi-stream
+/// residual layout of flash-next).
+bool EmbedGatherStreams(const void* table, int type, const std::int32_t* ids, float* out, std::size_t n_tokens,
+                        std::size_t hidden, std::uint32_t streams, hipStream_t stream);
 /// Single token passed by value (no device id buffer): out[0..hidden) = row `token`.
 bool EmbedGatherOne(const void* table, int type, std::uint32_t token, float* out, std::size_t hidden,
                     hipStream_t stream);

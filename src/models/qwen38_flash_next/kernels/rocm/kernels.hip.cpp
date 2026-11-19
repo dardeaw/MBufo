@@ -1,3 +1,4 @@
+#include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 #include <hip/hip_bfloat16.h>
@@ -194,20 +195,6 @@ __device__ float BlockMax(float v, float* shared) {
     total = fmaxf(total, shared[w]);
   }
   return total;
-}
-
-__global__ void EmbedKernel(const void* table, WeightType type,
-                            const std::int32_t* tokens, float* res,
-                            std::uint32_t hidden, std::uint32_t streams) {
-  const std::uint32_t t = blockIdx.x;
-  const auto* row = static_cast<const std::uint8_t*>(table) +
-                    RowBytes(type, hidden) * tokens[t];
-  for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
-    const float v = RowElement(row, type, i);
-    for (std::uint32_t s = 0; s < streams; ++s) {
-      res[(static_cast<std::size_t>(t) * streams + s) * hidden + i] = v;
-    }
-  }
 }
 
 __global__ void RmsNormKernel(const float* x, const float* gamma, float* out,
@@ -7175,8 +7162,13 @@ __global__ void RoutedScatterKernel(const std::int32_t* __restrict__ ids,
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                  float* res, std::uint32_t n_tokens, std::uint32_t hidden,
                  std::uint32_t streams, hipStream_t stream) {
-  hipLaunchKernelGGL(EmbedKernel, dim3(n_tokens), dim3(kThreads), 0, stream,
-                     table, type, tokens, res, hidden, streams);
+  if (n_tokens == 0) return;
+  // Shared core gather (one decoder per format in core::quant). `type` was already validated by SmallType();
+  // a format core does not list is refused the same way, not decoded as something else.
+  if (!core::compute::gemm::EmbedGatherStreams(table, static_cast<int>(type), tokens, res, n_tokens, hidden, streams,
+                                               stream)) {
+    throw std::logic_error("unsupported Flash-Next embedding format");
+  }
 }
 
 void RmsNormRows(const float* x, const float* gamma, float* out,

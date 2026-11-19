@@ -25,16 +25,19 @@ namespace q = ::gufo::core::quant;
 
 // kScaled multiplies the decoded element by `scale` (embedding scaling, e.g. Gemma's sqrt(hidden)); the
 // unscaled instance does no extra multiply so its output stays bit-identical to the plain decode.
+// `streams` > 1 writes every decoded element to that many consecutive output rows (out[(t*streams+s)*hidden+i]);
+// flash-next's residual keeps one copy of the embedding per stream.
 template <class F, bool kScaled>
 __global__ void EmbedGatherKernel(const std::uint8_t* __restrict__ table, std::size_t row_bytes,
                                   const std::int32_t* __restrict__ ids, float* __restrict__ out,
-                                  std::uint32_t hidden, float scale) {
+                                  std::uint32_t hidden, float scale, std::uint32_t streams) {
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t i = blockIdx.y * 256u + threadIdx.x;
   if (i >= hidden) return;
   const std::uint8_t* row = table + static_cast<std::size_t>(ids[t]) * row_bytes;
-  out[static_cast<std::size_t>(t) * hidden + i] =
-      kScaled ? q::ScaledElementOf<F>(row, i, scale) : F::Element(row, i);
+  const float v = kScaled ? q::ScaledElementOf<F>(row, i, scale) : F::Element(row, i);
+  for (std::uint32_t s = 0; s < streams; ++s)
+    out[(static_cast<std::size_t>(t) * streams + s) * hidden + i] = v;
 }
 
 // One token passed by value (no device id buffer needed).
@@ -48,8 +51,8 @@ __global__ void EmbedGatherOneKernel(const std::uint8_t* __restrict__ table, std
 
 template <bool kScaled>
 bool EmbedGatherImpl(const void* table, int type, const std::int32_t* ids, float* out, std::size_t n_tokens,
-                     std::size_t hidden, float scale, hipStream_t stream) {
-  if (table == nullptr || ids == nullptr || out == nullptr) return false;
+                     std::size_t hidden, float scale, std::uint32_t streams, hipStream_t stream) {
+  if (table == nullptr || ids == nullptr || out == nullptr || streams == 0) return false;
   if (n_tokens == 0) return true;
   if (n_tokens > 65535) return false;
   bool launched = false;
@@ -59,7 +62,7 @@ bool EmbedGatherImpl(const void* table, int type, const std::int32_t* ids, float
     const unsigned waves = static_cast<unsigned>((hidden + 255) / 256);
     hipLaunchKernelGGL((EmbedGatherKernel<F, kScaled>), dim3(static_cast<unsigned>(n_tokens), waves), dim3(256),
                        0, stream, static_cast<const std::uint8_t*>(table), F::RowBytes(hidden), ids, out,
-                       static_cast<std::uint32_t>(hidden), scale);
+                       static_cast<std::uint32_t>(hidden), scale, streams);
     launched = true;
   });
   return known && launched;
@@ -87,12 +90,17 @@ std::size_t DequantRowBytes(int type, std::size_t cols) {
 
 bool EmbedGather(const void* table, int type, const std::int32_t* ids, float* out, std::size_t n_tokens,
                  std::size_t hidden, hipStream_t stream) {
-  return EmbedGatherImpl<false>(table, type, ids, out, n_tokens, hidden, 1.0f, stream);
+  return EmbedGatherImpl<false>(table, type, ids, out, n_tokens, hidden, 1.0f, 1, stream);
 }
 
 bool EmbedGatherScaled(const void* table, int type, const std::int32_t* ids, float* out, std::size_t n_tokens,
                        std::size_t hidden, float scale, hipStream_t stream) {
-  return EmbedGatherImpl<true>(table, type, ids, out, n_tokens, hidden, scale, stream);
+  return EmbedGatherImpl<true>(table, type, ids, out, n_tokens, hidden, scale, 1, stream);
+}
+
+bool EmbedGatherStreams(const void* table, int type, const std::int32_t* ids, float* out, std::size_t n_tokens,
+                        std::size_t hidden, std::uint32_t streams, hipStream_t stream) {
+  return EmbedGatherImpl<false>(table, type, ids, out, n_tokens, hidden, 1.0f, streams, stream);
 }
 
 bool EmbedGatherOne(const void* table, int type, std::uint32_t token, float* out, std::size_t hidden,

@@ -101,6 +101,22 @@ int main(int argc, char** argv) {
       }
       hipFree(d_x); hipFree(d_y);
     }
+    {  // EmbedGatherStreams must equal EmbedGather replicated per stream, bit for bit
+      const std::int32_t ids_h[3] = {0, static_cast<std::int32_t>(m - 1), 1};
+      std::int32_t* d_ids; CK(hipMalloc(&d_ids, 12)); CK(hipMemcpy(d_ids, ids_h, 12, hipMemcpyHostToDevice));
+      float *d_a, *d_b; CK(hipMalloc(&d_a, 3 * k * 4)); CK(hipMalloc(&d_b, 3 * 3 * k * 4));
+      const bool oa = EmbedGather(d_w, type, d_ids, d_a, 3, k, 0);
+      const bool ob = EmbedGatherStreams(d_w, type, d_ids, d_b, 3, k, 3, 0);
+      CK(hipDeviceSynchronize());
+      std::vector<float> a(3 * k), b(9 * k);
+      CK(hipMemcpy(a.data(), d_a, a.size() * 4, hipMemcpyDeviceToHost));
+      CK(hipMemcpy(b.data(), d_b, b.size() * 4, hipMemcpyDeviceToHost));
+      bool same = oa && ob;
+      for (size_t tt = 0; tt < 3 && same; ++tt) for (size_t s2 = 0; s2 < 3 && same; ++s2) for (size_t i = 0; i < k; ++i)
+        if (b[(tt * 3 + s2) * k + i] != a[tt * k + i]) { same = false; break; }
+      check(same, "EmbedGatherStreams == replicated", name, "");
+      hipFree(d_ids); hipFree(d_a); hipFree(d_b);
+    }
     hipFree(d_w); hipFree(d_scr); hipFree(d_preq);
   }
   // refusal paths with no data dependence
