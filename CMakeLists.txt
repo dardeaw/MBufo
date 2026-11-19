@@ -128,6 +128,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/blocked_splitk.hip.cpp
     src/core/compute/attention/mixed_batch_attn.hip.cpp
     src/core/compute/attention/fused_fa_gqa128.hip.cpp
+    src/core/compute/attention/flash_wmma_gqa128.hip.cpp
     src/core/compute/attention/flash_f16_dense.hip.cpp
     src/core/compute/attention/flash_sink.hip.cpp
     src/core/compute/attention/flash_blas.hip.cpp
@@ -139,6 +140,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/attention/blocked_splitk.hip.cpp
     src/core/compute/attention/mixed_batch_attn.hip.cpp
     src/core/compute/attention/fused_fa_gqa128.hip.cpp
+    src/core/compute/attention/flash_wmma_gqa128.hip.cpp
     src/core/compute/attention/flash_f16_dense.hip.cpp
     src/core/compute/attention/flash_sink.hip.cpp
     src/core/compute/attention/flash_blas.hip.cpp PROPERTIES LANGUAGE HIP)

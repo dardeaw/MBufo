@@ -8,6 +8,7 @@
 // semantics never change. Sync is incremental on append-only growth.
 #include <cstdlib>
 #include "src/core/compute/attention/flash_sink.hpp"
+#include "src/core/compute/attention/flash_wmma_gqa128.hpp"
 #include "src/models/glimmer/engine.hpp"
 
 #include <algorithm>
@@ -27,7 +28,17 @@
 namespace gufo::models::glimmer {
 namespace {
 
-constexpr std::uint32_t kMaxChunk = 512;
+// Prefill chunk (tokens per Forward). Each chunk re-dequantizes every weight matrix to F16, so bigger chunks amortize
+// that cost (6.3K prompt: 512 -> 2048 = 27.6 -> 19.0 s; 4096 gains only 5% more). GLIMMER_PREFILL_CHUNK overrides (16..8192).
+inline std::uint32_t MaxChunkTokens() {
+  static const std::uint32_t v = [] {
+    const char* e = std::getenv("GLIMMER_PREFILL_CHUNK");
+    const long n = e != nullptr ? std::atol(e) : 2048;
+    return (n >= 16 && n <= 8192) ? static_cast<std::uint32_t>(n) : 2048u;
+  }();
+  return v;
+}
+#define kMaxChunk MaxChunkTokens()
 /// Batched-verify row cap: speculative verification batches are short
 /// (1 anchor + a handful of drafts); wider batches fall back to serial.
 constexpr std::uint32_t kMaxVerify = 8;
@@ -190,6 +201,10 @@ struct SessionBuffers {
   std::vector<std::uint8_t*> kv_bv;
   std::vector<std::uint32_t> kv_row_bytes_k;
   std::vector<std::uint32_t> kv_row_bytes_v;
+  // F16 staging planes ([max_context][kv_heads * d]) the blocked-Q8 prefill dequantizes the visible range into
+  // before the WMMA flash kernel (one pair per session, reused by every layer).
+  __half* stage_k{nullptr};
+  __half* stage_v{nullptr};
 
   template <typename T>
   T* Alloc(std::size_t count, std::string* error) {
@@ -540,6 +555,15 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
     (void)hipMemset(vv, 0, elems * sizeof(__half));
     impl.buffers.kv_k[il] = kk;
     impl.buffers.kv_v[il] = vv;
+  }  if (use_blocked) {
+    const std::size_t stage_elems = static_cast<std::size_t>(options_.max_context) * kvdim;
+    if (stage_elems * sizeof(__half) * 2 <= (std::size_t{1} << 30)) {
+      impl.buffers.stage_k = impl.buffers.Alloc<__half>(stage_elems, &error);
+      impl.buffers.stage_v = impl.buffers.Alloc<__half>(stage_elems, &error);
+      if (impl.buffers.stage_k == nullptr || impl.buffers.stage_v == nullptr) {
+        impl.buffers.stage_k = impl.buffers.stage_v = nullptr;  // staging is optional: scalar prefill still works
+      }
+    }
   }
   return session;
 }
@@ -641,6 +665,26 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
   const bool use_blocked = s.model_->options_.kv_cache_quant == "q8";
 
   if (use_blocked) {
+    // WMMA flash prefill: dequantize the visible range into the F16 staging planes and run the shared kernel
+    // (the blocked scalar read below is ~5 TFLOPS; the WMMA kernel is the tensor-core path).
+    if (n >= 16 && impl.buffers.stage_k != nullptr && std::getenv("GLIMMER_NO_WMMA_PREFILL") == nullptr &&
+        core::compute::flash_wmma_gqa128::IsFlashWmmaGqa128Supported(c.num_heads, c.num_kv_heads, d)) {
+      const std::uint32_t kvd = c.num_kv_heads * d;
+      const std::uint32_t kv_len = start_pos + n;
+      std::uint32_t lo = 0;
+      if (window != 0 && start_pos + 1 > window) lo = (start_pos + 1 - window) & ~3u;
+      if (core::compute::blocked_kv::DequantizeKvRows(
+              impl.buffers.kv_bk[il] + static_cast<std::size_t>(lo) * impl.buffers.kv_row_bytes_k[il],
+              impl.buffers.stage_k + static_cast<std::size_t>(lo) * kvd,
+              impl.buffers.kv_bv[il] + static_cast<std::size_t>(lo) * impl.buffers.kv_row_bytes_v[il],
+              impl.buffers.stage_v + static_cast<std::size_t>(lo) * kvd, (kv_len - lo) * c.num_kv_heads, d, 34, 34,
+              core::compute::blocked_kv::KvCodec::kQ8, stream) &&
+          core::compute::flash_wmma_gqa128::FlashWmmaGqa128Prefill(
+              impl.qbuf, impl.buffers.stage_k, impl.buffers.stage_v, impl.attn_out, n, start_pos, c.num_heads,
+              c.num_kv_heads, d, window, score_scale, stream)) {
+        return;
+      }
+    }
     // Blocked-Q8 path (codec branch; MQB cannot consume blocked KV): the
     // unified mixed-batch launcher runs first, with the legacy dispatcher
     // cores below as backup (Q8 semantics unchanged).
@@ -737,6 +781,14 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
           /*sinks=*/nullptr, impl.attn_out, n, start_pos, start_pos + n,
           c.num_heads, c.num_kv_heads, d, window, score_scale, stream,
           impl.flash_partials, impl.flash_partials_bytes)) {
+    return;
+  }
+  // F16 prefill: WMMA flash kernel straight on the F16 planes.
+  if (n >= 16 && std::getenv("GLIMMER_NO_WMMA_PREFILL") == nullptr &&
+      core::compute::flash_wmma_gqa128::IsFlashWmmaGqa128Supported(c.num_heads, c.num_kv_heads, d) &&
+      core::compute::flash_wmma_gqa128::FlashWmmaGqa128Prefill(
+          impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il], impl.attn_out, n, start_pos, c.num_heads,
+          c.num_kv_heads, d, window, score_scale, stream)) {
     return;
   }
   bool attn_mqb_ran = false;
