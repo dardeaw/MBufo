@@ -377,6 +377,8 @@ bool UploadWeights(ModelWeights& w, std::vector<void*>& owned,
       return false;
     if (!mirror(l.wo))
       return false;
+    if (!mirror(l.wq_n) || !mirror(l.wk_n) || !mirror(l.wo_n))
+      return false;
     if (!mirror(l.wo_b))
       return false;
     if (!mirror(l.attn_sinks))
@@ -894,8 +896,28 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
       no_fused || std::getenv("GPTOSS_NO_FUSED_ROUTER") != nullptr;
   const bool no_fused_wo =
       no_fused || std::getenv("GPTOSS_NO_FUSED_WO") != nullptr;
-  bool qkv_done = false;
-  if (!no_fused_qkv &&
+  // Native-bit single-token decode (see LayerWeights::wq_n): Q5_0 q/k with the
+  // bias folded in, Q8_0 v, one shared activation prequant.
+  const bool no_native = std::getenv("GPTOSS_NO_NATIVE") != nullptr;
+  bool qkv_native = false;
+  if (n == 1 && !no_native && l.wq_n.device != nullptr &&
+      l.wk_n.device != nullptr && l.wv.type == core::GgmlType::kQ8_0 &&
+      gemm::PrequantizeQ8_1(impl.normed, impl.preq_scratch, 1, hidden,
+                            stream) == 0) {
+    const void* wvd = l.wv.device != nullptr ? l.wv.device : l.wv.data;
+    qkv_native =
+        gemm::LaunchNarrowQ50Planar(
+            l.wq_n.device, impl.preq_scratch, impl.qbuf,
+            static_cast<const float*>(l.wq_b.device), hidden, qdim, stream) &&
+        gemm::LaunchNarrowQ50Planar(
+            l.wk_n.device, impl.preq_scratch, impl.kbuf,
+            static_cast<const float*>(l.wk_b.device), hidden, kvdim, stream) &&
+        gemm::LaunchNarrowQ80Decode(
+            wvd, impl.preq_scratch, impl.vbuf, hidden, kvdim, 1,
+            gemm::NarrowQ80PrequantStrideBlocks(hidden), stream);
+  }
+  bool qkv_done = qkv_native;
+  if (!qkv_done && !no_fused_qkv &&
       gemm::DecideNarrowQkvPrequantRoute(
           l.wq.type == core::GgmlType::kQ8_0 &&
               l.wk.type == core::GgmlType::kQ8_0 &&
@@ -923,10 +945,12 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
   }
   // Q/K/V biases: llama.cpp adds wq_b/wk_b/wv_b right after projection,
   // before RoPE; the artifact carries them as F32.
-  kernels::AddRowBias(impl.qbuf, static_cast<const float*>(l.wq_b.device), n,
-                      qdim, stream);
-  kernels::AddRowBias(impl.kbuf, static_cast<const float*>(l.wk_b.device), n,
-                      kvdim, stream);
+  if (!qkv_native) {  // the native path folds the q/k bias into its kernel
+    kernels::AddRowBias(impl.qbuf, static_cast<const float*>(l.wq_b.device), n,
+                        qdim, stream);
+    kernels::AddRowBias(impl.kbuf, static_cast<const float*>(l.wk_b.device), n,
+                        kvdim, stream);
+  }
   kernels::AddRowBias(impl.vbuf, static_cast<const float*>(l.wv_b.device), n,
                       kvdim, stream);
   TimingMark(LayerSection::kRopeKv);
@@ -1040,7 +1064,16 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
   // core launch (bitwise-identical store order). Falls back to the
   // three-launch sequence out of contract or under GPTOSS_NO_FUSED.
   bool wo_done = false;
-  if (!no_fused_wo &&
+  if (n == 1 && !no_native && l.wo_n.device != nullptr &&
+      gemm::PrequantizeQ8_1(impl.attn_out, impl.preq_scratch, 1, qdim,
+                            stream) == 0) {
+    // Native Q4_K wo: dot + bias added into the residual stream.
+    wo_done = gemm::LaunchNarrowQ4KRowAdd(
+        l.wo_n.device, impl.preq_scratch,
+        static_cast<const float*>(l.wo_b.device), hidden_buf, qdim, hidden,
+        stream);
+  }
+  if (!wo_done && !no_fused_wo &&
       gemm::DecideNarrowDecodePrequantRoute(
           l.wo.type == core::GgmlType::kQ8_0, /*gated=*/false, n, qdim,
           hidden) == gemm::NarrowDecodeRoute::kNarrowQ80Prequant) {

@@ -153,6 +153,21 @@ bool LaunchNarrowQ80PrequantRowAdd(const void* weights, const float* x_f32,
                                    std::size_t scratch_bytes,
                                    hipStream_t stream);
 
+// ---- Narrow decode for native Q5_0 / Q4_K weights (prequantized Q8_1 input) ----
+// Single token. `x_q8_1` is PrequantizeQ8_1 output for one row (k a multiple of
+// 32 for Q5_0, 256 for Q4_K). Q5_0 weights are a planar repack: for each row r and
+// block b (index r * (k/32) + b) a qs plane (16 B/block), then a qh plane (4 B),
+// then a d plane (2 B); NarrowQ50PlanarBytes is the total. y[row] = dot + bias[row]
+// (bias may be null). The Q4_K variant reads native 144 B blocks in place and
+// applies the attention-output epilogue inout[row] += dot + bias[row].
+std::size_t NarrowQ50PlanarBytes(std::size_t rows, std::size_t cols);
+bool LaunchNarrowQ50Planar(const void* planar_w, const void* x_q8_1, float* y,
+                           const float* bias, std::size_t k, std::size_t rows,
+                           hipStream_t stream);
+bool LaunchNarrowQ4KRowAdd(const void* w, const void* x_q8_1, const float* bias,
+                           float* inout, std::size_t k, std::size_t rows,
+                           hipStream_t stream);
+
 // ---- flash-next decode SmallGemm (F32/F16/BF16 narrow projections) ----
 namespace fn_compat {
 // type: 0 = F32, 1 = F16, 30 = BF16.

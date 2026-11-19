@@ -53,6 +53,14 @@ struct LayerWeights {  TensorRef attn_norm;      ///< [hidden] F32
   TensorRef wv_b;           ///< [512] F32 attention v bias
   TensorRef wo;             ///< [4096 -> hidden] Q8_0 (converted)
   TensorRef wo_b;           ///< [hidden] F32 attention out bias
+  // Native-bit copies for single-token decode (narrow GEMV reads the stored
+  // Q5_0 / Q4_K bits instead of the Q8_0 conversion above, ~1.4-1.9x fewer
+  // bytes): wq_n/wk_n are a planar Q5_0 repack (qs, qh, d planes), wo_n raw
+  // Q4_K. Empty when the artifact stores other types or GPTOSS_NO_NATIVE is
+  // set; prefill and the fallbacks keep using the converted tensors.
+  TensorRef wq_n;
+  TensorRef wk_n;
+  TensorRef wo_n;
   TensorRef attn_sinks;     ///< [64] F32 attention sinks
   TensorRef post_norm;      ///< [hidden] F32 post_attention_norm
   TensorRef router;         ///< [hidden -> 32] F32 router (ffn_gate_inp)

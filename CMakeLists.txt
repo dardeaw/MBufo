@@ -172,6 +172,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/w8a8_tiled.hip
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/dequant_rows.hip
+    src/core/compute/gemm/gemv_narrow_quant.hip
     src/core/compute/gemm/routed_moe.hip
     src/core/compute/gemm/moe_decode_kq.hip
     src/core/compute/gemm/router_gemv.hip
@@ -191,6 +192,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/w8a8_tiled.hip
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/dequant_rows.hip
+    src/core/compute/gemm/gemv_narrow_quant.hip
     src/core/compute/gemm/routed_moe.hip
     src/core/compute/gemm/moe_decode_kq.hip
     src/core/compute/gemm/router_gemv.hip

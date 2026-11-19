@@ -182,6 +182,61 @@ struct Binder {
     return out->NewArena(bytes);
   }
 
+  // Planar repack of a Q5_0 matrix for the narrow decode kernel: all qs bytes
+  // (16 B per 32-weight block), then all qh words (4 B), then all d halves (2 B),
+  // block index = row * (cols / 32) + block. Empty for other types / shapes.
+  TensorRef RepackQ50Planar(const std::string& name, std::uint64_t cols,
+                            std::uint64_t rows) {
+    TensorRef ref;
+    const auto* info = Find(name);
+    if (info == nullptr || info->type != core::GgmlType::kQ5_0 ||
+        info->dimensions.size() < 2 || info->dimensions[0] != cols ||
+        info->dimensions[1] != rows || cols % 32 != 0) {
+      return ref;
+    }
+    const std::size_t nb = cols / 32;
+    const std::size_t blocks = rows * nb;
+    auto* arena = Arena(blocks * 22);
+    std::uint8_t* qs = arena->data();
+    std::uint8_t* qh = qs + blocks * 16;
+    std::uint8_t* dd = qh + blocks * 4;
+    const auto* src = static_cast<const std::uint8_t*>(info->data);
+    for (std::size_t i = 0; i < blocks; ++i) {
+      const std::uint8_t* blk = src + i * 22;  // d(2) qh(4) qs(16)
+      std::memcpy(dd + i * 2, blk, 2);
+      std::memcpy(qh + i * 4, blk + 2, 4);
+      std::memcpy(qs + i * 16, blk + 6, 16);
+    }
+    ref.data = arena->data();
+    ref.size_bytes = arena->size();
+    ref.type = core::GgmlType::kQ5_0;
+    ref.cols = cols;
+    ref.rows = rows;
+    return ref;
+  }
+
+  // Copies a Q4_K matrix out of the file mapping into an arena (so it uploads
+  // as its own device allocation) for the native narrow decode kernel.
+  TensorRef CopyQ4K(const std::string& name, std::uint64_t cols,
+                    std::uint64_t rows) {
+    TensorRef ref;
+    const auto* info = Find(name);
+    if (info == nullptr || info->type != core::GgmlType::kQ4_K ||
+        info->dimensions.size() < 2 || info->dimensions[0] != cols ||
+        info->dimensions[1] != rows || cols % 256 != 0) {
+      return ref;
+    }
+    const std::size_t bytes = rows * (cols / 256) * 144;
+    auto* arena = Arena(bytes);
+    std::memcpy(arena->data(), info->data, bytes);
+    ref.data = arena->data();
+    ref.size_bytes = bytes;
+    ref.type = core::GgmlType::kQ4_K;
+    ref.cols = cols;
+    ref.rows = rows;
+    return ref;
+  }
+
   // Converts one row-major [rows x cols] matrix of `src_type` to Q8_0.
   TensorRef ConvertQ8(const std::string& name, std::uint64_t cols,
                       std::uint64_t rows) {
@@ -297,6 +352,11 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     l.wk_b = b.GetRaw(p + "attn_k.bias", kvdim);
     l.wv_b = b.GetRaw(p + "attn_v.bias", kvdim);
     l.wo = b.ConvertQ8(p + "attn_output.weight", qdim, hidden);
+    if (std::getenv("GPTOSS_NO_NATIVE") == nullptr) {
+      l.wq_n = b.RepackQ50Planar(p + "attn_q.weight", hidden, qdim);
+      l.wk_n = b.RepackQ50Planar(p + "attn_k.weight", hidden, kvdim);
+      l.wo_n = b.CopyQ4K(p + "attn_output.weight", qdim, hidden);
+    }
     l.wo_b = b.GetRaw(p + "attn_output.bias", hidden);
     l.attn_sinks =
         b.GetRaw(p + "attn_sinks.weight", config->num_heads);
