@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <cstdlib>
 
 #include "src/core/compute/gemm/gemm.hpp"
@@ -22,13 +23,19 @@ namespace q = ::gufo::core::quant;
 
 q::Status GemvDecode(const void* w, int type, const float* x, float* y, std::size_t n_tokens, std::size_t m,
                      std::size_t k, void* preq_scratch, std::size_t preq_bytes, hipStream_t stream) {
-  if (w == nullptr || x == nullptr || y == nullptr || m == 0 || k == 0 || n_tokens == 0 || n_tokens > 8)
+  if (w == nullptr || x == nullptr || y == nullptr || m == 0 || k == 0 || n_tokens == 0 || n_tokens > kQuantGemvGroupedMaxTokens)
     return q::Status::kBadShape;
   q::Status st = q::Status::kUnsupportedType;
   const bool known = q::AllFormats::Dispatch(type, [&](auto fm) {
     using F = decltype(fm);
     if (!F::ColsOk(k)) {
       st = q::Status::kBadShape;
+      return;
+    }
+    // Only the K-quant block path has a multi-token kernel (up to kQuantGemvMultiMaxTokens); the other paths serve at
+    // most 8 tokens and report kUnsupportedType above that so the caller takes its dense batched route.
+    if (n_tokens > 8 && F::kDecode != q::DecodePath::kBlockGemv) {
+      st = q::Status::kUnsupportedType;
       return;
     }
     switch (F::kDecode) {  // no default: every DecodePath must be handled
@@ -45,6 +52,34 @@ q::Status GemvDecode(const void* w, int type, const float* x, float* y, std::siz
         st = q::Status::kOk;
         break;
       case q::DecodePath::kBlockGemv:
+        // 2..192 tokens: read every weight once per group of <= 32 tokens (the loop below re-reads the matrix per token).
+        // GUFO_NO_MULTI_GEMV=1 keeps the per-token loop for A/B runs.
+        if (n_tokens >= 2 && std::getenv("GUFO_NO_MULTI_GEMV") == nullptr) {
+          const std::size_t groups = (n_tokens + kQuantGemvMultiMaxTokens - 1) / kQuantGemvMultiMaxTokens;
+          const std::size_t per = (n_tokens + groups - 1) / groups;
+          std::size_t done = 0;
+          bool served = true;
+          while (done < n_tokens) {
+            const std::size_t cnt = std::min(per, n_tokens - done);
+            if (!QuantGemvMulti(w, type, x + done * k, y + done * m, cnt, m, k, stream)) {
+              served = false;
+              break;
+            }
+            done += cnt;
+          }
+          if (served) {
+            st = q::Status::kOk;
+            break;
+          }
+          if (done != 0) {  // a later group was refused after earlier ones ran: cannot happen for one weight shape
+            st = q::Status::kBadShape;
+            break;
+          }
+        }
+        if (n_tokens > 8) {
+          st = q::Status::kUnsupportedType;
+          break;
+        }
         for (std::size_t t = 0; t < n_tokens; ++t)
           LaunchQ8KBlockGEMV(w, static_cast<::gufo::core::GgmlType>(type), x + t * k, y + t * m, m, k, stream);
         st = q::Status::kOk;

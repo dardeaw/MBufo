@@ -138,8 +138,8 @@ void GlimmerGemm(const TensorRef& w, const float* x, __half* x16,
   namespace quant = core::quant;
   const void* dev = w.device != nullptr ? w.device : w.data;
   const int type = static_cast<int>(w.type);
-  if (n_tokens <= 8) {
-    // Decode: the core picks the kernel per format (narrow Q8_0 prequant, K-quant block GEMV, wave32
+  if (n_tokens <= core::compute::gemm::kQuantGemvGroupedMaxTokens) {
+    // Decode / short verify batches: the core picks the kernel per format (narrow Q8_0 prequant, K-quant block GEMV, wave32
     // GEMV). Formats without a decode kernel (Q6_K) report kUnsupportedType and use the dense path below.
     const quant::Status st = gemm::GemvDecode(dev, type, x, y, n_tokens, m, k,
                                               preq_scratch, preq_bytes, stream);
