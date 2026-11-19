@@ -22,6 +22,10 @@ add_test(NAME ds4.cli COMMAND ds4_cli_test)
 set_tests_properties(ds4.cli PROPERTIES LABELS "cpu;ds4;cli")
 
 if(ENGINE_ENABLE_HIP)
+  # Registry pilot (adapter vs native vs EngineRegistry; needs the 87 GB weights + GPU): explicit-only.
+  add_executable(deepseek_registry_pilot_test EXCLUDE_FROM_ALL registry_pilot_test.cpp)
+  target_link_libraries(deepseek_registry_pilot_test PRIVATE gufo_deepseek_v4_flash gufo_core hip::host)
+
   add_executable(ds4_load_test load_test.cpp)
   target_link_libraries(ds4_load_test PRIVATE gufo_deepseek_v4_flash)
   add_test(NAME ds4.load COMMAND ds4_load_test)
