@@ -77,6 +77,30 @@ __global__ void DequantRowsKernel(const std::uint8_t* __restrict__ w, std::size_
   out[r * cols + c] = __float2half(F::Element(w + r * row_bytes, static_cast<std::uint32_t>(c)));
 }
 
+// One thread decodes 8 consecutive elements of one row (one 16-byte output chunk) and stores them with a single
+// 16-byte write; consecutive threads write consecutive chunks of the tiled layout, so the whole store stream is
+// coalesced (the packed input is small: ~0.56 byte/element for Q4_K).
+template <class F>
+__global__ void DequantRowsTiledKernel(const std::uint8_t* __restrict__ w, std::size_t row_bytes,
+                                       __half* __restrict__ out, std::size_t cols, std::size_t n_chunks) {
+  const std::size_t o = static_cast<std::size_t>(blockIdx.x) * 256u + threadIdx.x;
+  if (o >= n_chunks) return;
+  // o = (((row_tile * kblocks + kb) * 128 + row_in_tile) * 4 + chunk_in_k32)
+  const std::size_t cc = o & 3u, rin = (o >> 2) & 127u, t = o >> 9;
+  const std::size_t kblocks = cols >> 5;
+  const std::size_t kb = t % kblocks, rt = t / kblocks;
+  const std::size_t r = rt * 128 + rin;
+  const std::uint32_t c0 = static_cast<std::uint32_t>(kb * 32 + cc * 8);
+  const std::uint8_t* row = w + r * row_bytes;
+  float v[8];
+#pragma unroll
+  for (int e = 0; e < 8; ++e) v[e] = F::Element(row, c0 + static_cast<std::uint32_t>(e));
+  __half2 h[4];
+#pragma unroll
+  for (int e = 0; e < 4; ++e) h[e] = __floats2half2_rn(v[2 * e], v[2 * e + 1]);
+  *reinterpret_cast<uint4*>(out + o * 8) = *reinterpret_cast<const uint4*>(h);
+}
+
 }  // namespace
 
 std::size_t DequantRowBytes(int type, std::size_t cols) {
@@ -133,6 +157,24 @@ bool DequantRowsF16(const void* w, int type, __half* out, std::size_t rows, std:
       hipLaunchKernelGGL((DequantRowsKernel<F>), dim3(col_blocks, static_cast<unsigned>(n)), dim3(256), 0,
                          stream, static_cast<const std::uint8_t*>(w), row_bytes, out, row0, cols);
     }
+    launched = true;
+  });
+  return known && launched;
+}
+
+bool DequantRowsF16Tiled(const void* w, int type, __half* out, std::size_t rows, std::size_t cols,
+                         hipStream_t stream) {
+  if (w == nullptr || out == nullptr) return false;
+  if (rows == 0 || cols == 0) return true;
+  if (rows % kTiledRows != 0 || cols % 32 != 0) return false;
+  bool launched = false;
+  const bool known = q::AllFormats::Dispatch(type, [&](auto fm) {
+    using F = decltype(fm);
+    if (!F::ColsOk(cols)) return;
+    const std::size_t row_bytes = F::RowBytes(cols);
+    const std::size_t n_chunks = rows * cols / 8;
+    hipLaunchKernelGGL((DequantRowsTiledKernel<F>), dim3(static_cast<unsigned>((n_chunks + 255) / 256)), dim3(256), 0,
+                       stream, static_cast<const std::uint8_t*>(w), row_bytes, out, cols, n_chunks);
     launched = true;
   });
   return known && launched;

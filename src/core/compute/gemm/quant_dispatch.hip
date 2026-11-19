@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/quant/quant_traits.hpp"
@@ -83,6 +84,13 @@ q::Status QuantGemmPrefill(const void* w, int type, const __half* x16, float* y,
       case q::PrefillPath::kDequantF16:
         if (wdq_scratch == nullptr || m * k * sizeof(__half) > wdq_bytes) {
           st = q::Status::kScratchTooSmall;
+          break;
+        }
+        // Wide batches: dequantize into the tiled layout and run the shared WMMA GEMM (3x the row-major kernel's
+        // memory efficiency). GUFO_NO_TILED_GEMM=1 keeps the previous route for A/B runs.
+        if (batch >= 256 && m % kTiledRows == 0 && k % 32 == 0 && std::getenv("GUFO_NO_TILED_GEMM") == nullptr &&
+            DequantRowsF16Tiled(w, type, wdq_scratch, m, k, stream)) {
+          st = TiledF16Gemm(wdq_scratch, x16, y, batch, m, k, stream) ? q::Status::kOk : q::Status::kBadShape;
           break;
         }
         if (!DequantRowsF16(w, type, wdq_scratch, m, k, stream)) {

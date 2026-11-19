@@ -351,6 +351,17 @@ bool EmbedGatherOne(const void* table, int type, std::uint32_t token, float* out
 /// (prefill fallback for packed weights without a WMMA/MMQ kernel).
 bool DequantRowsF16(const void* w, int type, __half* out, std::size_t rows,
                     std::size_t cols, hipStream_t stream);
+/// Tiled F16 weight layout used by TiledF16Gemm: rows are grouped in tiles of kTiledRows and, inside a tile, stored
+/// K-block major: element (r, c) lives at ((r / 128 * (cols / 32) + c / 32) * 128 + r % 128) * 32 + c % 32.
+/// Requires rows % 128 == 0 and cols % 32 == 0.
+inline constexpr std::size_t kTiledRows = 128;
+/// DequantRowsF16 writing the tiled layout (the prefill GEMM's weight scratch; nothing else reads it).
+bool DequantRowsF16Tiled(const void* w, int type, __half* out, std::size_t rows, std::size_t cols,
+                         hipStream_t stream);
+/// Y[t][r] = sum_k X[t][k] * W[r][k], W in the tiled layout above, X F16 row-major [batch][k], Y F32 [batch][m].
+/// WMMA 16x16x16, single K-ordered F32 accumulation chain. Returns false (nothing launched) on unsupported shapes.
+bool TiledF16Gemm(const __half* w_tiled, const __half* x, float* y, std::size_t batch, std::size_t m, std::size_t k,
+                  hipStream_t stream);
 /// Routed-expert compaction sizing and launchers (16-row padded buckets).
 std::size_t RoutedCompactRows(std::size_t slots, std::size_t n_experts);
 void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
