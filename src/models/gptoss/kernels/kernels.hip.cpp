@@ -2,6 +2,9 @@
 // llama model-local kernel structure. NeoX YaRN RoPE, sink attention with
 // an optional sliding window, and the SwiGLU-OAI expert activation follow
 // the llama.cpp openai-moe math exactly (f32, same operation order).
+#include <cstdlib>
+#include <cstdio>
+#include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/gptoss/kernels/kernels.hpp"
 
 #include <hip/hip_fp16.h>
@@ -14,33 +17,6 @@ __device__ __forceinline__ float DequantQ8(const std::uint8_t* blk,
                                            std::uint32_t e) {
   const float scale = __half2float(*reinterpret_cast<const __half*>(blk));
   return static_cast<float>(static_cast<std::int8_t>(blk[2 + e])) * scale;
-}
-
-__global__ void EmbedKernel(const void* __restrict__ table,
-                            core::GgmlType type,
-                            const std::int32_t* __restrict__ ids,
-                            float* __restrict__ out, std::uint32_t hidden) {
-  const std::uint32_t t = blockIdx.x;
-  const std::uint32_t i = blockIdx.y * 256u + threadIdx.x;
-  if (i >= hidden)
-    return;
-  const std::int32_t id = ids[t];
-  float v = 0.0f;
-  if (type == core::GgmlType::kQ8_0) {
-    const auto* tab = static_cast<const std::uint8_t*>(table);
-    const std::size_t row_bytes = (hidden / 32) * 34;
-    const std::uint8_t* row =
-        tab + static_cast<std::size_t>(id) * row_bytes;
-    const std::uint32_t blk = i / 32;
-    v = DequantQ8(row + static_cast<std::size_t>(blk) * 34, i % 32);
-  } else if (type == core::GgmlType::kF16) {
-    const auto* tab = static_cast<const __half*>(table);
-    v = __half2float(tab[static_cast<std::size_t>(id) * hidden + i]);
-  } else {
-    const auto* tab = static_cast<const float*>(table);
-    v = tab[static_cast<std::size_t>(id) * hidden + i];
-  }
-  out[static_cast<std::size_t>(t) * hidden + i] = v;
 }
 
 __global__ void RmsNormKernel(const float* __restrict__ x,
@@ -296,9 +272,13 @@ void Embed(const void* table, core::GgmlType type, const std::int32_t* ids,
            hipStream_t stream) {
   if (n_tokens == 0)
     return;
-  const std::uint32_t waves = (hidden + 255) / 256;
-  hipLaunchKernelGGL(EmbedKernel, dim3(n_tokens, waves), dim3(256), 0, stream,
-                     table, type, ids, out, hidden);
+  // Shared core gather (every packed format the loader accepts).
+  if (!core::compute::gemm::EmbedGather(table, static_cast<int>(type), ids, out,
+                                        n_tokens, hidden, stream)) {
+    std::fprintf(stderr, "[%s] unsupported token_embd type %d (hidden %u)\n",
+                 "gptoss", static_cast<int>(type), hidden);
+    std::abort();
+  }
 }
 
 void RmsNorm(const float* x, const float* gamma, float* out,
