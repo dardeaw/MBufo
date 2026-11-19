@@ -48,6 +48,7 @@
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/gemma4/engine.hpp"
+#include "src/models/glimmer/draft_backend.hpp"
 #include "src/models/glimmer/engine.hpp"
 #include "src/models/gptoss/engine.hpp"
 #include "src/models/llama/engine.hpp"
@@ -4120,16 +4121,36 @@ std::string GlimmerRenderPrompt(
 
 class GlimmerTextRunnerState final : public TextRunnerState {
  public:
-  explicit GlimmerTextRunnerState(const std::shared_ptr<GlimmerModel>& model) {
+  using SharedDraft = models::glimmer::GlimmerDflashDraftBackend::SharedDraft;
+
+  /// `shared_draft` (nullable) enables DFlash speculative decoding: the state owns a draft session bound to the shared
+  /// draft weights and the target session captures the tapped-layer features the draft consumes.
+  explicit GlimmerTextRunnerState(const std::shared_ptr<GlimmerModel>& model,
+                                  const std::shared_ptr<SharedDraft>& shared_draft = nullptr,
+                                  std::uint32_t max_draft_tokens = 0)
+      : hidden_(model->weights().config.hidden_size) {
     std::string error;
     session_ = model->CreateSession(&error);
     if (session_ == nullptr) {
       throw std::runtime_error("Failed to create Glimmer session: " + error);
     }
+    if (shared_draft != nullptr) {
+      draft_ = models::glimmer::GlimmerDflashDraftBackend::CreateFromShared(shared_draft, max_draft_tokens, &error);
+      if (draft_ == nullptr) {
+        throw std::runtime_error("Failed to create Glimmer DFlash draft session: " + error);
+      }
+      if (!session_->EnableDraftTaps(draft_->TargetHiddenLayerIds(), &error)) {
+        throw std::runtime_error("Failed to enable Glimmer draft taps: " + error);
+      }
+      feat_width_ = draft_->TargetHiddenLayerIds().size() * hidden_;
+    }
   }
 
   void SetCancellationCheck(const CancellationCheck&) override {}
-  void Invalidate() noexcept override { position_ = 0; }
+  void Invalidate() noexcept override {
+    position_ = 0;
+    ResetSpeculative();
+  }
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
     return {};
@@ -4139,9 +4160,69 @@ class GlimmerTextRunnerState final : public TextRunnerState {
   [[nodiscard]] std::size_t position() const noexcept { return position_; }
   void set_position(std::size_t position) noexcept { position_ = position; }
 
+  // ---- DFlash speculative state (empty unless the runner enabled a draft)
+  [[nodiscard]] bool speculative_enabled() const noexcept { return draft_ != nullptr; }
+  [[nodiscard]] models::glimmer::GlimmerDflashDraftBackend& draft() const { return *draft_; }
+  /// True once the draft holds the prompt's features: decode may run speculative rounds.
+  [[nodiscard]] bool speculative_primed() const noexcept { return spec_primed_; }
+  [[nodiscard]] bool speculative_pending() const noexcept { return spec_pending_; }
+  void set_speculative_pending(bool value) noexcept { spec_pending_ = value; }
+  /// Committed tokens of the sequence (prompt + emitted); when pending, the last one is committed but not yet forwarded.
+  [[nodiscard]] std::vector<std::int32_t>& committed() noexcept { return committed_; }
+  [[nodiscard]] std::size_t feat_width() const noexcept { return feat_width_; }
+  [[nodiscard]] std::uint32_t hidden() const noexcept { return hidden_; }
+
+  void ResetSpeculative() noexcept {
+    spec_primed_ = false;
+    spec_pending_ = false;
+    committed_.clear();
+    feats_.clear();
+    if (draft_ != nullptr) draft_->Reset();
+  }
+
+  /// Stores the rows of one tapped layer's output (host copy of [n][hidden]) into the prompt feature matrix at their
+  /// absolute positions; rows arrive in any layer / chunk order.
+  void StoreTapRows(std::size_t slot, std::uint32_t start, std::uint32_t n, const std::vector<float>& rows) {
+    const std::size_t need = (static_cast<std::size_t>(start) + n) * feat_width_;
+    if (feats_.size() < need) feats_.resize(need, 0.0F);
+    for (std::uint32_t i = 0; i < n; ++i) {
+      std::copy_n(rows.data() + static_cast<std::size_t>(i) * hidden_, hidden_,
+                  feats_.data() + (static_cast<std::size_t>(start) + i) * feat_width_ + slot * hidden_);
+    }
+  }
+  /// Primes the draft with the captured features of the whole prompt; the draft then follows the verified commits.
+  [[nodiscard]] bool PrimeDraft(std::span<const TextRunnerToken> prompt) {
+    if (draft_ == nullptr || feats_.size() != prompt.size() * feat_width_) return false;
+    std::vector<tokenization::TokenId> ids;
+    ids.reserve(prompt.size());
+    committed_.clear();
+    committed_.reserve(prompt.size() + 1024);
+    for (const auto token : prompt) {
+      ids.push_back(static_cast<tokenization::TokenId>(token));
+      committed_.push_back(static_cast<std::int32_t>(token));
+    }
+    speculative::DraftTargetContext ctx;
+    ctx.prompt_tokens = ids;
+    ctx.prompt_hidden_states = feats_;
+    ctx.hidden_size = static_cast<std::uint32_t>(feat_width_);
+    ctx.first_token = ids.back();
+    spec_pending_ = false;
+    spec_primed_ = draft_->PrimeTargetContext(ctx);
+    feats_.clear();
+    feats_.shrink_to_fit();
+    return spec_primed_;
+  }
+
  private:
   std::unique_ptr<GlimmerSession> session_;
   std::size_t position_{0};
+  std::uint32_t hidden_{0};
+  std::size_t feat_width_{0};
+  std::unique_ptr<models::glimmer::GlimmerDflashDraftBackend> draft_;
+  std::vector<std::int32_t> committed_;
+  std::vector<float> feats_;
+  bool spec_primed_{false};
+  bool spec_pending_{false};
 };
 
 GlimmerTextRunnerState& RequireGlimmerState(TextRunnerState& state) {
@@ -4168,8 +4249,11 @@ class GlimmerTextRunner final : public HipTextModelRunner {
   }
 
   GlimmerTextRunner(std::shared_ptr<GlimmerModel> model,
-                    std::uint32_t max_context)
-      : model_(std::move(model)), max_context_(max_context) {
+                    std::uint32_t max_context,
+                    std::shared_ptr<GlimmerTextRunnerState::SharedDraft> shared_draft = nullptr,
+                    std::uint32_t max_draft_tokens = 0)
+      : model_(std::move(model)), max_context_(max_context), shared_draft_(std::move(shared_draft)),
+        max_draft_tokens_(max_draft_tokens) {
     // Turn-boundary stops from the template: the end-of-turn markers end
     // generation, while the continuation marker never does on its own.
     for (const char* marker : {"<|eot|>", "<|eot_id|>"}) {
@@ -4191,7 +4275,7 @@ class GlimmerTextRunner final : public HipTextModelRunner {
                 .fork = false,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
-                .multi_token_decode = false,
+                .multi_token_decode = shared_draft_ != nullptr,
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0,
                 .prefix_reuse = false,
@@ -4281,7 +4365,7 @@ class GlimmerTextRunner final : public HipTextModelRunner {
   }
 
   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    return std::make_unique<GlimmerTextRunnerState>(model_);
+    return std::make_unique<GlimmerTextRunnerState>(model_, shared_draft_, max_draft_tokens_);
   }
 
   [[nodiscard]] bool IsTurnStopToken(std::int32_t token) const noexcept {
@@ -4316,7 +4400,33 @@ class GlimmerTextRunner final : public HipTextModelRunner {
     }
     const auto prefix = GlimmerEngineTokens(prompt.first(next_position));
     std::string error;
-    if (!glimmer.session().Sync(prefix, &error)) {
+    if (glimmer.speculative_enabled()) {
+      // DFlash: capture the tapped-layer features of every prompt row during the prefill; the draft is primed with
+      // them once the prompt is complete.
+      if (offset == 0) glimmer.ResetSpeculative();
+      const auto tap_ids = glimmer.draft().TargetHiddenLayerIds();
+      GlimmerSession::TapSink sink;
+      sink.layers.assign(tap_ids.begin(), tap_ids.end());
+      std::vector<float> staging;
+      sink.fn = [&](std::uint32_t layer, const float* d_rows, std::uint32_t n, std::uint32_t start) {
+        for (std::size_t slot = 0; slot < sink.layers.size(); ++slot) {
+          if (sink.layers[slot] != layer) continue;
+          staging.resize(static_cast<std::size_t>(n) * glimmer.hidden());
+          if (hipMemcpy(staging.data(), d_rows, staging.size() * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess)
+            throw std::runtime_error("Glimmer DFlash feature capture failed");
+          glimmer.StoreTapRows(slot, start, n, staging);
+        }
+      };
+      if (!glimmer.session().Sync(prefix, &error, &sink)) {
+        glimmer.set_position(0);
+        glimmer.ResetSpeculative();
+        throw std::runtime_error("Glimmer prefill failed: " + error);
+      }
+      if (next_position == prompt.size() && !glimmer.PrimeDraft(prompt.first(next_position))) {
+        // Priming refused (e.g. context too long for the draft): decode stays plain autoregressive.
+        glimmer.ResetSpeculative();
+      }
+    } else if (!glimmer.session().Sync(prefix, &error)) {
       glimmer.set_position(0);
       throw std::runtime_error("Glimmer prefill failed: " + error);
     }
@@ -4371,9 +4481,59 @@ class GlimmerTextRunner final : public HipTextModelRunner {
   // then every pending token advances in one DecodeBatch; a launch refusal
   // falls back to the serial base path. (The scheduler only routes here when
   // the batched multi-token capability is advertised.)
+  // DFlash speculative decode (greedy requests only): each step commits the accepted drafts plus the target's own next
+  // token. The last committed token stays "pending" (committed but not yet forwarded) and anchors the next round, so the
+  // verify batch [pending, drafts...] is the only target forward per round. Any other request (sampling, penalties,
+  // grammar) decodes plainly through the base step.
+  [[nodiscard]] TextDecodeStep DecodeStep(TextRunnerState& state, std::size_t max_tokens,
+                                          sampling::SamplerState& sampler) const override {
+    if (max_tokens == 0) {
+      throw std::invalid_argument("text runner decode step budget must be at least one token");
+    }
+    auto& glimmer = RequireGlimmerState(state);
+    const bool speculate = shared_draft_ != nullptr && glimmer.speculative_enabled() && glimmer.speculative_primed() &&
+                           sampler.config().can_use_unmodified_argmax() && !sampler.ForcedToken().has_value();
+    if (!speculate) return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    TextDecodeStep result;
+    if (glimmer.position() >= max_context_) {
+      result.stop = true;
+      return result;
+    }
+    std::vector<std::int32_t> out;
+    if (!glimmer.speculative_pending()) {
+      // First token: the target's own prediction after the prompt, committed and left pending.
+      out.assign(1, glimmer.session().SampleGreedy());
+    } else {
+      std::string error;
+      const std::uint64_t drafted_before = glimmer.draft().drafted();
+      const std::uint64_t accepted_before = glimmer.draft().accepted();
+      if (!glimmer.session().SpeculativeStep(glimmer.draft(), glimmer.committed(), max_draft_tokens_, &out, &error,
+                                             static_cast<std::uint32_t>(std::min<std::size_t>(max_tokens, 32)))) {
+        throw std::runtime_error("Glimmer speculative decode failed: " + error);
+      }
+      result.draft_rounds = 1;
+      result.draft_tokens = static_cast<std::size_t>(glimmer.draft().drafted() - drafted_before);
+      result.draft_accepted_tokens = static_cast<std::size_t>(glimmer.draft().accepted() - accepted_before);
+    }
+    for (const std::int32_t token : out) {
+      glimmer.committed().push_back(token);
+      if (result.stop) continue;
+      if (glimmer.stop_at_eos() && IsTurnStopToken(token)) {
+        result.stop = true;
+        continue;
+      }
+      result.selections.push_back(TextDecodeSelection{
+          .stop = false, .token = static_cast<TextRunnerToken>(token), .piece = DecodeToken(token)});
+      sampler.Accept(static_cast<sampling::TokenId>(token));
+    }
+    glimmer.set_speculative_pending(true);
+    glimmer.set_position(glimmer.committed().size());
+    return result;
+  }
+
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const override {
-    if (decodes.size() < 2) {
+    if (decodes.size() < 2 || shared_draft_ != nullptr) {
       return TextModelRunner::DecodeBatch(decodes);
     }
     std::vector<std::int32_t> pending;
@@ -4443,6 +4603,8 @@ class GlimmerTextRunner final : public HipTextModelRunner {
  private:
   std::shared_ptr<GlimmerModel> model_;
   std::uint32_t max_context_;
+  std::shared_ptr<GlimmerTextRunnerState::SharedDraft> shared_draft_;  ///< non-null: DFlash speculative decode
+  std::uint32_t max_draft_tokens_{0};
   // Turn-boundary stops from the template's turn closers.
   std::vector<std::int32_t> turn_stops_;
 };
@@ -5599,10 +5761,11 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error, "Glimmer HTTP models do not support --mmproj");
       return false;
     }
-    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+        speculative_config.backend != TextSpeculativeBackend::kDFlash) {
       SetError(error,
-               "Glimmer HTTP models do not support speculative decoding "
-               "(pass --speculative off)");
+               "Glimmer HTTP models support only DFlash speculative decoding "
+               "(--speculative dflash2 --dflash-model PATH) or --speculative off");
       return false;
     }
     auto model = models::glimmer::Model::Load(
@@ -6126,9 +6289,22 @@ bool InferenceBackend::load(
     SetError(error, "HTTP context exceeds the loaded Glimmer model context");
     return false;
   }
-  if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+  std::shared_ptr<GlimmerTextRunnerState::SharedDraft> shared_draft;
+  if (speculative_config.backend == TextSpeculativeBackend::kDFlash) {
+    if (speculative_config.draft_model_path.empty()) {
+      SetError(error, "Glimmer DFlash speculative decoding requires --dflash-model");
+      return false;
+    }
+    std::string draft_error;
+    shared_draft = models::glimmer::GlimmerDflashDraftBackend::LoadShared(model, speculative_config.draft_model_path,
+                                                                          max_context, &draft_error);
+    if (shared_draft == nullptr) {
+      SetError(error, "Failed to load the Glimmer DFlash draft: " + draft_error);
+      return false;
+    }
+  } else if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
     SetError(error,
-             "Glimmer HTTP models do not support speculative decoding");
+             "Glimmer HTTP models support only DFlash speculative decoding");
     return false;
   }
   // No continuation snapshots exist for Glimmer sessions, so the disk cache
@@ -6144,8 +6320,12 @@ bool InferenceBackend::load(
         sampling::TextModelPreset::kUnspecified;
     new_state->sampling_defaults.supplied = {};
     new_state->supports_images = false;
-    auto runner =
-        std::make_shared<GlimmerTextRunner>(std::move(model), max_context);
+    auto runner = std::make_shared<GlimmerTextRunner>(
+        std::move(model), max_context, std::move(shared_draft),
+        // 15 draft tokens (16 verify rows = one WMMA token tile) measured best on Glimmer Q4 (mean 37.9 tok/s over six
+        // prompts vs 33.4 at 7, 26.6 at 20); the CLI default of 5 is treated as "unspecified" (pass any other value to override).
+        std::min<std::uint32_t>(speculative_config.max_draft_tokens == 5 ? 15u : speculative_config.max_draft_tokens,
+                                models::glimmer::kMaxDraftTokens));
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     auto runner_pool = std::make_shared<TextRunnerPool>(

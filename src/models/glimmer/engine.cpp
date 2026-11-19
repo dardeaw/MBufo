@@ -1548,7 +1548,8 @@ bool Session::SpeculativeRound(speculative::IDraftBackend& draft,
 }
 
 bool Session::SpeculativeStep(speculative::IDraftBackend& draft, std::span<const std::int32_t> committed,
-                              std::uint32_t n_draft, std::vector<std::int32_t>* out, std::string* error_msg) {
+                              std::uint32_t n_draft, std::vector<std::int32_t>* out, std::string* error_msg,
+                              std::uint32_t max_emit) {
   const auto fail = [&](const std::string& m) {
     if (error_msg != nullptr && error_msg->empty()) *error_msg = m;
     return false;
@@ -1590,7 +1591,8 @@ bool Session::SpeculativeStep(speculative::IDraftBackend& draft, std::span<const
     out->assign(1, SampleGreedy());
     return true;
   };
-  std::uint32_t k = std::min({n_draft, kMaxVerify - 1, impl_->capacity - L - 1});
+  // max_emit bounds the tokens this step may commit (accepted drafts + bonus), so a caller with a token budget never loses any.
+  std::uint32_t k = std::min({n_draft, kMaxVerify - 1, impl_->capacity - L - 1, max_emit > 0 ? max_emit - 1 : 0u});
   if (k == 0 || !dflash->primed()) return plain_step(error_msg);
   std::vector<tokenization::TokenId> advisory;
   advisory.reserve(committed.size());

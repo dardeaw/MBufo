@@ -178,7 +178,7 @@ class Session final {
   /// EnableDraftTaps with the backend's tap layers and a primed draft.
   [[nodiscard]] bool SpeculativeStep(speculative::IDraftBackend& draft, std::span<const std::int32_t> committed,
                                      std::uint32_t n_draft, std::vector<std::int32_t>* out,
-                                     std::string* error_msg = nullptr);
+                                     std::string* error_msg = nullptr, std::uint32_t max_emit = 32);
   /// Enables tapped-layer last-row staging for draft feature capture
   /// (allocates [layers][hidden] device staging; every forward refreshes
   /// the tapped rows). `layers` are zero-based tapped layer outputs and
