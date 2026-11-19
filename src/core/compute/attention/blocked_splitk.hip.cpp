@@ -21,6 +21,8 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
+#include <cstdlib>
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -259,6 +261,260 @@ __global__ void AttentionBlockedSplitKMergeKernel(
   out[(static_cast<std::size_t>(t) * heads + h) * kHeadDim + i] = acc / l;
 }
 
+
+__device__ __forceinline__ float WaveMax(float v) {
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    v = fmaxf(v, XorLane(v, offset));
+  }
+  return v;
+}
+
+// ---------------------------------------------------------------------------
+// GQA-grouped split-K decode. One single-wave block per (kv head, token,
+// split) serves ALL q heads of the group (kQ == heads / kv_heads), so every K/V
+// block is read once per group instead of once per q head (16x for Glimmer's
+// 32 heads / 2 kv heads), and the keys are scored lane-per-key in 32-key tiles:
+// one wave max / wave sum per head per tile instead of one per key.
+//   score pass : lane j decodes its key row (block by block) and dots it with
+//                the group's q rows held in LDS (broadcast reads);
+//   softmax    : per head, wave max/sum over the tile, rescale accumulators,
+//                weights go to LDS;
+//   PV pass    : each lane owns kD / 32 dims (half2-aligned pairs 2*lane+64*u)
+//                and walks the tile's keys with the LDS weights.
+// Partials use the same layout as the legacy kernel, so the merge is shared.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ void DecodeKeyBlock32(const std::uint8_t* blk,
+                                                 std::uint32_t block_bytes,
+                                                 float* out32) {
+  if (block_bytes == 34) {
+    const float sc = __half2float(*reinterpret_cast<const __half*>(blk + 32));
+    const unsigned short* p = reinterpret_cast<const unsigned short*>(blk);
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      const unsigned u = p[i];
+      out32[2 * i] = static_cast<float>(static_cast<std::int8_t>(u & 0xFFu)) * sc;
+      out32[2 * i + 1] =
+          static_cast<float>(static_cast<std::int8_t>(u >> 8)) * sc;
+    }
+  } else {
+    const float sc = __half2float(*reinterpret_cast<const __half*>(blk + 16));
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      const unsigned byte = blk[i];
+      const int lo = static_cast<int>(byte & 0xFu);
+      const int hi = static_cast<int>(byte >> 4);
+      out32[2 * i] = static_cast<float>(lo - ((lo & 8) ? 16 : 0)) * sc;
+      out32[2 * i + 1] = static_cast<float>(hi - ((hi & 8) ? 16 : 0)) * sc;
+    }
+  }
+}
+
+// Elements p and p + 1 (p even) of one value row.
+__device__ __forceinline__ float2 DecodeValuePair(const std::uint8_t* row,
+                                                  std::uint32_t block_bytes,
+                                                  std::uint32_t p) {
+  const std::uint8_t* blk = row + static_cast<std::size_t>(p >> 5) * block_bytes;
+  const std::uint32_t off = p & 31u;
+  if (block_bytes == 34) {
+    const float sc = __half2float(*reinterpret_cast<const __half*>(blk + 32));
+    const unsigned u = *reinterpret_cast<const unsigned short*>(blk + off);
+    return make_float2(
+        static_cast<float>(static_cast<std::int8_t>(u & 0xFFu)) * sc,
+        static_cast<float>(static_cast<std::int8_t>(u >> 8)) * sc);
+  }
+  const float sc = __half2float(*reinterpret_cast<const __half*>(blk + 16));
+  const unsigned byte = blk[off >> 1];
+  const int lo = static_cast<int>(byte & 0xFu);
+  const int hi = static_cast<int>(byte >> 4);
+  return make_float2(static_cast<float>(lo - ((lo & 8) ? 16 : 0)) * sc,
+                     static_cast<float>(hi - ((hi & 8) ? 16 : 0)) * sc);
+}
+
+template <std::uint32_t kD, std::uint32_t kQ>
+__launch_bounds__(32) __global__ void AttentionBlockedSplitKGqaKernel(
+    const float* __restrict__ q, const std::uint8_t* __restrict__ k_cache,
+    const std::uint8_t* __restrict__ v_cache, float* __restrict__ partials,
+    const std::uint32_t* __restrict__ start_pos, std::uint32_t heads,
+    std::uint32_t kv_heads, float score_scale, std::uint32_t splits,
+    std::uint32_t chunk, std::uint32_t key_block_bytes,
+    std::uint32_t value_block_bytes) {
+  constexpr std::uint32_t kB = kD / 32;  // 32-element blocks per head row
+  constexpr std::uint32_t kU = kD / 64;  // dim pairs per lane in the PV pass
+  const std::uint32_t kvh = blockIdx.x;
+  const std::uint32_t t = blockIdx.y;
+  const std::uint32_t s = blockIdx.z;
+  const std::uint32_t lane = threadIdx.x;  // 0..31, one wave
+  const std::uint32_t pos = *start_pos + t;
+  const std::uint32_t n_kv = pos + 1;
+  const std::uint32_t k_beg = s * chunk;
+  std::uint32_t k_end = k_beg + chunk;
+  if (k_end > n_kv) k_end = n_kv;
+  const std::size_t k_stride =
+      static_cast<std::size_t>(kv_heads) * kB * key_block_bytes;
+  const std::size_t v_stride =
+      static_cast<std::size_t>(kv_heads) * kB * value_block_bytes;
+  const std::size_t k_head_off = static_cast<std::size_t>(kvh) * kB * key_block_bytes;
+  const std::size_t v_head_off = static_cast<std::size_t>(kvh) * kB * value_block_bytes;
+
+  __shared__ float qsm[kQ][kD];
+  __shared__ float wsm[kQ][32];
+#pragma unroll
+  for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+    const float* qrow =
+        q + (static_cast<std::size_t>(t) * heads + kvh * kQ + hh) * kD;
+    for (std::uint32_t i = lane; i < kD; i += 32) qsm[hh][i] = qrow[i];
+  }
+  __syncthreads();
+
+  float m[kQ], l[kQ];
+  float2 acc[kQ][kU];
+#pragma unroll
+  for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+    m[hh] = -INFINITY;
+    l[hh] = 0.0f;
+#pragma unroll
+    for (std::uint32_t u = 0; u < kU; ++u) acc[hh][u] = make_float2(0.0f, 0.0f);
+  }
+
+  for (std::uint32_t base = k_beg; base < k_end; base += 32) {
+    const std::uint32_t j = base + lane;
+    const bool valid = j < k_end;
+    float score[kQ];
+#pragma unroll
+    for (std::uint32_t hh = 0; hh < kQ; ++hh) score[hh] = -INFINITY;
+    if (valid) {
+      float dot[kQ];
+#pragma unroll
+      for (std::uint32_t hh = 0; hh < kQ; ++hh) dot[hh] = 0.0f;
+      const std::uint8_t* krow = k_cache + static_cast<std::size_t>(j) * k_stride + k_head_off;
+#pragma unroll 1  // full unrolling hoists every LDS read and spills to scratch
+      for (std::uint32_t b = 0; b < kB; ++b) {
+        float kv[32];
+        DecodeKeyBlock32(krow + static_cast<std::size_t>(b) * key_block_bytes,
+                         key_block_bytes, kv);
+#pragma unroll
+        for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+          float a = dot[hh];
+#pragma unroll
+          for (int e = 0; e < 32; e += 4) {
+            const float4 qq = *reinterpret_cast<const float4*>(&qsm[hh][b * 32 + e]);
+            a = fmaf(qq.x, kv[e], a);
+            a = fmaf(qq.y, kv[e + 1], a);
+            a = fmaf(qq.z, kv[e + 2], a);
+            a = fmaf(qq.w, kv[e + 3], a);
+          }
+          dot[hh] = a;
+        }
+      }
+#pragma unroll
+      for (std::uint32_t hh = 0; hh < kQ; ++hh) score[hh] = dot[hh] * score_scale;
+    }
+#pragma unroll
+    for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+      const float m_tile = WaveMax(score[hh]);
+      const float m_new = m[hh] > m_tile ? m[hh] : m_tile;
+      const float corr = (m[hh] == -INFINITY) ? 0.0f : expf(m[hh] - m_new);
+      const float w = valid ? expf(score[hh] - m_new) : 0.0f;
+      l[hh] = l[hh] * corr + WaveSum(w);
+#pragma unroll
+      for (std::uint32_t u = 0; u < kU; ++u) {
+        acc[hh][u].x *= corr;
+        acc[hh][u].y *= corr;
+      }
+      wsm[hh][lane] = w;
+      m[hh] = m_new;
+    }
+    __syncthreads();
+    const std::uint32_t cnt = k_end - base < 32u ? k_end - base : 32u;
+    for (std::uint32_t jj = 0; jj < cnt; ++jj) {
+      const std::uint8_t* vrow =
+          v_cache + static_cast<std::size_t>(base + jj) * v_stride + v_head_off;
+      float2 vv[kU];
+#pragma unroll
+      for (std::uint32_t u = 0; u < kU; ++u)
+        vv[u] = DecodeValuePair(vrow, value_block_bytes, 2 * lane + 64 * u);
+#pragma unroll
+      for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+        const float wj = wsm[hh][jj];
+#pragma unroll
+        for (std::uint32_t u = 0; u < kU; ++u) {
+          acc[hh][u].x = fmaf(wj, vv[u].x, acc[hh][u].x);
+          acc[hh][u].y = fmaf(wj, vv[u].y, acc[hh][u].y);
+        }
+      }
+    }
+    __syncthreads();
+  }
+  const bool live = k_beg < k_end;
+#pragma unroll
+  for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+    float* part = partials +
+                  ((static_cast<std::size_t>(t) * heads + kvh * kQ + hh) * splits + s) *
+                      (kD + 2);
+    if (lane == 0) {
+      part[0] = live ? m[hh] : -INFINITY;
+      part[1] = live ? l[hh] : 0.0f;
+    }
+#pragma unroll
+    for (std::uint32_t u = 0; u < kU; ++u) {
+      part[2 + 64 * u + 2 * lane] = live ? acc[hh][u].x : 0.0f;
+      part[2 + 64 * u + 2 * lane + 1] = live ? acc[hh][u].y : 0.0f;
+    }
+  }
+}
+
+template <std::uint32_t kD, std::uint32_t kQ>
+void LaunchGqa(const float* q, const std::uint8_t* k_cache,
+               const std::uint8_t* v_cache, float* partials,
+               const std::uint32_t* start_pos, std::uint32_t heads,
+               std::uint32_t kv_heads, std::uint32_t n_tokens, float score_scale,
+               std::uint32_t splits, std::uint32_t chunk,
+               std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
+               hipStream_t stream) {
+  hipLaunchKernelGGL((AttentionBlockedSplitKGqaKernel<kD, kQ>),
+                     dim3(kv_heads, n_tokens, splits), dim3(32), 0, stream, q,
+                     k_cache, v_cache, partials, start_pos, heads, kv_heads,
+                     score_scale, splits, chunk, key_block_bytes,
+                     value_block_bytes);
+}
+
+// Supported groups: kD == 128 -> heads/kv_heads in {1,2,4,8,16}; kD == 256 ->
+// {1,2,4,8} (register budget). Returns false for anything else.
+template <std::uint32_t kD>
+bool DispatchGqa(const float* q, const std::uint8_t* k_cache,
+                 const std::uint8_t* v_cache, float* partials,
+                 const std::uint32_t* start_pos, std::uint32_t heads,
+                 std::uint32_t kv_heads, std::uint32_t n_tokens,
+                 float score_scale, std::uint32_t splits, std::uint32_t chunk,
+                 std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
+                 hipStream_t stream) {
+  const std::uint32_t qpg = heads / kv_heads;
+#define GUFO_GQA_CASE(Q)                                                        \
+  case Q:                                                                       \
+    LaunchGqa<kD, Q>(q, k_cache, v_cache, partials, start_pos, heads, kv_heads, \
+                     n_tokens, score_scale, splits, chunk, key_block_bytes,     \
+                     value_block_bytes, stream);                                \
+    return true;
+  switch (qpg) {
+    GUFO_GQA_CASE(1)
+    GUFO_GQA_CASE(2)
+    GUFO_GQA_CASE(4)
+    GUFO_GQA_CASE(8)
+    case 16:
+      if constexpr (kD == 128) {
+        LaunchGqa<kD, 16>(q, k_cache, v_cache, partials, start_pos, heads,
+                          kv_heads, n_tokens, score_scale, splits, chunk,
+                          key_block_bytes, value_block_bytes, stream);
+        return true;
+      }
+      return false;
+    default:
+      return false;
+  }
+#undef GUFO_GQA_CASE
+}
+
 }  // namespace
 
 // Split-K decode over blocked Q8 caches (d == 256 SWA, heads <= 16;
@@ -288,11 +544,20 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
       (value_block_bytes != 34 && value_block_bytes != 18)) {
     return false;
   }
-  // Same split sizing as the F16 narrow-batch path: ~128 keys per chunk at
-  // full GQA occupancy, 64-way cap.
-  const std::uint32_t min_tile = (kv_heads * n_tokens >= 8u) ? 128u : 64u;
+  // GQA-grouped lane-per-key kernel (default); GUFO_BLOCKED_SPLITK_LEGACY=1
+  // restores the per-q-head kernel below for A/B. Groups the grouped kernel does
+  // not cover (heads / kv_heads outside {1,2,4,8,16}, {1,2,4,8} for d == 256)
+  // fall through to the legacy kernel.
+  const std::uint32_t qpg = heads / kv_heads;
+  const bool gqa_ok = std::getenv("GUFO_BLOCKED_SPLITK_LEGACY") == nullptr &&
+                      (qpg == 1 || qpg == 2 || qpg == 4 || qpg == 8 ||
+                       (qpg == 16 && kHeadDim == 128));
+  // Legacy sizing: ~128 keys per chunk at full GQA occupancy; grouped kernel:
+  // one 32-key tile per chunk. 64-way cap either way.
+  const std::uint32_t min_tile =
+      gqa_ok ? 32u : ((kv_heads * n_tokens >= 8u) ? 128u : 64u);
   std::uint32_t splits = (kv_len + min_tile - 1u) / min_tile;
-  if (splits < 2u) {
+  if (splits < (gqa_ok ? 1u : 2u)) {
     return false;
   }
   if (splits > kBlockedSplitKMaxSplits) {
@@ -307,6 +572,15 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
     return false;
   }
   const std::uint32_t chunk = (kv_len + splits - 1u) / splits;
+  if (gqa_ok &&
+      DispatchGqa<kHeadDim>(q, k_cache, v_cache, partials, start_pos, heads,
+                            kv_heads, n_tokens, score_scale, splits, chunk,
+                            key_block_bytes, value_block_bytes, stream)) {
+    hipLaunchKernelGGL((AttentionBlockedSplitKMergeKernel<kHeadDim>),
+                       dim3(heads, n_tokens), dim3(kThreads), 0, stream,
+                       partials, out, heads, splits);
+    return true;
+  }
   hipLaunchKernelGGL((AttentionBlockedSplitKKernel<Codec, kHeadDim>),
                      dim3(heads, n_tokens, splits), dim3(kThreads), 0, stream,
                      q, k_cache, v_cache, partials, start_pos, heads, kv_heads,

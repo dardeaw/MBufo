@@ -7,7 +7,7 @@
 //
 //   prefill q_len >= wmma_min_tokens (32)  -> blocked WMMA
 //   decode  q_len <= splitk_max_tokens (8) -> blocked Split-K
-//          AND kv_len >= splitk_min_kv (1024)
+//          AND kv_len >= splitk_min_kv (256)
 //   else                                   -> scalar (blocked_kv::AttentionKv)
 //   anything unsupported / mixed codecs    -> kLegacy (caller runs legacy)
 //
@@ -18,8 +18,9 @@
 //    8   == blocked_splitk::kBlockedSplitKMaxTokens
 //          (src/core/compute/attention/blocked_splitk.hpp): the Split-K
 //          decode shape (decode + other single-digit forwards).
-// 1024   == blocked_splitk::kBlockedSplitKMinKv: shorter contexts stay on
-//          the scalar single-block scan.
+//  256   == blocked_splitk::kBlockedSplitKMinKv: shorter contexts stay on
+//          the scalar single-block scan (was 1024 before the GQA-grouped
+//          kernel; re-measured, see the blocked_splitk commit message).
 //
 // Kernel-geometry facts (hardcoded below, with file citations — these are
 // kernel properties, not tunable policy):
@@ -91,7 +92,7 @@ enum class DispatchCodec : std::uint32_t {
 struct AttentionDispatchPolicy {
   std::uint32_t wmma_min_tokens = 32;   // prefill rows to take WMMA
   std::uint32_t splitk_max_tokens = 8;  // decode rows to consider Split-K
-  std::uint32_t splitk_min_kv = 1024;   // visible keys to pay off Split-K
+  std::uint32_t splitk_min_kv = 256;    // visible keys to pay off Split-K
   bool dispatch_enabled = true;         // false -> always kLegacy
 
   // Measured defaults with the GUFO_ATTN_* env overrides applied.

@@ -44,7 +44,8 @@ inline constexpr std::uint32_t kBlockedSplitKMaxTokens = 8;
 
 /// Minimum visible KV length that pays off: shorter contexts stay on the
 /// scalar single-block scan, whose launch + merge overhead wins below this.
-inline constexpr std::uint32_t kBlockedSplitKMinKv = 1024;
+/// (1024 for the legacy per-q-head kernel; the GQA-grouped kernel wins from ~256.)
+inline constexpr std::uint32_t kBlockedSplitKMinKv = 256;
 
 /// Maximum KV splits (matches the F16 Split-K cap).
 inline constexpr std::uint32_t kBlockedSplitKMaxSplits = 64;
