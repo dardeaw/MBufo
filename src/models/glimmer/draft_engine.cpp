@@ -24,14 +24,23 @@ namespace {
 
 /// Draft prefill chunk width (priming loops in these blocks).
 constexpr std::uint32_t kDraftChunk = 128;
+constexpr std::uint32_t kMaxScoreRows = 32;
 
 // One F32 projection over the shared SmallGemm core (no activation
 // staging: the core reads F32 rows directly).
 void DraftGemm(const DraftTensorRef& w, const float* x, float* y,
                std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                hipStream_t stream) {
-  core::compute::gemm::fn_compat::SmallGemm(w.device, /*type=*/0, x, y,
-                                            n_tokens, m, k, stream);
+  if (w.type == 12) {  // packed Q4_K: read once for all rows (single- or multi-token K-quant kernel)
+    const auto st = core::compute::gemm::GemvDecode(w.device, w.type, x, y, n_tokens, m, k, nullptr, 0, stream);
+    if (st != core::quant::Status::kOk) {
+      std::fprintf(stderr, "[glimmer draft] GemvDecode failed (%ux%u, n=%u, status %d)\n", m, k, n_tokens,
+                   static_cast<int>(st));
+      std::abort();
+    }
+    return;
+  }
+  core::compute::gemm::fn_compat::SmallGemm(w.device, w.type, x, y, n_tokens, m, k, stream);
 }
 
 struct DraftSessionBuffers {
@@ -77,6 +86,8 @@ struct DraftSession::Impl {
   float* up_out{nullptr};
   float* ffn_out{nullptr};
   float* logits{nullptr};
+  float* score_logits{nullptr};      ///< [kMaxScoreRows][vocab] multi-row head scores
+  std::int32_t* score_out{nullptr};  ///< [kMaxScoreRows] device argmax per scored row
   std::uint32_t* d_pos{nullptr};
   std::uint32_t* d_pos_win{nullptr};
   std::uint32_t* d_pos_full{nullptr};  ///< shared end position (device)
@@ -111,6 +122,8 @@ struct DraftSession::Impl {
     up_out = buffers.Alloc<float>(chunk * c.intermediate_size, error);
     ffn_out = buffers.Alloc<float>(chunk * hidden_dim, error);
     logits = buffers.Alloc<float>(vocab, error);
+    score_logits = buffers.Alloc<float>(static_cast<std::size_t>(kMaxScoreRows) * vocab, error);
+    score_out = buffers.Alloc<std::int32_t>(kMaxScoreRows, error);
     d_pos = buffers.Alloc<std::uint32_t>(1, error);
     d_pos_win = buffers.Alloc<std::uint32_t>(1, error);
     d_pos_full = buffers.Alloc<std::uint32_t>(1, error);
@@ -128,7 +141,8 @@ struct DraftSession::Impl {
            fused != nullptr && hidden != nullptr &&
            normed != nullptr && qbuf != nullptr && kbuf != nullptr &&
            vbuf != nullptr && attn_out != nullptr && gate_out != nullptr &&
-           up_out != nullptr && ffn_out != nullptr && logits != nullptr &&
+           up_out != nullptr && ffn_out != nullptr && logits != nullptr && score_logits != nullptr &&
+           score_out != nullptr &&
            d_pos != nullptr && d_pos_win != nullptr &&
            d_pos_full != nullptr && d_tok != nullptr &&
            splitk_partials != nullptr && argmax_scratch != nullptr &&
@@ -1011,9 +1025,11 @@ bool DraftSession::ForwardBlock(std::uint32_t n, std::uint32_t start_pos,
   // Reference block layout (llama.cpp draft-dflash): the anchor overwrites
   // the last committed row, masks append after it. The block extends from
   // Length with one overlapping row: Length == start_pos + 1.
-  if (start_pos + 1 != impl_->length) {
+  // Overlap mode (the anchor overwrites the last committed row: Length == start_pos + 1) or append mode (the block starts
+  // exactly at Length: the anchor is a pending token whose own row has not been committed yet).
+  if (start_pos + 1 != impl_->length && start_pos != impl_->length) {
     if (error_msg != nullptr)
-      *error_msg = "glimmer draft block must overlap the current length";
+      *error_msg = "glimmer draft block must start at or overlap the current length";
     return false;
   }
   if (start_pos + n > model_->options_.max_context) {
@@ -1094,10 +1110,12 @@ bool DraftSession::ScoreRow(std::uint32_t i, std::string* error_msg) {
                    impl.normed, 1, hidden, w.config.rms_eps, stream);
   const void* dev =
       head.output.device != nullptr ? head.output.device : head.output.data;
-  core::compute::gemm::GemvBatched(dev, static_cast<int>(head.output.type),
-                                   head.output.RowBytes(), hidden,
-                                   impl.normed, impl.logits, 1,
-                                   head.vocab_size, 0.0F, stream);
+  if (core::compute::gemm::GemvDecode(dev, static_cast<int>(head.output.type), impl.normed, impl.logits, 1,
+                                      head.vocab_size, hidden, nullptr, 0, stream) !=
+      core::quant::Status::kOk) {
+    core::compute::gemm::GemvBatched(dev, static_cast<int>(head.output.type), head.output.RowBytes(), hidden,
+                                     impl.normed, impl.logits, 1, head.vocab_size, 0.0F, stream);
+  }
   if (head.logit_scale != 1.0F) {
     kernels::ScaleInplace(impl.logits, head.logit_scale, head.vocab_size,
                           stream);
@@ -1126,6 +1144,45 @@ bool DraftSession::ScoreRow(std::uint32_t i, std::string* error_msg) {
       std::fprintf(stderr, " %u:%.3f", best[b], hl[best[b]]);
     std::fprintf(stderr, "\n");
   }
+  return true;
+}
+
+bool DraftSession::ScoreRows(std::uint32_t first, std::uint32_t count, std::vector<std::int32_t>* tokens,
+                             std::string* error_msg) {
+  auto& w = *model_->weights_;
+  const auto& head = model_->target_head_;
+  if (head.output.empty() || head.vocab_size == 0 || tokens == nullptr) {
+    if (error_msg != nullptr) *error_msg = "glimmer draft target head is not bound";
+    return false;
+  }
+  if (count == 0 || count > kMaxScoreRows || first + count > kDraftChunk) {
+    if (error_msg != nullptr) *error_msg = "glimmer draft ScoreRows is out of range";
+    return false;
+  }
+  const std::uint32_t hidden = model_->weights_->config.hidden_size;
+  const std::uint32_t vocab = head.vocab_size;
+  auto& impl = *impl_;
+  hipStream_t stream = 0;
+  kernels::RmsNorm(impl.hidden + static_cast<std::size_t>(first) * hidden,
+                   static_cast<const float*>(w.output_norm.device), impl.normed, count, hidden, w.config.rms_eps, stream);
+  const void* dev = head.output.device != nullptr ? head.output.device : head.output.data;
+  const int type = static_cast<int>(head.output.type);
+  if (core::compute::gemm::GemvDecode(dev, type, impl.normed, impl.score_logits, count, vocab, hidden, nullptr, 0,
+                                      stream) != core::quant::Status::kOk) {
+    // Heads without a multi-token kernel (e.g. Q8_0 above 8 rows): one single-row GEMV per row.
+    for (std::uint32_t r = 0; r < count; ++r) {
+      core::compute::gemm::GemvBatched(dev, type, head.output.RowBytes(), hidden,
+                                       impl.normed + static_cast<std::size_t>(r) * hidden,
+                                       impl.score_logits + static_cast<std::size_t>(r) * vocab, 1, vocab, 0.0F, stream);
+    }
+  }
+  if (head.logit_scale != 1.0F)
+    kernels::ScaleInplace(impl.score_logits, head.logit_scale, static_cast<std::size_t>(count) * vocab, stream);
+  kernels::SoftCap(impl.score_logits, head.final_logit_softcapping, static_cast<std::size_t>(count) * vocab, stream);
+  core::compute::gemm::Argmax(impl.score_logits, impl.argmax_scratch, impl.score_out, count, vocab, stream);
+  tokens->assign(count, -1);
+  (void)hipMemcpyAsync(tokens->data(), impl.score_out, count * sizeof(std::int32_t), hipMemcpyDeviceToHost, stream);
+  (void)hipStreamSynchronize(stream);
   return true;
 }
 

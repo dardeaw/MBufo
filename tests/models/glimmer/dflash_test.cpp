@@ -3,7 +3,8 @@
 // The draft is EAGLE-style: target tapped-layer features are captured
 // during Sync (prompt-first priming) and per round the commit (accepted +
 // bonus rows) is appended back to the draft.
-// Usage: glimmer_dflash_test TARGET.gguf DRAFT.gguf [N_DRAFT=4]
+// Usage: glimmer_dflash_test TARGET.gguf DRAFT.gguf [N_DRAFT=4] [N_STEPS=24]
+// DFLASH_V2=1 drives Session::SpeculativeStep (pending-anchor flow, no separate bonus forward) instead of SpeculativeRound.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -35,8 +36,8 @@ int main(int argc, char** argv) {
   std::uint32_t n_draft = 4;
   if (argc >= 4)
     n_draft = static_cast<std::uint32_t>(std::strtoul(argv[3], nullptr, 10));
-  if (n_draft == 0 || n_draft > 8)
-    return Fail("N_DRAFT must be 1..8");
+  if (n_draft == 0 || n_draft > 31)
+    return Fail("N_DRAFT must be 1..31");
   int kSteps = 24;
   if (argc == 5)
     kSteps = std::atoi(argv[4]);
@@ -219,11 +220,18 @@ int main(int argc, char** argv) {
     if (!dflash->PrimeTargetContext(prime))
       return Fail("prime failed");
     std::fprintf(stderr, "[ckpt] primed, entering rounds\n");
+    const bool v2 = std::getenv("DFLASH_V2") != nullptr;
     std::vector<std::int32_t> context(prompt.begin(), prompt.end());
     t0 = std::chrono::steady_clock::now();
+    if (v2) {  // the first generated token is the pending anchor (committed, not yet forwarded)
+      const std::int32_t first = s->SampleGreedy();
+      context.push_back(first);
+      spec_seq.push_back(first);
+    }
     while (spec_seq.size() < static_cast<std::size_t>(kSteps)) {
       std::vector<std::int32_t> out;
-      if (!s->SpeculativeRound(*backend, context, n_draft, &out, &error))
+      if (v2 ? !s->SpeculativeStep(*backend, context, n_draft, &out, &error)
+             : !s->SpeculativeRound(*backend, context, n_draft, &out, &error))
         return Fail("round: " + error);
       ++rounds;
       if (rounds <= 3 || rounds % 10 == 0)
@@ -246,7 +254,7 @@ int main(int argc, char** argv) {
             .count();
     drafted = dflash->drafted();
     accepted = dflash->accepted();
-    if (context.size() != s->Length())
+    if (context.size() != s->Length() + (v2 ? 1u : 0u))
       return Fail("context/session length desync");
   }
 

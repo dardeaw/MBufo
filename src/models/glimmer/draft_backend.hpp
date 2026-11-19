@@ -56,9 +56,25 @@
 
 namespace gufo::models::glimmer {
 
+/// Most draft tokens one round proposes: the target verifies [anchor, drafts...] in one batch of at most 32 rows.
+inline constexpr std::uint32_t kMaxDraftTokens = 31;
+
 /// Target-bound block-diffusion DFlash draft backend (greedy only).
 class GlimmerDflashDraftBackend final : public speculative::IDraftBackend {
  public:
+  /// Draft weights bound to one target (head, embedding, tap list); shared by every session's backend.
+  struct SharedDraft {
+    std::shared_ptr<draft::DraftModel> model;
+    std::vector<std::uint32_t> taps;  ///< zero-based tapped target layer outputs
+  };
+  /// Loads the draft artifact, normalizes the tap list and binds the target output head and embedding.
+  [[nodiscard]] static std::shared_ptr<SharedDraft> LoadShared(std::shared_ptr<const Model> target,
+                                                              const std::string& draft_model_path,
+                                                              std::uint32_t max_context,
+                                                              std::string* error_msg = nullptr);
+  /// Opens a draft session over already loaded shared draft weights (no weight loading).
+  [[nodiscard]] static std::unique_ptr<GlimmerDflashDraftBackend> CreateFromShared(
+      std::shared_ptr<SharedDraft> shared, std::uint32_t max_draft_tokens, std::string* error_msg = nullptr);
   /// Creates the backend: loads the draft artifact, normalizes the tap
   /// list, binds the target output head and embedding, and opens a draft
   /// session.
@@ -95,6 +111,14 @@ class GlimmerDflashDraftBackend final : public speculative::IDraftBackend {
   [[nodiscard]] speculative::DraftProposal Propose(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens) override;
+
+  /// Pending-anchor proposal (llama.cpp draft-dflash flow): `committed` holds every committed token and its LAST element is
+  /// the pending anchor, whose target row has not been forwarded yet; the draft holds committed fused features for
+  /// positions [0, committed.size() - 1). The block [anchor, mask * k] is decoded appended at Length(). After the target
+  /// verified [anchor, drafts...], AppendTargetContext(rows for the anchor and the accepted drafts, position = block start)
+  /// rewinds the block and commits those rows. Empty when not primed / out of room / desynchronized.
+  [[nodiscard]] speculative::DraftProposal ProposeFromPending(
+      std::span<const tokenization::TokenId> committed, std::uint32_t max_tokens);
 
   [[nodiscard]] bool SupportsSampledProposals() const noexcept override {
     return false;

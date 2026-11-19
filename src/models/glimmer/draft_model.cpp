@@ -210,24 +210,46 @@ std::optional<DraftModelWeights> DraftModelWeights::Bind(
       }
       return false;
     }
+    // Q4_K matrices stay packed; other matrices go to F16; vectors stay F32.
+    const bool keep_packed = info->type == core::GgmlType::kQ4_K && rows > 1 && cols % 256 == 0;
     std::vector<float> host;
-    if (!DequantToF32(*info, host, error_msg))
-      return false;
+    std::vector<__half> half;
+    const void* src = nullptr;
+    std::size_t bytes = 0;
+    int ref_type = 0;
+    if (keep_packed) {
+      src = info->data;
+      bytes = info->size_bytes;
+      ref_type = 12;
+    } else {
+      if (!DequantToF32(*info, host, error_msg))
+        return false;
+      if (rows > 1) {
+        half.resize(host.size());
+        for (std::size_t i = 0; i < host.size(); ++i) half[i] = __float2half(host[i]);
+        src = half.data();
+        bytes = half.size() * sizeof(__half);
+        ref_type = 1;
+      } else {
+        src = host.data();
+        bytes = host.size() * sizeof(float);
+        ref_type = 0;
+      }
+    }
     void* dev = nullptr;
-    if (hipMalloc(&dev, host.size() * sizeof(float)) != hipSuccess ||
-        dev == nullptr) {
+    if (hipMalloc(&dev, bytes) != hipSuccess || dev == nullptr) {
       if (error_msg != nullptr && error_msg->empty())
         *error_msg = "draft weight mirror allocation failed: " + name;
       return false;
     }
-    if (hipMemcpy(dev, host.data(), host.size() * sizeof(float),
-                  hipMemcpyHostToDevice) != hipSuccess) {
+    if (hipMemcpy(dev, src, bytes, hipMemcpyHostToDevice) != hipSuccess) {
       (void)hipFree(dev);
       if (error_msg != nullptr && error_msg->empty())
         *error_msg = "draft weight mirror copy failed: " + name;
       return false;
     }
     ref.device = dev;
+    ref.type = ref_type;
     ref.cols = cols;
     ref.rows = rows;
     owned.push_back(dev);

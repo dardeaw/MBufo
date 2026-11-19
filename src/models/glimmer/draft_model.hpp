@@ -45,11 +45,13 @@ struct DraftConfig {
 };
 
 struct DraftTensorRef {
-  // Device-resident F32 mirror (dequantized at load when the artifact is
-  // quantized; byte-copied when already F32). Matrices follow the GGUF
-  // [K, M] convention (reduction dim contiguous): GEMM callers pass
+  // Device-resident weights. Q4_K matrices stay PACKED (type 12; read through the shared K-quant GEMV, ~0.56 byte/weight);
+  // other matrices (Q6_K, Q8_0, ...) are dequantized once to F16 (type 1) and vectors (norms) to F32 (type 0). The block
+  // forward of the draft is weight-bandwidth bound, so the old all-F32 mirror (10 GB) made every proposal cost ~100 ms.
+  // Matrices follow the GGUF [K, M] convention (reduction dim contiguous): GEMM callers pass
   // m = rows(out-dim), k = cols(in-dim) with the matching config sizes.
   const void* device{nullptr};
+  int type{0};  ///< GgmlType code of the device bytes: 0 = F32, 1 = F16, 12 = Q4_K (packed)
   std::uint64_t cols{0};  ///< file dims[0] (reduction dim)
   std::uint64_t rows{0};  ///< file dims[1] (output dim)
   [[nodiscard]] bool empty() const noexcept { return device == nullptr; }

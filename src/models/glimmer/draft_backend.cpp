@@ -21,52 +21,39 @@
 
 namespace gufo::models::glimmer {
 
-std::unique_ptr<GlimmerDflashDraftBackend> GlimmerDflashDraftBackend::Create(
-    std::shared_ptr<const Model> target, const std::string& draft_model_path,
-    std::uint32_t max_context, std::uint32_t max_draft_tokens,
+std::shared_ptr<GlimmerDflashDraftBackend::SharedDraft> GlimmerDflashDraftBackend::LoadShared(
+    std::shared_ptr<const Model> target, const std::string& draft_model_path, std::uint32_t max_context,
     std::string* error_msg) {
   if (target == nullptr) {
-    if (error_msg != nullptr && error_msg->empty())
-      *error_msg = "glimmer-dflash backend needs a target model";
+    if (error_msg != nullptr && error_msg->empty()) *error_msg = "glimmer-dflash backend needs a target model";
     return nullptr;
   }
   if (draft_model_path.empty()) {
-    if (error_msg != nullptr && error_msg->empty())
-      *error_msg = "glimmer-dflash backend needs draft_model_path";
+    if (error_msg != nullptr && error_msg->empty()) *error_msg = "glimmer-dflash backend needs draft_model_path";
     return nullptr;
   }
-  if (max_draft_tokens == 0)
-    max_draft_tokens = 4;
-  if (max_draft_tokens > 8)
-    max_draft_tokens = 8;  // target verify width (kMaxVerify)
   std::string error;
   draft::DraftModelOptions draft_options;
-  draft_options.max_context =
-      max_context != 0 ? max_context : target->MaxContext();
-  auto draft_model = draft::DraftModel::Load(draft_model_path, draft_options,
-                                             {}, &error);
+  draft_options.max_context = max_context != 0 ? max_context : target->MaxContext();
+  auto draft_model = draft::DraftModel::Load(draft_model_path, draft_options, {}, &error);
   if (draft_model == nullptr) {
-    if (error_msg != nullptr)
-      *error_msg = "glimmer-dflash draft load failed: " + error;
+    if (error_msg != nullptr) *error_msg = "glimmer-dflash draft load failed: " + error;
     return nullptr;
   }
-  // Normalize the artifact's 1-based layer-input taps to zero-based layer
-  // outputs (27B DFlash2 convention: the converter numbers layer inputs,
-  // Gufo taps layer outputs).
+  // Normalize the artifact's 1-based layer-input taps to zero-based layer outputs (27B DFlash2 convention: the
+  // converter numbers layer inputs, Gufo taps layer outputs).
   std::vector<std::uint32_t> taps;
   taps.reserve(draft_model->TargetLayerIds().size());
   const std::uint32_t num_target_layers = target->weights().config.num_layers;
   for (const std::uint32_t encoded : draft_model->TargetLayerIds()) {
     if (encoded == 0 || encoded > num_target_layers) {
-      if (error_msg != nullptr)
-        *error_msg = "glimmer-dflash tap layer out of range";
+      if (error_msg != nullptr) *error_msg = "glimmer-dflash tap layer out of range";
       return nullptr;
     }
     taps.push_back(encoded - 1);
   }
   if (taps.empty()) {
-    if (error_msg != nullptr && error_msg->empty())
-      *error_msg = "glimmer-dflash draft has no tap layers";
+    if (error_msg != nullptr && error_msg->empty()) *error_msg = "glimmer-dflash draft has no tap layers";
     return nullptr;
   }
   const auto& tc = target->weights().config;
@@ -76,8 +63,7 @@ std::unique_ptr<GlimmerDflashDraftBackend> GlimmerDflashDraftBackend::Create(
   head.final_logit_softcapping = tc.final_logit_softcapping;
   head.vocab_size = tc.vocab_size;
   if (head.output.empty() || head.vocab_size == 0) {
-    if (error_msg != nullptr)
-      *error_msg = "glimmer-dflash target head is missing";
+    if (error_msg != nullptr) *error_msg = "glimmer-dflash target head is missing";
     return nullptr;
   }
   draft_model->SetTargetHead(head);
@@ -85,34 +71,49 @@ std::unique_ptr<GlimmerDflashDraftBackend> GlimmerDflashDraftBackend::Create(
   embed.device = target->weights().token_embd.device;
   embed.type = target->weights().token_embd.type;
   if (embed.device == nullptr) {
-    if (error_msg != nullptr)
-      *error_msg = "glimmer-dflash target embedding is missing";
+    if (error_msg != nullptr) *error_msg = "glimmer-dflash target embedding is missing";
     return nullptr;
   }
   if (tc.hidden_size != draft_model->HiddenSize()) {
-    if (error_msg != nullptr)
-      *error_msg = "glimmer-dflash target/draft hidden size mismatch";
+    if (error_msg != nullptr) *error_msg = "glimmer-dflash target/draft hidden size mismatch";
     return nullptr;
   }
-  if (draft_model->MaskTokenId() == 0 ||
-      draft_model->MaskTokenId() >= tc.vocab_size) {
-    if (error_msg != nullptr)
-      *error_msg = "glimmer-dflash mask token id is invalid";
+  if (draft_model->MaskTokenId() == 0 || draft_model->MaskTokenId() >= tc.vocab_size) {
+    if (error_msg != nullptr) *error_msg = "glimmer-dflash mask token id is invalid";
     return nullptr;
   }
   draft_model->SetTargetEmbed(embed);
-  auto session = draft_model->CreateSession(&error);
-  if (session == nullptr) {
-    if (error_msg != nullptr)
-      *error_msg = "glimmer-dflash session failed: " + error;
+  auto shared = std::make_shared<SharedDraft>();
+  shared->model = std::move(draft_model);
+  shared->taps = std::move(taps);
+  return shared;
+}
+
+std::unique_ptr<GlimmerDflashDraftBackend> GlimmerDflashDraftBackend::CreateFromShared(
+    std::shared_ptr<SharedDraft> shared, std::uint32_t max_draft_tokens, std::string* error_msg) {
+  if (shared == nullptr || shared->model == nullptr) {
+    if (error_msg != nullptr && error_msg->empty()) *error_msg = "glimmer-dflash backend needs loaded draft weights";
     return nullptr;
   }
-  const std::uint32_t feat_width =
-      static_cast<std::uint32_t>(taps.size()) * tc.hidden_size;
-  return std::unique_ptr<GlimmerDflashDraftBackend>(
-      new GlimmerDflashDraftBackend(std::move(draft_model),
-                                    std::move(session), std::move(taps),
-                                    max_draft_tokens, feat_width));
+  if (max_draft_tokens == 0) max_draft_tokens = 4;
+  if (max_draft_tokens > kMaxDraftTokens) max_draft_tokens = kMaxDraftTokens;  // target verify width - 1 (anchor row)
+  std::string error;
+  auto session = shared->model->CreateSession(&error);
+  if (session == nullptr) {
+    if (error_msg != nullptr) *error_msg = "glimmer-dflash session failed: " + error;
+    return nullptr;
+  }
+  const std::uint32_t feat_width = static_cast<std::uint32_t>(shared->taps.size()) * shared->model->HiddenSize();
+  return std::unique_ptr<GlimmerDflashDraftBackend>(new GlimmerDflashDraftBackend(
+      shared->model, std::move(session), shared->taps, max_draft_tokens, feat_width));
+}
+
+std::unique_ptr<GlimmerDflashDraftBackend> GlimmerDflashDraftBackend::Create(
+    std::shared_ptr<const Model> target, const std::string& draft_model_path, std::uint32_t max_context,
+    std::uint32_t max_draft_tokens, std::string* error_msg) {
+  auto shared = LoadShared(std::move(target), draft_model_path, max_context, error_msg);
+  if (shared == nullptr) return nullptr;
+  return CreateFromShared(std::move(shared), max_draft_tokens, error_msg);
 }
 
 bool GlimmerDflashDraftBackend::PrimeTargetContext(
@@ -253,15 +254,13 @@ speculative::DraftProposal GlimmerDflashDraftBackend::Propose(
     (void)session.Rewind(base, nullptr);
     return speculative::DraftProposal{};
   }
-  // Greedy argmax per mask position (reference top_k=10/p_min=0 at temp 0).
-  for (std::uint32_t i = 1; i <= k; ++i) {
-    if (!session.ScoreRow(i, &error)) {
-      (void)session.Rewind(base, nullptr);
-      return speculative::DraftProposal{};
-    }
-    const std::int32_t tok = session.SampleGreedy();
-    out.tokens.push_back(static_cast<tokenization::TokenId>(tok));
+  // Greedy argmax per mask position (reference top_k=10/p_min=0 at temp 0), all rows in one head GEMM.
+  std::vector<std::int32_t> greedy;
+  if (!session.ScoreRows(1, k, &greedy, &error)) {
+    (void)session.Rewind(base, nullptr);
+    return speculative::DraftProposal{};
   }
+  for (const std::int32_t tok : greedy) out.tokens.push_back(static_cast<tokenization::TokenId>(tok));
   propose_pos_ = block_pos;
   proposed_ = k;
   proposal_active_ = true;
@@ -272,6 +271,41 @@ speculative::DraftProposal GlimmerDflashDraftBackend::Propose(
       std::fprintf(stderr, " %d", static_cast<int>(t));
     std::fprintf(stderr, "\n");
   }
+  return out;
+}
+
+speculative::DraftProposal GlimmerDflashDraftBackend::ProposeFromPending(
+    std::span<const tokenization::TokenId> committed, std::uint32_t max_tokens) {
+  speculative::DraftProposal out;
+  out.start_pos = static_cast<std::uint32_t>(committed.size());
+  out.from_lookup = false;
+  if (!primed_ || max_tokens == 0 || committed.empty()) return out;
+  auto& session = *draft_session_;
+  const std::uint32_t base = session.Length();
+  if (base + 1 != committed.size()) return out;  // the draft must hold features for every committed token but the anchor
+  std::uint32_t k = std::min(max_tokens, max_draft_tokens_);
+  if (base + k + 1 > draft_model_->MaxContext())
+    k = base + 1 < draft_model_->MaxContext() ? draft_model_->MaxContext() - base - 1 : 0;
+  if (k == 0) return out;
+  const std::int32_t mask = static_cast<std::int32_t>(draft_model_->MaskTokenId());
+  std::vector<std::int32_t> block;
+  block.reserve(k + 1);
+  block.push_back(static_cast<std::int32_t>(committed.back()));
+  for (std::uint32_t i = 0; i < k; ++i) block.push_back(mask);
+  std::string error;
+  if (!session.EmbedBlock(block, &error) || !session.ForwardBlock(k + 1, base, &error)) {
+    (void)session.Rewind(base, nullptr);
+    return speculative::DraftProposal{};
+  }
+  std::vector<std::int32_t> greedy;
+  if (!session.ScoreRows(1, k, &greedy, &error)) {
+    (void)session.Rewind(base, nullptr);
+    return speculative::DraftProposal{};
+  }
+  for (const std::int32_t tok : greedy) out.tokens.push_back(static_cast<tokenization::TokenId>(tok));
+  propose_pos_ = base;
+  proposed_ = k;
+  proposal_active_ = true;
   return out;
 }
 
@@ -333,8 +367,8 @@ bool RegisterGlimmerDflashDraftBackend() {
         std::uint32_t max_tokens = request.max_draft_tokens == 0
                                        ? 4u
                                        : request.max_draft_tokens;
-        if (max_tokens > 8u) {
-          max_tokens = 8u;
+        if (max_tokens > kMaxDraftTokens) {
+          max_tokens = kMaxDraftTokens;
         }
         return GlimmerDflashDraftBackend::Create(
             std::move(target), request.draft_model_path, request.max_context,

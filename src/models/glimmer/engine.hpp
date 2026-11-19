@@ -168,6 +168,17 @@ class Session final {
                                      std::uint32_t n_draft,
                                      std::vector<std::int32_t>* out,
                                      std::string* error_msg = nullptr);
+  /// One temperature-0 speculative step in the llama.cpp draft-dflash flow ("pending anchor"): `committed` is every
+  /// committed token and its LAST element is the pending anchor, committed but not yet forwarded
+  /// (committed.size() == Length() + 1). The draft proposes up to n_draft tokens after the anchor, the target verifies
+  /// [anchor, drafts...] in ONE batched forward (<= 32 rows), greedy prefix-accept commits the matching drafts and the
+  /// target's own next token (the bonus) becomes the new pending anchor: no separate bonus forward. `out` receives the
+  /// newly committed tokens [accepted drafts..., bonus]; the driver appends them to `committed`. Afterwards Length() covers
+  /// the anchor and the accepted drafts and Logits() are the distribution whose argmax is the bonus. Requires
+  /// EnableDraftTaps with the backend's tap layers and a primed draft.
+  [[nodiscard]] bool SpeculativeStep(speculative::IDraftBackend& draft, std::span<const std::int32_t> committed,
+                                     std::uint32_t n_draft, std::vector<std::int32_t>* out,
+                                     std::string* error_msg = nullptr);
   /// Enables tapped-layer last-row staging for draft feature capture
   /// (allocates [layers][hidden] device staging; every forward refreshes
   /// the tapped rows). `layers` are zero-based tapped layer outputs and

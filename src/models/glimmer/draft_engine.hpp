@@ -134,6 +134,10 @@ class DraftSession final {
                                   std::string* error_msg = nullptr);
   /// Scores staged hidden row i through the target head (for sampling).
   [[nodiscard]] bool ScoreRow(std::uint32_t i, std::string* error_msg = nullptr);
+  /// Scores staged hidden rows [first, first + count) through the target head in ONE multi-row GEMM and returns the greedy
+  /// token of each row (count <= 32). The weights of the (large) output head are read once instead of once per row.
+  [[nodiscard]] bool ScoreRows(std::uint32_t first, std::uint32_t count, std::vector<std::int32_t>* tokens,
+                               std::string* error_msg = nullptr);
   /// Moves the length marker back (used by the backend to roll back
   /// unaccepted proposals). KV rows beyond the marker stay valid and are
   /// overwritten by later forwards.

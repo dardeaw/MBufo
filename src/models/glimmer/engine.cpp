@@ -40,9 +40,8 @@ inline std::uint32_t MaxChunkTokens() {
   return v;
 }
 #define kMaxChunk MaxChunkTokens()
-/// Batched-verify row cap: speculative verification batches are short
-/// (1 anchor + a handful of drafts); wider batches fall back to serial.
-constexpr std::uint32_t kMaxVerify = 8;
+/// Batched-verify row cap: [anchor + drafts] rows scored in one forward.
+constexpr std::uint32_t kMaxVerify = 32;
 
 /// Unified-batch opt-out valve (default on): GUFO_GLIMMER_UNIFIED_BATCH=0
 /// keeps the legacy per-session attention cores everywhere (Forward and
@@ -1001,21 +1000,14 @@ void Session::ForwardFinish(Session& s, std::uint32_t n,
                    static_cast<const float*>(w.output_norm.device),
                    impl.normed, n, hidden, c.rms_eps, stream);
   if (all_logits && n <= kMaxVerify) {
-    // Batched verify: score every row (n <= kMaxVerify, dense staging).
-    for (std::uint32_t r = 0; r < n; ++r) {
-      const float* row_in = impl.normed + static_cast<std::size_t>(r) * hidden;
-      float* row_out =
-          impl.verify_logits + static_cast<std::size_t>(r) * c.vocab_size;
-      GlimmerGemm(w.output, row_in, impl.x16, impl.q8tiled, impl.preq_scratch, impl.preq_bytes, impl.wdq, impl.wdq_bytes, &impl.predq, row_out, 1, c.vocab_size,
-                  hidden, stream);
-      if (c.logit_scale != 1.0F) {
-        kernels::ScaleInplace(row_out, c.logit_scale,
-                              static_cast<std::size_t>(1) * c.vocab_size,
-                              stream);
-      }
-      kernels::SoftCap(row_out, c.final_logit_softcapping,
-                       static_cast<std::size_t>(1) * c.vocab_size, stream);
+    // Batched verify: score every row with ONE multi-row head GEMM (n <= kMaxVerify): the output head is read once.
+    float* rows_out = impl.verify_logits;
+    GlimmerGemm(w.output, impl.normed, impl.x16, impl.q8tiled, impl.preq_scratch, impl.preq_bytes, impl.wdq,
+                impl.wdq_bytes, &impl.predq, rows_out, n, c.vocab_size, hidden, stream);
+    if (c.logit_scale != 1.0F) {
+      kernels::ScaleInplace(rows_out, c.logit_scale, static_cast<std::size_t>(n) * c.vocab_size, stream);
     }
+    kernels::SoftCap(rows_out, c.final_logit_softcapping, static_cast<std::size_t>(n) * c.vocab_size, stream);
   } else {
     const float* last_row =
         impl.normed + static_cast<std::size_t>(n - 1) * hidden;
@@ -1323,7 +1315,7 @@ bool Session::Verify(std::span<const std::int32_t> tokens,
   const std::uint32_t n = static_cast<std::uint32_t>(tokens.size());
   if (n == 0 || n > kMaxVerify) {
     if (error_msg != nullptr)
-      *error_msg = "glimmer Verify needs 1..8 tokens";
+      *error_msg = "glimmer Verify needs 1..32 tokens";
     return false;
   }
   if (!Forward(tokens, start_pos, error_msg, /*all_logits=*/true, tap))
@@ -1552,6 +1544,126 @@ bool Session::SpeculativeRound(speculative::IDraftBackend& draft,
   std::vector<tokenization::TokenId> matched(
       proposal.tokens.begin(), proposal.tokens.begin() + accepted);
   dflash->AcceptFeedback(matched, static_cast<tokenization::TokenId>(bonus));
+  return true;
+}
+
+bool Session::SpeculativeStep(speculative::IDraftBackend& draft, std::span<const std::int32_t> committed,
+                              std::uint32_t n_draft, std::vector<std::int32_t>* out, std::string* error_msg) {
+  const auto fail = [&](const std::string& m) {
+    if (error_msg != nullptr && error_msg->empty()) *error_msg = m;
+    return false;
+  };
+  if (out == nullptr) return fail("glimmer SpeculativeStep needs an output");
+  if (committed.empty() || impl_->length == 0) return fail("speculative step needs a prompt and a pending anchor");
+  if (committed.size() != static_cast<std::size_t>(impl_->length) + 1)
+    return fail("speculative prefix desync (needs Length() + 1: forwarded tokens plus the pending anchor)");
+  auto* dflash = dynamic_cast<GlimmerDflashDraftBackend*>(&draft);
+  if (dflash == nullptr) return fail("glimmer SpeculativeStep needs the glimmer-dflash backend");
+  const auto tap_span = dflash->TargetHiddenLayerIds();
+  const std::vector<std::uint32_t> taps(tap_span.begin(), tap_span.end());
+  if (taps.empty() || impl_->tap_layers_ != taps) return fail("draft tap mismatch (call EnableDraftTaps first)");
+  const std::uint32_t hidden = model_->weights_->config.hidden_size;
+  const std::uint32_t feat_width = static_cast<std::uint32_t>(taps.size()) * hidden;
+  const std::uint32_t L = impl_->length;  // forwarded tokens; the pending anchor sits at position L
+  const std::int32_t pending = committed.back();
+  if (L + 1 > impl_->capacity) return fail("glimmer context exhausted");
+  const auto append_to_draft = [&](std::span<const std::int32_t> toks, std::span<const float> feats,
+                                   std::uint32_t position) {
+    std::vector<tokenization::TokenId> ids(toks.begin(), toks.end());
+    speculative::DraftTargetContext ctx;
+    ctx.prompt_tokens = ids;
+    ctx.prompt_hidden_states = feats;
+    ctx.hidden_size = feat_width;
+    ctx.first_token = ids[0];
+    return dflash->AppendTargetContext(ctx, position);
+  };
+  // Plain step: forward the anchor, emit the target's next token (the new pending anchor), keep the draft in lockstep.
+  const auto plain_step = [&](std::string* err) -> bool {
+    if (!Forward({&pending, 1}, L, err)) return false;
+    if (dflash->primed()) {
+      std::vector<float> anchor_feats(feat_width);
+      if (!CopyTappedRow(anchor_feats, err)) return false;
+      if (!append_to_draft({&pending, 1}, anchor_feats, L)) return fail("glimmer draft append failed");
+      std::vector<tokenization::TokenId> none;
+      dflash->AcceptFeedback(none, static_cast<tokenization::TokenId>(pending));
+    }
+    out->assign(1, SampleGreedy());
+    return true;
+  };
+  std::uint32_t k = std::min({n_draft, kMaxVerify - 1, impl_->capacity - L - 1});
+  if (k == 0 || !dflash->primed()) return plain_step(error_msg);
+  std::vector<tokenization::TokenId> advisory;
+  advisory.reserve(committed.size());
+  for (const std::int32_t t : committed) advisory.push_back(static_cast<tokenization::TokenId>(t));
+  impl_->synced_.clear();  // the verify below performs KV surgery past L
+  const bool prof = std::getenv("GLIMMER_SPEC_PROF") != nullptr;
+  const auto tp0 = std::chrono::steady_clock::now();
+  auto proposal = dflash->ProposeFromPending(advisory, k);
+  const auto tp1 = std::chrono::steady_clock::now();
+  if (proposal.tokens.empty()) return plain_step(error_msg);
+  k = std::min(static_cast<std::uint32_t>(proposal.tokens.size()), kMaxVerify - 1);
+  // Verify [anchor, d_1..d_k]; a one-shot tap captures every verify row of every tapped layer (host [taps][k+1][hidden]).
+  const std::uint32_t rows = k + 1;
+  std::vector<std::vector<float>> tap_rows(taps.size());
+  TapSink sink;
+  sink.layers = taps;
+  sink.fn = [&](std::uint32_t il, const float* d_rows, std::uint32_t n, std::uint32_t start) {
+    (void)start;
+    for (std::size_t s = 0; s < taps.size(); ++s) {
+      if (taps[s] == il) {
+        tap_rows[s].assign(static_cast<std::size_t>(n) * hidden, 0.0F);
+        (void)hipMemcpy(tap_rows[s].data(), d_rows, static_cast<std::size_t>(n) * hidden * sizeof(float),
+                        hipMemcpyDeviceToHost);
+      }
+    }
+  };
+  std::vector<std::int32_t> vtoks;
+  vtoks.reserve(rows);
+  vtoks.push_back(pending);
+  for (std::uint32_t i = 0; i < k; ++i) vtoks.push_back(static_cast<std::int32_t>(proposal.tokens[i]));
+  std::vector<std::int32_t> vbest;
+  if (!Verify(vtoks, L, vbest, error_msg, &sink)) return false;
+  const auto tp2 = std::chrono::steady_clock::now();
+  // Row j of the verify batch predicts position L + j + 1: draft d_{j+1} is accepted while it equals row j's argmax.
+  std::uint32_t accepted = 0;
+  while (accepted < k && static_cast<std::int32_t>(proposal.tokens[accepted]) == vbest[accepted]) ++accepted;
+  const std::int32_t bonus = vbest[accepted];
+  out->clear();
+  for (std::uint32_t i = 0; i < accepted; ++i) out->push_back(static_cast<std::int32_t>(proposal.tokens[i]));
+  out->push_back(bonus);
+  // Target commit: the KV rows of the anchor and the accepted drafts are valid; the bonus stays pending. Point the logits
+  // at the bonus row so the session is consistent for a plain continuation.
+  impl_->length = L + accepted + 1;
+  {
+    auto& impl = *impl_;
+    const std::size_t vocab = impl.host_logits.size();
+    hipStream_t stream = 0;
+    (void)hipMemcpyAsync(impl.logits, impl.verify_logits + static_cast<std::size_t>(accepted) * vocab,
+                         vocab * sizeof(float), hipMemcpyDeviceToDevice, stream);
+    (void)hipMemcpyAsync(impl.host_logits.data(), impl.logits, vocab * sizeof(float), hipMemcpyDeviceToHost, stream);
+    (void)hipStreamSynchronize(0);
+  }
+  // Draft commit: the anchor and the accepted drafts with their true verify-row features, starting at the block start L.
+  std::vector<std::int32_t> commit_toks;
+  commit_toks.reserve(accepted + 1);
+  commit_toks.push_back(pending);
+  for (std::uint32_t i = 0; i < accepted; ++i) commit_toks.push_back(static_cast<std::int32_t>(proposal.tokens[i]));
+  std::vector<float> commit_feats;
+  commit_feats.reserve(static_cast<std::size_t>(accepted + 1) * feat_width);
+  for (std::uint32_t j = 0; j <= accepted; ++j)
+    for (std::size_t s = 0; s < taps.size(); ++s) {
+      const float* row = tap_rows[s].data() + static_cast<std::size_t>(j) * hidden;
+      commit_feats.insert(commit_feats.end(), row, row + hidden);
+    }
+  if (!append_to_draft(commit_toks, commit_feats, L)) return fail("glimmer draft append failed");
+  std::vector<tokenization::TokenId> matched(proposal.tokens.begin(), proposal.tokens.begin() + accepted);
+  dflash->AcceptFeedback(matched, static_cast<tokenization::TokenId>(bonus));
+  if (prof) {
+    const auto tp3 = std::chrono::steady_clock::now();
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    std::fprintf(stderr, "[spec] k=%u accepted=%u propose=%.1f ms verify=%.1f ms commit=%.1f ms\n", k, accepted,
+                 ms(tp0, tp1), ms(tp1, tp2), ms(tp2, tp3));
+  }
   return true;
 }
 
