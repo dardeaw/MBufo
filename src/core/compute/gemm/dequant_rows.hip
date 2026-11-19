@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "src/core/compute/gemm/gemm.hpp"
 
@@ -80,10 +81,12 @@ __device__ __forceinline__ void ScaleMinK4(std::uint32_t j,
   }
 }
 
-// Element `i` of a packed row (`row` points at the row start).
-__device__ __forceinline__ float RowElementAt(int type, const std::uint8_t* row,
+// Element `i` of a packed row (`row` points at the row start). The type is a
+// template parameter so every kernel instance decodes exactly one format.
+template <int kType>
+__device__ __forceinline__ float RowElementAt(const std::uint8_t* row,
                                               std::uint32_t i) {
-  switch (type) {
+  switch (kType) {
     case GUFO_GEMM_F32:
       return reinterpret_cast<const float*>(row)[i];
     case GUFO_GEMM_F16:
@@ -147,8 +150,9 @@ __device__ __forceinline__ float RowElementAt(int type, const std::uint8_t* row,
   }
 }
 
+template <int kType>
 __global__ void EmbedGatherKernel(const std::uint8_t* __restrict__ table,
-                                  int type, std::size_t row_bytes,
+                                  std::size_t row_bytes,
                                   const std::int32_t* __restrict__ ids,
                                   float* __restrict__ out,
                                   std::uint32_t hidden) {
@@ -158,10 +162,11 @@ __global__ void EmbedGatherKernel(const std::uint8_t* __restrict__ table,
     return;
   const std::uint8_t* row =
       table + static_cast<std::size_t>(ids[t]) * row_bytes;
-  out[static_cast<std::size_t>(t) * hidden + i] = RowElementAt(type, row, i);
+  out[static_cast<std::size_t>(t) * hidden + i] = RowElementAt<kType>(row, i);
 }
 
-__global__ void DequantRowsKernel(const std::uint8_t* __restrict__ w, int type,
+template <int kType>
+__global__ void DequantRowsKernel(const std::uint8_t* __restrict__ w,
                                   std::size_t row_bytes,
                                   __half* __restrict__ out,
                                   std::size_t row0, std::size_t cols) {
@@ -170,7 +175,24 @@ __global__ void DequantRowsKernel(const std::uint8_t* __restrict__ w, int type,
   if (c >= cols)
     return;
   out[r * cols + c] = __float2half(
-      RowElementAt(type, w + r * row_bytes, static_cast<std::uint32_t>(c)));
+      RowElementAt<kType>(w + r * row_bytes, static_cast<std::uint32_t>(c)));
+}
+
+// Calls f(std::integral_constant<int, T>{}) for the runtime type code; false when
+// the type has no decoder.
+template <class F>
+bool DispatchType(int type, F&& f) {
+  switch (type) {
+    case GUFO_GEMM_F32:  f(std::integral_constant<int, GUFO_GEMM_F32>{});  return true;
+    case GUFO_GEMM_F16:  f(std::integral_constant<int, GUFO_GEMM_F16>{});  return true;
+    case GUFO_GEMM_BF16: f(std::integral_constant<int, GUFO_GEMM_BF16>{}); return true;
+    case GUFO_GEMM_Q4_0: f(std::integral_constant<int, GUFO_GEMM_Q4_0>{}); return true;
+    case GUFO_GEMM_Q8_0: f(std::integral_constant<int, GUFO_GEMM_Q8_0>{}); return true;
+    case GUFO_GEMM_Q4_K: f(std::integral_constant<int, GUFO_GEMM_Q4_K>{}); return true;
+    case GUFO_GEMM_Q5_K: f(std::integral_constant<int, GUFO_GEMM_Q5_K>{}); return true;
+    case GUFO_GEMM_Q6_K: f(std::integral_constant<int, GUFO_GEMM_Q6_K>{}); return true;
+    default: return false;
+  }
 }
 
 }  // namespace
@@ -190,11 +212,14 @@ bool EmbedGather(const void* table, int type, const std::int32_t* ids,
     return false;
   const std::size_t row_bytes = RowBytesOf(type, hidden);
   const unsigned waves = static_cast<unsigned>((hidden + 255) / 256);
-  hipLaunchKernelGGL(EmbedGatherKernel,
-                     dim3(static_cast<unsigned>(n_tokens), waves), dim3(256), 0,
-                     stream, static_cast<const std::uint8_t*>(table), type,
-                     row_bytes, ids, out, static_cast<std::uint32_t>(hidden));
-  return true;
+  return DispatchType(type, [&](auto tc) {
+    constexpr int kT = decltype(tc)::value;
+    hipLaunchKernelGGL((EmbedGatherKernel<kT>),
+                       dim3(static_cast<unsigned>(n_tokens), waves), dim3(256),
+                       0, stream, static_cast<const std::uint8_t*>(table),
+                       row_bytes, ids, out,
+                       static_cast<std::uint32_t>(hidden));
+  });
 }
 
 bool DequantRowsF16(const void* w, int type, __half* out, std::size_t rows,
@@ -207,14 +232,16 @@ bool DequantRowsF16(const void* w, int type, __half* out, std::size_t rows,
     return false;
   const std::size_t row_bytes = RowBytesOf(type, cols);
   const unsigned col_blocks = static_cast<unsigned>((cols + 255) / 256);
-  for (std::size_t row0 = 0; row0 < rows; row0 += 65535) {
-    const std::size_t n = rows - row0 < 65535 ? rows - row0 : 65535;
-    hipLaunchKernelGGL(DequantRowsKernel,
-                       dim3(col_blocks, static_cast<unsigned>(n)), dim3(256), 0,
-                       stream, static_cast<const std::uint8_t*>(w), type,
-                       row_bytes, out, row0, cols);
-  }
-  return true;
+  return DispatchType(type, [&](auto tc) {
+    constexpr int kT = decltype(tc)::value;
+    for (std::size_t row0 = 0; row0 < rows; row0 += 65535) {
+      const std::size_t n = rows - row0 < 65535 ? rows - row0 : 65535;
+      hipLaunchKernelGGL((DequantRowsKernel<kT>),
+                         dim3(col_blocks, static_cast<unsigned>(n)), dim3(256),
+                         0, stream, static_cast<const std::uint8_t*>(w),
+                         row_bytes, out, row0, cols);
+    }
+  });
 }
 
 }  // namespace gufo::core::compute::gemm
