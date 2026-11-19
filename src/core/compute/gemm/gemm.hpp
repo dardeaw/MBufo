@@ -83,6 +83,10 @@ void GemvQkv(const void* w_q, int type_q, std::uint64_t rb_q,
              std::uint32_t n_tokens, hipStream_t stream);
 void SoftCap(float* x, float cap, std::size_t count, hipStream_t stream);
 
+/// Single-token decode GEMV for K-quant weights (Q4_K, Q5_K), F32 activations: Y[r] = sum_k W[r][k] * X[k]. Rows share one
+/// load of each activation slice (the generic block GEMV reloads it per row). Returns false for other formats / shapes
+/// (k % 256 == 0, 16-byte aligned pointers).
+bool QuantGemvSingle(const void* w, int type, const float* x, float* y, std::size_t m, std::size_t k, hipStream_t stream);
 /// Multi-token decode / speculative-verify GEMM for K-quant weights (Q4_K, Q5_K): Y[t][r] = sum_k W[r][k] * X[t][k] with
 /// X F32 [n_tokens][k] (16-byte aligned), Y F32 [n_tokens][m]. Every weight byte is read once for all tokens (WMMA with
 /// in-register dequantization). Returns false (nothing launched) for other formats or shapes: n_tokens 1..32,

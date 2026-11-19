@@ -177,6 +177,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/quant_dispatch.hip
     src/core/compute/gemm/wmma_tiled_gemm.hip
     src/core/compute/gemm/gemv_multi_wmma.hip
+    src/core/compute/gemm/gemv_single_k.hip
     src/core/compute/gemm/gemv_narrow_quant.hip
     src/core/compute/gemm/routed_moe.hip
     src/core/compute/gemm/moe_decode_kq.hip
@@ -200,6 +201,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/quant_dispatch.hip
     src/core/compute/gemm/wmma_tiled_gemm.hip
     src/core/compute/gemm/gemv_multi_wmma.hip
+    src/core/compute/gemm/gemv_single_k.hip
     src/core/compute/gemm/gemv_narrow_quant.hip
     src/core/compute/gemm/routed_moe.hip
     src/core/compute/gemm/moe_decode_kq.hip

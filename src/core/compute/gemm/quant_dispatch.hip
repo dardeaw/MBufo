@@ -52,6 +52,11 @@ q::Status GemvDecode(const void* w, int type, const float* x, float* y, std::siz
         st = q::Status::kOk;
         break;
       case q::DecodePath::kBlockGemv:
+        // One token: rows share a single load of each activation slice (GUFO_NO_SINGLE_GEMV=1 keeps the block GEMV).
+        if (n_tokens == 1 && std::getenv("GUFO_NO_SINGLE_GEMV") == nullptr && QuantGemvSingle(w, type, x, y, m, k, stream)) {
+          st = q::Status::kOk;
+          break;
+        }
         // 2..192 tokens: read every weight once per group of <= 32 tokens (the loop below re-reads the matrix per token).
         // GUFO_NO_MULTI_GEMV=1 keeps the per-token loop for A/B runs.
         if (n_tokens >= 2 && std::getenv("GUFO_NO_MULTI_GEMV") == nullptr) {
