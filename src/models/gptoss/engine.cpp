@@ -974,11 +974,22 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
         impl.buffers.kv_bk[il], impl.buffers.kv_k[il],
         impl.buffers.kv_bv[il], impl.buffers.kv_v[il],
         kv_len * c.num_kv_heads, d, 34, 34, blocked::KvCodec::kQ8, stream);
-    kernels::AttentionF16Sink(
-        impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
-        static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
-        start_pos, c.num_heads, c.num_kv_heads, d, window, stream,
-        score_scale);
+    // The dequantized staging is plain F16 KV, so decode can ride the shared
+    // split-K flash-sink kernel (the scalar AttentionF16Sink scans every key
+    // serially: ~70 us/layer even at short context).
+    if (!(n == 1 && d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr &&
+          core::compute::flash_sink::FlashSinkDecode(
+              impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+              static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
+              start_pos, start_pos + n, c.num_heads, c.num_kv_heads, d, window,
+              score_scale, stream, impl.flash_partials,
+              impl.flash_partials_bytes))) {
+      kernels::AttentionF16Sink(
+          impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+          static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
+          start_pos, c.num_heads, c.num_kv_heads, d, window, stream,
+          score_scale);
+    }
   } else {
     kernels::StoreKvF16(impl.kbuf, impl.buffers.kv_k[il], n, kvdim,
                         start_pos, stream);
