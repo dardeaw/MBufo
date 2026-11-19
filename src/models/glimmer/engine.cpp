@@ -1547,11 +1547,17 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
   } else {
     impl_->length = 0;
   }
-  for (std::size_t off = start; off < prompt.size(); off += kMaxChunk) {
-    const std::size_t len = std::min<std::size_t>(kMaxChunk, prompt.size() - off);
+  // Even split into ceil(n / kMaxChunk) chunks: a short tail chunk would pay a whole-model weight dequantize for a
+  // handful of tokens (and fall under the tiled GEMM's 256-token floor). Per-token results do not depend on how
+  // the prompt is chunked.
+  const std::size_t total_tokens = prompt.size() - start;
+  std::size_t chunks_left = (total_tokens + kMaxChunk - 1) / kMaxChunk;
+  for (std::size_t off = start; off < prompt.size(); --chunks_left) {
+    const std::size_t len = (prompt.size() - off + chunks_left - 1) / chunks_left;
     if (!Forward(prompt.subspan(off, len), static_cast<std::uint32_t>(off),
                  error_msg, /*all_logits=*/false, tap))
       return false;
+    off += len;
   }
   impl_->synced_.assign(prompt.begin(), prompt.end());
   (void)hipStreamSynchronize(0);
