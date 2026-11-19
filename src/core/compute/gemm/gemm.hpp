@@ -18,6 +18,9 @@
 #define GUFO_GEMM_F16 1
 #define GUFO_GEMM_Q4_0 2
 #define GUFO_GEMM_Q8_0 8
+#define GUFO_GEMM_Q4_K 12
+#define GUFO_GEMM_Q5_K 13
+#define GUFO_GEMM_Q6_K 14
 #define GUFO_GEMM_BF16 30
 
 #include <cstddef>
@@ -290,6 +293,21 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
 bool DenseF16Gemm(const void* w, const __half* x, float* out,
                   std::size_t batch, std::size_t m, std::size_t k,
                   hipStream_t stream, std::size_t input_stride = 0);
+
+/// Bytes of one packed GGML row of `cols` elements (type = GUFO_GEMM_* code:
+/// F32/F16/BF16/Q4_0/Q8_0/Q4_K/Q5_K/Q6_K); 0 when the type is unsupported or
+/// `cols` is not a whole number of blocks.
+std::size_t DequantRowBytes(int type, std::size_t cols);
+/// Embedding gather: out[t, :] = dequantized row ids[t] of `table` (F32).
+/// Shared by every model so an embedding table in any supported format works.
+/// Returns false (nothing launched) for unsupported type/shape.
+bool EmbedGather(const void* table, int type, const std::int32_t* ids,
+                 float* out, std::size_t n_tokens, std::size_t hidden,
+                 hipStream_t stream);
+/// Dequantize `rows` packed rows of `cols` elements into dense row-major F16
+/// (prefill fallback for packed weights without a WMMA/MMQ kernel).
+bool DequantRowsF16(const void* w, int type, __half* out, std::size_t rows,
+                    std::size_t cols, hipStream_t stream);
 /// Routed-expert compaction sizing and launchers (16-row padded buckets).
 std::size_t RoutedCompactRows(std::size_t slots, std::size_t n_experts);
 void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
