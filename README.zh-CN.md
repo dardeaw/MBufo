@@ -1,8 +1,9 @@
 # MBufo
 
-专为 AMD Strix Halo（`gfx1151`）架构深度打造的 [gufo](https://github.com/gufo-org/gufo) 分支，定位为**高并发、极致公平性与低成本的生产级推理引擎**。
+专为 AMD Strix Halo（`gfx1151`）架构深度打造的 [gufo](https://github.com/gufo-org/gufo) 分支，定位为**高并发、极致公平性与多模型的生产级推理引擎**。
 
 > [English Version](README.md) · [繁體中文版](README.zh-Hant.md)
+<img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/562fcc09-a6dd-46eb-b143-6d702f5aa08c" />
 
 上游 gufo 专精于单流极限吞吐；MBufo 则聚焦于服务端实际服务的核心挑战：单台 Strix Halo 节点在面临十六路以上高并发请求时如何保持满载，且每路请求如何承载长达 256K 的极限上下文。MBufo 以三大核心支柱解答：**负载下的公平调度（§1）**、**极致节省显存与算力的低精度计算（§2）**，以及**单端口整合全家族的 GGUF 兼容支持（§3）**。底层引擎、算子内核与核心架构源自上游，在此诚挚致谢 gufo-org 及广大社区贡献者。
 

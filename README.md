@@ -1,8 +1,10 @@
 # MBufo
 
-A specialized fork of [gufo](https://github.com/gufo-org/gufo) engineered for AMD Strix Halo (`gfx1151`), built as a **fair, low-cost, high-concurrency inference engine for production workloads**.
+A specialized fork of [gufo](https://github.com/gufo-org/gufo) engineered for AMD Strix Halo (`gfx1151`), built as a **fair, multi-models, high-concurrency inference engine for production workloads**.
 
 > [繁體中文版](README.zh-Hant.md) · [简体中文版](README.zh-CN.md)
+
+<img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/8021186d-c066-4fa6-bd84-0d908c1164eb" />
 
 Upstream gufo is tuned for single-stream peak throughput. MBufo addresses the operational reality of production serving: how a single Strix Halo node sustains 16+ concurrent streams under heavy load while offering up to 256K context per session. MBufo achieves this through three core pillars: **fair scheduling under load (§1)**, **low-precision compute that drastically cuts cost and memory (§2)**, and **comprehensive GGUF coverage across 13 model families on a single port (§3)**. The engine primitives, compute kernels, and foundations originate from upstream; sincere thanks to gufo-org and all community contributors.
 
