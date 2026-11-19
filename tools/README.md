@@ -8,7 +8,7 @@ benchmark/tuning executables; Python tools run from this source tree.
 
 | Directory | Purpose |
 | --- | --- |
-| `bench/` | Kernel microbenchmarks, hipBLASLt tuning, and direct speculative-corpus checks; `model-bench.py` drives per-model BENCHMARKS.md tables against each model's reference |
+| `bench/` | Kernel microbenchmarks, hipBLASLt tuning, direct speculative-corpus checks, and `tool_ladder.py` (tool-call accuracy vs context length against any OpenAI-compatible server); `model-bench.py` drives per-model BENCHMARKS.md tables against each model's reference |
 | `prof/` | rocprofv3 capture, stage summaries, and ISA inspection |
 | `serving/` | HTTP serving benchmarks |
 | `ds4/` | DeepSeek-specific validation and experiments |
