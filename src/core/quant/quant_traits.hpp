@@ -118,6 +118,16 @@ template <> struct Traits<FormatId::kQ4_0> {
     const int q = (e < 16u ? (b & 0xF) : (b >> 4)) - 8;
     return static_cast<float>(q) * detail::HalfAt(blk);
   }
+  /// Element * scale with the scale folded into the block scale first, the order embedding-scaling callers
+  /// (Gemma's sqrt(hidden)) used before the shared decode, so their output stays bit-identical.
+  GUFO_QT_FN static float ScaledElement(const std::uint8_t* row, std::uint32_t i, float scale) {
+    const std::uint8_t* blk = row + static_cast<std::size_t>(i / 32) * 18;
+    const std::uint32_t e = i % 32;
+    const std::uint8_t b = blk[2 + (e & 15u)];
+    const int q = (e < 16u ? (b & 0xF) : (b >> 4)) - 8;
+    const float d = detail::HalfAt(blk) * scale;
+    return d * static_cast<float>(q);
+  }
 };
 
 template <> struct Traits<FormatId::kQ8_0> {
@@ -130,6 +140,12 @@ template <> struct Traits<FormatId::kQ8_0> {
   GUFO_QT_FN static float Element(const std::uint8_t* row, std::uint32_t i) {
     const std::uint8_t* blk = row + static_cast<std::size_t>(i / 32) * 34;
     return static_cast<float>(static_cast<std::int8_t>(blk[2 + (i % 32)])) * detail::HalfAt(blk);
+  }
+  /// See Traits<kQ4_0>::ScaledElement.
+  GUFO_QT_FN static float ScaledElement(const std::uint8_t* row, std::uint32_t i, float scale) {
+    const std::uint8_t* blk = row + static_cast<std::size_t>(i / 32) * 34;
+    const float d = detail::HalfAt(blk) * scale;
+    return d * static_cast<float>(static_cast<std::int8_t>(blk[2 + (i % 32)]));
   }
 };
 
@@ -205,6 +221,16 @@ concept QuantFormat = requires(const std::uint8_t* row, std::size_t n, std::uint
   { T::ColsOk(n) } -> std::same_as<bool>;
   { T::Element(row, i) } -> std::same_as<float>;
 };
+
+/// Element(row, i) * scale, using the format's own ScaledElement when it declares one (so the scale is
+/// folded in the same order its callers always used) and Element * scale otherwise.
+template <class F>
+GUFO_QT_FN float ScaledElementOf(const std::uint8_t* row, std::uint32_t i, float scale) {
+  if constexpr (requires { { F::ScaledElement(row, i, scale) } -> std::same_as<float>; })
+    return F::ScaledElement(row, i, scale);
+  else
+    return F::Element(row, i) * scale;
+}
 
 template <class... Fs>
 struct FormatList {

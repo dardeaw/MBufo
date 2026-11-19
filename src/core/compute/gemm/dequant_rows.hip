@@ -23,15 +23,46 @@ namespace {
 
 namespace q = ::gufo::core::quant;
 
-template <class F>
+// kScaled multiplies the decoded element by `scale` (embedding scaling, e.g. Gemma's sqrt(hidden)); the
+// unscaled instance does no extra multiply so its output stays bit-identical to the plain decode.
+template <class F, bool kScaled>
 __global__ void EmbedGatherKernel(const std::uint8_t* __restrict__ table, std::size_t row_bytes,
                                   const std::int32_t* __restrict__ ids, float* __restrict__ out,
-                                  std::uint32_t hidden) {
+                                  std::uint32_t hidden, float scale) {
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t i = blockIdx.y * 256u + threadIdx.x;
   if (i >= hidden) return;
   const std::uint8_t* row = table + static_cast<std::size_t>(ids[t]) * row_bytes;
-  out[static_cast<std::size_t>(t) * hidden + i] = F::Element(row, i);
+  out[static_cast<std::size_t>(t) * hidden + i] =
+      kScaled ? q::ScaledElementOf<F>(row, i, scale) : F::Element(row, i);
+}
+
+// One token passed by value (no device id buffer needed).
+template <class F>
+__global__ void EmbedGatherOneKernel(const std::uint8_t* __restrict__ table, std::size_t row_bytes,
+                                     std::uint32_t token, float* __restrict__ out, std::uint32_t hidden) {
+  const std::uint32_t i = blockIdx.x * 256u + threadIdx.x;
+  if (i >= hidden) return;
+  out[i] = F::Element(table + static_cast<std::size_t>(token) * row_bytes, i);
+}
+
+template <bool kScaled>
+bool EmbedGatherImpl(const void* table, int type, const std::int32_t* ids, float* out, std::size_t n_tokens,
+                     std::size_t hidden, float scale, hipStream_t stream) {
+  if (table == nullptr || ids == nullptr || out == nullptr) return false;
+  if (n_tokens == 0) return true;
+  if (n_tokens > 65535) return false;
+  bool launched = false;
+  const bool known = q::AllFormats::Dispatch(type, [&](auto fm) {
+    using F = decltype(fm);
+    if (!F::ColsOk(hidden)) return;
+    const unsigned waves = static_cast<unsigned>((hidden + 255) / 256);
+    hipLaunchKernelGGL((EmbedGatherKernel<F, kScaled>), dim3(static_cast<unsigned>(n_tokens), waves), dim3(256),
+                       0, stream, static_cast<const std::uint8_t*>(table), F::RowBytes(hidden), ids, out,
+                       static_cast<std::uint32_t>(hidden), scale);
+    launched = true;
+  });
+  return known && launched;
 }
 
 template <class F>
@@ -56,16 +87,23 @@ std::size_t DequantRowBytes(int type, std::size_t cols) {
 
 bool EmbedGather(const void* table, int type, const std::int32_t* ids, float* out, std::size_t n_tokens,
                  std::size_t hidden, hipStream_t stream) {
-  if (table == nullptr || ids == nullptr || out == nullptr) return false;
-  if (n_tokens == 0) return true;
-  if (n_tokens > 65535) return false;
+  return EmbedGatherImpl<false>(table, type, ids, out, n_tokens, hidden, 1.0f, stream);
+}
+
+bool EmbedGatherScaled(const void* table, int type, const std::int32_t* ids, float* out, std::size_t n_tokens,
+                       std::size_t hidden, float scale, hipStream_t stream) {
+  return EmbedGatherImpl<true>(table, type, ids, out, n_tokens, hidden, scale, stream);
+}
+
+bool EmbedGatherOne(const void* table, int type, std::uint32_t token, float* out, std::size_t hidden,
+                    hipStream_t stream) {
+  if (table == nullptr || out == nullptr) return false;
   bool launched = false;
   const bool known = q::AllFormats::Dispatch(type, [&](auto fm) {
     using F = decltype(fm);
     if (!F::ColsOk(hidden)) return;
-    const unsigned waves = static_cast<unsigned>((hidden + 255) / 256);
-    hipLaunchKernelGGL((EmbedGatherKernel<F>), dim3(static_cast<unsigned>(n_tokens), waves), dim3(256), 0,
-                       stream, static_cast<const std::uint8_t*>(table), F::RowBytes(hidden), ids, out,
+    hipLaunchKernelGGL((EmbedGatherOneKernel<F>), dim3(static_cast<unsigned>((hidden + 255) / 256)), dim3(256), 0,
+                       stream, static_cast<const std::uint8_t*>(table), F::RowBytes(hidden), token, out,
                        static_cast<std::uint32_t>(hidden));
     launched = true;
   });

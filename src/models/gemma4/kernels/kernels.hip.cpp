@@ -1,3 +1,6 @@
+#include <cstdlib>
+#include <cstdio>
+#include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/gemma4/kernels/kernels.hpp"
 #include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/models/gemma4/weights.hpp"
@@ -1654,56 +1657,6 @@ __global__ void MoeEpilogueKernel(const float* expert_out,
 
 }  // namespace
 
-__global__ void EmbedKernel(const std::uint8_t* __restrict__ table,
-                            int type, const std::int32_t* __restrict__ tokens,
-                            float* __restrict__ res, std::uint32_t hidden) {
-  const std::uint32_t t = blockIdx.x;
-  const std::size_t row_bytes =
-      type == 0 ? static_cast<std::size_t>(hidden) * 4        // F32
-                : type == 1 ? static_cast<std::size_t>(hidden) * 2   // F16
-                : type == 8 ? static_cast<std::size_t>(hidden) / 32 * 34  // Q8_0
-                : static_cast<std::size_t>(hidden) / 32 * 18;        // Q4_0
-  const std::uint8_t* row = table + row_bytes * tokens[t];
-  const std::size_t base = static_cast<std::size_t>(t) * hidden;
-  if (type == 0) {
-    const auto* src = reinterpret_cast<const float*>(row);
-    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
-      res[base + i] = src[i];
-    }
-    return;
-  }
-  if (type == 1) {
-    const auto* src = reinterpret_cast<const __half*>(row);
-    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
-      res[base + i] = __half2float(src[i]);
-    }
-    return;
-  }
-  if (type == 8) {  // Q8_0: f16 scale (2B) + 32 int8
-    for (std::uint32_t b = threadIdx.x; b < hidden / 32; b += blockDim.x) {
-      const std::uint8_t* blk = row + static_cast<std::size_t>(34) * b;
-      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
-      const std::size_t off = base + static_cast<std::size_t>(b) * 32;
-      for (int q = 0; q < 32; ++q) {
-        res[off + q] = d * static_cast<float>(static_cast<std::int8_t>(blk[2 + q]));
-      }
-    }
-    return;
-  }
-  for (std::uint32_t b = threadIdx.x; b < hidden / 32; b += blockDim.x) {
-    const std::uint8_t* blk = row + static_cast<std::size_t>(18) * b;
-    const float d = __half2float(*reinterpret_cast<const __half*>(blk));
-    const std::uint8_t* qs = blk + 2;
-    const std::size_t off = base + static_cast<std::size_t>(b) * 32;
-    for (int q = 0; q < 16; ++q) {
-      const int lo = qs[q] & 0xF;
-      const int hi = qs[q] >> 4;
-      res[off + q] = d * static_cast<float>(lo - 8);
-      res[off + q + 16] = d * static_cast<float>(hi - 8);
-    }
-  }
-}
-
 __global__ void DebugRowKernel(const std::uint8_t* table,
                                std::uint32_t row_bytes, std::uint32_t token,
                                float* out, std::uint32_t n) {
@@ -1723,51 +1676,19 @@ void DebugRow(const void* table, std::uint32_t row_bytes,
 static std::int32_t* g_d_tokens = nullptr;
 static std::size_t g_d_tokens_cap = 0;
 
-__global__ void EmbedScaleKernel(const std::uint8_t* __restrict__ table,
-                                 int type, const std::int32_t* __restrict__ tokens,
-                                 float* __restrict__ res, std::uint32_t hidden,
-                                 float scale) {
-  const std::uint32_t t = blockIdx.x;
-  const std::size_t row_bytes =
-      type == 0 ? static_cast<std::size_t>(hidden) * 4
-                : type == 1 ? static_cast<std::size_t>(hidden) * 2
-                : type == 8 ? static_cast<std::size_t>(hidden) / 32 * 34
-                            : static_cast<std::size_t>(hidden) / 32 * 18;
-  const std::uint8_t* row = table + row_bytes * tokens[t];
-  const std::size_t base = static_cast<std::size_t>(t) * hidden;
-  if (type == 0) {
-    const auto* src = reinterpret_cast<const float*>(row);
-    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x)
-      res[base + i] = src[i] * scale;
-    return;
-  }
-  if (type == 1) {
-    const auto* src = reinterpret_cast<const __half*>(row);
-    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x)
-      res[base + i] = __half2float(src[i]) * scale;
-    return;
-  }
-  if (type == 8) {
-    for (std::uint32_t b = threadIdx.x; b < hidden / 32; b += blockDim.x) {
-      const std::uint8_t* blk = row + static_cast<std::size_t>(34) * b;
-      const float d = __half2float(*reinterpret_cast<const __half*>(blk)) * scale;
-      const std::size_t off = base + static_cast<std::size_t>(b) * 32;
-      for (int q = 0; q < 32; ++q)
-        res[off + q] = d * static_cast<float>(static_cast<std::int8_t>(blk[2 + q]));
-    }
-    return;
-  }
-  for (std::uint32_t b = threadIdx.x; b < hidden / 32; b += blockDim.x) {
-    const std::uint8_t* blk = row + static_cast<std::size_t>(18) * b;
-    const float d = __half2float(*reinterpret_cast<const __half*>(blk)) * scale;
-    const std::uint8_t* qs = blk + 2;
-    const std::size_t off = base + static_cast<std::size_t>(b) * 32;
-    for (int q = 0; q < 16; ++q) {
-      const int lo = qs[q] & 0xF;
-      const int hi = qs[q] >> 4;
-      res[off + q] = d * static_cast<float>(lo - 8);
-      res[off + q + 16] = d * static_cast<float>(hi - 8);
-    }
+// Embedding gathers ride the shared core decode (every format core::quant lists; an unlisted format
+// aborts instead of being read as Q4_0 like the private kernels did).
+static void EmbedOrDie(const void* table, core::GgmlType type, const std::int32_t* d_tokens, float* res,
+                       std::uint32_t n_tokens, std::uint32_t hidden, bool scaled, float scale,
+                       hipStream_t stream) {
+  if (n_tokens == 0) return;
+  const bool ok = scaled ? core::compute::gemm::EmbedGatherScaled(table, static_cast<int>(type), d_tokens, res,
+                                                                  n_tokens, hidden, scale, stream)
+                         : core::compute::gemm::EmbedGather(table, static_cast<int>(type), d_tokens, res,
+                                                            n_tokens, hidden, stream);
+  if (!ok) {
+    std::fprintf(stderr, "[gemma4] unsupported token_embd type %d (hidden %u)\n", static_cast<int>(type), hidden);
+    std::abort();
   }
 }
 
@@ -1775,19 +1696,14 @@ void EmbedScale(const void* table, core::GgmlType type,
                 const std::int32_t* tokens, float* res, std::uint32_t n_tokens,
                 std::uint32_t hidden, float scale, hipStream_t stream) {
   UploadTokens(tokens, n_tokens, stream);
-  hipLaunchKernelGGL(EmbedScaleKernel, dim3(n_tokens), dim3(kThreads), 0,
-                     stream, static_cast<const std::uint8_t*>(table),
-                     static_cast<int>(type), g_d_tokens, res, hidden, scale);
+  EmbedOrDie(table, type, g_d_tokens, res, n_tokens, hidden, true, scale, stream);
 }
 
 void EmbedScaleDevice(const void* table, core::GgmlType type,
                       const std::int32_t* d_tokens, float* res,
                       std::uint32_t n_tokens, std::uint32_t hidden, float scale,
                       hipStream_t stream) {
-  if (n_tokens == 0) return;
-  hipLaunchKernelGGL(EmbedScaleKernel, dim3(n_tokens), dim3(kThreads), 0,
-                     stream, static_cast<const std::uint8_t*>(table),
-                     static_cast<int>(type), d_tokens, res, hidden, scale);
+  EmbedOrDie(table, type, d_tokens, res, n_tokens, hidden, true, scale, stream);
 }
 
 void UploadTokens(const std::int32_t* tokens, std::uint32_t n_tokens,
@@ -1811,9 +1727,7 @@ void Embed(const void* table, core::GgmlType type,
            const std::int32_t* tokens, float* res, std::uint32_t n_tokens,
            std::uint32_t hidden, hipStream_t stream) {
   UploadTokens(tokens, n_tokens, stream);
-  hipLaunchKernelGGL(EmbedKernel, dim3(n_tokens), dim3(kThreads), 0, stream,
-                     static_cast<const std::uint8_t*>(table),
-                     static_cast<int>(type), g_d_tokens, res, hidden);
+  EmbedOrDie(table, type, g_d_tokens, res, n_tokens, hidden, false, 1.0f, stream);
 }
 
 bool CopyHostToDevice(void* dst, const void* host, std::size_t bytes) {

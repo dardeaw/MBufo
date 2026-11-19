@@ -337,6 +337,12 @@ std::size_t DequantRowBytes(int type, std::size_t cols);
 bool EmbedGather(const void* table, int type, const std::int32_t* ids,
                  float* out, std::size_t n_tokens, std::size_t hidden,
                  hipStream_t stream);
+/// EmbedGather with every element multiplied by `scale` (embedding scaling).
+bool EmbedGatherScaled(const void* table, int type, const std::int32_t* ids, float* out,
+                       std::size_t n_tokens, std::size_t hidden, float scale, hipStream_t stream);
+/// Single token passed by value (no device id buffer): out[0..hidden) = row `token`.
+bool EmbedGatherOne(const void* table, int type, std::uint32_t token, float* out, std::size_t hidden,
+                    hipStream_t stream);
 /// Dequantize `rows` packed rows of `cols` elements into dense row-major F16
 /// (prefill fallback for packed weights without a WMMA/MMQ kernel).
 bool DequantRowsF16(const void* w, int type, __half* out, std::size_t rows,
