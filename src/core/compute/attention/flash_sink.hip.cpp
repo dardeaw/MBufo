@@ -252,7 +252,13 @@ __global__ void FlashSinkPrefillKernel(
   }
 }
 
-// One block scans a K-chunk for (head, token); partials feed the merge.
+// One wave scans a K-chunk for (head, token, split); partials feed the merge.
+// Lane-per-key: each lane scores its own key of a 32-key tile (one contiguous
+// kD * 2 byte K row), so one wave max / wave sum serves 32 keys instead of one
+// per key (the previous loop was a dependent load -> WaveSum -> WaveMax -> expf
+// chain per key). Value rows are read as coalesced half2 pairs; each lane owns
+// kD / 32 dims (pairs 2 * lane + 64 * u). `sinks` may be null (no sink term).
+template <std::uint32_t kD>
 __global__ void FlashSinkSplitKernel(
     const float* __restrict__ q, const __half* __restrict__ k_cache,
     const __half* __restrict__ v_cache, float* __restrict__ partials,
@@ -260,7 +266,7 @@ __global__ void FlashSinkSplitKernel(
     std::uint32_t n_tokens, std::uint32_t heads, std::uint32_t kv_heads,
     std::uint32_t splits, std::uint32_t chunk, std::uint32_t window,
     float score_scale) {
-  constexpr std::uint32_t kHeadDim = 64;
+  constexpr std::uint32_t kU = kD / 64;
   const std::uint32_t h = blockIdx.x;
   const std::uint32_t t = blockIdx.y;
   const std::uint32_t s = blockIdx.z;
@@ -273,33 +279,31 @@ __global__ void FlashSinkSplitKernel(
   const std::uint32_t my_lo = k0 + s * chunk;
   std::uint32_t my_hi = my_lo + chunk;
   if (my_hi > n_kv) my_hi = n_kv;
-  const float* qrow = q + (static_cast<std::size_t>(t) * heads + h) * kHeadDim;
-  // Lane-per-key: each lane scores its own key of a 32-key tile (a 64-wide dot
-  // over one contiguous 128 B K row), so one wave max / wave sum serves 32 keys
-  // instead of one per key. The old loop was a dependent
-  // load -> WaveSum -> WaveMax -> expf chain per key and cost ~70 us for a
-  // 256-key chunk.
-  float qv[kHeadDim];
+  const float* qrow = q + (static_cast<std::size_t>(t) * heads + h) * kD;
+  float qv[kD];
 #pragma unroll
-  for (std::uint32_t i = 0; i < kHeadDim; ++i) qv[i] = qrow[i];
-  // The attention sink is one extra softmax term per (token, head): only split 0
-  // carries it. Every split starting from (sink, 1) counted it once per split
-  // in the merge (harmless with 1-2 splits, wrong with many).
-  float m = (s == 0) ? sinks[h] : -INFINITY;
-  float l = (s == 0) ? 1.0f : 0.0f;
-  float acc0 = 0.0f, acc1 = 0.0f;
+  for (std::uint32_t i = 0; i < kD; ++i) qv[i] = qrow[i];
+  // The attention sink is one extra softmax term per (token, head): only split
+  // 0 carries it (every split starting from it would count it once per split in
+  // the merge).
+  const bool has_sink = (s == 0) && (sinks != nullptr);
+  float m = has_sink ? sinks[h] : -INFINITY;
+  float l = has_sink ? 1.0f : 0.0f;
+  float2 acc[kU];
+#pragma unroll
+  for (std::uint32_t u = 0; u < kU; ++u) acc[u] = make_float2(0.0f, 0.0f);
   for (std::uint32_t base = my_lo; base < my_hi; base += 32) {
     const std::uint32_t j = base + lane;
     const bool valid = j < my_hi;
     float score = -INFINITY;
     if (valid) {
       const uint4* kp = reinterpret_cast<const uint4*>(
-          k_cache + (static_cast<std::size_t>(j) * kv_heads + kvh) * kHeadDim);
+          k_cache + (static_cast<std::size_t>(j) * kv_heads + kvh) * kD);
       float dot = 0.0f;
 #pragma unroll
-      for (int c = 0; c < 8; ++c) {
-        const uint4 u = kp[c];
-        const __half2* h2 = reinterpret_cast<const __half2*>(&u);
+      for (std::uint32_t c = 0; c < kD / 8; ++c) {
+        const uint4 u4 = kp[c];
+        const __half2* h2 = reinterpret_cast<const __half2*>(&u4);
 #pragma unroll
         for (int pi = 0; pi < 4; ++pi) {
           const float2 f = __half22float2(h2[pi]);
@@ -311,58 +315,71 @@ __global__ void FlashSinkSplitKernel(
     }
     const float m_tile = WaveMax(score);
     const float m_new = m > m_tile ? m : m_tile;
-    const float corr = expf(m - m_new);
+    // m == -inf only before the first key of a sink-less split: corr is 0 then.
+    const float corr = (m == -INFINITY) ? 0.0f : expf(m - m_new);
     const float w = valid ? expf(score - m_new) : 0.0f;
     l = l * corr + WaveSum(w);
-    acc0 *= corr;
-    acc1 *= corr;
+#pragma unroll
+    for (std::uint32_t u = 0; u < kU; ++u) {
+      acc[u].x *= corr;
+      acc[u].y *= corr;
+    }
     const std::uint32_t cnt = my_hi - base < 32u ? my_hi - base : 32u;
     for (std::uint32_t jj = 0; jj < cnt; ++jj) {
       const float wj = __shfl(w, static_cast<int>(jj), 32);
-      const __half* vrow =
-          v_cache + (static_cast<std::size_t>(base + jj) * kv_heads + kvh) * kHeadDim;
-      acc0 = fmaf(wj, __half2float(vrow[2 * lane]), acc0);
-      acc1 = fmaf(wj, __half2float(vrow[2 * lane + 1]), acc1);
+      const __half2* vrow = reinterpret_cast<const __half2*>(
+          v_cache + (static_cast<std::size_t>(base + jj) * kv_heads + kvh) * kD);
+#pragma unroll
+      for (std::uint32_t u = 0; u < kU; ++u) {
+        const float2 vv = __half22float2(vrow[lane + 32 * u]);
+        acc[u].x = fmaf(wj, vv.x, acc[u].x);
+        acc[u].y = fmaf(wj, vv.y, acc[u].y);
+      }
     }
     m = m_new;
   }
   const bool live = my_lo < my_hi;
   float* dst = partials +
                ((static_cast<std::size_t>(t) * heads + h) * splits + s) *
-                   (kHeadDim + 2);
+                   (kD + 2);
   if (lane == 0) {
     dst[0] = live ? m : -INFINITY;
     dst[1] = live ? l : 0.0f;
   }
-  dst[2 + 2 * lane] = live ? acc0 : 0.0f;
-  dst[2 + 2 * lane + 1] = live ? acc1 : 0.0f;
+#pragma unroll
+  for (std::uint32_t u = 0; u < kU; ++u) {
+    dst[2 + 64 * u + 2 * lane] = live ? acc[u].x : 0.0f;
+    dst[2 + 64 * u + 2 * lane + 1] = live ? acc[u].y : 0.0f;
+  }
 }
 
-// Fixed-order merge over splits; one block per (head, token).
+// Fixed-order merge over splits; one block per (head, token), one dim per thread.
+template <std::uint32_t kD>
 __global__ void FlashSinkMergeKernel(const float* __restrict__ partials,
                                     float* __restrict__ out,
                                     std::uint32_t n_tokens,
                                     std::uint32_t heads, std::uint32_t splits) {
-  constexpr std::uint32_t kHeadDim = 64;
   const std::uint32_t h = blockIdx.x;
   const std::uint32_t t = blockIdx.y;
-  const unsigned i = threadIdx.x;  // 0..63, one dim each
+  const unsigned i = threadIdx.x;  // 0..kD-1
   const float* base =
-      partials + (static_cast<std::size_t>(t) * heads + h) * splits *
-                     (kHeadDim + 2);
+      partials + (static_cast<std::size_t>(t) * heads + h) * splits * (kD + 2);
   float m = -INFINITY;
   float l = 0.0f;
   float acc = 0.0f;
   for (std::uint32_t s = 0; s < splits; ++s) {
-    const float* p = base + static_cast<std::size_t>(s) * (kHeadDim + 2);
+    const float* p = base + static_cast<std::size_t>(s) * (kD + 2);
     const float ms = p[0];
     const float ls = p[1];
+    if (ms == -INFINITY) continue;  // empty split
     const float m_new = m > ms ? m : ms;
-    acc = acc * expf(m - m_new) + p[2 + i] * expf(ms - m_new);
-    l = l * expf(m - m_new) + ls * expf(ms - m_new);
+    const float c0 = (m == -INFINITY) ? 0.0f : expf(m - m_new);
+    const float c1 = expf(ms - m_new);
+    acc = acc * c0 + p[2 + i] * c1;
+    l = l * c0 + ls * c1;
     m = m_new;
   }
-  out[(static_cast<std::size_t>(t) * heads + h) * kHeadDim + i] = acc / l;
+  out[(static_cast<std::size_t>(t) * heads + h) * kD + i] = acc / l;
 }
 
 }  // namespace
@@ -398,8 +415,9 @@ bool FlashSinkDecode(const float* q, const __half* k_cache,
                      hipStream_t stream, float* partials,
                      std::size_t partials_bytes) {
   if (q == nullptr || k_cache == nullptr || v_cache == nullptr ||
-      sinks == nullptr || out == nullptr || partials == nullptr ||
-      n_tokens == 0 || n_tokens > kFlashSinkMaxTokens || d != 64 ||
+      out == nullptr || partials == nullptr ||
+      n_tokens == 0 || n_tokens > kFlashSinkMaxTokens ||
+      (d != 64 && d != 128) ||
       heads == 0 || kv_heads == 0 || heads % kv_heads != 0 ||
       start_pos + n_tokens > kv_len ||
       partials_bytes <
@@ -423,13 +441,22 @@ bool FlashSinkDecode(const float* q, const __half* k_cache,
   if (splits > kFlashSinkMaxSplits) splits = kFlashSinkMaxSplits;
   const std::uint32_t chunk = (longest + splits - 1) / splits;
   const dim3 grid(heads, n_tokens, splits);
-  hipLaunchKernelGGL(FlashSinkSplitKernel, grid, dim3(kThreadsSplit), 0,
-                     stream, q, k_cache, v_cache, partials, sinks, start_pos,
-                     n_tokens, heads, kv_heads, splits, chunk, window,
-                     score_scale);
   const dim3 mgrid(heads, n_tokens);
-  hipLaunchKernelGGL(FlashSinkMergeKernel, mgrid, dim3(kThreadsMerge), 0,
-                     stream, partials, out, n_tokens, heads, splits);
+  if (d == 64) {
+    hipLaunchKernelGGL((FlashSinkSplitKernel<64>), grid, dim3(kThreadsSplit), 0,
+                       stream, q, k_cache, v_cache, partials, sinks, start_pos,
+                       n_tokens, heads, kv_heads, splits, chunk, window,
+                       score_scale);
+    hipLaunchKernelGGL((FlashSinkMergeKernel<64>), mgrid, dim3(64), 0, stream,
+                       partials, out, n_tokens, heads, splits);
+  } else {
+    hipLaunchKernelGGL((FlashSinkSplitKernel<128>), grid, dim3(kThreadsSplit),
+                       0, stream, q, k_cache, v_cache, partials, sinks,
+                       start_pos, n_tokens, heads, kv_heads, splits, chunk,
+                       window, score_scale);
+    hipLaunchKernelGGL((FlashSinkMergeKernel<128>), mgrid, dim3(128), 0, stream,
+                       partials, out, n_tokens, heads, splits);
+  }
   return true;
 }
 

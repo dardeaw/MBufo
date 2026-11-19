@@ -13,6 +13,7 @@
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/core/compute/attention/blocked_splitk.hpp"
+#include "src/core/compute/attention/flash_sink.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/llama/kernels/kernels.hpp"
 
@@ -188,6 +189,8 @@ struct Session::Impl {
   std::int32_t* d_tokens{nullptr};
   std::uint32_t* d_pos{nullptr};
   float* splitk_partials{nullptr};
+  float* flash_partials{nullptr};  ///< F16 split-K decode scratch
+  std::size_t flash_partials_bytes{0};
   core::compute::gemm::ArgmaxCandidate* argmax_scratch{nullptr};
   std::int32_t* argmax_out{nullptr};
   std::uint32_t capacity{0};
@@ -224,6 +227,12 @@ struct Session::Impl {
         core::compute::blocked_splitk::AttentionBlockedSplitKScratchBytes() /
             sizeof(float),
         error);
+    flash_partials_bytes =
+        core::compute::flash_sink::FlashSinkDecodeScratchBytes(
+            core::compute::flash_sink::kFlashSinkMaxTokens,
+            w.config.num_heads);
+    flash_partials =
+        buffers.Alloc<float>(flash_partials_bytes / sizeof(float), error);
     argmax_scratch = buffers.Alloc<core::compute::gemm::ArgmaxCandidate>(
         core::compute::gemm::kArgmaxParts, error);
     argmax_out = buffers.Alloc<std::int32_t>(1, error);
@@ -498,10 +507,19 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                         start_pos, stream);
     kernels::StoreKvF16(impl.vbuf, impl.buffers.kv_v[il], n, kvdim,
                         start_pos, stream);
-    kernels::AttentionF16(impl.qbuf, impl.buffers.kv_k[il],
-                          impl.buffers.kv_v[il], impl.attn_out, n, start_pos,
-                          c.num_heads, c.num_kv_heads, d, stream,
-                          score_scale);
+    // Single-token decode rides the shared lane-per-key split-K kernel (the
+    // scalar kernel scans every key serially); LLAMA_NO_FLASH_DECODE keeps it.
+    if (!(n == 1 && std::getenv("LLAMA_NO_FLASH_DECODE") == nullptr &&
+          core::compute::flash_sink::FlashSinkDecode(
+              impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+              /*sinks=*/nullptr, impl.attn_out, n, start_pos, start_pos + n,
+              c.num_heads, c.num_kv_heads, d, /*window=*/0, score_scale,
+              stream, impl.flash_partials, impl.flash_partials_bytes))) {
+      kernels::AttentionF16(impl.qbuf, impl.buffers.kv_k[il],
+                            impl.buffers.kv_v[il], impl.attn_out, n, start_pos,
+                            c.num_heads, c.num_kv_heads, d, stream,
+                            score_scale);
+    }
     if (getenv("LLAMA_DUMP_QKV") != nullptr && n <= 32) {
       (void)hipStreamSynchronize(stream);
       auto dump = [&](const float* dev, std::size_t cnt, const char* name) {

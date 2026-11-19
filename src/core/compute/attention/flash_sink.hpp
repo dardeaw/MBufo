@@ -33,11 +33,12 @@ inline constexpr std::uint32_t kFlashSinkMaxSplits = 32;
 /// Maximum decode tokens per call (n == 1 in practice).
 inline constexpr std::uint32_t kFlashSinkMaxTokens = 8;
 
-/// Decode scratch: max_tokens x heads x splits x (d + 2) floats.
+/// Decode scratch: max_tokens x heads x splits x (d + 2) floats, sized for
+/// d == 128 (also covers d == 64).
 [[nodiscard]] inline constexpr std::size_t FlashSinkDecodeScratchBytes(
     std::uint32_t max_tokens, std::uint32_t heads) noexcept {
   return static_cast<std::size_t>(max_tokens) * heads *
-         kFlashSinkMaxSplits * (64u + 2u) * sizeof(float);
+         kFlashSinkMaxSplits * (128u + 2u) * sizeof(float);
 }
 
 /// Tiled prefill over F16 KV. q is [n][heads][d] F32, k/v caches are
@@ -52,7 +53,8 @@ bool FlashSinkPrefill(const float* q, const __half* k_cache,
                       std::uint32_t window, float score_scale,
                       hipStream_t stream);
 
-/// Split-K decode over F16 KV with the same math. partials is caller-owned
+/// Split-K decode over F16 KV with the same math (d == 64 or 128; `sinks` may be
+/// null for models without attention sinks). partials is caller-owned
 /// device scratch of at least FlashSinkDecodeScratchBytes(n_tokens, heads).
 bool FlashSinkDecode(const float* q, const __half* k_cache,
                      const __half* v_cache, const float* sinks, float* out,

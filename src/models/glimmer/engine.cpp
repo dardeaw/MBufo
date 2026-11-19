@@ -6,6 +6,7 @@
 // launcher first (single block for Forward, one block per session for
 // DecodeBatch) and falls back to the legacy cores on refusal, so F16
 // semantics never change. Sync is incremental on append-only growth.
+#include "src/core/compute/attention/flash_sink.hpp"
 #include "src/models/glimmer/engine.hpp"
 
 #include <algorithm>
@@ -267,6 +268,8 @@ struct Session::Impl {
   void* preq_scratch{nullptr};  ///< session arena for preq-q81 narrow decode
   __half* wdq{nullptr};         ///< F16 scratch for dequantized K-quant weights
   std::size_t wdq_bytes{0};
+  float* flash_partials{nullptr};  ///< F16 split-K decode scratch
+  std::size_t flash_partials_bytes{0};
   std::size_t preq_bytes{0};
   std::int32_t* d_tokens{nullptr};
   std::uint32_t* d_pos{nullptr};  ///< device position scalar (blocked path)
@@ -339,6 +342,12 @@ struct Session::Impl {
         wdq_bytes = wdq_elems * sizeof(__half);
       }
     }
+    flash_partials_bytes =
+        core::compute::flash_sink::FlashSinkDecodeScratchBytes(
+            core::compute::flash_sink::kFlashSinkMaxTokens,
+            w.config.num_heads);
+    flash_partials =
+        buffers.Alloc<float>(flash_partials_bytes / sizeof(float), error);
     d_tokens = buffers.Alloc<std::int32_t>(chunk, error);
     d_pos = buffers.Alloc<std::uint32_t>(1, error);
     d_pos_win = buffers.Alloc<std::uint32_t>(1, error);
@@ -756,6 +765,16 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
   // legacy route; the multi-query blocking kernel below is that route's
   // accelerator (same online-softmax math, F16 semantics unchanged).
   // `false` = unsupported shape (tiny/decode/non-d128) -> legacy runs.
+  // Single-token F16 decode: shared lane-per-key split-K kernel (the legacy and
+  // mixed-batch routes below scan keys one at a time at n == 1).
+  if (n == 1 && std::getenv("GLIMMER_NO_FLASH_DECODE") == nullptr &&
+      core::compute::flash_sink::FlashSinkDecode(
+          impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+          /*sinks=*/nullptr, impl.attn_out, n, start_pos, start_pos + n,
+          c.num_heads, c.num_kv_heads, d, window, score_scale, stream,
+          impl.flash_partials, impl.flash_partials_bytes)) {
+    return;
+  }
   bool attn_mqb_ran = false;
   {
     namespace attn_disp = core::compute::attention_dispatcher;
