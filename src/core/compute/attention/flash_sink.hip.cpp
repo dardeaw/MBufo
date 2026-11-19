@@ -274,26 +274,56 @@ __global__ void FlashSinkSplitKernel(
   std::uint32_t my_hi = my_lo + chunk;
   if (my_hi > n_kv) my_hi = n_kv;
   const float* qrow = q + (static_cast<std::size_t>(t) * heads + h) * kHeadDim;
-  const float q0 = qrow[2 * lane];
-  const float q1 = qrow[2 * lane + 1];
-  float m = sinks[h];
-  float l = 1.0f;
+  // Lane-per-key: each lane scores its own key of a 32-key tile (a 64-wide dot
+  // over one contiguous 128 B K row), so one wave max / wave sum serves 32 keys
+  // instead of one per key. The old loop was a dependent
+  // load -> WaveSum -> WaveMax -> expf chain per key and cost ~70 us for a
+  // 256-key chunk.
+  float qv[kHeadDim];
+#pragma unroll
+  for (std::uint32_t i = 0; i < kHeadDim; ++i) qv[i] = qrow[i];
+  // The attention sink is one extra softmax term per (token, head): only split 0
+  // carries it. Every split starting from (sink, 1) counted it once per split
+  // in the merge (harmless with 1-2 splits, wrong with many).
+  float m = (s == 0) ? sinks[h] : -INFINITY;
+  float l = (s == 0) ? 1.0f : 0.0f;
   float acc0 = 0.0f, acc1 = 0.0f;
-  for (std::uint32_t j = my_lo; j < my_hi; ++j) {
-    const __half* krow =
-        k_cache + (static_cast<std::size_t>(j) * kv_heads + kvh) * kHeadDim;
-    float dot = q0 * __half2float(krow[2 * lane]) +
-                q1 * __half2float(krow[2 * lane + 1]);
-    dot = WaveSum(dot);
-    const float score = dot * score_scale;
-    const float m_new = WaveMax(m > score ? m : score);
+  for (std::uint32_t base = my_lo; base < my_hi; base += 32) {
+    const std::uint32_t j = base + lane;
+    const bool valid = j < my_hi;
+    float score = -INFINITY;
+    if (valid) {
+      const uint4* kp = reinterpret_cast<const uint4*>(
+          k_cache + (static_cast<std::size_t>(j) * kv_heads + kvh) * kHeadDim);
+      float dot = 0.0f;
+#pragma unroll
+      for (int c = 0; c < 8; ++c) {
+        const uint4 u = kp[c];
+        const __half2* h2 = reinterpret_cast<const __half2*>(&u);
+#pragma unroll
+        for (int pi = 0; pi < 4; ++pi) {
+          const float2 f = __half22float2(h2[pi]);
+          dot = fmaf(qv[c * 8 + 2 * pi], f.x, dot);
+          dot = fmaf(qv[c * 8 + 2 * pi + 1], f.y, dot);
+        }
+      }
+      score = dot * score_scale;
+    }
+    const float m_tile = WaveMax(score);
+    const float m_new = m > m_tile ? m : m_tile;
     const float corr = expf(m - m_new);
-    const float w = expf(score - m_new);
-    const __half* vrow =
-        v_cache + (static_cast<std::size_t>(j) * kv_heads + kvh) * kHeadDim;
-    acc0 = acc0 * corr + w * __half2float(vrow[2 * lane]);
-    acc1 = acc1 * corr + w * __half2float(vrow[2 * lane + 1]);
-    l = l * corr + w;
+    const float w = valid ? expf(score - m_new) : 0.0f;
+    l = l * corr + WaveSum(w);
+    acc0 *= corr;
+    acc1 *= corr;
+    const std::uint32_t cnt = my_hi - base < 32u ? my_hi - base : 32u;
+    for (std::uint32_t jj = 0; jj < cnt; ++jj) {
+      const float wj = __shfl(w, static_cast<int>(jj), 32);
+      const __half* vrow =
+          v_cache + (static_cast<std::size_t>(base + jj) * kv_heads + kvh) * kHeadDim;
+      acc0 = fmaf(wj, __half2float(vrow[2 * lane]), acc0);
+      acc1 = fmaf(wj, __half2float(vrow[2 * lane + 1]), acc1);
+    }
     m = m_new;
   }
   const bool live = my_lo < my_hi;
@@ -376,7 +406,11 @@ bool FlashSinkDecode(const float* q, const __half* k_cache,
           FlashSinkDecodeScratchBytes(n_tokens, heads)) {
     return false;
   }
-  // Splits sized so each chunk scans ~256 keys (longest causal extent).
+  // Splits sized so each chunk scans ~32 keys (one lane-per-key tile) of the
+  // longest causal extent, capped at kFlashSinkMaxSplits. One wave per
+  // (head, split) is latency-bound (each tile is load K -> reduce -> load V),
+  // so short contexts want many small blocks in flight rather than one long
+  // serial scan per head.
   std::uint32_t longest = 0;
   for (std::uint32_t t = 0; t < n_tokens; ++t) {
     const std::uint32_t n_kv = start_pos + t + 1;
@@ -384,7 +418,7 @@ bool FlashSinkDecode(const float* q, const __half* k_cache,
         (window != 0 && n_kv > window) ? n_kv - window : 0;
     if (n_kv - k0 > longest) longest = n_kv - k0;
   }
-  std::uint32_t splits = (longest + 255) / 256;
+  std::uint32_t splits = (longest + 31) / 32;
   if (splits < 1) splits = 1;
   if (splits > kFlashSinkMaxSplits) splits = kFlashSinkMaxSplits;
   const std::uint32_t chunk = (longest + splits - 1) / splits;
