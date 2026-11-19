@@ -6,6 +6,7 @@
 // launcher first (single block for Forward, one block per session for
 // DecodeBatch) and falls back to the legacy cores on refusal, so F16
 // semantics never change. Sync is incremental on append-only growth.
+#include <cstdlib>
 #include "src/core/compute/attention/flash_sink.hpp"
 #include "src/models/glimmer/engine.hpp"
 
@@ -116,40 +117,25 @@ bool UploadWeights(ModelWeights& w, std::vector<void*>& owned,
 // GemvBatched route (narrow misses keep yesterday's numerics bit-for-bit).
 void GlimmerGemm(const TensorRef& w, const float* x, __half* x16,
                  void* q8tiled, void* preq_scratch, std::size_t preq_bytes,
-                 __half* wdq, std::size_t wdq_bytes, float* y, std::uint32_t n_tokens,
+                 __half* wdq, std::size_t wdq_bytes, float* y,
+                 std::uint32_t n_tokens,
                  std::uint32_t m, std::uint32_t k, hipStream_t stream) {
+  namespace gemm = core::compute::gemm;
+  namespace quant = core::quant;
   const void* dev = w.device != nullptr ? w.device : w.data;
+  const int type = static_cast<int>(w.type);
   if (n_tokens <= 8) {
-    // preq-q81: Q8_0 narrow decode shapes run the shared quantize ->
-    // narrow-GEMV on the session-arena scratch (§4.2); misses (non-Q8_0,
-    // out-of-contract shapes, short scratch) keep GemvBatched bit-identical.
-    if (w.type == core::GgmlType::kQ8_0 &&
-        core::compute::gemm::DecideNarrowDecodePrequantRoute(
-            /*weight_q8_0=*/true, /*gated=*/false, n_tokens, k,
-            m) == core::compute::gemm::NarrowDecodeRoute::kNarrowQ80Prequant &&
-        core::compute::gemm::LaunchNarrowQ80Prequant(
-            dev, x, y, k, m, n_tokens, preq_scratch, preq_bytes,
-            stream)) {
+    // Decode: the core picks the kernel per format (narrow Q8_0 prequant, K-quant block GEMV, wave32
+    // GEMV). Formats without a decode kernel (Q6_K) report kUnsupportedType and use the dense path below.
+    const quant::Status st = gemm::GemvDecode(dev, type, x, y, n_tokens, m, k,
+                                              preq_scratch, preq_bytes, stream);
+    if (st == quant::Status::kOk)
       return;
+    if (st != quant::Status::kUnsupportedType) {
+      std::fprintf(stderr, "[glimmer] GemvDecode failed for weight type %d (%ux%u, status %d)\n", type, m, k,
+                   static_cast<int>(st));
+      std::abort();
     }
-    if (w.type == core::GgmlType::kQ4_K || w.type == core::GgmlType::kQ5_K) {
-      // GemvBatched decodes anything that is not F32/F16/Q8_0/BF16 as Q4_0,
-      // so K-quant rows go through the block GEMV the Qwen path uses (one
-      // activation vector per call).
-      for (std::uint32_t t = 0; t < n_tokens; ++t) {
-        core::compute::gemm::LaunchQ8KBlockGEMV(
-            dev, w.type, x + static_cast<std::size_t>(t) * k,
-            y + static_cast<std::size_t>(t) * m, m, k, stream);
-      }
-      return;
-    }
-    if (w.type != core::GgmlType::kQ6_K) {
-      core::compute::gemm::GemvBatched(dev, static_cast<int>(w.type),
-                                       w.RowBytes(), k, x, y, n_tokens, m,
-                                       0.0F, stream);
-      return;
-    }
-    // Q6_K has no decode GEMV yet: fall through to dequantize + dense F16.
   }
   if (n_tokens >= 96 && q8tiled != nullptr &&
       w.type == core::GgmlType::kQ8_0) {
@@ -183,36 +169,14 @@ void GlimmerGemm(const TensorRef& w, const float* x, __half* x16,
     }
   }
   kernels::F32ToF16(x, x16, static_cast<std::size_t>(n_tokens) * k, stream);
-  if (w.type == core::GgmlType::kF16) {
-    core::compute::gemm::UnquantizedF16Gemm(dev, x16, y, n_tokens, m, k,
-                                           stream);
-  } else if (w.type == core::GgmlType::kQ8_0) {
-    core::compute::gemm::DenseF16Gemm(dev, x16, y, n_tokens, m, k, stream);
-  } else if (wdq != nullptr &&
-             static_cast<std::size_t>(m) * k * sizeof(__half) <= wdq_bytes &&
-             core::compute::gemm::DequantRowsF16(dev, static_cast<int>(w.type),
-                                                 wdq, m, k, stream)) {
-    // K-quant / Q4_0 projections have no WMMA kernel yet: dequantize the
-    // weight into the session's F16 scratch and ride the dense F16 GEMM.
-    // (DenseF16Gemm only understands Q8_0 blocks; feeding it Q4_K read the
-    // packed rows as Q8_0 and faulted.)
-    core::compute::gemm::UnquantizedF16Gemm(wdq, x16, y, n_tokens, m, k,
-                                           stream);
-  } else {
-    // Weight too large for the scratch (or no scratch): decode-style GEMV in
-    // per-token decode GEMV.
-    for (std::uint32_t t = 0; t < n_tokens; ++t) {
-      if (w.type == core::GgmlType::kQ4_K || w.type == core::GgmlType::kQ5_K) {
-        core::compute::gemm::LaunchQ8KBlockGEMV(
-            dev, w.type, x + static_cast<std::size_t>(t) * k,
-            y + static_cast<std::size_t>(t) * m, m, k, stream);
-      } else {
-        core::compute::gemm::GemvBatched(
-            dev, static_cast<int>(w.type), w.RowBytes(), k,
-            x + static_cast<std::size_t>(t) * k,
-            y + static_cast<std::size_t>(t) * m, 1, m, 0.0F, stream);
-      }
-    }
+  // Batched path for every format: Q8_0 dense GEMM, F16 unquantized GEMM, everything else dequantized into
+  // the session's F16 scratch (QuantGemmPrefill decides; an unsupported format aborts, never miscomputes).
+  const quant::Status st =
+      gemm::QuantGemmPrefill(dev, type, x16, y, n_tokens, m, k, wdq, wdq_bytes, stream);
+  if (st != quant::Status::kOk) {
+    std::fprintf(stderr, "[glimmer] QuantGemmPrefill failed for weight type %d (%ux%u, batch %u, status %d)\n",
+                 type, m, k, n_tokens, static_cast<int>(st));
+    std::abort();
   }
 }
 

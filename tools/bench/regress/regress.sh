@@ -44,7 +44,7 @@ if [ $RUN_KERNELS = 1 ]; then
   K=$OUT/kernels; mkdir -p $K
   # Each check: prep data (python), build the test with hipcc, run. The build line is in each tool's README docstring.
   I="-I$REPO -DENGINE_ENABLE_HIP=1 --offload-arch=gfx1151 -std=c++20 -O2"
-  LIBG=$(find ${NEW%/release/gufo}/ -name libgufo_core_gemm.a 2>/dev/null | head -1)
+  LIBG=$(find $REPO/build/release -name libgufo_core_gemm.a 2>/dev/null | head -1)
   python3 $REPO/tools/bench/dequant_rows_check/dq_prep.py $K/dq >/dev/null 2>&1
   hipcc $I -x hip $REPO/tools/bench/dequant_rows_check/dq_test.cpp $REPO/src/core/compute/gemm/dequant_rows.hip -o $K/dq_test 2>/dev/null && $K/dq_test $K/dq > $K/dq.txt 2>&1; python3 $REPO/tools/bench/dequant_rows_check/dq_cmp.py $K/dq 2>&1 | tail -1 | sed 's/^/dequant_rows: /' | tee -a $OUT/run.log
   python3 $REPO/tools/bench/flash_decode_check/fd_prep.py $K/fd >/dev/null 2>&1

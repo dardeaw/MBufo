@@ -31,6 +31,7 @@
 #include <hip/hip_runtime.h>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/quant/quant_status.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/compute/gemm/gemm_dispatcher.hpp"
 
@@ -308,6 +309,23 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
 bool DenseF16Gemm(const void* w, const __half* x, float* out,
                   std::size_t batch, std::size_t m, std::size_t k,
                   hipStream_t stream, std::size_t input_stride = 0);
+
+/// Type-dispatched single-token decode GEMV over core::quant::AllFormats (see quant_traits.hpp):
+/// y[t][r] = dot(row r of W, x[t]) for 1..8 tokens. `x` is F32 [n][k], y is [n][m]. Each format
+/// declares how it is served (narrow Q8 prequant, K-quant block GEMV, wave32 GEMV). Returns
+/// kUnsupportedType for a code that is not in the list and for formats without a decode kernel
+/// (Q6_K): then dequantize with QuantGemmPrefill, which works for any batch. `preq_scratch` is the
+/// narrow-Q8 prequant arena (may be null: Q8_0 then uses the plain GEMV).
+[[nodiscard]] quant::Status GemvDecode(const void* w, int type, const float* x, float* y, std::size_t n_tokens,
+                                       std::size_t m, std::size_t k, void* preq_scratch, std::size_t preq_bytes,
+                                       hipStream_t stream);
+/// Type-dispatched batched GEMM with F16 activations: y[b][r] = dot(row r of W, x16[b]). Q8_0 rides the
+/// dense F16 GEMM, F16 the unquantized GEMM, everything else is dequantized into `wdq_scratch`
+/// (m * k * 2 bytes) first. kUnsupportedType for a code that is not in the list, kScratchTooSmall when
+/// the scratch is short.
+[[nodiscard]] quant::Status QuantGemmPrefill(const void* w, int type, const __half* x16, float* y,
+                                             std::size_t batch, std::size_t m, std::size_t k,
+                                             __half* wdq_scratch, std::size_t wdq_bytes, hipStream_t stream);
 
 /// Bytes of one packed GGML row of `cols` elements (type = GUFO_GEMM_* code:
 /// F32/F16/BF16/Q4_0/Q8_0/Q4_K/Q5_K/Q6_K); 0 when the type is unsupported or

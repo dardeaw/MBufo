@@ -4,6 +4,7 @@
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include <cstdio>
 
 #include <cmath>
 #include <cstddef>
@@ -632,6 +633,12 @@ void GemvBatched(const void* wdev, int type, std::uint64_t row_bytes,
                  std::uint32_t n_tokens, std::uint32_t m, float softcap,
                  hipStream_t stream) {
   if (m == 0 || n_tokens == 0) return;
+  // The legacy kernel below decodes F32 / F16 / Q8_0 / BF16 and treats everything else as Q4_0, so a K-quant
+  // or any other format used to produce garbage silently. Refuse instead (use GemvDecode for dispatch).
+  if (!(type == 0 || type == 1 || type == 2 || type == 8 || type == 30)) {
+    std::fprintf(stderr, "GemvBatched: weight type %d is not supported (F32/F16/Q4_0/Q8_0/BF16); use GemvDecode\n", type);
+    std::abort();
+  }
   const bool type_ok =
       (type == 0 || type == 1 || type == 2 || type == 8 || type == 30);
   if (type_ok && (cols % 32ull) == 0ull && n_tokens <= 8u &&

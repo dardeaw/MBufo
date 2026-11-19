@@ -76,9 +76,11 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < a.size(); ++i) { double e = a[i] - b[i]; num += e * e; den += double(b[i]) * b[i]; }
       return std::sqrt(num / den);
     };
-    const double e_new = rel(o_new, ref), e_old = rel(o_old, ref);
-    // the legacy kernel refuses single-split shapes (returns false); only check it when it ran
-    const bool ok = ok_new && e_new < 2e-5 && (!ok_old || e_old < 2e-5);
+    // Below kBlockedSplitKMinKv the launcher must refuse (the caller keeps its scalar path); the legacy
+    // kernel also refuses single-split shapes. Otherwise the grouped kernel must match the reference.
+    const bool expect_refuse = kv_len < kBlockedSplitKMinKv;
+    const double e_new = expect_refuse ? 0.0 : rel(o_new, ref), e_old = (expect_refuse || !ok_old) ? 0.0 : rel(o_old, ref);
+    const bool ok = expect_refuse ? (!ok_new && !ok_old) : (ok_new && e_new < 2e-5 && (!ok_old || e_old < 2e-5));
     char tbuf[96] = "";
     if (timing && ok) {
       unsetenv("GUFO_BLOCKED_SPLITK_LEGACY");
@@ -87,7 +89,10 @@ int main(int argc, char** argv) {
       const float us_old = !ok_old ? 0.0f : TimeUs([&] { Run(D, d_q, d_k, d_v, d_o, nt, d_sp, kv_len, heads, kvh, kbb, vbb, d_p, pbytes, scale); }, 200);
       std::snprintf(tbuf, sizeof tbuf, "  %7.1f us (legacy %7.1f us, %.1fx)", us_new, us_old, us_old > 0 ? us_old / us_new : 0.0f);
     }
-    std::printf("%-4s D=%3u heads=%2u kvh=%2u kv=%5u nt=%u kb=%2u vb=%2u  new %.2e  legacy %.2e  %s%s\n", name.c_str(), D, heads, kvh, kv_len, nt, kbb, vbb, e_new, e_old, ok ? "OK" : "FAIL", tbuf);
+    if (expect_refuse)
+      std::printf("%-4s D=%3u heads=%2u kvh=%2u kv=%5u nt=%u kb=%2u vb=%2u  refused (kv < %u)  %s\n", name.c_str(), D, heads, kvh, kv_len, nt, kbb, vbb, kBlockedSplitKMinKv, ok ? "OK" : "FAIL (should refuse)");
+    else
+      std::printf("%-4s D=%3u heads=%2u kvh=%2u kv=%5u nt=%u kb=%2u vb=%2u  new %.2e  legacy %.2e  %s%s\n", name.c_str(), D, heads, kvh, kv_len, nt, kbb, vbb, e_new, e_old, ok ? "OK" : "FAIL", tbuf);
     ++total; if (!ok) ++bad;
     hipFree(d_q); hipFree(d_k); hipFree(d_v); hipFree(d_o); hipFree(d_p); hipFree(d_sp);
   }
