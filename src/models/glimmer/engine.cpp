@@ -8,7 +8,8 @@
 // semantics never change. Sync is incremental on append-only growth.
 #include <cstdlib>
 #include "src/core/compute/attention/flash_sink.hpp"
-#include "src/core/compute/attention/flash_wmma_gqa128.hpp"
+#include "src/core/compute/attention/flash_wmma_gqa.hpp"
+#include "src/core/compute/gemm/predequant.hpp"
 #include "src/models/glimmer/engine.hpp"
 
 #include <algorithm>
@@ -126,19 +127,7 @@ bool UploadWeights(ModelWeights& w, std::vector<void*>& owned,
 // Dense F16 path so short prompts are bit-identical to the f16 reference;
 // shapes the narrow/W8A8 launchers reject fall through to the legacy
 // GemvBatched route (narrow misses keep yesterday's numerics bit-for-bit).
-/// Weights of the layer being prefilled, dequantized ONCE into the tiled F16 layout (layer-major prefill) and looked up
-/// by device pointer; count == 0 outside layer-major prefill.
-struct PreDequant {
-  static constexpr int kMax = 8;
-  const void* dev[kMax]{};
-  __half* tiled[kMax]{};
-  int count{0};
-  [[nodiscard]] __half* Find(const void* d) const noexcept {
-    for (int i = 0; i < count; ++i)
-      if (dev[i] == d) return tiled[i];
-    return nullptr;
-  }
-};
+using PreDequant = core::compute::gemm::PreDequant;
 
 void GlimmerGemm(const TensorRef& w, const float* x, __half* x16,
                  void* q8tiled, void* preq_scratch, std::size_t preq_bytes,
@@ -713,7 +702,7 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
     // WMMA flash prefill: dequantize the visible range into the F16 staging planes and run the shared kernel
     // (the blocked scalar read below is ~5 TFLOPS; the WMMA kernel is the tensor-core path).
     if (n >= 16 && impl.buffers.stage_k != nullptr && std::getenv("GLIMMER_NO_WMMA_PREFILL") == nullptr &&
-        core::compute::flash_wmma_gqa128::IsFlashWmmaGqa128Supported(c.num_heads, c.num_kv_heads, d)) {
+        core::compute::flash_wmma_gqa::IsFlashWmmaSupported(c.num_heads, c.num_kv_heads, d)) {
       const std::uint32_t kvd = c.num_kv_heads * d;
       const std::uint32_t kv_len = start_pos + n;
       std::uint32_t lo = 0;
@@ -724,8 +713,7 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
               impl.buffers.kv_bv[il] + static_cast<std::size_t>(lo) * impl.buffers.kv_row_bytes_v[il],
               impl.buffers.stage_v + static_cast<std::size_t>(lo) * kvd, (kv_len - lo) * c.num_kv_heads, d, 34, 34,
               core::compute::blocked_kv::KvCodec::kQ8, stream) &&
-          core::compute::flash_wmma_gqa128::FlashWmmaGqa128Prefill(
-              impl.qbuf, impl.buffers.stage_k, impl.buffers.stage_v, impl.attn_out, n, start_pos, c.num_heads,
+          core::compute::flash_wmma_gqa::FlashWmmaPrefill(impl.qbuf, impl.buffers.stage_k, impl.buffers.stage_v, /*sinks=*/nullptr, impl.attn_out, n, start_pos, c.num_heads,
               c.num_kv_heads, d, window, score_scale, stream)) {
         return;
       }
@@ -830,9 +818,8 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
   }
   // F16 prefill: WMMA flash kernel straight on the F16 planes.
   if (n >= 16 && std::getenv("GLIMMER_NO_WMMA_PREFILL") == nullptr &&
-      core::compute::flash_wmma_gqa128::IsFlashWmmaGqa128Supported(c.num_heads, c.num_kv_heads, d) &&
-      core::compute::flash_wmma_gqa128::FlashWmmaGqa128Prefill(
-          impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il], impl.attn_out, n, start_pos, c.num_heads,
+      core::compute::flash_wmma_gqa::IsFlashWmmaSupported(c.num_heads, c.num_kv_heads, d) &&
+      core::compute::flash_wmma_gqa::FlashWmmaPrefill(impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il], /*sinks=*/nullptr, impl.attn_out, n, start_pos, c.num_heads,
           c.num_kv_heads, d, window, score_scale, stream)) {
     return;
   }
@@ -1638,13 +1625,8 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
             t->rows % core::compute::gemm::kTiledRows != 0 || t->cols % 32 != 0)
           continue;
         const void* dev = t->device != nullptr ? t->device : t->data;
-        if (core::compute::gemm::DequantRowsF16Tiled(dev, static_cast<int>(t->type), cursor, t->rows, t->cols,
-                                                     stream)) {
-          impl.predq.dev[impl.predq.count] = dev;
-          impl.predq.tiled[impl.predq.count] = cursor;
-          ++impl.predq.count;
-          cursor += static_cast<std::size_t>(t->rows) * t->cols;
-        }
+        (void)core::compute::gemm::PreDequantAdd(impl.predq, cursor, dev, static_cast<int>(t->type), t->rows, t->cols,
+                                                 stream);
       }
       for (const Span& c : chunks) {
         const std::uint32_t n = static_cast<std::uint32_t>(c.len);

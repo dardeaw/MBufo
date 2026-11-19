@@ -22,6 +22,7 @@
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/core/compute/attention/flash_blas.hpp"
+#include "src/core/compute/attention/flash_wmma_gqa.hpp"
 #include "src/core/compute/attention/flash_sink.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/gptoss/kernels/kernels.hpp"
@@ -29,7 +30,16 @@
 namespace gufo::models::gptoss {
 namespace {
 
-constexpr std::uint32_t kMaxChunk = 256;
+// Prefill chunk (tokens per Forward); GPTOSS_PREFILL_CHUNK overrides it (16..8192) for tuning.
+inline std::uint32_t MaxChunkTokens() {
+  static const std::uint32_t v = [] {
+    const char* e = std::getenv("GPTOSS_PREFILL_CHUNK");
+    const long n = e != nullptr ? std::atol(e) : 256;
+    return (n >= 16 && n <= 8192) ? static_cast<std::uint32_t>(n) : 256u;
+  }();
+  return v;
+}
+#define kMaxChunk MaxChunkTokens()
 
 // Env-gated per-section timing (GPTOSS_LAYER_TIME=1). Zero cost when unset
 // (one cached getenv). Accumulates hipEvent deltas per ForwardLayer section,
@@ -1001,7 +1011,14 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
     // The dequantized staging is plain F16 KV, so decode can ride the shared
     // split-K flash-sink kernel (the scalar AttentionF16Sink scans every key
     // serially: ~70 us/layer even at short context).
-    if (!(n == 1 && d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr &&
+    const bool wmma_done =
+        n >= 16 && d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr && getenv("GPTOSS_NO_WMMA_PREFILL") == nullptr &&
+        core::compute::flash_wmma_gqa::IsFlashWmmaSupported(c.num_heads, c.num_kv_heads, d) &&
+        core::compute::flash_wmma_gqa::FlashWmmaPrefill(
+            impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
+            static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n, start_pos, c.num_heads, c.num_kv_heads, d,
+            window, score_scale, stream);
+    if (!wmma_done && !(n == 1 && d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr &&
           core::compute::flash_sink::FlashSinkDecode(
               impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
               static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
@@ -1025,7 +1042,14 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
     namespace flash = core::compute::flash_sink;
     namespace blas = core::compute::flash_blas;
     bool flashed = false;
-    if (d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr) {
+    // Tensor-core flash prefill (sinks + window): the rocBLAS-batched route below spends ~60% of 8K prefill here.
+    if (n >= 16 && d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr && getenv("GPTOSS_NO_WMMA_PREFILL") == nullptr &&
+        core::compute::flash_wmma_gqa::IsFlashWmmaSupported(c.num_heads, c.num_kv_heads, d)) {
+      flashed = core::compute::flash_wmma_gqa::FlashWmmaPrefill(
+          impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il], static_cast<const float*>(l.attn_sinks.device),
+          impl.attn_out, n, start_pos, c.num_heads, c.num_kv_heads, d, window, score_scale, stream);
+    }
+    if (!flashed && d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr) {
       if (n == 1) {
         flashed = flash::FlashSinkDecode(
             impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],

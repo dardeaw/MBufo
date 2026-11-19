@@ -14,13 +14,24 @@
 #include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/core/compute/attention/blocked_splitk.hpp"
 #include "src/core/compute/attention/flash_sink.hpp"
+#include "src/core/compute/attention/flash_wmma_gqa.hpp"
+#include "src/core/compute/gemm/predequant.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/llama/kernels/kernels.hpp"
 
 namespace gufo::models::llama {
 namespace {
 
-constexpr std::uint32_t kMaxChunk = 512;
+// Prefill chunk (tokens per Forward); LLAMA_PREFILL_CHUNK overrides it (16..8192) for tuning.
+inline std::uint32_t MaxChunkTokens() {
+  static const std::uint32_t v = [] {
+    const char* e = std::getenv("LLAMA_PREFILL_CHUNK");
+    const long n = e != nullptr ? std::atol(e) : 512;
+    return (n >= 16 && n <= 8192) ? static_cast<std::uint32_t>(n) : 512u;
+  }();
+  return v;
+}
+#define kMaxChunk MaxChunkTokens()
 
 bool Check(hipError_t err, std::string* error_msg, const char* what) {
   if (err == hipSuccess)
@@ -97,7 +108,8 @@ bool UploadWeights(ModelWeights& w, std::vector<void*>& owned,
 // One projection: narrow decode rides the fused quant GEMV, prefill converts
 // activations to F16 once and rides the shared dense kernel (Q8_0 weights
 // dequantize in LDS).
-void LlamaGemm(const TensorRef& w, const float* x, __half* x16, float* y,
+void LlamaGemm(const core::compute::gemm::PreDequant* predq, const TensorRef& w, const float* x,
+               __half* x16, float* y,
                std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                hipStream_t stream) {
   const void* dev = w.device != nullptr ? w.device : w.data;
@@ -108,6 +120,11 @@ void LlamaGemm(const TensorRef& w, const float* x, __half* x16, float* y,
     return;
   }
   kernels::F32ToF16(x, x16, static_cast<std::size_t>(n_tokens) * k, stream);
+  if (predq != nullptr && predq->count != 0) {  // layer-major prefill: weights already dequantized (tiled F16)
+    if (const __half* wt = predq->Find(dev)) {
+      if (core::compute::gemm::TiledF16Gemm(wt, x16, y, n_tokens, m, k, stream)) return;
+    }
+  }
   if (w.type == core::GgmlType::kF16) {
     core::compute::gemm::UnquantizedF16Gemm(dev, x16, y, n_tokens, m, k,
                                            stream);
@@ -151,6 +168,10 @@ struct SessionBuffers {
   std::vector<__half*> kv_v;
   std::vector<std::uint8_t*> kv_bk;
   std::vector<std::uint8_t*> kv_bv;
+  // F16 staging planes ([max_context][kv_heads * d]) the blocked-Q8 prefill dequantizes the visible range into before
+  // the WMMA flash kernel (one pair per session, reused by every layer).
+  __half* stage_k{nullptr};
+  __half* stage_v{nullptr};
 
   template <typename T>
   T* Alloc(std::size_t count, std::string* error) {
@@ -196,6 +217,9 @@ struct Session::Impl {
   std::uint32_t capacity{0};
   std::uint32_t length{0};
   std::vector<float> host_logits;
+  core::compute::gemm::PreDequant predq;  ///< current layer's tiled F16 weights (layer-major prefill)
+  __half* predq_arena{nullptr};           ///< one layer's worth of tiled F16 weights
+  float* hidden_all{nullptr};             ///< residual stream of the whole prompt ([capacity][hidden])
 
   [[nodiscard]] bool Ensure(const ModelWeights& w, std::uint32_t capacity,
                             std::string* error) {
@@ -237,6 +261,22 @@ struct Session::Impl {
         core::compute::gemm::kArgmaxParts, error);
     argmax_out = buffers.Alloc<std::int32_t>(1, error);
     host_logits.assign(w.config.vocab_size, 0.0f);
+    {  // optional layer-major prefill buffers (without them prefill stays chunk-major)
+      std::size_t arena_elems = 0;
+      for (const auto& l : w.layers) {
+        std::size_t sum = 0;
+        for (const TensorRef* t : {&l.wq, &l.wk, &l.wv, &l.wo, &l.ffn_gate, &l.ffn_up, &l.ffn_down})
+          if (!t->empty() && core::compute::gemm::PreDequantEligible(t->rows, t->cols)) sum += t->rows * t->cols;
+        arena_elems = std::max(arena_elems, sum);
+      }
+      const std::size_t hidden_bytes = static_cast<std::size_t>(capacity) * hidden_dim * sizeof(float);
+      if (arena_elems != 0 && arena_elems * sizeof(__half) <= (std::size_t{6} << 30) &&
+          hidden_bytes <= (std::size_t{2} << 30)) {
+        predq_arena = buffers.Alloc<__half>(arena_elems, error);
+        hidden_all = buffers.Alloc<float>(static_cast<std::size_t>(capacity) * hidden_dim, error);
+        if (predq_arena == nullptr || hidden_all == nullptr) predq_arena = nullptr, hidden_all = nullptr;
+      }
+    }
     return hidden != nullptr && normed != nullptr && qbuf != nullptr &&
            kbuf != nullptr && vbuf != nullptr && attn_out != nullptr &&
            gate_out != nullptr && up_out != nullptr && ffn_out != nullptr &&
@@ -411,6 +451,15 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
     impl.buffers.kv_k[il] = kk;
     impl.buffers.kv_v[il] = vv;
   }
+  if (use_blocked) {
+    const std::size_t stage_elems = static_cast<std::size_t>(options_.max_context) * kvdim;
+    if (stage_elems * sizeof(__half) * 2 <= (std::size_t{1} << 30)) {
+      impl.buffers.stage_k = impl.buffers.Alloc<__half>(stage_elems, &error);
+      impl.buffers.stage_v = impl.buffers.Alloc<__half>(stage_elems, &error);
+      if (impl.buffers.stage_k == nullptr || impl.buffers.stage_v == nullptr)
+        impl.buffers.stage_k = impl.buffers.stage_v = nullptr;  // optional: scalar prefill still works
+    }
+  }
   return session;
 }
 
@@ -432,11 +481,11 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
   kernels::RmsNorm(hidden_buf,
                    static_cast<const float*>(l.attn_norm.device),
                    impl.normed, n, hidden, c.rms_eps, stream);
-  LlamaGemm(l.wq, impl.normed, impl.x16, impl.qbuf, n, qdim,
+  LlamaGemm(&impl.predq, l.wq, impl.normed, impl.x16, impl.qbuf, n, qdim,
             hidden, stream);
-  LlamaGemm(l.wk, impl.normed, impl.x16, impl.kbuf, n, kvdim,
+  LlamaGemm(&impl.predq, l.wk, impl.normed, impl.x16, impl.kbuf, n, kvdim,
             hidden, stream);
-  LlamaGemm(l.wv, impl.normed, impl.x16, impl.vbuf, n, kvdim,
+  LlamaGemm(&impl.predq, l.wv, impl.normed, impl.x16, impl.vbuf, n, kvdim,
             hidden, stream);
   if (getenv("LLAMA_DUMP_QKV") != nullptr && n <= 32 && il < 2) {
     (void)hipStreamSynchronize(stream);
@@ -469,6 +518,21 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
         impl.vbuf, kvdim, d, impl.buffers.kv_bv[il], kvdim,
         c.num_kv_heads, d, n, blocked::KvCodec::kQ8, 127.0F, 34,
         impl.d_pos, stream);
+    // WMMA flash prefill: dequantize the visible rows into the F16 staging planes and run the shared tensor-core
+    // kernel (the scalar blocked read below is ~5 TFLOPS and dominated 8B prefill at 6K tokens).
+    bool wmma_done = false;
+    if (n >= 16 && impl.buffers.stage_k != nullptr && std::getenv("LLAMA_NO_WMMA_PREFILL") == nullptr &&
+        core::compute::flash_wmma_gqa::IsFlashWmmaSupported(c.num_heads, c.num_kv_heads, d)) {
+      const std::uint32_t kv_len = start_pos + n;
+      const std::uint32_t row_bytes = (d / 32) * 34 * c.num_kv_heads;
+      (void)row_bytes;
+      wmma_done = blocked::DequantizeKvRows(impl.buffers.kv_bk[il], impl.buffers.stage_k, impl.buffers.kv_bv[il],
+                                            impl.buffers.stage_v, static_cast<std::size_t>(kv_len) * c.num_kv_heads, d,
+                                            34, 34, blocked::KvCodec::kQ8, stream) &&
+                  core::compute::flash_wmma_gqa::FlashWmmaPrefill(impl.qbuf, impl.buffers.stage_k, impl.buffers.stage_v, /*sinks=*/nullptr, impl.attn_out, n, start_pos,
+                      c.num_heads, c.num_kv_heads, d, /*window=*/0, score_scale, stream);
+    }
+    if (!wmma_done) {
     // Shared dispatcher: long-context decode rides Split-K-128, everything
     // else runs the scalar direct read (same math, fused dequant).
     namespace attn_disp = core::compute::attention_dispatcher;
@@ -502,6 +566,7 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
           c.num_heads, c.num_kv_heads, d, /*ratio=*/1, 34, 34,
           blocked::KvCodec::kQ8, stream, score_scale);
     }
+    }  // !wmma_done
   } else {
     kernels::StoreKvF16(impl.kbuf, impl.buffers.kv_k[il], n, kvdim,
                         start_pos, stream);
@@ -509,7 +574,12 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                         start_pos, stream);
     // Single-token decode rides the shared lane-per-key split-K kernel (the
     // scalar kernel scans every key serially); LLAMA_NO_FLASH_DECODE keeps it.
-    if (!(n == 1 && std::getenv("LLAMA_NO_FLASH_DECODE") == nullptr &&
+    const bool wmma_done =
+        n >= 16 && std::getenv("LLAMA_NO_WMMA_PREFILL") == nullptr &&
+        core::compute::flash_wmma_gqa::IsFlashWmmaSupported(c.num_heads, c.num_kv_heads, d) &&
+        core::compute::flash_wmma_gqa::FlashWmmaPrefill(impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il], /*sinks=*/nullptr, impl.attn_out, n, start_pos, c.num_heads,
+            c.num_kv_heads, d, /*window=*/0, score_scale, stream);
+    if (!wmma_done && !(n == 1 && std::getenv("LLAMA_NO_FLASH_DECODE") == nullptr &&
           core::compute::flash_sink::FlashSinkDecode(
               impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
               /*sinks=*/nullptr, impl.attn_out, n, start_pos, start_pos + n,
@@ -557,7 +627,7 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
     }
   }
   }
-  LlamaGemm(l.wo, impl.attn_out, impl.x16, impl.ffn_out, n, hidden,
+  LlamaGemm(&impl.predq, l.wo, impl.attn_out, impl.x16, impl.ffn_out, n, hidden,
             qdim, stream);
   // Llama has no post-attention norm: plain residual add.
   kernels::ResidualAdd(impl.ffn_out, hidden_buf,
@@ -584,14 +654,14 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
   kernels::RmsNorm(hidden_buf,
                    static_cast<const float*>(l.ffn_norm.device),
                    impl.normed, n, hidden, c.rms_eps, stream);
-  LlamaGemm(l.ffn_gate, impl.normed, impl.x16, impl.gate_out, n,
+  LlamaGemm(&impl.predq, l.ffn_gate, impl.normed, impl.x16, impl.gate_out, n,
             c.intermediate_size, hidden, stream);
-  LlamaGemm(l.ffn_up, impl.normed, impl.x16, impl.up_out, n,
+  LlamaGemm(&impl.predq, l.ffn_up, impl.normed, impl.x16, impl.up_out, n,
             c.intermediate_size, hidden, stream);
   kernels::SiluMul(impl.gate_out, impl.up_out, impl.gate_out,
                    static_cast<std::size_t>(n) * c.intermediate_size,
                    stream);
-  LlamaGemm(l.ffn_down, impl.gate_out, impl.x16, impl.ffn_out, n,
+  LlamaGemm(&impl.predq, l.ffn_down, impl.gate_out, impl.x16, impl.ffn_out, n,
             hidden, c.intermediate_size, stream);
   if (getenv("LLAMA_DUMP_QKV") != nullptr && n <= 32 && il < 2) {
     (void)hipStreamSynchronize(stream);
@@ -643,7 +713,7 @@ void Session::ForwardFinish(Session& s, std::uint32_t n,
                    impl.normed, n, hidden, c.rms_eps, stream);
   const float* last_row =
       impl.normed + static_cast<std::size_t>(n - 1) * hidden;
-  LlamaGemm(w.output, last_row, impl.x16, impl.logits, 1,
+  LlamaGemm(&impl.predq, w.output, last_row, impl.x16, impl.logits, 1,
             c.vocab_size, hidden, stream);
   if (getenv("LLAMA_DUMP_QKV") != nullptr && n <= 32) {
     (void)hipStreamSynchronize(stream);
@@ -776,11 +846,65 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     return false;
   }
   impl_->length = 0;
-  for (std::size_t off = 0; off < prompt.size(); off += kMaxChunk) {
-    const std::size_t len = std::min<std::size_t>(kMaxChunk, prompt.size() - off);
-    if (!Forward(prompt.subspan(off, len), static_cast<std::uint32_t>(off),
-                 error_msg))
-      return false;
+  const std::size_t n_chunks = (prompt.size() + kMaxChunk - 1) / kMaxChunk;
+  if (n_chunks >= 2 && impl_->predq_arena != nullptr && impl_->hidden_all != nullptr &&
+      std::getenv("LLAMA_NO_LAYER_MAJOR") == nullptr) {
+    // Layer-major prefill: each layer's weights are dequantized once (tiled F16) and every chunk of the prompt runs
+    // through the layer before the next one starts; the residual stream of the whole prompt lives in hidden_all and
+    // the layer code sees one chunk's slice through impl.hidden.
+    auto& impl = *impl_;
+    const auto& w = *model_->weights_;
+    const std::uint32_t hidden = w.config.hidden_size;
+    hipStream_t stream = 0;
+    struct Span { std::size_t off, len; };
+    std::vector<Span> chunks;
+    for (std::size_t off = 0, left = n_chunks; off < prompt.size(); --left) {
+      const std::size_t len = (prompt.size() - off + left - 1) / left;
+      chunks.push_back({off, len});
+      off += len;
+    }
+    float* const saved_hidden = impl.hidden;
+    const auto slice = [&](const Span& c) { return impl.hidden_all + c.off * hidden; };
+    const auto set_pos = [&](std::size_t off) {
+      if (model_->options_.kv_cache_quant == "q8") {
+        const std::uint32_t sp = static_cast<std::uint32_t>(off);
+        (void)hipMemcpyAsync(impl.d_pos, &sp, sizeof(sp), hipMemcpyHostToDevice, stream);
+      }
+    };
+    for (const Span& c : chunks) {
+      std::vector<std::int32_t> host_tokens(prompt.begin() + c.off, prompt.begin() + c.off + c.len);
+      (void)hipMemcpy(impl.d_tokens, host_tokens.data(), host_tokens.size() * sizeof(std::int32_t),
+                      hipMemcpyHostToDevice);
+      kernels::Embed(w.token_embd.device, w.token_embd.type, impl.d_tokens, slice(c),
+                     static_cast<std::uint32_t>(c.len), hidden, stream);
+    }
+    for (std::uint32_t il = 0; il < w.config.num_layers; ++il) {
+      const auto& l = w.layers[il];
+      impl.predq.count = 0;
+      __half* cursor = impl.predq_arena;
+      for (const TensorRef* t : {&l.wq, &l.wk, &l.wv, &l.wo, &l.ffn_gate, &l.ffn_up, &l.ffn_down}) {
+        if (t->empty()) continue;
+        const void* dev = t->device != nullptr ? t->device : t->data;
+        (void)core::compute::gemm::PreDequantAdd(impl.predq, cursor, dev, static_cast<int>(t->type), t->rows, t->cols,
+                                                 stream);
+      }
+      for (const Span& c : chunks) {
+        impl.hidden = slice(c);
+        set_pos(c.off);
+        ForwardLayer(*this, il, static_cast<std::uint32_t>(c.len), static_cast<std::uint32_t>(c.off), stream);
+      }
+    }
+    impl.predq.count = 0;
+    const Span& last = chunks.back();
+    impl.hidden = slice(last);
+    set_pos(last.off);
+    ForwardFinish(*this, static_cast<std::uint32_t>(last.len), static_cast<std::uint32_t>(last.off), stream);
+    impl.hidden = saved_hidden;
+  } else {
+    for (std::size_t off = 0; off < prompt.size(); off += kMaxChunk) {
+      const std::size_t len = std::min<std::size_t>(kMaxChunk, prompt.size() - off);
+      if (!Forward(prompt.subspan(off, len), static_cast<std::uint32_t>(off), error_msg)) return false;
+    }
   }
   (void)hipStreamSynchronize(0);
   return true;
