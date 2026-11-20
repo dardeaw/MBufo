@@ -191,6 +191,7 @@ struct Binder {
                         GgmlType::kMXFP4};
     const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K,
                           GgmlType::kQ6_K, GgmlType::kQ5_1,
+                          GgmlType::kQ4_0, GgmlType::kQ2_K, GgmlType::kQ3_K,
                           GgmlType::kQ8_0, GgmlType::kQ4_0_ROCMFP4_FAST,
                           GgmlType::kMXFP4};
 

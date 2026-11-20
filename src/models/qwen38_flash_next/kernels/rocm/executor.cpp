@@ -2084,6 +2084,18 @@ bool Executor::Experts(const DeviceTensor& w, const float* x,
       case GgmlType::kQ8_0:
         rc = qfn_mmq_q8_0_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
         break;
+      case GgmlType::kQ4_0:
+        rc = qfn_mmq_q4_0_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
+        break;
+      case GgmlType::kQ2_K:
+        rc = qfn_mmq_q2_K_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
+        break;
+      case GgmlType::kQ3_K:
+        rc = qfn_mmq_q3_K_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
+        break;
+      case GgmlType::kQ6_K:
+        rc = qfn_mmq_q6_K_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
+        break;
       default:
         break;
     }

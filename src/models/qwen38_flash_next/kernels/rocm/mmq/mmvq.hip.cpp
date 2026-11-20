@@ -235,6 +235,10 @@ static constexpr __device__ vec_dot_q_hip_t get_vec_dot_q_hip(ggml_type type) {
         case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1;
         case GGML_TYPE_Q4_0_ROCMFP4_FAST: return vec_dot_rocmfp4_fast_q8_1;
         case GGML_TYPE_MXFP4: return vec_dot_mxfp4_q8_1;
+        case GGML_TYPE_Q4_0:    return vec_dot_q4_0_q8_1;
+        case GGML_TYPE_Q2_K:    return vec_dot_q2_K_q8_1;
+        case GGML_TYPE_Q3_K:    return vec_dot_q3_K_q8_1;
+        case GGML_TYPE_Q6_K:    return vec_dot_q6_K_q8_1;
         default:                return nullptr;
     }
 }
@@ -248,6 +252,10 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
         case GGML_TYPE_Q5_K:    return VDR_Q5_K_Q8_1_MMVQ;
         case GGML_TYPE_Q4_0_ROCMFP4_FAST: return VDR_ROCMFP4_Q8_1_MMVQ;
         case GGML_TYPE_MXFP4: return VDR_MXFP4_Q8_1_MMVQ;
+        case GGML_TYPE_Q4_0:    return VDR_Q4_0_Q8_1_MMVQ;
+        case GGML_TYPE_Q2_K:    return VDR_Q2_K_Q8_1_MMVQ;
+        case GGML_TYPE_Q3_K:    return VDR_Q3_K_Q8_1_MMVQ;
+        case GGML_TYPE_Q6_K:    return VDR_Q6_K_Q8_1_MMVQ;
         default:                return 1;
     }
 }
@@ -963,6 +971,22 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
             launch_moe<GGML_TYPE_MXFP4>(weights, input, ids, output, k, rows,
                                          tokens, experts_used, input_stride,
                                          stream, dst_slots);
+            break;
+        case GGML_TYPE_Q4_0:
+            launch_moe<GGML_TYPE_Q4_0>(weights, input, ids, output, k, rows, tokens,
+                                          experts_used, input_stride, stream);
+            break;
+        case GGML_TYPE_Q2_K:
+            launch_moe<GGML_TYPE_Q2_K>(weights, input, ids, output, k, rows, tokens,
+                                          experts_used, input_stride, stream);
+            break;
+        case GGML_TYPE_Q3_K:
+            launch_moe<GGML_TYPE_Q3_K>(weights, input, ids, output, k, rows, tokens,
+                                          experts_used, input_stride, stream);
+            break;
+        case GGML_TYPE_Q6_K:
+            launch_moe<GGML_TYPE_Q6_K>(weights, input, ids, output, k, rows, tokens,
+                                          experts_used, input_stride, stream);
             break;
         default: GGML_ABORT("unsupported vector weight format");
     }

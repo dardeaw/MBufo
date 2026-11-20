@@ -652,8 +652,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     // anything else was rejected at bind time.
     for (const TensorRef* t :
          {&l.ffn_gate_exps, &l.ffn_up_exps, &l.ffn_down_exps}) {
-      if (t->type == core::GgmlType::kQ6_K ||
-          t->type == core::GgmlType::kQ4_0_ROCMFP4) {
+      if (t->type == core::GgmlType::kQ4_0_ROCMFP4) {
         if (error_msg != nullptr)
           *error_msg = "unsupported HIP tensor format for experts: " +
                        std::string(t->name);
