@@ -1,14 +1,22 @@
 # MBufo
 
-MBufo is an inference server for AMD Strix Halo (`gfx1151`). It hosts multiple model families in a range of quantization formats on one server, reduces KV-cache memory with compressed layouts, and schedules requests fairly under high concurrency.
+A high-concurrency inference engine for AMD Strix Halo (`gfx1151`), built for fair production serving across multiple models and quantization formats, with efficient KV-cache compression.
 
-MBufo started from the engine foundations of [gufo](https://github.com/gufo-org/gufo), but has since been rewritten and extended so extensively that it is effectively an independent project. Thanks to gufo-org and its contributors for the foundation.
+Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily rewritten.
 
 > [繁體中文版](README.zh-Hant.md) · [简体中文版](README.zh-CN.md)
 
 <img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/8021186d-c066-4fa6-bd84-0d908c1164eb" />
 
-The original gufo is tuned for single-stream peak throughput. MBufo targets production serving: a single Strix Halo node should stay saturated under 16 or more concurrent streams, each with up to 256K tokens of context. Three design pillars get it there: **fair scheduling under load (§1)**, **low-precision compute and a compressed KV cache that cut memory and cost (§2)**, and **broad GGUF coverage, 19 model families behind a single port (§3)**.
+**Key features**
+
+- **High concurrency**: a single Strix Halo node stays saturated with 16+ concurrent streams, each with up to 256K tokens of context (§1).
+- **Fair scheduling**: prefill and decode share one mixed batch under anti-starvation scheduling, so no request is starved under load (§1).
+- **Multiple models, one port**: 19 model families served side by side, loaded and unloaded at runtime from the built-in `/admin` console (§3).
+- **Multiple quantization formats**: K-quants, IQ4, MXFP4, ROCmFP4 and more; see [Supported Quantization Formats](#supported-quantization-formats) for each engine (§3).
+- **Efficient KV cache**: blocked INT8 and compact 4-bit layouts that cut the memory each session holds (§2).
+- **Low-precision compute**: quantized weights reduce memory traffic and cost (§2).
+- **Speculative decoding**: MTP, DFlash and DSpark drafting (§1).
 
 **Contents:** [Key Highlights](#mbufo-key-highlights) ·
 [§1 High Concurrency Architecture](#1-high-concurrency-architecture) ·
@@ -402,4 +410,4 @@ For container configurations and system tuning, refer to the [upstream build gui
 
 Upstream gufo is licensed under the MIT License. Notices for adapted code and dependencies are maintained in [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and `licenses/`.
 
-MBufo is an optimized fork of [mbufo](https://github.com/gufo-org/gufo) (gufo-org and community contributors). Sincere thanks to the upstream developers whose work on Q8 KV caching, int8 WMMA, and speculative foundations made this project possible.
+MBufo started from [gufo](https://github.com/gufo-org/gufo). Thanks to gufo-org and its contributors, whose work on Q8 KV caching, int8 WMMA and speculative decoding laid the foundation for this project.

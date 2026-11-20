@@ -1,13 +1,21 @@
 # MBufo
 
-MBufo 是面向 AMD Strix Halo（`gfx1151`）的推論服務引擎：同一個服務端可並行承載多種模型家族與多種量化格式，以壓縮的 KV 快取控制記憶體用量，並在高併發下維持公平排程。
+專為 AMD Strix Halo（`gfx1151`）打造的高併發推論引擎，面向生產環境，在公平排程下同時服務多種模型與多種量化格式，並以高效的 KV 快取壓縮節省記憶體。
 
-MBufo 起步於 [gufo](https://github.com/gufo-org/gufo) 的底層引擎，經過大規模重寫與擴充，如今已不再是傳統意義上的分支。感謝 gufo-org 及其貢獻者奠定的基礎。
+最初源自 [gufo](https://github.com/gufo-org/gufo)，之後已大幅重寫。
 
 > [English Version](README.md) · [简体中文版](README.zh-CN.md)
 <img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/fb3f41c3-5883-48c6-872e-fbf327dcf3f3" />
 
-原版 gufo 追求單串流峰值吞吐；MBufo 面向生產服務，目標是讓單台 Strix Halo 節點在 16 路以上併發、每路最長 256K 上下文的負載下依然滿載運行。為此有三大支柱：**負載下的公平排程（§1）**、**降低記憶體與成本的低精度運算和 KV 快取壓縮（§2）**，以及**單端口涵蓋 19 個模型家族的 GGUF 支援（§3）**。
+**核心特點**
+
+- **高併發**：單台 Strix Halo 節點在 16 路以上併發下維持滿載，每路最長可達 256K 上下文（§1）。
+- **公平排程**：預填與解碼統一混合批次，搭配防飢餓排程，高負載下不會有請求被餓死（§1）。
+- **多模型單端口**：19 個模型家族並行服務，可透過內建 `/admin` 控制台在執行期載入與卸載（§3）。
+- **多種量化格式**：K 系列、IQ4、MXFP4、ROCmFP4 等，各引擎的支援清單見[支援的量化格式](#支援的量化格式)（§3）。
+- **高效 KV 快取**：分塊 INT8 與 4-bit 緊湊佈局，顯著降低每個會話佔用的記憶體（§2）。
+- **低精度運算**：以量化權重降低記憶體頻寬需求與成本（§2）。
+- **投機解碼**：支援 MTP、DFlash、DSpark（§1）。
 
 **目錄：** [核心特性](#mbufo-核心特性) ·
 [§1 高併發架構](#1-高併發架構) ·
@@ -399,4 +407,4 @@ cmake --build --preset release --parallel 4
 
 上游 gufo 採用 MIT 授權條款；第三方函式庫授權聲明詳見 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 與 `licenses/`。模型權重檔案依其各原始發布者之許可協議規範。
 
-MBufo 作為 [mbufo](https://github.com/gufo-org/gufo)（gufo-org 及社群貢獻者）的優化衍生版本，在此感謝開源社群奠定的深厚基礎。
+MBufo 起步於 [gufo](https://github.com/gufo-org/gufo)。感謝 gufo-org 及其貢獻者在 Q8 KV 快取、int8 WMMA 與投機解碼上的工作，為本專案奠定了基礎。
