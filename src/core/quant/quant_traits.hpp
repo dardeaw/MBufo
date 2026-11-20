@@ -35,7 +35,7 @@ namespace mbufo::core::quant {
 /// GGML type codes (same values as core::GgmlType / the MBUFO_GEMM_* codes).
 enum class FormatId : int {
   kF32 = 0, kF16 = 1, kQ4_0 = 2, kQ4_1 = 3, kQ5_0 = 6, kQ5_1 = 7, kQ8_0 = 8, kQ2_K = 10, kQ4_K = 12, kQ5_K = 13, kIQ2_XXS = 16,
-  kQ6_K = 14, kBF16 = 30, kMXFP4 = 39, kQ4_0_ROCMFP4 = 100, kQ4_0_ROCMFP4_FAST = 101, kQ3_0_ROCMFPX = 104,
+  kQ6_K = 14, kQ3_K = 11, kIQ4_NL = 20, kIQ4_XS = 23, kBF16 = 30, kMXFP4 = 39, kQ4_0_ROCMFP4 = 100, kQ4_0_ROCMFP4_FAST = 101, kQ3_0_ROCMFPX = 104,
 };
 
 /// How single-token (1..8 rows) decode GEMV is provided for a format.
@@ -307,6 +307,77 @@ template <> struct Traits<FormatId::kQ2_K> {
   }
 };
 
+/// Q3_K: 32 bytes of high bits, 64 bytes of 2-bit codes, 12 bytes of packed 6-bit scales (16 sub-blocks of 16), fp16 d.
+/// value = d * (scale - 32) * ((code) - (high bit set ? 0 : 4)).
+template <> struct Traits<FormatId::kQ3_K> {
+  static constexpr FormatId kId = FormatId::kQ3_K;
+  static constexpr unsigned kBlockElems = 256, kBlockBytes = 110;
+  static constexpr DecodePath kDecode = DecodePath::kNone;
+  static constexpr PrefillPath kPrefill = PrefillPath::kDequantF16;
+  MBUFO_QT_FN static std::size_t RowBytes(std::size_t cols) { return cols / 256 * 110; }
+  MBUFO_QT_FN static bool ColsOk(std::size_t cols) { return cols != 0 && cols % 256 == 0; }
+  MBUFO_QT_FN static float Element(const std::uint8_t* row, std::uint32_t i) {
+    const std::uint8_t* blk = row + static_cast<std::size_t>(i / 256) * 110;
+    const std::uint32_t e = i % 256;
+    const std::uint32_t n = e / 128u, r = e % 128u, j = r / 32u, l32 = r % 32u;
+    const std::uint32_t second = l32 / 16u, l = l32 % 16u;
+    const std::uint32_t k = n * 8u + j * 2u + second;  // sub-block 0..15
+    const std::uint8_t* sc = blk + 96;
+    const std::uint32_t low = k < 8u ? (sc[k] & 0xFu) : (sc[k - 8u] >> 4);
+    const std::uint32_t high = (sc[8u + (k & 3u)] >> (2u * (k / 4u))) & 3u;
+    const float dl = detail::HalfAt(blk + 108) * static_cast<float>(static_cast<int>(low | (high << 4)) - 32);
+    const std::uint32_t q = (blk[32 + n * 32u + second * 16u + l] >> (2u * j)) & 3u;
+    const bool hb = (blk[second * 16u + l] & (1u << (n * 4u + j))) != 0;
+    return dl * static_cast<float>(static_cast<int>(q) - (hb ? 0 : 4));
+  }
+};
+
+namespace detail {
+// Non-linear 4-bit codebook shared by IQ4_NL and IQ4_XS.
+MBUFO_QT_FN float Iq4Value(std::uint32_t nibble) {
+  constexpr float kValues[16] = {-127.0F, -104.0F, -83.0F, -65.0F, -49.0F, -35.0F, -22.0F, -10.0F,
+                                 1.0F,    13.0F,   25.0F,  38.0F,  53.0F,  69.0F,  89.0F,  113.0F};
+  return kValues[nibble & 15u];
+}
+}  // namespace detail
+
+/// IQ4_NL: fp16 d + 16 bytes of 4-bit indices into the non-linear codebook, 18 bytes per 32 (low nibbles first).
+template <> struct Traits<FormatId::kIQ4_NL> {
+  static constexpr FormatId kId = FormatId::kIQ4_NL;
+  static constexpr unsigned kBlockElems = 32, kBlockBytes = 18;
+  static constexpr DecodePath kDecode = DecodePath::kNone;
+  static constexpr PrefillPath kPrefill = PrefillPath::kDequantF16;
+  MBUFO_QT_FN static std::size_t RowBytes(std::size_t cols) { return cols / 32 * 18; }
+  MBUFO_QT_FN static bool ColsOk(std::size_t cols) { return cols != 0 && cols % 32 == 0; }
+  MBUFO_QT_FN static float Element(const std::uint8_t* row, std::uint32_t i) {
+    const std::uint8_t* blk = row + static_cast<std::size_t>(i / 32) * 18;
+    const std::uint32_t e = i % 32;
+    const std::uint8_t b = blk[2 + (e & 15u)];
+    return detail::HalfAt(blk) * detail::Iq4Value(e < 16u ? (b & 0xFu) : (b >> 4));
+  }
+};
+
+/// IQ4_XS: fp16 d, 16-bit high scale bits, 4 bytes of low scale nibbles (8 sub-blocks of 32), 128 bytes of 4-bit indices,
+/// 136 bytes per 256. value = d * (scale - 32) * codebook[nibble].
+template <> struct Traits<FormatId::kIQ4_XS> {
+  static constexpr FormatId kId = FormatId::kIQ4_XS;
+  static constexpr unsigned kBlockElems = 256, kBlockBytes = 136;
+  static constexpr DecodePath kDecode = DecodePath::kNone;
+  static constexpr PrefillPath kPrefill = PrefillPath::kDequantF16;
+  MBUFO_QT_FN static std::size_t RowBytes(std::size_t cols) { return cols / 256 * 136; }
+  MBUFO_QT_FN static bool ColsOk(std::size_t cols) { return cols != 0 && cols % 256 == 0; }
+  MBUFO_QT_FN static float Element(const std::uint8_t* row, std::uint32_t i) {
+    const std::uint8_t* blk = row + static_cast<std::size_t>(i / 256) * 136;
+    const std::uint32_t e = i % 256;
+    const std::uint32_t ib = e / 32u, j = e % 32u;
+    const std::uint32_t scales_h = static_cast<std::uint32_t>(blk[2]) | (static_cast<std::uint32_t>(blk[3]) << 8);
+    const std::uint32_t ls = ((blk[4 + ib / 2u] >> (4u * (ib % 2u))) & 0xFu) | (((scales_h >> (2u * ib)) & 3u) << 4);
+    const float dl = detail::HalfAt(blk) * static_cast<float>(static_cast<int>(ls) - 32);
+    const std::uint8_t b = blk[8 + ib * 16u + (j & 15u)];
+    return dl * detail::Iq4Value(j < 16u ? (b & 0xFu) : (b >> 4));
+  }
+};
+
 /// MXFP4 (OCP microscaling, GGML type 39): one e8m0 scale byte + 16 e2m1 nibble bytes (low nibbles first).
 /// The codebook is halved ({0,.5,1,1.5,2,3,4,6}) against scale 2^(e-127), which is exactly the engines'
 /// integer codebook {0,1,2,3,4,6,8,12} against 2^(e-128).
@@ -457,7 +528,8 @@ struct FormatList {
 using AllFormats =
     FormatList<Traits<FormatId::kF32>, Traits<FormatId::kF16>, Traits<FormatId::kBF16>, Traits<FormatId::kQ4_0>,
                Traits<FormatId::kQ4_1>, Traits<FormatId::kQ5_0>, Traits<FormatId::kQ5_1>, Traits<FormatId::kQ8_0>,
-               Traits<FormatId::kQ2_K>, Traits<FormatId::kIQ2_XXS>, Traits<FormatId::kQ4_K>, Traits<FormatId::kQ5_K>, Traits<FormatId::kQ6_K>,
+               Traits<FormatId::kQ2_K>, Traits<FormatId::kQ3_K>, Traits<FormatId::kIQ4_NL>, Traits<FormatId::kIQ4_XS>,
+               Traits<FormatId::kIQ2_XXS>, Traits<FormatId::kQ4_K>, Traits<FormatId::kQ5_K>, Traits<FormatId::kQ6_K>,
                Traits<FormatId::kMXFP4>, Traits<FormatId::kQ4_0_ROCMFP4>, Traits<FormatId::kQ4_0_ROCMFP4_FAST>,
                Traits<FormatId::kQ3_0_ROCMFPX>>;
 static_assert(AllFormats::kAllValid, "every listed format must satisfy QuantFormat");

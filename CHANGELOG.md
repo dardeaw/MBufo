@@ -3,6 +3,14 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## Unreleased
+
+### Added (more quantization formats; see docs/QUANT_FORMATS.md)
+- **gpt-oss experts beyond MXFP4**: Q4_0 / Q8_0 / Q5_1 (and Q4_K / Q5_K where the row width allows) decode through the core lane-geometry MoE (`LaunchMoeWaveGateUp` gained SwiGLU-OAI + per-expert biases; `device::SwigluOaiOne` is shared with the fused MXFP4 kernels) and the type-keyed routed GEMM. Q4_0 and Q8_0 experts match llama.cpp token for token on most prompts at -3..-4% speed. K-quants cannot encode gpt-oss experts (rows are 2880 wide), which the loader now says.
+- **Flash-Next dense Q4_K / Q5_K / Q4_0 / Q4_1 / Q5_0 / Q2_K / Q3_K / IQ4_XS / IQ4_NL**: converted to Q8_0 at upload through the new shared host dequantizer (`core/compute/gemm/host_dequant.hpp`, every format in the row-dot registry plus the ggml host dequantizers).
+- **Flash-Next routed experts in Q4_0 / Q2_K / Q3_K / Q6_K**: mmvq decode vectors and tiled routed GEMMs (the vendored mmq tiles already existed for them).
+- **Shared registry gains Q3_K, IQ4_NL and IQ4_XS** (`core/quant/quant_traits.hpp`, checked against the ggml oracles by `tools/bench/quant_traits_check`). This also fixes embedding gathers of IQ4_XS-embedded models: a Qwen 27B all-IQ4_XS file used to abort with `unsupported token_embd type 23`, now 13.9 tok/s vs llama.cpp 14.0.
+
 ## v0.33.0 (2026-11-21)
 
 ### Changed (project renamed gufo -> MBufo)

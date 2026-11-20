@@ -159,6 +159,8 @@ Identical weights, release build, greedy decoding; positive values denote MBufo 
 
 A single HTTP port hosts and routes across all 19 supported families:
 
+Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT_FORMATS.md).
+
 | Model | Parameters | HTTP Serving | Evaluation | Speculative Draft | Architecture Highlights |
 | --- | --- | --- | --- | --- | --- |
 | **Qwen3.8 Flash-Next** (Primary) | 30B-A3B MoE | Supported | Pilot | MTP | ROCmFP4-FAST / UD-Q4_K_XL, Blocked-Q8 KV |
