@@ -47,6 +47,7 @@ target_link_libraries(gufo_deepseek_v4_flash_mmq PUBLIC
 add_library(gufo_deepseek_v4_flash STATIC
   chat_template.cpp
   engine.cpp
+  engine_adapter.cpp
   ${DEEPSEEK_V4_FLASH_RUNTIME_DIR}/model_data.cpp
   ${DEEPSEEK_V4_FLASH_RUNTIME_DIR}/rocm_graph.cpp
   ${DEEPSEEK_V4_FLASH_RUNTIME_DIR}/sampling.cpp
