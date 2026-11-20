@@ -176,6 +176,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/w8a8_tiled.hip
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/dequant_rows.hip
+    src/core/compute/gemm/host_dequant.hip
     src/core/compute/gemm/quant_dispatch.hip
     src/core/compute/gemm/wmma_tiled_gemm.hip
     src/core/compute/gemm/gemv_multi_wmma.hip
@@ -201,6 +202,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/compute/gemm/w8a8_tiled.hip
     src/core/compute/gemm/dense_f16.hip
     src/core/compute/gemm/dequant_rows.hip
+    src/core/compute/gemm/host_dequant.hip
     src/core/compute/gemm/quant_dispatch.hip
     src/core/compute/gemm/wmma_tiled_gemm.hip
     src/core/compute/gemm/gemv_multi_wmma.hip

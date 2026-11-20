@@ -34,7 +34,8 @@ bool IsQuantized(core::GgmlType type) noexcept {
 
 bool IsSupported(core::GgmlType type) noexcept {
   return type == core::GgmlType::kF32 || type == core::GgmlType::kF16 ||
-         type == core::GgmlType::kBF16 || IsQuantized(type);
+         type == core::GgmlType::kBF16 || IsQuantized(type) || type == core::GgmlType::kIQ4_NL ||
+         type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ3_S;
 }
 
 void Dequantize(core::GgmlType type, const void* src, float* dst,
@@ -74,6 +75,15 @@ void Dequantize(core::GgmlType type, const void* src, float* dst,
       return;
     case core::GgmlType::kQ8_0:
       DequantizeQ8_0(src, dst, k);
+      return;
+    case core::GgmlType::kIQ4_NL:
+      DequantizeIQ4_NL(src, dst, k);
+      return;
+    case core::GgmlType::kIQ4_XS:
+      DequantizeIQ4_XS(src, dst, k);
+      return;
+    case core::GgmlType::kIQ3_S:
+      DequantizeIQ3_S(src, dst, k);
       return;
     default:
       assert(false && "quant::Dequantize: unsupported GgmlType");

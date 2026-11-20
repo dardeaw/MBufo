@@ -43,6 +43,18 @@ struct Format {
       return {256, 176};
     case GgmlType::kQ6_K:
       return {256, 210};
+    case GgmlType::kQ4_0:
+      return {32, 18};
+    case GgmlType::kQ4_1:
+      return {32, 20};
+    case GgmlType::kQ5_0:
+      return {32, 22};
+    case GgmlType::kQ2_K:
+      return {256, 84};
+    case GgmlType::kQ3_K:
+      return {256, 110};
+    case GgmlType::kIQ4_XS:
+      return {256, 136};
     default:
       return {0, 0};
   }
@@ -85,8 +97,30 @@ struct Binder {
       return t;
     }
     bool type_ok = false;
+    bool takes_converted = false;
     for (auto type : types) {
       type_ok = type_ok || info->type == type;
+      takes_converted = takes_converted || type == GgmlType::kQ6_K;
+    }
+    // A single-slab matrix whose consumer already accepts the load-time Q8_0 conversion (the lists that name Q6_K) takes
+    // every other block format the host can dequantize: Q4_K, Q5_K, Q4_0, Q4_1, Q5_0, Q2_K, Q3_K, IQ4_XS.
+    if (!type_ok && takes_converted && experts == 1) {
+      switch (info->type) {
+        case GgmlType::kQ4_K:
+        case GgmlType::kQ5_K:
+        case GgmlType::kQ4_0:
+        case GgmlType::kQ4_1:
+        case GgmlType::kQ5_0:
+        case GgmlType::kQ2_K:
+        case GgmlType::kQ3_K:
+        case GgmlType::kIQ4_XS:
+        case GgmlType::kIQ4_NL:
+        case GgmlType::kQ5_1:
+          type_ok = true;
+          break;
+        default:
+          break;
+      }
     }
     const Format format = FormatOf(info->type);
     if (!type_ok || format.block == 0 || cols % format.block != 0) {
@@ -133,7 +167,7 @@ struct Binder {
              GgmlType::kQ4_0_ROCMFP4, GgmlType::kMXFP4});
     m.up = Get(prefix + "_up.weight", c.hc_low_rank, hc_dim, 1,
                {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
-                GgmlType::kF32, GgmlType::kQ4_0_ROCMFP4_FAST,
+                GgmlType::kF32, GgmlType::kQ6_K, GgmlType::kQ4_0_ROCMFP4_FAST,
                 GgmlType::kQ4_0_ROCMFP4, GgmlType::kMXFP4});
     if (with_inject) {
       m.inject = Get(

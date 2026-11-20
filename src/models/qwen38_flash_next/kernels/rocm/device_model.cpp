@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <vector>
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/core/compute/gemm/host_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
 namespace mbufo::models::qwen38_flash_next::rocm {
@@ -26,6 +27,31 @@ namespace {
 constexpr std::size_t kTailMargin = 4096;
 
 namespace {
+// Dense formats the device kernels read directly; everything else that the host can dequantize is converted to Q8_0 at
+// upload (ROCmFP4 dual scale, Q6_K and, through the shared core dequantizer, Q4_K / Q5_K / Q4_0 / Q4_1 / Q5_0 / Q2_K /
+// Q3_K / IQ4_XS ...).
+bool NativeDenseType(core::GgmlType t) {
+  return t == core::GgmlType::kF32 || t == core::GgmlType::kF16 || t == core::GgmlType::kBF16 ||
+         t == core::GgmlType::kQ8_0;
+}
+bool Q8Convertible(core::GgmlType t) {
+  if (NativeDenseType(t)) return false;
+  return t == core::GgmlType::kQ4_0_ROCMFP4 || t == core::GgmlType::kQ4_0_ROCMFP4_FAST || t == core::GgmlType::kQ6_K ||
+         core::compute::gemm::HostDequantSupported(t);
+}
+// One packed row -> F32 (cols elements).
+void RowToF32(core::GgmlType t, const void* row, float* out, std::size_t cols) {
+  if (t == core::GgmlType::kQ4_0_ROCMFP4) {
+    mbufo::quant::DequantizeQ4_0_ROCMFP4(row, out, cols);
+  } else if (t == core::GgmlType::kQ4_0_ROCMFP4_FAST) {
+    mbufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row, out, cols);
+  } else if (t == core::GgmlType::kQ6_K) {
+    mbufo::quant::DequantizeQ6_K(row, out, cols);
+  } else {
+    core::compute::gemm::HostDequantRow(t, row, out, cols);
+  }
+}
+
 // Device row stride for the formats Copy() can emit (raw or converted).
 std::size_t DeviceRowBytes(core::GgmlType type, std::uint32_t cols) {
   switch (type) {
@@ -132,16 +158,11 @@ struct Uploader {
       float* frow = fbuf.data();
       for (std::size_t r = 0; r < chunk; ++r) {
         const void* row_src = src + r * t.RowBytes();
-        if (t.type == core::GgmlType::kQ4_0_ROCMFP4) {
-          mbufo::quant::DequantizeQ4_0_ROCMFP4(row_src, frow, cols);
-        } else if (t.type == core::GgmlType::kQ4_0_ROCMFP4_FAST) {
-          mbufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, frow, cols);
-        } else if (t.type == core::GgmlType::kQ6_K) {
-          mbufo::quant::DequantizeQ6_K(row_src, frow, cols);
-        } else {
+        if (!Q8Convertible(t.type)) {
           Fail("unexpected conversion source for " + std::string(t.name));
           return d;
         }
+        RowToF32(t.type, row_src, frow, cols);
         frow += cols;
       }
       mbufo::quant::QuantizeQ8_0(fbuf.data(), staging.data() + r0 * q8_row,
@@ -171,10 +192,7 @@ struct Uploader {
   // raw; F32-only consumers (norms/router/biases/nextn, inject below)
   // never see these types because the bind sets reject them there.
   DeviceTensor CopyQ8(const TensorRef& t) {
-    if (!t.empty() && ok &&
-        (t.type == core::GgmlType::kQ4_0_ROCMFP4 ||
-         t.type == core::GgmlType::kQ4_0_ROCMFP4_FAST ||
-         t.type == core::GgmlType::kQ6_K)) {
+    if (!t.empty() && ok && Q8Convertible(t.type)) {
       return CopyConvertedQ8(t);
     }
     return Copy(t);
@@ -428,10 +446,7 @@ struct Uploader {
     std::size_t rows = 0;
     std::size_t size = 0;
     for (const TensorRef* t : parts) {
-      const bool convertible =
-          t->type == core::GgmlType::kQ4_0_ROCMFP4 ||
-          t->type == core::GgmlType::kQ4_0_ROCMFP4_FAST ||
-          t->type == core::GgmlType::kQ6_K;
+      const bool convertible = Q8Convertible(t->type);
       if (t->empty() || t->type != type ||
           t->cols != (*parts.begin())->cols || t->cols % 32 != 0 ||
           !convertible) {
@@ -463,13 +478,7 @@ struct Uploader {
         float* frow = fbuf.data();
         for (std::size_t r = 0; r < chunk; ++r) {
           const void* row_src = src + r * t->RowBytes();
-          if (type == core::GgmlType::kQ4_0_ROCMFP4) {
-            mbufo::quant::DequantizeQ4_0_ROCMFP4(row_src, frow, cols);
-          } else if (type == core::GgmlType::kQ4_0_ROCMFP4_FAST) {
-            mbufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, frow, cols);
-          } else {
-            mbufo::quant::DequantizeQ6_K(row_src, frow, cols);
-          }
+          RowToF32(type, row_src, frow, cols);
           frow += cols;
         }
         mbufo::quant::QuantizeQ8_0(fbuf.data(),
