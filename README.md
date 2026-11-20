@@ -1,12 +1,14 @@
 # MBufo
 
-An inference engine for AMD Strix Halo (`gfx1151`) built for production serving: **many model families, many quantization formats, and efficient KV-cache compression** behind one fair, high-concurrency server. It began from the engine primitives of [gufo](https://github.com/gufo-org/gufo) and has since been rewritten and extended so heavily that it is no longer a fork in any practical sense; sincere thanks to gufo-org and its contributors for the foundation.
+MBufo is an inference server for AMD Strix Halo (`gfx1151`). It hosts multiple model families in a range of quantization formats on one server, reduces KV-cache memory with compressed layouts, and schedules requests fairly under high concurrency.
+
+MBufo started from the engine foundations of [gufo](https://github.com/gufo-org/gufo), but has since been rewritten and extended so extensively that it is effectively an independent project. Thanks to gufo-org and its contributors for the foundation.
 
 > [繁體中文版](README.zh-Hant.md) · [简体中文版](README.zh-CN.md)
 
 <img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/8021186d-c066-4fa6-bd84-0d908c1164eb" />
 
-The original gufo is tuned for single-stream peak throughput. MBufo addresses the operational reality of production serving: how a single Strix Halo node sustains 16+ concurrent streams under heavy load while offering up to 256K context per session. MBufo achieves this through three core pillars: **fair scheduling under load (§1)**, **low-precision compute that drastically cuts cost and memory (§2)**, and **comprehensive GGUF coverage across 19 model families on a single port (§3)**. The engine primitives, compute kernels, and foundations originate from upstream; sincere thanks to gufo-org and all community contributors.
+The original gufo is tuned for single-stream peak throughput. MBufo targets production serving: a single Strix Halo node should stay saturated under 16 or more concurrent streams, each with up to 256K tokens of context. Three design pillars get it there: **fair scheduling under load (§1)**, **low-precision compute and a compressed KV cache that cut memory and cost (§2)**, and **broad GGUF coverage, 19 model families behind a single port (§3)**.
 
 **Contents:** [Key Highlights](#mbufo-key-highlights) ·
 [§1 High Concurrency Architecture](#1-high-concurrency-architecture) ·
