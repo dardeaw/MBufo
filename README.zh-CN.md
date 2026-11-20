@@ -1,11 +1,11 @@
 # MBufo
 
-专为 AMD Strix Halo（`gfx1151`）架构深度打造的 [mbufo](https://github.com/gufo-org/gufo) 分支，定位为**高并发、极致公平性与多模型的生产级推理引擎**。
+面向 AMD Strix Halo（`gfx1151`）的生产级推理引擎：**支持多种模型家族、多种量化格式与高效的 KV 缓存压缩**，并以单一服务端提供公平、高并发的推理。项目最初源自 [gufo](https://github.com/gufo-org/gufo) 的底层引擎，但此后已被大幅重写与扩展，实质上已不再是一个分支；在此诚挚感谢 gufo-org 及其贡献者奠定的基础。
 
 > [English Version](README.md) · [繁體中文版](README.zh-Hant.md)
 <img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/562fcc09-a6dd-46eb-b143-6d702f5aa08c" />
 
-上游 mbufo 专精于单流极限吞吐；MBufo 则聚焦于服务端实际服务的核心挑战：单台 Strix Halo 节点在面临十六路以上高并发请求时如何保持满载，且每路请求如何承载长达 256K 的极限上下文。MBufo 以三大核心支柱解答：**负载下的公平调度（§1）**、**极致节省显存与算力的低精度计算（§2）**，以及**单端口整合全家族的 GGUF 兼容支持（§3）**。底层引擎、算子内核与核心架构源自上游，在此诚挚致谢 gufo-org 及广大社区贡献者。
+原版 gufo 专精于单流极限吞吐；MBufo 则聚焦于服务端实际服务的核心挑战：单台 Strix Halo 节点在面临十六路以上高并发请求时如何保持满载，且每路请求如何承载长达 256K 的极限上下文。MBufo 以三大核心支柱解答：**负载下的公平调度（§1）**、**极致节省显存与算力的低精度计算（§2）**，以及**单端口整合全家族的 GGUF 兼容支持（§3）**。底层引擎、算子内核与核心架构源自上游，在此诚挚致谢 gufo-org 及广大社区贡献者。
 
 **目录：** [核心特性](#mbufo-核心特性) ·
 [§1 高并发架构](#1-高并发架构) ·
@@ -179,6 +179,22 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 | **Qwen3-TTS 12Hz 1.7B** | 1.7B | 支援（語音合成） | — | — | BF16 safetensors、F32 波形解碼器 |
 | **Qwen-Image-2.1** | Diffusion transformer | 支援（圖像生成／編輯） | — | — | BF16 safetensors、Qwen3-VL 提示編碼器、RGBA VAE |
 | **MiniMax H3** | 50 區塊 BF16 transformer | 支援（影片，純文字 FL2VA） | — | — | HIP transformer、VisualVAE / AudioVAE、MP4 合成 |
+
+### 支持的量化格式
+
+各引擎均直接读取 GGUF；下表为各引擎接受的格式（不在清单内的格式会在加载时连同张量名称一并拒绝，绝不会被当成其他格式解码）。细节、限制与各组合的验证方式见 [docs/QUANT_FORMATS.md](docs/QUANT_FORMATS.md)。
+
+| 引擎 | 稠密／注意力权重 | 路由专家 |
+| --- | --- | --- |
+| **Qwen 27B / Qwen3.5-3.6 MoE** | Q8_0、Q4_K、Q5_K、Q6_K、Q3_K、IQ4_NL、IQ4_XS、IQ3_S、ROCmFP4、F16 / BF16 / F32 | Q4_0、Q4_1、Q5_0、Q5_1、Q8_0、Q2_K、Q4_K、Q5_K、Q6_K、IQ2_XXS、MXFP4、ROCmFP4 |
+| **Qwen3.8 Flash-Next** | 原生：Q8_0、Q6_K、ROCmFP4 / FAST、MXFP4、F16 / BF16 / F32；加载时转为 Q8_0：Q4_K、Q5_K、Q4_0、Q4_1、Q5_0、Q2_K、Q3_K、IQ4_XS、IQ4_NL | Q4_K、Q5_K、Q6_K、Q5_1、Q8_0、Q4_0、Q3_K、Q2_K、ROCmFP4_FAST、MXFP4 |
+| **Gemma 4（26B-A4B、E4B、E2B、12B）** | Q4_0、Q8_0、Q4_K、Q5_K、Q6_K、F16 / BF16 / F32 | 同左（Q4_0 走快速 MoE 路径） |
+| **GPT-OSS 20B / 120B** | Q8_0、Q5_0、Q4_K 及 F16 / BF16 / F32 注意力 | MXFP4（原生）、Q4_0、Q8_0、Q5_1（K 系列无法编码其 2880 宽的专家） |
+| **Muse Glimmer、Llama-3.1** | Q4_0、Q8_0、Q4_K、Q5_K、Q6_K、F16 / BF16 / F32 | - |
+| **DeepSeek V4 Flash** | 已发布的 IQ2_XXS / Q2_K / Q8_0 混合配方 | 同左 |
+| **bge-m3、重排序、Qwen3-Embedding** | Q4_K_M 与 F16 加载器 | - |
+
+嵌入查表、行反量化、行点积内核与主机端反量化器共用同一份格式注册表（`core/quant/quant_traits.hpp`）：F32、F16、BF16、Q4_0、Q4_1、Q5_0、Q5_1、Q8_0、Q2_K、Q3_K、Q4_K、Q5_K、Q6_K、IQ4_NL、IQ4_XS、IQ2_XXS、MXFP4、ROCmFP4、ROCmFP3。KV 缓存：F16，或分块 INT8（Q8），内存约减半，并保持精确连续性的 split-K 注意力。
 
 ### 生产级异构多模型并驻（Multi-Model Co-Residency）与 `/admin` 控制台
 

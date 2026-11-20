@@ -3,7 +3,10 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
-## Unreleased
+## v0.34.0 (2026-11-21)
+
+### Changed (README)
+- README intro rewritten (many model families, many quantization formats, efficient KV-cache compression; no longer presented as a fork), and a "Supported Quantization Formats" section in all three languages.
 
 ### Added (more quantization formats; see docs/QUANT_FORMATS.md)
 - **gpt-oss experts beyond MXFP4**: Q4_0 / Q8_0 / Q5_1 (and Q4_K / Q5_K where the row width allows) decode through the core lane-geometry MoE (`LaunchMoeWaveGateUp` gained SwiGLU-OAI + per-expert biases; `device::SwigluOaiOne` is shared with the fused MXFP4 kernels) and the type-keyed routed GEMM. Q4_0 and Q8_0 experts match llama.cpp token for token on most prompts at -3..-4% speed. K-quants cannot encode gpt-oss experts (rows are 2880 wide), which the loader now says.

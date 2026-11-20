@@ -1,12 +1,12 @@
 # MBufo
 
-A specialized fork of [mbufo](https://github.com/gufo-org/gufo) engineered for AMD Strix Halo (`gfx1151`), built as a **fair, multi-models, high-concurrency inference engine for production workloads**.
+An inference engine for AMD Strix Halo (`gfx1151`) built for production serving: **many model families, many quantization formats, and efficient KV-cache compression** behind one fair, high-concurrency server. It began from the engine primitives of [gufo](https://github.com/gufo-org/gufo) and has since been rewritten and extended so heavily that it is no longer a fork in any practical sense; sincere thanks to gufo-org and its contributors for the foundation.
 
 > [繁體中文版](README.zh-Hant.md) · [简体中文版](README.zh-CN.md)
 
 <img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/8021186d-c066-4fa6-bd84-0d908c1164eb" />
 
-Upstream gufo is tuned for single-stream peak throughput. MBufo addresses the operational reality of production serving: how a single Strix Halo node sustains 16+ concurrent streams under heavy load while offering up to 256K context per session. MBufo achieves this through three core pillars: **fair scheduling under load (§1)**, **low-precision compute that drastically cuts cost and memory (§2)**, and **comprehensive GGUF coverage across 19 model families on a single port (§3)**. The engine primitives, compute kernels, and foundations originate from upstream; sincere thanks to gufo-org and all community contributors.
+The original gufo is tuned for single-stream peak throughput. MBufo addresses the operational reality of production serving: how a single Strix Halo node sustains 16+ concurrent streams under heavy load while offering up to 256K context per session. MBufo achieves this through three core pillars: **fair scheduling under load (§1)**, **low-precision compute that drastically cuts cost and memory (§2)**, and **comprehensive GGUF coverage across 19 model families on a single port (§3)**. The engine primitives, compute kernels, and foundations originate from upstream; sincere thanks to gufo-org and all community contributors.
 
 **Contents:** [Key Highlights](#mbufo-key-highlights) ·
 [§1 High Concurrency Architecture](#1-high-concurrency-architecture) ·
@@ -182,6 +182,22 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 | **Qwen3-TTS 12Hz 1.7B** | 1.7B | Supported (speech synthesis) | — | — | BF16 safetensors, F32 waveform decoder |
 | **Qwen-Image-2.1** | Diffusion transformer | Supported (image generation / editing) | — | — | BF16 safetensors, Qwen3-VL prompt encoder, RGBA VAE |
 | **MiniMax H3** | 50-block BF16 transformer | Supported (video, text-only FL2VA) | — | — | HIP transformer, VisualVAE / AudioVAE, MP4 composition |
+
+### Supported Quantization Formats
+
+Every engine reads GGUF directly; the formats below are what each one accepts (anything else is refused at load with the tensor name and format, never decoded as another format). Details, caveats and how each combination was verified: [docs/QUANT_FORMATS.md](docs/QUANT_FORMATS.md).
+
+| Engine | Dense / attention weights | Routed experts |
+| --- | --- | --- |
+| **Qwen 27B / Qwen3.5-3.6 MoE** | Q8_0, Q4_K, Q5_K, Q6_K, Q3_K, IQ4_NL, IQ4_XS, IQ3_S, ROCmFP4, F16 / BF16 / F32 | Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q4_K, Q5_K, Q6_K, IQ2_XXS, MXFP4, ROCmFP4 |
+| **Qwen3.8 Flash-Next** | Native: Q8_0, Q6_K, ROCmFP4 / FAST, MXFP4, F16 / BF16 / F32. Converted to Q8_0 at load: Q4_K, Q5_K, Q4_0, Q4_1, Q5_0, Q2_K, Q3_K, IQ4_XS, IQ4_NL | Q4_K, Q5_K, Q6_K, Q5_1, Q8_0, Q4_0, Q3_K, Q2_K, ROCmFP4_FAST, MXFP4 |
+| **Gemma 4 (26B-A4B, E4B, E2B, 12B)** | Q4_0, Q8_0, Q4_K, Q5_K, Q6_K, F16 / BF16 / F32 | same (Q4_0 takes the fast MoE path) |
+| **GPT-OSS 20B / 120B** | Q8_0, Q5_0, Q4_K and F16 / BF16 / F32 attention | MXFP4 (native), Q4_0, Q8_0, Q5_1 (K-quants cannot encode its 2880-wide experts) |
+| **Muse Glimmer, Llama-3.1** | Q4_0, Q8_0, Q4_K, Q5_K, Q6_K, F16 / BF16 / F32 | - |
+| **DeepSeek V4 Flash** | the published mixed IQ2_XXS / Q2_K / Q8_0 recipe | same |
+| **bge-m3, rerankers, Qwen3-Embedding** | Q4_K_M and F16 loaders | - |
+
+The embedding gather, row dequantization, row-dot kernels and host dequantizer share one registry (`core/quant/quant_traits.hpp`): F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, IQ2_XXS, MXFP4, ROCmFP4, ROCmFP3. KV cache: F16, or blocked INT8 (Q8) at roughly half the memory with exact-continuity split-K attention.
 
 ### Production Multi-Model Co-Residency & `/admin` Control Plane
 
