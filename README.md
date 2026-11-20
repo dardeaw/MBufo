@@ -1,6 +1,6 @@
 # MBufo
 
-A high-concurrency inference engine for AMD Strix Halo (`gfx1151`), built for fair production serving across multiple models and quantization formats, with efficient KV-cache compression.
+A high-concurrency inference engine for AMD Strix Halo (`gfx1151`), built for fair production serving across multiple models and quantization formats, with FlashAttention, Split-K decode attention and efficient KV-cache compression.
 
 Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily rewritten.
 
@@ -14,6 +14,7 @@ Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily 
 - **Fair scheduling**: prefill and decode share one mixed batch under anti-starvation scheduling, so no request is starved under load (§1).
 - **Multiple models, one port**: 19 model families served side by side, loaded and unloaded at runtime from the built-in `/admin` console (§3).
 - **Multiple quantization formats**: K-quants, IQ4, MXFP4, ROCmFP4 and more; see [Supported Quantization Formats](#supported-quantization-formats) for each engine (§3).
+- **FlashAttention and Split-K attention**: WMMA flash-attention prefill and Split-K decode attention keep long-context decode bandwidth-bound, from short prompts to 256K (§2).
 - **Efficient KV cache**: blocked INT8 and compact 4-bit layouts that cut the memory each session holds (§2).
 - **Low-precision compute**: quantized weights reduce memory traffic and cost (§2).
 - **Speculative decoding**: MTP, DFlash and DSpark drafting (§1).
