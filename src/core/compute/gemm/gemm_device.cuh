@@ -12,6 +12,13 @@
 
 namespace mbufo::core::compute::gemm {
 namespace device {
+// SwiGLU-OAI (gpt-oss): min(g, 7) / (1 + exp(-1.702 min(g, 7))) * (clamp(u, -7, 7) + 1).
+[[nodiscard]] __device__ __forceinline__ float SwigluOaiOne(float g, float u) {
+  const float x = g < 7.0F ? g : 7.0F;
+  const float y = u < -7.0F ? -7.0F : (u > 7.0F ? 7.0F : u);
+  return (x / (1.0F + expf(-1.702F * x))) * (y + 1.0F);
+}
+
 [[nodiscard]] __device__ __forceinline__ float GeluTanhOne(float x) {
   // Exact tanh approximation used by Gemma (0.7978845608 = sqrt(2/pi)).
   const float inner = 0.7978845608F * (x + 0.044715F * x * x * x);

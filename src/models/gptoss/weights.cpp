@@ -1,4 +1,5 @@
 #include "src/models/gptoss/weights.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -295,6 +296,26 @@ struct Binder {
 
 }  // namespace
 
+namespace {
+[[nodiscard]] bool ExpertTypeAllowed(core::GgmlType t) {
+  switch (t) {
+    case core::GgmlType::kMXFP4:
+    case core::GgmlType::kQ4_0:
+    case core::GgmlType::kQ8_0:
+    case core::GgmlType::kQ5_1:
+    case core::GgmlType::kQ4_K:
+    case core::GgmlType::kQ5_K:
+      return true;
+    default:
+      return false;
+  }
+}
+[[nodiscard]] bool ExpertColsOk(core::GgmlType t, std::uint64_t cols) {
+  const std::uint64_t block = (t == core::GgmlType::kQ4_K || t == core::GgmlType::kQ5_K) ? 256 : 32;
+  return cols != 0 && cols % block == 0;
+}
+}  // namespace
+
 std::size_t TensorRef::RowBytes() const noexcept {
   switch (type) {
     case core::GgmlType::kF32:
@@ -307,6 +328,10 @@ std::size_t TensorRef::RowBytes() const noexcept {
       return static_cast<std::size_t>(cols / 32) * 18;
     case core::GgmlType::kMXFP4:
       return static_cast<std::size_t>(cols / 32) * 17;
+    case core::GgmlType::kQ5_1:
+    case core::GgmlType::kQ4_K:
+    case core::GgmlType::kQ5_K:
+      return ::mbufo::quant::QuantizedRowBytes(type, static_cast<std::size_t>(cols));
     default:
       return 0;
   }
@@ -378,14 +403,27 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
       b.Fail("missing MoE expert weights in " + p);
       break;
     }
-    for (const auto* info :
-         {gate_info, up_info, down_info}) {
-      if (info->type != core::GgmlType::kMXFP4) {
-        b.Fail("expert weights must be MXFP4 in " + p);
+    // Expert formats: MXFP4 (native, fused decode kernels) or any format both the core lane-geometry decode MoE and the
+    // routed prefill GEMM serve. K-quants need the row width to be a multiple of 256 (gpt-oss: 2880 is not, so they
+    // are refused here with that reason rather than mis-sized).
+    for (const auto* info : {gate_info, up_info, down_info}) {
+      if (!ExpertTypeAllowed(info->type)) {
+        b.Fail("expert weights in " + p + " have unsupported type " + std::string(core::ToString(info->type)) +
+               " (supported: MXFP4, Q4_0, Q8_0, Q5_1, Q4_K, Q5_K)");
+        break;
+      }
+      const std::uint64_t cols = info == down_info ? ff : hidden;
+      if (!ExpertColsOk(info->type, cols)) {
+        b.Fail("expert weights in " + p + " use " + std::string(core::ToString(info->type)) + " whose block size does not divide the row width " +
+               std::to_string(cols));
         break;
       }
     }
     if (!b.ok) break;
+    if (gate_info->type != up_info->type) {
+      b.Fail("gate and up expert weights must share one format in " + p);
+      break;
+    }
     if (gate_info->dimensions.size() != 3 || up_info->dimensions.size() != 3 ||
         down_info->dimensions.size() != 3 ||
         gate_info->dimensions[0] != hidden || gate_info->dimensions[1] != ff ||
@@ -396,10 +434,8 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
       b.Fail("expert weights have unexpected dimensions in " + p);
       break;
     }
-    constexpr std::size_t kMxfp4RowElems = 32;
-    constexpr std::size_t kMxfp4BlockBytes = 17;
-    const std::size_t mx_row = (hidden / kMxfp4RowElems) * kMxfp4BlockBytes;
-    const std::size_t slab = ff * mx_row;
+    const std::size_t gu_row = ::mbufo::quant::QuantizedRowBytes(gate_info->type, static_cast<std::size_t>(hidden));
+    const std::size_t slab = ff * gu_row;
     // Merged gate_up: [2*ff][hidden] per expert, MXFP4. No persistent host
     // arena (a 120B merge would pin 40GB): Bind records the merge plan and
     // the engine streams gate/up straight from the file mapping through a
@@ -417,13 +453,13 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     w.gate_up_plans.push_back(plan);
     l.gate_up_exps.data = gate_info->data;
     l.gate_up_exps.size_bytes = 2 * slab * nex;
-    l.gate_up_exps.type = core::GgmlType::kMXFP4;
+    l.gate_up_exps.type = gate_info->type;
     l.gate_up_exps.cols = hidden;
     l.gate_up_exps.rows = 2 * ff;
     l.gate_up_exps.experts = nex;
     l.down_exps.data = down_info->data;
     l.down_exps.size_bytes = down_info->size_bytes;
-    l.down_exps.type = core::GgmlType::kMXFP4;
+    l.down_exps.type = down_info->type;
     l.down_exps.cols = ff;
     l.down_exps.rows = hidden;
     l.down_exps.experts = nex;

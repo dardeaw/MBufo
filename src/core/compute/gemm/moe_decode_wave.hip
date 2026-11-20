@@ -1,5 +1,4 @@
-// Decode MoE, lane geometry: one wave per weight row, lane partials reduced across the wave (gemma4; gptoss
-// joins when its MXFP4 row is ported). The sibling of moe_decode_kq.hip (thread geometry, qwen35moe).
+// Decode MoE, lane geometry: one wave per weight row, lane partials reduced across the wave (gemma4 GeLU, gpt-oss SwiGLU-OAI with per-expert biases). The sibling of moe_decode_kq.hip (thread geometry, qwen35moe).
 //
 // Kernels are templates over `RowDot<F>` (src/core/quant/row_dot_traits.hpp, LaneRowFormat) and a gate
 // activation, so a new format or activation is a trait / enum value, not a copy of the kernel. The body is the
@@ -30,6 +29,8 @@ template <MoeGateAct kAct>
 __device__ __forceinline__ float GateActivation(float g, float u) {
   if constexpr (kAct == MoeGateAct::kGeluTanhMul) {
     return device::GeluTanhOne(g) * u;
+  } else if constexpr (kAct == MoeGateAct::kSwigluOaiBias) {
+    return device::SwigluOaiOne(g, u);
   } else {
     return (g * (1.0F / (1.0F + expf(-g)))) * u;
   }
@@ -39,7 +40,8 @@ template <class F, MoeGateAct kAct>
 __global__ void __launch_bounds__(256) MoeWaveGateUpKernel(
     const void* __restrict__ gate_up, std::uint64_t row_bytes, std::uint64_t expert_stride_bytes,
     const float* __restrict__ x, const std::int32_t* __restrict__ ids, float* __restrict__ act_out,
-    std::uint32_t used, std::uint32_t ff, std::uint32_t hidden) {
+    std::uint32_t used, std::uint32_t ff, std::uint32_t hidden, const float* __restrict__ gate_b,
+    const float* __restrict__ up_b) {
   const std::uint32_t slot = blockIdx.x;
   const std::int32_t e = ids[slot];
   const std::uint32_t warp_id = threadIdx.x >> 5;
@@ -64,7 +66,14 @@ __global__ void __launch_bounds__(256) MoeWaveGateUpKernel(
   float u = F::LaneDot(urow, sx, hidden, lane);
   g = device::WaveSum(g);
   u = device::WaveSum(u);
-  if (lane == 0) act_out[static_cast<std::size_t>(slot) * ff + out_row] = GateActivation<kAct>(g, u);
+  if (lane == 0) {
+    if constexpr (kAct == MoeGateAct::kSwigluOaiBias) {
+      const std::size_t boff = static_cast<std::size_t>(e) * ff + out_row;
+      g += gate_b[boff];
+      u += up_b[boff];
+    }
+    act_out[static_cast<std::size_t>(slot) * ff + out_row] = GateActivation<kAct>(g, u);
+  }
 }
 
 template <class F>
@@ -101,10 +110,11 @@ __global__ void __launch_bounds__(256) MoeWaveDownKernel(
 bool LaunchMoeWaveGateUp(const void* gate_up, WeightType type, std::uint64_t row_bytes,
                          std::uint64_t expert_stride_bytes, const float* x, const std::int32_t* ids, float* act_out,
                          std::uint32_t slots, std::uint32_t used, std::uint32_t ff, std::uint32_t hidden,
-                         MoeGateAct act, hipStream_t stream) {
+                         MoeGateAct act, hipStream_t stream, const float* gate_b, const float* up_b) {
   if (gate_up == nullptr || x == nullptr || ids == nullptr || act_out == nullptr) return false;
   if (slots == 0 || used == 0 || slots % used != 0 || ff == 0 || hidden == 0) return false;
   if (hidden % 4 != 0 || hidden > 16384) return false;  // float4 staging, LDS budget
+  if (act == MoeGateAct::kSwigluOaiBias && (gate_b == nullptr || up_b == nullptr)) return false;
   bool launched = false;
   (void)quant::LaneRowFormats::Dispatch(static_cast<int>(type), [&](auto fm) {
     using F = decltype(fm);
@@ -112,10 +122,12 @@ bool LaunchMoeWaveGateUp(const void* gate_up, WeightType type, std::uint64_t row
     const dim3 grid(slots, (ff + 7u) / 8u);
     const auto go = [&](auto act_c) {
       hipLaunchKernelGGL((MoeWaveGateUpKernel<F, decltype(act_c)::value>), grid, dim3(256), hidden * sizeof(float),
-                         stream, gate_up, row_bytes, expert_stride_bytes, x, ids, act_out, used, ff, hidden);
+                         stream, gate_up, row_bytes, expert_stride_bytes, x, ids, act_out, used, ff, hidden, gate_b, up_b);
     };
     if (act == MoeGateAct::kGeluTanhMul) {
       go(std::integral_constant<MoeGateAct, MoeGateAct::kGeluTanhMul>{});
+    } else if (act == MoeGateAct::kSwigluOaiBias) {
+      go(std::integral_constant<MoeGateAct, MoeGateAct::kSwigluOaiBias>{});
     } else {
       go(std::integral_constant<MoeGateAct, MoeGateAct::kSiluMul>{});
     }

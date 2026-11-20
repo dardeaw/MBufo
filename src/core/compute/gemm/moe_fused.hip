@@ -1658,11 +1658,7 @@ __device__ __forceinline__ void Mxfp4DualBlockDotAcc(
   Mxfp4Row::BlockDotPairedAcc(gblk, ublk, xv, sg, su);
 }
 
-__device__ __forceinline__ float SwigluOaiScalar(float g, float u) {
-  const float x = g < 7.0F ? g : 7.0F;
-  const float y = u < -7.0F ? -7.0F : (u > 7.0F ? 7.0F : u);
-  return (x / (1.0F + expf(-1.702F * x))) * (y + 1.0F);
-}
+__device__ __forceinline__ float SwigluOaiScalar(float g, float u) { return device::SwigluOaiOne(g, u); }
 
 __global__ void MoeDecodeGateUpActMxfp4Kernel(
     const void* __restrict__ gate_up, std::uint64_t row_bytes,

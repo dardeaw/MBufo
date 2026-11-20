@@ -421,11 +421,13 @@ bool LaunchDecodeMoeKQuant(const void* gate_w, WeightType gate_type,
 // does not match the format, returns false and launches nothing so the caller keeps its existing path.
 // Gate/up rows of expert e are [e * expert_stride_bytes, +ff * row_bytes) gate, then ff up rows; act_out is
 // F32 [slots x ff]; down output is F32 [slots x hidden]. Bit-identical to MoeVecGateUpSwiglu / GemvQSlot.
-enum class MoeGateAct : std::uint32_t { kSiluMul = 0, kGeluTanhMul = 1 };
+enum class MoeGateAct : std::uint32_t { kSiluMul = 0, kGeluTanhMul = 1, kSwigluOaiBias = 2 };
+// kSwigluOaiBias (gpt-oss) adds gate_b / up_b ([experts x ff] F32, both required) to the dots before the activation.
 bool LaunchMoeWaveGateUp(const void* gate_up, WeightType type, std::uint64_t row_bytes,
                          std::uint64_t expert_stride_bytes, const float* x, const std::int32_t* ids, float* act_out,
                          std::uint32_t slots, std::uint32_t used, std::uint32_t ff, std::uint32_t hidden,
-                         MoeGateAct act, hipStream_t stream);
+                         MoeGateAct act, hipStream_t stream, const float* gate_b = nullptr,
+                         const float* up_b = nullptr);
 bool LaunchMoeWaveDown(const void* down, WeightType type, std::uint64_t row_bytes, std::uint64_t expert_stride_bytes,
                        const float* act, const std::int32_t* ids, float* out, std::uint32_t slots,
                        std::uint32_t hidden, std::uint32_t ff, hipStream_t stream);

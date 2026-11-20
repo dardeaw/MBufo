@@ -138,7 +138,7 @@ core::engine::MoeGeometry DescribeMoeGeometry(const Model& model) {
 core::engine::MoeKernelInfo DescribeMoeKernels() {
   core::engine::MoeKernelInfo k;
   k.origin = core::engine::MoeKernelOrigin::kCoreRowDot;
-  k.gate_up_kernel = "core MoeDecodeGateUpActMxfp4 (RowDot<MXFP4> block math, SwiGLU-OAI, biases)";
+  k.gate_up_kernel = "other expert formats (Q4_0/Q8_0/Q5_1/Q4_K/Q5_K): core MoeWaveGateUp (lane geometry, RowDot<F>::LaneDot, SwiGLU-OAI + bias); MXFP4: core MoeDecodeGateUpActMxfp4 (RowDot<MXFP4> block math, SwiGLU-OAI, biases)";
   k.down_kernel = "core MoeDecodeDownEpiMxfp4 (RowDot<MXFP4> block math, weighted epilogue)";
   k.masks_inactive_slots = true;
   k.graph_capture_safe = true;

@@ -1200,7 +1200,25 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
     if (v == 16ul || v == 48ul || v == 64ul)
       tile_rows = static_cast<std::uint32_t>(v);
   }
-  bool routed = getenv("GPTOSS_NO_ROUTED") == nullptr && !moe_done &&
+  const bool native_mxfp4 = l.gate_up_exps.type == core::GgmlType::kMXFP4 && l.down_exps.type == core::GgmlType::kMXFP4;
+  // Expert formats other than MXFP4 (Q4_0 / Q8_0 / Q5_1 / Q4_K / Q5_K) decode through the core lane-geometry MoE
+  // (RowDot<F>::LaneDot, SwiGLU-OAI + biases) and prefill through the routed GEMM keyed on the tensor type.
+  const auto weight_type = [](core::GgmlType t) {
+    return t == core::GgmlType::kMXFP4 ? gemm::WeightType::kMXFP4
+                                       : static_cast<gemm::WeightType>(static_cast<std::uint32_t>(t));
+  };
+  bool wave_done = false;
+  const auto run_wave = [&]() {
+    return gemm::LaunchMoeWaveGateUp(gu_dev, static_cast<gemm::WeightType>(static_cast<std::uint32_t>(l.gate_up_exps.type)),
+                                     l.gate_up_exps.RowBytes(), gu_stride, impl.normed, impl.expert_ids, impl.moe_act,
+                                     slots, used, ff, hidden, gemm::MoeGateAct::kSwigluOaiBias, stream,
+                                     static_cast<const float*>(l.gate_b.device), static_cast<const float*>(l.up_b.device)) &&
+           gemm::LaunchMoeWaveDown(dn_dev, static_cast<gemm::WeightType>(static_cast<std::uint32_t>(l.down_exps.type)),
+                                   l.down_exps.RowBytes(), dn_stride, impl.moe_act, impl.expert_ids, impl.moe_down, slots,
+                                   hidden, ff, stream);
+  };
+  if (!native_mxfp4 && !moe_done && n <= 8 && gu_dev != nullptr && dn_dev != nullptr) wave_done = run_wave();
+  bool routed = getenv("GPTOSS_NO_ROUTED") == nullptr && !moe_done && !wave_done &&
                 impl.routed_gateup != nullptr && gu_dev != nullptr &&
                 dn_dev != nullptr;
   if (routed) {
@@ -1256,7 +1274,7 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
         routed = false;
       } else {
         routed = gemm::RoutedF16Gemm(
-            gu_dev, gemm::WeightType::kMXFP4, impl.x16, impl.routed_tiles,
+            gu_dev, weight_type(l.gate_up_exps.type), impl.x16, impl.routed_tiles,
             n_tiles, tile_rows, impl.routed_bounds, impl.routed_rows_token,
             impl.routed_identity, nullptr, impl.routed_gateup, nullptr,
             static_cast<std::size_t>(2) * ff, hidden, stream);
@@ -1268,7 +1286,7 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                 static_cast<const float*>(l.up_b.device), impl.routed_act,
                 q4_rows, ff, stream);
             routed = gemm::RoutedF16Gemm(
-                dn_dev, gemm::WeightType::kMXFP4, impl.routed_act,
+                dn_dev, weight_type(l.down_exps.type), impl.routed_act,
                 impl.routed_tiles, n_tiles, tile_rows, impl.routed_bounds,
                 impl.routed_identity, impl.routed_rows_slot, nullptr,
                 impl.moe_down, nullptr, hidden, ff, stream);
@@ -1276,17 +1294,22 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
       }
     }
   }
-  if (!moe_done && !routed) {
-    gemm::MoeVecGateUpMxfp4(gu_dev, l.gate_up_exps.RowBytes(), gu_stride,
-                       impl.normed, impl.expert_ids, impl.moe_gate,
-                       impl.moe_up, slots, used, ff, hidden, stream);
-    kernels::SwigluOaiBias(impl.moe_gate, impl.moe_up, impl.expert_ids,
-                           static_cast<const float*>(l.gate_b.device),
-                           static_cast<const float*>(l.up_b.device),
-                           impl.moe_act, slots, ff, stream);
-    gemm::GemvQSlotMxfp4(dn_dev, l.down_exps.RowBytes(), dn_stride,
-                    impl.moe_act, impl.expert_ids, impl.moe_down, slots,
-                    hidden, ff, stream);
+  if (!moe_done && !routed && !wave_done) {
+    if (native_mxfp4) {
+      gemm::MoeVecGateUpMxfp4(gu_dev, l.gate_up_exps.RowBytes(), gu_stride,
+                         impl.normed, impl.expert_ids, impl.moe_gate,
+                         impl.moe_up, slots, used, ff, hidden, stream);
+      kernels::SwigluOaiBias(impl.moe_gate, impl.moe_up, impl.expert_ids,
+                             static_cast<const float*>(l.gate_b.device),
+                             static_cast<const float*>(l.up_b.device),
+                             impl.moe_act, slots, ff, stream);
+      gemm::GemvQSlotMxfp4(dn_dev, l.down_exps.RowBytes(), dn_stride,
+                      impl.moe_act, impl.expert_ids, impl.moe_down, slots,
+                      hidden, ff, stream);
+    } else if (!run_wave()) {
+      std::fprintf(stderr, "[gptoss] layer %u: no MoE kernel serves expert type %s\n", il,
+                   std::string(core::ToString(l.gate_up_exps.type)).c_str());
+    }
   }
   if (!moe_done) {
     kernels::DownBiasAdd(impl.moe_down, impl.expert_ids,
