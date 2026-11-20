@@ -12,14 +12,14 @@
   },
   "benchmarks-2026-09-22": {
     "reference": "llama.cpp b11069 from flake.nix (0.4.1-dev build 11069, commit 68d9053a), ROCm gfx1151",
-    "gufoArMemory": "revision 89d58eb7 (tree dirty only by docs/models/qwen3.8-flash-next), nix build, binary sha256 prefix 4b1e592acb7e4a56",
+    "mbufoArMemory": "revision 89d58eb7 (tree dirty only by docs/models/qwen3.8-flash-next), nix build, binary sha256 prefix 4b1e592acb7e4a56",
     "referenceMtp": "llama-server-mtp, llama.cpp commit 6fcaa16f, pinned ROCm recipe in flake.nix",
     "note": "Retained single-user AR, reference single-user MTP and memory measurements. Per-artifact source revisions and commands are authoritative."
   },
   "scope": "Current retained benchmark and qualification evidence; per-table dates and source revisions identify partial refreshes.",
   "benchmarks-2026-09-23": {
-    "scope": "Gufo single-user MTP mixed/repetitive, matched pp2048 concurrency on both engines, C1/MTP loading at capacity 262144; reference single-user MTP mixed/repetitive at 65536/131072 (UTC measurement date)",
-    "gufo": {
+    "scope": "MBufo single-user MTP mixed/repetitive, matched pp2048 concurrency on both engines, C1/MTP loading at capacity 262144; reference single-user MTP mixed/repetitive at 65536/131072 (UTC measurement date)",
+    "mbufo": {
       "revision": "c650f786e08b07ab2476308cf20e7af59ab6f87f",
       "build": "nix build; inference unchanged during measurement",
       "binarySha256": "fc4e05dbd2419e18698d1e0653fb46fb06c8edf79d8e39dc614c0ff985f2e850"
@@ -34,11 +34,11 @@
       "build": "pinned Nix ROCm gfx1151 recipe; archive fetch matches the declared source hash",
       "binarySha256": "66a42853bde76ef09e0574298819559003ef7fa5a9aa55bdbe3c0e4c085a484f"
     },
-    "measurement": "One measured sample per point. Concurrency uses the same synthetic pp2048 prompt generator as single-user d0. Every session completes prompt preparation before timed tg128; measured requests reuse the full prefix, allowing at most four final prompt tokens to be evaluated again. Rates sum individual server decode rates. Gufo outputs match independent fresh AR controls. Inference and weights are unchanged."
+    "measurement": "One measured sample per point. Concurrency uses the same synthetic pp2048 prompt generator as single-user d0. Every session completes prompt preparation before timed tg128; measured requests reuse the full prefix, allowing at most four final prompt tokens to be evaluated again. Rates sum individual server decode rates. MBufo outputs match independent fresh AR controls. Inference and weights are unchanged."
   },
   "benchmarks-attention-tiles": {
-    "scope": "Gufo single-user TG refresh only; retained PP and other measurements retain their original provenance.",
-    "gufo": {
+    "scope": "MBufo single-user TG refresh only; retained PP and other measurements retain their original provenance.",
+    "mbufo": {
       "revision": "f797b5b05cba21c08e133783ec8e5c9fa85111f7",
       "binarySha256": "0536e337596a720a5c53e47dc7d66f9f64f68d621ef210a6ff034671c09dda61",
       "build": "nix build, production gfx1151 binary"
@@ -46,8 +46,8 @@
     "qualification": "attention-tiles-review.json"
   },
   "benchmarks-2026-10-06": {
-    "scope": "Gufo single-user AR and MTP mixed/repetitive HTTP pp2048/tg128 at 0, 4096, 8192, 12288, 16384, 32768, 65536 and 131072 cached tokens.",
-    "gufo": {
+    "scope": "MBufo single-user AR and MTP mixed/repetitive HTTP pp2048/tg128 at 0, 4096, 8192, 12288, 16384, 32768, 65536 and 131072 cached tokens.",
+    "mbufo": {
       "revision": "4c5a00d2d609846cb73e79aa33de324624aa9c2c",
       "binarySourceRevision": "eecb008a909ca299c13d1ef773765c7e2e24d395",
       "binarySha256": "2ebf7a2cf22eae84b0c78bf87bc39adda3336fc59f9ecb4e3f1b7c06227571d4",
@@ -59,8 +59,8 @@
     "retained": "Reference, concurrency, loading and memory results retain their September 22-23 measurements."
   },
   "benchmarks-2026-10-07": {
-    "scope": "Gufo single-user AR and MTP mixed/repetitive HTTP pp2048/tg128 at 0, 4096, 8192, 12288, 16384, 32768, 65536 and 131072 cached tokens.",
-    "gufo": {
+    "scope": "MBufo single-user AR and MTP mixed/repetitive HTTP pp2048/tg128 at 0, 4096, 8192, 12288, 16384, 32768, 65536 and 131072 cached tokens.",
+    "mbufo": {
       "revision": "def2ed1e904f912e69550344aa7c13a99f535d0e",
       "binarySha256": "1ea59e9bfb214b5cdd4d4b6bcc896058df43a06f9c5e180086ea6a8d4301ca58",
       "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
@@ -86,14 +86,14 @@
     "retained": "Reference, concurrency, loading and memory retain September 22-23 measurements."
   },
   "benchmarks-2026-10-08-09": {
-    "scope": "Gufo single-user AR/MTP mixed/repetitive pp2048/tg128 at d0/4K/8K/12K/16K/32K/64K/128K; C1/2/4/6/8 AR/MTP; both memory rows.",
-    "gufo": {
+    "scope": "MBufo single-user AR/MTP mixed/repetitive pp2048/tg128 at d0/4K/8K/12K/16K/32K/64K/128K; C1/2/4/6/8 AR/MTP; both memory rows.",
+    "mbufo": {
       "baseRevision": "50900eb717925cc8e85ed952e1a75e522958a7f6",
       "branch": "perf/qwen-flash-long-prefill",
       "dirty": true,
       "build": "nix build, production gfx1151",
       "binarySha256": "e462fc4fdca5718aece434fedd2391f5734c5609e0d3fbd294ca0baf769a9a99",
-      "derivation": "/nix/store/bcigl89m146dgiwgnkygzmhd0dsvsfvn-gufo-0-unstable-50900eb-dirty.drv",
+      "derivation": "/nix/store/bcigl89m146dgiwgnkygzmhd0dsvsfvn-mbufo-0-unstable-50900eb-dirty.drv",
       "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
       "productionSourceSha256": {
         "src/models/qwen38_flash_next/kernels/rocm/batch.cpp": "0c5d93133dd2377fd150512ce3fa7aa11e0df67fdeb07d9187d3cdc429004b14",
@@ -112,8 +112,8 @@
     "evidence": "prefill-long-context.json"
   },
   "benchmarks-2026-10-10": {
-    "scope": "Gufo full AR/MTP depth and C1/2/4/6/8 sweep, cold-file loading, both memory rows; matched main controls.",
-    "gufo": {
+    "scope": "MBufo full AR/MTP depth and C1/2/4/6/8 sweep, cold-file loading, both memory rows; matched main controls.",
+    "mbufo": {
       "revision": "25cdb2a11e30b174c996b6afef4332e5c8aee6fe",
       "binary_sha256": "5b000aa50220c68d6a0156afbacab9eb687324c799b8d1a73ae11fdcf271a17e",
       "model_source_tree": "77af3d5a995a03c3cbf5bc879cc77406b8290adf"
@@ -214,8 +214,8 @@
     "ppRetry": "C1 at64K, exact saved prompts and token/cache counts, one output token: AR1467.30 to1497.60tok/s (+2.1%); MTP1451.39 to1463.63tok/s (+0.8%). Fresh prefix pairs; original ordered-sweep samples retained separately. All single-user PP rows audited: no drop over5% versus main or the previous published table."
   },
   "benchmarks-2026-10-16": {
-    "scope": "Complete Gufo-only HTTP single-user AR/MTP, concurrency, cold-file loading and memory refresh after PR #603, including the cache overhead follow-up.",
-    "gufo": {
+    "scope": "Complete MBufo-only HTTP single-user AR/MTP, concurrency, cold-file loading and memory refresh after PR #603, including the cache overhead follow-up.",
+    "mbufo": {
       "revision": "fdc2184941a19867fb2d643030717fec344b7280",
       "binarySha256": "b1ab0e9795df6fbac837cb00971dd021058cff045fc63178ccc3ac53265165f9",
       "build": "nix build; clean production source; pinned flake.lock unchanged"
@@ -224,8 +224,8 @@
     "reference": "All retained September 22\u201323 llama.cpp data unchanged; not rerun or requalified."
   },
   "benchmarks-2026-10-16-pr622": {
-    "scope": "Gufo-only HTTP single-user AR/MTP and concurrency refresh with PR #622 (compacted sparse-attention selections); loading and memory retain benchmarks-2026-10-16.",
-    "gufo": {
+    "scope": "MBufo-only HTTP single-user AR/MTP and concurrency refresh with PR #622 (compacted sparse-attention selections); loading and memory retain benchmarks-2026-10-16.",
+    "mbufo": {
       "revision": "32c4ece8",
       "source": "PR #622 head adfa4fd7 rebased on main 22e36769",
       "binarySha256": "2361bcffddf74773e282da717494703c3e5be74b62fdc1a50efdb30fba0db128",
@@ -235,8 +235,8 @@
     "reference": "All retained September 22\u201323 llama.cpp data unchanged; not rerun or requalified."
   },
   "benchmarks-2026-10-17-pr626": {
-    "scope": "Gufo HTTP C1 AR and mixed/repetitive MTP, canonical eight-depth pp2048/tg128 histories.",
-    "gufo": {
+    "scope": "MBufo HTTP C1 AR and mixed/repetitive MTP, canonical eight-depth pp2048/tg128 histories.",
+    "mbufo": {
       "baseRevision": "c1088f891afc306b5fd9d893ed38ab69fc6039ff",
       "dirty": true,
       "binarySha256": "fc0a6628055f970e40af56172ece2be9ea3f72519365e8de036ef2264eea48d3",
@@ -260,8 +260,8 @@
     "retained": "Concurrency retains the October 16 PR #622 capture; loading and memory retain the October 16 fdc21849 capture. Every September 22-23 llama.cpp artifact is unchanged and was not rerun or requalified."
   },
   "benchmarks-2026-10-17-pr613": {
-    "scope": "Gufo HTTP C1 AR and mixed/repetitive MTP at all eight depths through 128K, plus C1/2/4/6/8 prepared decoding.",
-    "gufo": {
+    "scope": "MBufo HTTP C1 AR and mixed/repetitive MTP at all eight depths through 128K, plus C1/2/4/6/8 prepared decoding.",
+    "mbufo": {
       "revision": "3b02d877400d069c392a89adc5dbc37b5f6e2627",
       "dirty": true,
       "binarySha256": "93ec6640be94adb915cf36db5e9d00b8121146859024668efdc15837e70c1e32",
@@ -284,8 +284,8 @@
     "retained": "Loading and memory retain October 16 fdc21849. All September 22-23 llama.cpp measurements remain unchanged and were not rerun or requalified."
   },
   "benchmarks-2026-10-18-host-memory": {
-    "scope": "Complete Gufo single-user, concurrency, cold-file loading and memory refresh.",
-    "gufo": {
+    "scope": "Complete MBufo single-user, concurrency, cold-file loading and memory refresh.",
+    "mbufo": {
       "revision": "fec4759d064585d72f87c6e11af5cfa0e1fa95c7",
       "dirty": false,
       "binarySha256": "1d822fb97b4639c61df61e9f5fcc874d9b639a69c82c484bfa4dafbbcb44a692",

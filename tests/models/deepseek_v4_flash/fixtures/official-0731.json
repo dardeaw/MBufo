@@ -1,5 +1,5 @@
 {
-  "schema": "gufo.ds4-official-continuations.v1",
+  "schema": "mbufo.ds4-official-continuations.v1",
   "source_repository": "https://github.com/antirez/ds4",
   "source_revision": "6289c516273979173abbc062209a81dd3706b804",
   "checkpoint": "0731",

@@ -25,7 +25,7 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 namespace {
 
@@ -351,7 +351,7 @@ struct HipblasLtGemm::Impl {
 
     std::string database_path = options.plan_database_path;
     if (database_path.empty() && !options.ignore_environment) {
-      if (const char* value = std::getenv("GUFO_HIPBLASLT_PLAN_CACHE");
+      if (const char* value = std::getenv("MBUFO_HIPBLASLT_PLAN_CACHE");
           value != nullptr) {
         database_path = value;
       }
@@ -751,5 +751,5 @@ bool HipblasLtGemm::SavePlans(const std::string& path,
   return detail::SaveHipblasLtPlanDatabase(path, database, error);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

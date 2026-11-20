@@ -7,11 +7,11 @@
   "draft_snapshot": "2d9571f8ce46e151f61c6499c99dee6079e1d610",
   "hardware": "gfx1151, 128 GiB unified memory",
   "method": "HTTP C1, pp2048/tg128, greedy, thinking off, context 36864, one full-size warmup and one measured sample per point. Deep request reuses the same eight-token assistant reply and byte-identical messages on both engines. Profile separately.",
-  "gufo": {
+  "mbufo": {
     "revision": "82a947a0c36b38dfe01f5db58c2d6464a4f0ef57",
     "binary_sha256": "954edcafa827b098662044d83c487c9828ab53147e946cd9efb758426eca4cb6",
     "command": [
-      "/nix/store/8qlhs22xbvkhcwchdk77mc30ym7f06pr-gufo-4c8888f-dirty/bin/gufo",
+      "/nix/store/8qlhs22xbvkhcwchdk77mc30ym7f06pr-mbufo-4c8888f-dirty/bin/mbufo",
       "serve",
       "--port",
       "35225",
@@ -44,7 +44,7 @@
     "method": "Same Q8_K_XL target and Q4_K_M draft, default draft-dflash policy; raw commands retained in single-user artifacts."
   },
   "rows": {
-    "gufo|ar|0": {
+    "mbufo|ar|0": {
       "messages_sha256": "3ec47d6c24e65163d6d05ee8d0f24a09dafd7d93318882e8af7820a1bef24b50",
       "prompt_tokens": 2040,
       "cached_prompt_tokens": 0,
@@ -58,7 +58,7 @@
       "draft_accepted_tokens": 0,
       "completion_sha256": "fad485940c3413ecb84fe8a240543ceec6c58f06a49ec4ef7f3a6d5a16fd2341"
     },
-    "gufo|ar|32768": {
+    "mbufo|ar|32768": {
       "prompt_tokens": 34824,
       "cached_prompt_tokens": 32765,
       "prefill_tokens": 2059,
@@ -134,7 +134,7 @@
       "draft_accepted_tokens": 76,
       "completion_sha256": "0233a9ba7968001e005cfe4ca735674d788ae733378308fff698dce7a1155bbe"
     },
-    "gufo|dflash2|0": {
+    "mbufo|dflash2|0": {
       "prompt_tokens": 2040,
       "cached_prompt_tokens": 0,
       "prefill_tokens": 2040,
@@ -154,7 +154,7 @@
       },
       "qualified_revision": "147c6608fc2755f8aa40d33278eecc5aef9b6df7"
     },
-    "gufo|dflash2|32768": {
+    "mbufo|dflash2|32768": {
       "prompt_tokens": 34824,
       "cached_prompt_tokens": 32764,
       "prefill_tokens": 2060,
@@ -193,7 +193,7 @@
       "q8_target": "9a24eec5c3ff8ea2c626671bebe17ed6af190b526e8b52c208fff6a2509a0567",
       "shared_runner_scheduler": "fa47e5dab5e7d5a24631237b380119b5a3638187e7c5ddcfed79dda0620f3fe7"
     },
-    "greedy_agreement": "All 128 tokens match within Gufo AR/DFlash2 at both depths. All four modes match at d0. At d32K the reference differs from its own AR and from Gufo; this does not establish original-checkpoint parity.",
+    "greedy_agreement": "All 128 tokens match within MBufo AR/DFlash2 at both depths. All four modes match at d0. At d32K the reference differs from its own AR and from MBufo; this does not establish original-checkpoint parity.",
     "rejected_pre_fix_deep_control": {
       "decode_tokens_per_second": 13.687280290854481,
       "completion_sha256": "a5fd11516c20900beec26f7faf02af93a2bbf831c9e7c770b52ca26824451dc4",

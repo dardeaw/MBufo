@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GLIMMER_ENGINE_ADAPTER_HPP_
-#define GUFO_MODELS_GLIMMER_ENGINE_ADAPTER_HPP_
+#ifndef MBUFO_MODELS_GLIMMER_ENGINE_ADAPTER_HPP_
+#define MBUFO_MODELS_GLIMMER_ENGINE_ADAPTER_HPP_
 
 // Glimmer adapter: exposes the existing glimmer::Model/Session through
 // the L0/L1 engine abstraction (EngineModel / SpeculativeSession).
@@ -39,14 +39,15 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/engine/attention_contract.hpp"
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/glimmer/engine.hpp"
 
-namespace gufo::speculative {
+namespace mbufo::speculative {
 class IDraftBackend;
-}  // namespace gufo::speculative
+}  // namespace mbufo::speculative
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 
 class GlimmerEngineSession final : public core::engine::SpeculativeSession {
  public:
@@ -105,7 +106,7 @@ class GlimmerEngineSession final : public core::engine::SpeculativeSession {
   std::unique_ptr<Session> inner_;
 };
 
-class GlimmerEngineModel final : public core::engine::EngineModel {
+class GlimmerEngineModel final : public core::engine::EngineModel, public core::engine::AttentionCapable {
  public:
   [[nodiscard]] static std::shared_ptr<GlimmerEngineModel> Load(
       const std::string& model_path, const ModelOptions& options,
@@ -122,6 +123,8 @@ class GlimmerEngineModel final : public core::engine::EngineModel {
   [[nodiscard]] std::uint32_t MaxContext() const noexcept override;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept override;
   [[nodiscard]] std::string ModelName() const override;
+  [[nodiscard]] core::engine::AttentionGeometry AttentionGeometryInfo() const override;
+  [[nodiscard]] core::engine::AttentionKernelInfo AttentionKernelsInfo() const override;
 
   // L0-external glimmer pass-throughs (unchanged glimmer semantics).
   [[nodiscard]] std::string Decode(
@@ -138,6 +141,6 @@ class GlimmerEngineModel final : public core::engine::EngineModel {
   std::shared_ptr<Model> model_;
 };
 
-}  // namespace gufo::models::glimmer
+}  // namespace mbufo::models::glimmer
 
-#endif  // GUFO_MODELS_GLIMMER_ENGINE_ADAPTER_HPP_
+#endif  // MBUFO_MODELS_GLIMMER_ENGINE_ADAPTER_HPP_

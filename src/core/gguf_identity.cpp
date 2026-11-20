@@ -19,7 +19,7 @@
 
 #include "src/core/crypto/sha256.hpp"
 
-namespace gufo::core {
+namespace mbufo::core {
 namespace {
 
 class FileDescriptor {
@@ -66,7 +66,7 @@ int OpenCacheDirectory() {
       return -1;
     path = std::filesystem::path(home) / ".cache";
   }
-  path /= "gufo";
+  path /= "mbufo";
   std::error_code error;
   std::filesystem::create_directories(path, error);
   if (error)
@@ -249,4 +249,4 @@ std::string GgufIdentityHex(const GgufReader& reader) {
   return hash.FinishHex();
 }
 
-}  // namespace gufo::core
+}  // namespace mbufo::core

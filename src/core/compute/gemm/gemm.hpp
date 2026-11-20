@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_GEMM_GEMM_HPP_
-#define GUFO_CORE_COMPUTE_GEMM_GEMM_HPP_
+#ifndef MBUFO_CORE_COMPUTE_GEMM_GEMM_HPP_
+#define MBUFO_CORE_COMPUTE_GEMM_GEMM_HPP_
 
 // Unified decode GEMV / fused-MoE launchers (Phase B, mechanical merge).
 //
@@ -14,14 +14,14 @@
 // Only equivalent merging here: no algorithm changes.
 //
 // GGML type codes used by the int-typed launchers below.
-#define GUFO_GEMM_F32 0
-#define GUFO_GEMM_F16 1
-#define GUFO_GEMM_Q4_0 2
-#define GUFO_GEMM_Q8_0 8
-#define GUFO_GEMM_Q4_K 12
-#define GUFO_GEMM_Q5_K 13
-#define GUFO_GEMM_Q6_K 14
-#define GUFO_GEMM_BF16 30
+#define MBUFO_GEMM_F32 0
+#define MBUFO_GEMM_F16 1
+#define MBUFO_GEMM_Q4_0 2
+#define MBUFO_GEMM_Q8_0 8
+#define MBUFO_GEMM_Q4_K 12
+#define MBUFO_GEMM_Q5_K 13
+#define MBUFO_GEMM_Q6_K 14
+#define MBUFO_GEMM_BF16 30
 
 #include <cstddef>
 #include <cstdint>
@@ -35,7 +35,7 @@
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/compute/gemm/gemm_dispatcher.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 
 constexpr std::uint32_t kThreads = 256;
 
@@ -343,7 +343,7 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out,
                                              std::size_t batch, std::size_t m, std::size_t k,
                                              __half* wdq_scratch, std::size_t wdq_bytes, hipStream_t stream);
 
-/// Bytes of one packed GGML row of `cols` elements (type = GUFO_GEMM_* code:
+/// Bytes of one packed GGML row of `cols` elements (type = MBUFO_GEMM_* code:
 /// F32/F16/BF16/Q4_0/Q8_0/Q4_K/Q5_K/Q6_K); 0 when the type is unsupported or
 /// `cols` is not a whole number of blocks.
 std::size_t DequantRowBytes(int type, std::size_t cols);
@@ -398,23 +398,37 @@ void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
 void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
                   std::uint32_t n_tokens, std::uint32_t n_experts,
                   std::uint32_t k, hipStream_t stream);
-// Lightweight decode MoE (qwen35moe, moe_decode_kq.hip): fused per-slot
-// K-quant x SwiGLU for 1..8 tokens, top-k sparse. gate/up are Q4_K or Q5_K
-// (hidden K, 256-wide blocks); down is Q5_K (256-wide) or load-converted
-// Q8_0 (32-wide). x is F32 [n_tokens x hidden]; ids/weights come from
-// RouterTopK; down_e receives F32 [slots x hidden] for the shared
-// fn_compat::MoeEpilogue. Fixed 64-slot grid with a slot>=live mask
-// (capture-compatible); masked slots leave down_e untouched. hidden and
-// expert_ff must be nonzero multiples of 256 with hidden + expert_ff <=
-// 16384 (LDS budget). Returns false for out-of-contract shapes or types;
-// the caller keeps the routed WMMA legacy path.
+// Decode MoE (qwen35moe, moe_decode_kq.hip): packed-weight x SwiGLU for 1..8 tokens, top-k sparse, as two
+// launches over many blocks (gate/up -> act_scratch, then down -> down_e). Weight formats come from the
+// RowDot trait list (src/core/quant/row_dot_traits.hpp: Q4_K, Q5_K, Q8_0 today; a type code that is not
+// listed, or a width that is not a multiple of the format's block, returns false). x is F32
+// [n_tokens x hidden]; ids/weights come from RouterTopK; act_scratch is F32 [slots x expert_ff] and down_e
+// F32 [slots x hidden] for the shared fn_compat::MoeEpilogue. Slots at or above n_tokens*top_k and
+// negative expert ids are masked (down_e left untouched), so a fixed grid is capture-compatible. hidden and
+// expert_ff must be nonzero multiples of 256 with hidden + expert_ff <= 16384. Returns false for
+// out-of-contract shapes or types; the caller keeps the routed WMMA legacy path.
 bool LaunchDecodeMoeKQuant(const void* gate_w, WeightType gate_type,
                            const void* up_w, const void* down_w,
                            WeightType down_type, const float* x,
-                           const std::int32_t* ids, float* down_e,
-                           std::uint32_t n_tokens, std::uint32_t top_k,
-                           std::size_t hidden, std::size_t expert_ff,
-                           hipStream_t stream);
+                           const std::int32_t* ids, float* act_scratch,
+                           float* down_e, std::uint32_t n_tokens,
+                           std::uint32_t top_k, std::size_t hidden,
+                           std::size_t expert_ff, hipStream_t stream,
+                           std::uint32_t rows_hint = 0);
+// Decode MoE, lane geometry (moe_decode_wave.hip; gemma4): one wave per row, merged gate/up layout, masked
+// slots (negative ids) write zeros. Weight formats come from the LaneRowFormat trait list
+// (src/core/quant/row_dot_traits.hpp: Q4_0, Q8_0 today); a type that is not listed, or a row_bytes that
+// does not match the format, returns false and launches nothing so the caller keeps its existing path.
+// Gate/up rows of expert e are [e * expert_stride_bytes, +ff * row_bytes) gate, then ff up rows; act_out is
+// F32 [slots x ff]; down output is F32 [slots x hidden]. Bit-identical to MoeVecGateUpSwiglu / GemvQSlot.
+enum class MoeGateAct : std::uint32_t { kSiluMul = 0, kGeluTanhMul = 1 };
+bool LaunchMoeWaveGateUp(const void* gate_up, WeightType type, std::uint64_t row_bytes,
+                         std::uint64_t expert_stride_bytes, const float* x, const std::int32_t* ids, float* act_out,
+                         std::uint32_t slots, std::uint32_t used, std::uint32_t ff, std::uint32_t hidden,
+                         MoeGateAct act, hipStream_t stream);
+bool LaunchMoeWaveDown(const void* down, WeightType type, std::uint64_t row_bytes, std::uint64_t expert_stride_bytes,
+                       const float* act, const std::int32_t* ids, float* out, std::uint32_t slots,
+                       std::uint32_t hidden, std::uint32_t ff, hipStream_t stream);
 // Fused shared-gate + combine epilogue for the 35B decode MoE path
 // (moe_decode_kq.hip; the shared fn_compat::MoeEpilogue is untouched).
 // Replaces the per-layer hipblas 1xH glogit SGEMM plus the shared epilogue:
@@ -483,15 +497,15 @@ enum class QwenDecodeRoute { kReject, kQ8KBlock, kDenseLocal };
       return QwenDecodeRoute::kReject;
   }
   const std::size_t block_elements =
-      ::gufo::quant::QuantizedBlockElements(type);
+      ::mbufo::quant::QuantizedBlockElements(type);
   if (block_elements == 0 || k % block_elements != 0) {
     return QwenDecodeRoute::kReject;
   }
   return QwenDecodeRoute::kQ8KBlock;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
-#endif  // GUFO_CORE_COMPUTE_GEMM_GEMM_HPP_
+#endif  // MBUFO_CORE_COMPUTE_GEMM_GEMM_HPP_
 
 

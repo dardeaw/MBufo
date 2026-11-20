@@ -2,7 +2,7 @@
   "date": "2026-09-29",
   "base_commit": "8eedee6fd904b8e6812f740f777fe84940f341c5",
   "model": "Unsloth Qwen3.8 Flash-Next UD-Q4_K_XL with shared Q8_0 MTP",
-  "production_binary": "/nix/store/bl5hdp8plk40i746xlimd3hqbq51yf6m-gufo-0-unstable-8eedee6-dirty/bin/gufo",
+  "production_binary": "/nix/store/bl5hdp8plk40i746xlimd3hqbq51yf6m-mbufo-0-unstable-8eedee6-dirty/bin/mbufo",
   "source_diff_sha256": "a986630c4b417890c82e3ac2f297d1768d43843f851586cfe817eed0b485b647",
   "method": "One warmed HTTP measurement per configuration, GPU_MAX_HW_QUEUES=4. Concurrency rates sum individual decode rates; prompts are cached before timing. These short-prompt controls do not replace the pp2048 benchmark tables.",
   "reported_request": {
@@ -123,7 +123,7 @@
     "main_commit": "6a32726068f21f94db0761edba1da00eefe99c4b",
     "candidate_commit": "2b129b580af76aafa956e5b4ddb13900f87d8cba",
     "candidate_note": "Includes the subsequent WithoutConstraint staging fix; final source changes after this build are formatting only.",
-    "production_binary": "/nix/store/c5nxk1xaqpv4syf0qiv4k842wiagv834-gufo-0-unstable-2b129b5-dirty/bin/gufo",
+    "production_binary": "/nix/store/c5nxk1xaqpv4syf0qiv4k842wiagv834-mbufo-0-unstable-2b129b5-dirty/bin/mbufo",
     "method": "One matched warmed run per case, same C8 server/capacity8192 and GPU_MAX_HW_QUEUES=4. Short-prompt tg128 controls; compare each request independently. Tool calls have 24 generated tokens. No repeated sweep.",
     "all_matched_outputs_equal": true,
     "affected_decode_timings": "pass: every measured request is within 5% and 3 ms; all C8 rows improve 10.56% to 15.17%",

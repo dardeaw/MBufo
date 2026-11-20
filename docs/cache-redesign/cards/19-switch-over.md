@@ -147,8 +147,8 @@ while an execution lease is active.
 | Bridge, long Pi replay and standard speed benchmark | Pending; matched standard RAM table measured, with an unresolved RAM regression |
 
 Raw logs, production binaries, source patches and hashes are retained outside
-Git at `/home/mixer/gufo-qualification/pr543-followup`. The initial measured
-candidate was `candidate-r3-gufo`, SHA-256
+Git at `/home/mixer/mbufo-qualification/pr543-followup`. The initial measured
+candidate was `candidate-r3-mbufo`, SHA-256
 `b2b271a70620e91e5d95e78fea8563f78c4f76b9b59796dfcbb0e68991b86eec`.
 The core run uses C2, context 32768, 8 GiB cache RAM, 8 GiB disk and 1 GiB
 staging, selecting growth, depth, edits, shared-prefix, rotation, concurrency,
@@ -160,7 +160,7 @@ the final per-request 5% / 3 ms timing gate. The PR remains draft.
 
 ### Backing assignment follow-up
 
-The `candidate-r3-gufo` AR run passed all 54 growth requests, then exposed
+The `candidate-r3-mbufo` AR run passed all 54 growth requests, then exposed
 77.65 seconds of snapshot work on a cold 23,521-token depth request. The
 retained CPU profile shows exception unwinding in `ReserveBacking`: every
 assignment restarted its scan at block zero, repeatedly trying occupied
@@ -172,7 +172,7 @@ atomic cursor is only a hint; ledger ownership still arbitrates races. The
 passes afterwards. Existing allocation/failure/persistence-pin/concurrent-owner
 checks and the AR/MTP adapter restoration tests also pass.
 
-The restarted matrix uses `candidate-r4-gufo`, SHA-256
+The restarted matrix uses `candidate-r4-mbufo`, SHA-256
 `618c9cbe3baf4d9e3e77a05217436ceb4c965090377f7bea392d2e786584d001`.
 Main is still `665fc182` after checking the remote. Both production builds now
 have external RSS/high-water and global HIP/UMA memory sampling for a matched
@@ -231,7 +231,7 @@ failure from a numerical restoration defect.
 
 ### Capture batching and capacity planning
 
-`candidate-r6-gufo` (SHA-256
+`candidate-r6-mbufo` (SHA-256
 `bceaef2cb4399e8edc5dda88d81b395183af055bcc314290684ff6d64928ae2d`)
 coalesces adjacent chunks from the same physical allocation and batches four
 independent transfers. Capture admits all buffers before submission and waits
@@ -255,7 +255,7 @@ and MTP at 2/8 GiB, C2/32K, C8/4K and C1/100K+ capacities. A delayed-transfer
 test verifies that a failed capture leaves the preceding published boundary
 restorable; existing branch, restart and corruption checks also pass.
 
-The revised production build is `candidate-r7-gufo`, SHA-256
+The revised production build is `candidate-r7-mbufo`, SHA-256
 `ae09ee54a37ef2ea1e6595709445428bce45ce560fb76c8f5f64b2a98739e432`.
 Its AR/MTP model sampling and EOS replay checks pass, including all 25
 strategies, concurrent interleaving and short output budgets. The complete RAM-side functional histories pass in both modes at the original
@@ -285,7 +285,7 @@ rate and about 78.65% of prompt tokens reused. Cold controls are excluded.
 ### Fresh matched RAM benchmark
 
 A separate fresh standard `memory` table compares main `665fc182` with
-`candidate-r8-gufo`, SHA-256
+`candidate-r8-mbufo`, SHA-256
 `0ab38a58aed6715d92adc92649f152f40366c099be2a2e176c4818a701f1e86e`.
 Both use AR, C1, context 133121, 8 GiB cache RAM, no disk/staging, the same
 weights, pinned production toolchain and standard HTTP harness. Source
@@ -360,7 +360,7 @@ with the same CRC-64/ECMA and streaming seed semantics. An independent bitwise
 oracle covers alignments, lengths, seeds and split updates; all six focused
 CPU disk/cache targets and all 57 hosted PR checks pass. Focused AR and MTP
 HTTP cache histories also pass. Source and evidence:
-`/home/mixer/gufo-qualification/pr543-followup/cache-crc-review.json`.
+`/home/mixer/mbufo-qualification/pr543-followup/cache-crc-review.json`.
 
 AR disk restore observations improve from 238–526 ms on R11 to 65–164 ms
 on R12, versus 89–180 ms on main. All 479 observations are retained: 476
@@ -427,7 +427,7 @@ binary, complete patch, successful focused CPU checks, failed timing comparison
 and raw memory samples remain retained. It was never pushed. The remaining R13
 allocator work is separate and unpushed. Source manifests, hashes, commands,
 memory observations and individual queue gates in
-`/home/mixer/gufo-qualification/pr543-followup/cache-ram-review.json` make the
+`/home/mixer/mbufo-qualification/pr543-followup/cache-ram-review.json` make the
 experiment reviewable without presenting it as the current PR.
 
 Borrowed-row capture and idle spill still need serving integration and real
@@ -488,7 +488,7 @@ complete card 19 or make the PR ready to merge.
 
 Commands, immutable binaries, patches, source/harness hashes and raw results,
 including the initial expanded test's context-configuration failure, are retained
-at `/home/mixer/gufo-qualification/pr543-borrowed-2026-10-11`.
+at `/home/mixer/mbufo-qualification/pr543-borrowed-2026-10-11`.
 
 
 The frozen `36cacfb6` serving candidate passes RAM `cache-growth` (54
@@ -755,7 +755,7 @@ remaining queue and concurrency TTFT flags; the inconclusive depth-0 prefill
 benchmark; reassignment latency;
 the standard speed benchmark; a lower physical RAM footprint. Evidence,
 commands and binaries are retained at
-`/home/mixer/gufo-qualification/pr543-claude-2026-10-11`. The gap-clearing
+`/home/mixer/mbufo-qualification/pr543-claude-2026-10-11`. The gap-clearing
 candidate binary SHA-256 is
 `6c1cc173fe0c1c193a444c5021151081b49de3bb760fd70bbbf756c8e0262409`.
 
@@ -782,7 +782,7 @@ pass. The initial load-only client used an incorrect served model name and
 received HTTP 404; those attempts are retained separately and excluded from
 generation evidence.
 
-Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+Evidence: `/home/mixer/mbufo-qualification/pr543-review-2026-10-11`,
 `base-load-c6.log`, `diagnose-load-c6.log`, `load-generation.json`,
 `*-generation.log`, `check-pr-budget.log`.
 Production binary SHA-256:
@@ -824,7 +824,7 @@ a lower effective RAM budget. The successful repeat does not establish that
 the lower-budget stall is fixed. Crash recovery and transfer latency remain
 follow-up work.
 
-Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+Evidence: `/home/mixer/mbufo-qualification/pr543-review-2026-10-11`,
 `deep-oversized-mtp-final/report.json`, `deep-oversized-mtp/report.json`,
 `deep-cpu-tail-final.log`, `deep-focused-final.log`, `deep-pr-contract.log`,
 `deep-format-final.log`. Candidate production binary SHA-256:
@@ -857,7 +857,7 @@ as unqualified. The earlier SIGKILL test reached the correct published-only
 restore, but a competing GPU-test build OOM-killed its final cold control;
 the kernel evidence is retained and an isolated rerun is required.
 
-Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+Evidence: `/home/mixer/mbufo-qualification/pr543-review-2026-10-11`,
 `group-deep-seed-timing`, `group-deep-timing`, `deep-crash-mtp`,
 `deep-crash-build-oom.log`, `group-cpu4.log`, `group-pr-contract.log`,
 `group-format-final.log`, `group-harness.log`, `group-adapter-gpu.log`.
@@ -888,7 +888,7 @@ fails the strict timing gate. These runs omit cold controls and establish a
 matched timing observation, not full lifecycle correctness. No inference
 benchmark or numerical-quality claim changes.
 
-Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+Evidence: `/home/mixer/mbufo-qualification/pr543-review-2026-10-11`,
 `fold-deep-seed-timing`, `prefetch-deep-seed-timing`, `main-deep-seed-timing`,
 `fold-cpu.log`, `fold-pr-contract.log`, `fold-format-final.log`.
 Production binary SHA-256:
@@ -911,14 +911,14 @@ AR/MTP growth, depth, shared-prefix, rotation, concurrency and edit replays are
 running separately. This rank correction does not establish that grid admission
 starvation or constrained-RAM pressure is fixed.
 
-Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+Evidence: `/home/mixer/mbufo-qualification/pr543-review-2026-10-11`,
 `rank-red.log`, `rank-pr.log`, `rank-format-final.log`, `rank-functional-summary.json`.
 
 
 ### Review follow-up: open and closed cache issue audit (October 11)
 
 The issue audit (`review-543-issues.md` and `issue-audit-classification.json`
-in `/home/mixer/gufo-qualification/pr543-review-2026-10-11`) records 106 cache
+in `/home/mixer/mbufo-qualification/pr543-review-2026-10-11`) records 106 cache
 search matches and
 160 unique issues after expanding to checkpoint, prefill and continuation
 (139 closed, 21 open). Fifty directly related assessments name the evidence and
@@ -947,7 +947,7 @@ prefill 1199/1656/1199; cold outputs match. MTP proposes 1506 drafts, accepting
 871. The constrained 2 GiB pressure replay and affected matched timings remain
 open; this is an edit-reuse correctness result, not a latency qualification.
 
-Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+Evidence: `/home/mixer/mbufo-qualification/pr543-review-2026-10-11`,
 `grid-functional-summary.json`, `grid-core-{off,mtp}`, `grid-protection-red.log`,
 `grid-protection-green.log`, `grid-pr-final.log`, `grid-format-after-control.log`.
 Production binary SHA-256:

@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_HIP_COMMITTED_BACKING_HPP_
-#define GUFO_CORE_HIP_COMMITTED_BACKING_HPP_
+#ifndef MBUFO_CORE_HIP_COMMITTED_BACKING_HPP_
+#define MBUFO_CORE_HIP_COMMITTED_BACKING_HPP_
 
 #include <cstddef>
 #include <functional>
@@ -13,7 +13,7 @@
 #include "src/cache/ledger.hpp"
 #include "src/cache/slot.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace detail {
 struct BackingState;
 }
@@ -117,5 +117,5 @@ private:
   std::jthread ahead_;
 };
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif

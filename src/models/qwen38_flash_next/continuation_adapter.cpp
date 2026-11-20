@@ -14,7 +14,7 @@
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 namespace {
 using cache::Rows;
 using cache::TransferResult;
@@ -456,8 +456,8 @@ void ContinuationAdapter::BeginRestore(
 
 cache::Completion ContinuationAdapter::Transfer(
     State& state, bool load, cache::Stream& stream,
-    const std::function<void(gufo::hip::TransferStream&)>& submit) {
-  auto& hip_stream = dynamic_cast<gufo::hip::TransferStream&>(stream);
+    const std::function<void(mbufo::hip::TransferStream&)>& submit) {
+  auto& hip_stream = dynamic_cast<mbufo::hip::TransferStream&>(stream);
   auto job = std::make_shared<State::Job>();
   job->owner = &state;
   job->load = load;
@@ -604,7 +604,7 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
   if (component.part == ContinuationPart::kMetadata)
     region.pieces = {{host_metadata.data(), 0, host_metadata.size(), true}};
   return Transfer(
-      state, false, stream, [&](gufo::hip::TransferStream& transfer) {
+      state, false, stream, [&](mbufo::hip::TransferStream& transfer) {
         // Pieces overwrite their ranges. Clear only uncovered bytes, which
         // serialize as zeros: clearing the whole recycled copy on the host
         // dominated capture time.
@@ -677,7 +677,7 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
       state.coverage[id.value - 1].emplace_back(offset, offset + bytes.size());
     }
     return Transfer(
-        state, true, stream, [&](gufo::hip::TransferStream& transfer) {
+        state, true, stream, [&](mbufo::hip::TransferStream& transfer) {
           for (const auto& piece : region.pieces) {
             const auto first = std::max(offset, piece.offset);
             const auto end =
@@ -722,7 +722,7 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
           ? nullptr
           : static_cast<std::byte*>(RowData(state, component)) + first * row;
   return Transfer(
-      state, false, stream, [&](gufo::hip::TransferStream& transfer) {
+      state, false, stream, [&](mbufo::hip::TransferStream& transfer) {
         if (component.part == ContinuationPart::kTokens && !bytes.empty())
           std::memcpy(bytes.data(), source, bytes.size());
         else if (!bytes.empty())
@@ -787,7 +787,7 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
       state.coverage[id.value - 1].emplace_back(first * row, end * row);
     }
     return Transfer(
-        state, true, stream, [&](gufo::hip::TransferStream& transfer) {
+        state, true, stream, [&](mbufo::hip::TransferStream& transfer) {
           if (component.part == ContinuationPart::kTokens && !bytes.empty())
             std::memcpy(destination, bytes.data(), bytes.size());
           else if (!bytes.empty())
@@ -906,4 +906,4 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
     return false;
   }
 }
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next

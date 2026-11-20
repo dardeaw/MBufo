@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace qfn = gufo::models::qwen38_flash_next;
+namespace qfn = mbufo::models::qwen38_flash_next;
 
 void Require(bool condition, const char* message) {
   if (!condition)

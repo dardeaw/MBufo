@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_ORACLES_HPP_
-#define GUFO_MODELS_QWEN_ORACLES_HPP_
+#ifndef MBUFO_MODELS_QWEN_ORACLES_HPP_
+#define MBUFO_MODELS_QWEN_ORACLES_HPP_
 
 #include <cmath>
 #include <cstddef>
@@ -8,7 +8,7 @@
 #include <span>
 #include <vector>
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 /// BF16 bit-exact bitcast and representation utilities.
 [[nodiscard]] inline std::uint16_t FloatToBf16(float f) noexcept {
@@ -60,6 +60,6 @@ void ReferenceGEMV(std::span<const float> matrix, std::span<const float> x,
                    std::size_t rows, std::size_t cols,
                    std::span<float> y) noexcept;
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 
-#endif  // GUFO_MODELS_QWEN_ORACLES_HPP_
+#endif  // MBUFO_MODELS_QWEN_ORACLES_HPP_

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Join llama.cpp and gufo verdicts into tests/fixtures/llama_cpp_tool_grammar.json.
+"""Join llama.cpp and mbufo verdicts into tests/fixtures/llama_cpp_tool_grammar.json.
 
 Usage: golden.py DIR LLAMA_REVISION OUTPUT. DIR holds cases_{qwen,deepseek}.tsv,
-llama_{qwen,deepseek}.tsv (llama_probe) and gufo_{qwen,deepseek}.tsv
-(gufo_probe ... required). Every disagreement must match a reviewed reason.
+llama_{qwen,deepseek}.tsv (llama_probe) and mbufo_{qwen,deepseek}.tsv
+(mbufo_probe ... required). Every disagreement must match a reviewed reason.
 """
 
 from collections import Counter
@@ -27,7 +27,7 @@ def verdicts(path, llama):
     return d
 rows, unexplained = [], []
 for fmt in ("qwen", "deepseek"):
-    cfile, lfile, gfile = f"cases_{fmt}.tsv", f"llama_{fmt}.tsv", f"gufo_{fmt}.tsv"
+    cfile, lfile, gfile = f"cases_{fmt}.tsv", f"llama_{fmt}.tsv", f"mbufo_{fmt}.tsv"
     cs, ll, gg = cases(f"{S}/{cfile}"), verdicts(f"{S}/{lfile}", True), verdicts(f"{S}/{gfile}", False)
     for label, (schema, cands) in cs.items():
         for i, text in enumerate(cands, 1):
@@ -41,11 +41,11 @@ for fmt in ("qwen", "deepseek"):
                 if gv and not lv and prop in ("all_of_int", "int_empty") and cls == "valid":
                     note = "llama.cpp's grammar rejects this schema-valid value"
                 elif label in ("root_ref", "root_typed_ref"):
-                    note = "gufo follows a root $ref, as its native path did before"
+                    note = "mbufo follows a root $ref, as its native path did before"
                 elif not gv and lv and cls == "invalid_value":
-                    note = "gufo enforces string const/enum/length, as its native path did before"
+                    note = "mbufo enforces string const/enum/length, as its native path did before"
                 elif not gv and lv and prop == "const_tag":
-                    note = "gufo enforces the string const, as its native path did before"
+                    note = "mbufo enforces the string const, as its native path did before"
                 elif fmt == "deepseek" and gv and not lv and cls == "undeclared":
                     note = "DeepSeek string flag carries wildcard parameters on open roots, as before"
                 elif fmt == "deepseek" and gv and not lv and label in ("root_if_then", "root_oneof", "root_allof"):
@@ -57,7 +57,7 @@ for fmt in ("qwen", "deepseek"):
                 else:
                     unexplained.append((fmt, label, cls, lv, gv))
             rows.append({"format": fmt, "case": label, "parameters": json.loads(schema), "output": text,
-                         "class": cls, "llama_cpp": lv, "gufo": gv, **({"difference": note} if note else {})})
+                         "class": cls, "llama_cpp": lv, "mbufo": gv, **({"difference": note} if note else {})})
 assert not unexplained, unexplained
 fixture = {"source": f"llama.cpp {revision} common/parsers/qwen3-coder.cpp and deepseek.cpp, tool_choice required; "
            "verdicts from its GBNF grammar engine (Qwen3.8 Flash-Next and DeepSeek V4 Flash templates)",

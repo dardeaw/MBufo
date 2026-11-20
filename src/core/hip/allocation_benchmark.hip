@@ -32,11 +32,11 @@
 #define MFD_CLOEXEC 0x0001U
 #endif
 
-#ifndef GUFO_REVISION
-#define GUFO_REVISION "unknown"
+#ifndef MBUFO_REVISION
+#define MBUFO_REVISION "unknown"
 #endif
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 namespace {
 
 constexpr std::size_t kSafetyHeadroom = 4ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -534,7 +534,7 @@ bool CreateResource(AllocationKind kind, std::size_t size,
       const FaultSnapshot before_faults = ReadFaults();
       const auto begin = std::chrono::steady_clock::now();
       resource->fd_ = static_cast<int>(
-          syscall(SYS_memfd_create, "gufo-allocation-benchmark", MFD_CLOEXEC));
+          syscall(SYS_memfd_create, "mbufo-allocation-benchmark", MFD_CLOEXEC));
       if (resource->fd_ >= 0 &&
           ftruncate(resource->fd_, static_cast<off_t>(size)) == 0) {
         resource->mapping_ =
@@ -1117,7 +1117,7 @@ AllocationBenchmarkReport RunHipAllocationBenchmark(
     const MachineFingerprint& fingerprint) {
   AllocationBenchmarkReport report;
   report.timestamp = CurrentIso8601Utc();
-  report.engine_revision = GUFO_REVISION;
+  report.engine_revision = MBUFO_REVISION;
   report.options = options;
   report.inventory = inventory;
   report.fingerprint = fingerprint;
@@ -1197,6 +1197,6 @@ AllocationBenchmarkReport RunHipAllocationBenchmark(
   return report;
 }
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics
 
 #endif  // defined(ENGINE_ENABLE_HIP)

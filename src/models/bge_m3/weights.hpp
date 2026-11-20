@@ -17,8 +17,8 @@
 // (Q4_K/Q5_K/Q6_K/Q8_0, Q4 leg). Anything else refuses explicitly (no silent
 // dequant). There is no pooler (unused for CLS pooling),
 // no lm_head (encoder-only, never decodes), no KV (no decode at all).
-#ifndef GUFO_MODELS_BGE_M3_WEIGHTS_HPP_
-#define GUFO_MODELS_BGE_M3_WEIGHTS_HPP_
+#ifndef MBUFO_MODELS_BGE_M3_WEIGHTS_HPP_
+#define MBUFO_MODELS_BGE_M3_WEIGHTS_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -30,7 +30,7 @@
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/bge_m3/config.hpp"
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 
 /// Non-owning reference to one mapped weight tensor. Storage is F32, F16,
 /// or BF16 only; GetFloat upcasts exactly (one rounding for F16/BF16).
@@ -50,7 +50,7 @@ struct BgeM3TensorRef {
       return static_cast<const float*>(data)[index];
     }
     if (type == core::GgmlType::kF16) {
-      return gufo::quant::Fp16ToFloat(
+      return mbufo::quant::Fp16ToFloat(
           static_cast<const std::uint16_t*>(data)[index]);
     }
     // BF16: shift into the high half of an F32.
@@ -117,6 +117,6 @@ struct BgeM3Weights {
                                      std::size_t row_elems,
                                      std::string* error_msg = nullptr);
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3
 
-#endif  // GUFO_MODELS_BGE_M3_WEIGHTS_HPP_
+#endif  // MBUFO_MODELS_BGE_M3_WEIGHTS_HPP_

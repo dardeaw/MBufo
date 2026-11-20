@@ -42,19 +42,19 @@ namespace {
 constexpr std::size_t kK = 1024;
 
 struct FormatCase {
-  gufo::core::GgmlType type;
+  mbufo::core::GgmlType type;
   const char* name;
 };
 
 const FormatCase kFormats[] = {
-    {gufo::core::GgmlType::kQ4_K, "Q4_K"},
-    {gufo::core::GgmlType::kQ5_K, "Q5_K"},
-    {gufo::core::GgmlType::kQ6_K, "Q6_K"},
-    {gufo::core::GgmlType::kQ3_K, "Q3_K"},
-    {gufo::core::GgmlType::kIQ4_NL, "IQ4_NL"},
-    {gufo::core::GgmlType::kIQ4_XS, "IQ4_XS"},
-    {gufo::core::GgmlType::kIQ3_S, "IQ3_S"},
-    {gufo::core::GgmlType::kQ8_0, "Q8_0"},
+    {mbufo::core::GgmlType::kQ4_K, "Q4_K"},
+    {mbufo::core::GgmlType::kQ5_K, "Q5_K"},
+    {mbufo::core::GgmlType::kQ6_K, "Q6_K"},
+    {mbufo::core::GgmlType::kQ3_K, "Q3_K"},
+    {mbufo::core::GgmlType::kIQ4_NL, "IQ4_NL"},
+    {mbufo::core::GgmlType::kIQ4_XS, "IQ4_XS"},
+    {mbufo::core::GgmlType::kIQ3_S, "IQ3_S"},
+    {mbufo::core::GgmlType::kQ8_0, "Q8_0"},
 };
 
 std::uint32_t NextRandom(std::uint32_t& state) {
@@ -67,10 +67,10 @@ std::uint32_t NextRandom(std::uint32_t& state) {
 /// Fills a weight buffer with pseudo-random bytes. Half-precision scale fields
 /// are overwritten with well-conditioned values so the comparison is not
 /// dominated by denormals or infinities drawn from random bit patterns.
-std::vector<std::uint8_t> MakeWeights(gufo::core::GgmlType type,
+std::vector<std::uint8_t> MakeWeights(mbufo::core::GgmlType type,
                                       std::size_t rows, std::size_t k,
                                       std::uint32_t seed) {
-  const std::size_t row_bytes = gufo::quant::QuantizedRowBytes(type, k);
+  const std::size_t row_bytes = mbufo::quant::QuantizedRowBytes(type, k);
   std::vector<std::uint8_t> bytes(rows * row_bytes);
   std::uint32_t state = seed;
   for (auto& byte : bytes) {
@@ -84,26 +84,26 @@ std::vector<std::uint8_t> MakeWeights(gufo::core::GgmlType type,
     std::memcpy(at, &bits, sizeof(bits));
   };
 
-  const std::size_t block_bytes = gufo::quant::QuantizedRowBytes(
-      type, gufo::quant::QuantizedBlockElements(type));
+  const std::size_t block_bytes = mbufo::quant::QuantizedRowBytes(
+      type, mbufo::quant::QuantizedBlockElements(type));
   for (std::size_t off = 0; off < bytes.size(); off += block_bytes) {
     std::uint8_t* block = bytes.data() + off;
     switch (type) {
-      case gufo::core::GgmlType::kQ4_K:
-      case gufo::core::GgmlType::kQ5_K:
+      case mbufo::core::GgmlType::kQ4_K:
+      case mbufo::core::GgmlType::kQ5_K:
         tame_half(block);      // d
         tame_half(block + 2);  // dmin
         break;
-      case gufo::core::GgmlType::kQ6_K:
+      case mbufo::core::GgmlType::kQ6_K:
         tame_half(block + 208);  // d is last
         break;
-      case gufo::core::GgmlType::kQ3_K:
+      case mbufo::core::GgmlType::kQ3_K:
         tame_half(block + 108);  // d is last
         break;
-      case gufo::core::GgmlType::kIQ4_NL:
-      case gufo::core::GgmlType::kIQ4_XS:
-      case gufo::core::GgmlType::kIQ3_S:
-      case gufo::core::GgmlType::kQ8_0:
+      case mbufo::core::GgmlType::kIQ4_NL:
+      case mbufo::core::GgmlType::kIQ4_XS:
+      case mbufo::core::GgmlType::kIQ3_S:
+      case mbufo::core::GgmlType::kQ8_0:
         tame_half(block);  // d is first
         break;
       default:
@@ -113,54 +113,54 @@ std::vector<std::uint8_t> MakeWeights(gufo::core::GgmlType type,
   return bytes;
 }
 
-float CpuDot(gufo::core::GgmlType type, const void* row,
+float CpuDot(mbufo::core::GgmlType type, const void* row,
              std::span<const float> x, std::size_t k) {
   switch (type) {
-    case gufo::core::GgmlType::kQ4_K:
-      return gufo::quant::DotProductQ4_K(row, x, k);
-    case gufo::core::GgmlType::kQ5_K:
-      return gufo::quant::DotProductQ5_K(row, x, k);
-    case gufo::core::GgmlType::kQ6_K:
-      return gufo::quant::DotProductQ6_K(row, x, k);
-    case gufo::core::GgmlType::kQ3_K:
-      return gufo::quant::DotProductQ3_K(row, x, k);
-    case gufo::core::GgmlType::kIQ4_NL:
-      return gufo::quant::DotProductIQ4_NL(row, x, k);
-    case gufo::core::GgmlType::kIQ4_XS:
-      return gufo::quant::DotProductIQ4_XS(row, x, k);
-    case gufo::core::GgmlType::kIQ3_S:
-      return gufo::quant::DotProductIQ3_S(row, x, k);
+    case mbufo::core::GgmlType::kQ4_K:
+      return mbufo::quant::DotProductQ4_K(row, x, k);
+    case mbufo::core::GgmlType::kQ5_K:
+      return mbufo::quant::DotProductQ5_K(row, x, k);
+    case mbufo::core::GgmlType::kQ6_K:
+      return mbufo::quant::DotProductQ6_K(row, x, k);
+    case mbufo::core::GgmlType::kQ3_K:
+      return mbufo::quant::DotProductQ3_K(row, x, k);
+    case mbufo::core::GgmlType::kIQ4_NL:
+      return mbufo::quant::DotProductIQ4_NL(row, x, k);
+    case mbufo::core::GgmlType::kIQ4_XS:
+      return mbufo::quant::DotProductIQ4_XS(row, x, k);
+    case mbufo::core::GgmlType::kIQ3_S:
+      return mbufo::quant::DotProductIQ3_S(row, x, k);
     default:
-      return gufo::quant::DotProductQ8_0(row, x, k);
+      return mbufo::quant::DotProductQ8_0(row, x, k);
   }
 }
 
-void Dequantize(gufo::core::GgmlType type, const void* row, float* out,
+void Dequantize(mbufo::core::GgmlType type, const void* row, float* out,
                 std::size_t k) {
   switch (type) {
-    case gufo::core::GgmlType::kQ4_K:
-      gufo::quant::DequantizeQ4_K(row, out, k);
+    case mbufo::core::GgmlType::kQ4_K:
+      mbufo::quant::DequantizeQ4_K(row, out, k);
       return;
-    case gufo::core::GgmlType::kQ5_K:
-      gufo::quant::DequantizeQ5_K(row, out, k);
+    case mbufo::core::GgmlType::kQ5_K:
+      mbufo::quant::DequantizeQ5_K(row, out, k);
       return;
-    case gufo::core::GgmlType::kQ6_K:
-      gufo::quant::DequantizeQ6_K(row, out, k);
+    case mbufo::core::GgmlType::kQ6_K:
+      mbufo::quant::DequantizeQ6_K(row, out, k);
       return;
-    case gufo::core::GgmlType::kQ3_K:
-      gufo::quant::DequantizeQ3_K(row, out, k);
+    case mbufo::core::GgmlType::kQ3_K:
+      mbufo::quant::DequantizeQ3_K(row, out, k);
       return;
-    case gufo::core::GgmlType::kIQ4_NL:
-      gufo::quant::DequantizeIQ4_NL(row, out, k);
+    case mbufo::core::GgmlType::kIQ4_NL:
+      mbufo::quant::DequantizeIQ4_NL(row, out, k);
       return;
-    case gufo::core::GgmlType::kIQ4_XS:
-      gufo::quant::DequantizeIQ4_XS(row, out, k);
+    case mbufo::core::GgmlType::kIQ4_XS:
+      mbufo::quant::DequantizeIQ4_XS(row, out, k);
       return;
-    case gufo::core::GgmlType::kIQ3_S:
-      gufo::quant::DequantizeIQ3_S(row, out, k);
+    case mbufo::core::GgmlType::kIQ3_S:
+      mbufo::quant::DequantizeIQ3_S(row, out, k);
       return;
     default:
-      gufo::quant::DequantizeQ8_0(row, out, k);
+      mbufo::quant::DequantizeQ8_0(row, out, k);
       return;
   }
 }
@@ -203,7 +203,7 @@ void TestDecodeGemv(const FormatCase& format) {
   HIP_CHECK(hipMemcpy(d_x, x.data(), x.size() * sizeof(float),
                       hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchQ8KBlockGEMV(d_w, format.type, static_cast<float*>(d_x),
+  mbufo::hip::LaunchQ8KBlockGEMV(d_w, format.type, static_cast<float*>(d_x),
                                 static_cast<float*>(d_y), kM, kK, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -211,7 +211,7 @@ void TestDecodeGemv(const FormatCase& format) {
   HIP_CHECK(
       hipMemcpy(gpu.data(), d_y, kM * sizeof(float), hipMemcpyDeviceToHost));
 
-  const std::size_t row_bytes = gufo::quant::QuantizedRowBytes(format.type, kK);
+  const std::size_t row_bytes = mbufo::quant::QuantizedRowBytes(format.type, kK);
   std::vector<float> row_values(kK);
   double worst = 0.0;
   for (std::size_t row = 0; row < kM; ++row) {
@@ -281,7 +281,7 @@ void TestPrefillGemm(const FormatCase& format, std::size_t batch,
   void* d_x = nullptr;
   void* d_q8 = nullptr;
   void* d_y = nullptr;
-  const std::size_t act_bytes = gufo::hip::QuantizedActivationBytes(batch, kK);
+  const std::size_t act_bytes = mbufo::hip::QuantizedActivationBytes(batch, kK);
   HIP_CHECK(hipMalloc(&d_w, weights.size()));
   HIP_CHECK(hipMalloc(&d_x, x.size() * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_q8, act_bytes));
@@ -292,9 +292,9 @@ void TestPrefillGemm(const FormatCase& format, std::size_t batch,
                       hipMemcpyHostToDevice));
   HIP_CHECK(hipMemset(d_y, 0, batch * kM * sizeof(float)));
 
-  gufo::hip::LaunchQuantizeActivationQ8_1FromFp32(
+  mbufo::hip::LaunchQuantizeActivationQ8_1FromFp32(
       static_cast<const float*>(d_x), d_q8, batch, kK, nullptr);
-  gufo::hip::LaunchBatchedQuantGEMMPreQuantized(
+  mbufo::hip::LaunchBatchedQuantGEMMPreQuantized(
       format.type, d_w, d_q8, static_cast<float*>(d_y), batch, kM, kK, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -302,7 +302,7 @@ void TestPrefillGemm(const FormatCase& format, std::size_t batch,
   HIP_CHECK(hipMemcpy(gpu.data(), d_y, gpu.size() * sizeof(float),
                       hipMemcpyDeviceToHost));
 
-  const std::size_t row_bytes = gufo::quant::QuantizedRowBytes(format.type, kK);
+  const std::size_t row_bytes = mbufo::quant::QuantizedRowBytes(format.type, kK);
   std::vector<float> row_values(kK);
   double worst = 0.0;
   for (std::size_t row = 0; row < kM; ++row) {
@@ -372,7 +372,7 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
   HIP_CHECK(hipMemcpy(d_x, x.data(), x.size() * sizeof(float),
                       hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchBatchedQuantGEMMFp32(
+  mbufo::hip::LaunchBatchedQuantGEMMFp32(
       format.type, d_w, static_cast<const float*>(d_x),
       static_cast<float*>(d_batched), batch, rows, columns, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
@@ -385,7 +385,7 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
     mismatches += std::bit_cast<std::uint32_t>(batched[index]) != 0xA5A5A5A5U;
   std::vector<float> single(rows);
   for (std::size_t token = 0; token < batch; ++token) {
-    gufo::hip::LaunchQ8KBlockGEMV(
+    mbufo::hip::LaunchQ8KBlockGEMV(
         d_w, format.type, static_cast<const float*>(d_x) + (token * columns),
         static_cast<float*>(d_single), rows, columns, nullptr);
     HIP_CHECK(hipDeviceSynchronize());
@@ -417,10 +417,10 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
 // AR's fused FFN and verification must produce identical finite activations.
 // Check separate and packed gate/up rows, including mixed quantization
 // formats, two distinct inputs and incomplete row groups.
-void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
-                     gufo::core::GgmlType up_type, std::size_t rows,
+void TestFusedSwiGLU(mbufo::core::GgmlType gate_type,
+                     mbufo::core::GgmlType up_type, std::size_t rows,
                      std::size_t columns) {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   constexpr std::size_t batch = 2;
   const DeviceBuffer<std::uint8_t> gate(
       MakeWeights(gate_type, rows, columns, 0x5EED1234U));
@@ -439,18 +439,18 @@ void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
   HIP_CHECK(hipMemset(fused.data(), 0xFF, batch * rows * sizeof(float)));
   HIP_CHECK(hipMemset(split.data(), 0xFF, batch * rows * sizeof(float)));
   for (std::size_t token = 0; token < batch; ++token) {
-    gufo::hip::LaunchFusedSwiGLUGEMV(gate.data(), gate_type, up.data(), up_type,
+    mbufo::hip::LaunchFusedSwiGLUGEMV(gate.data(), gate_type, up.data(), up_type,
                                      input.data() + token * columns,
                                      fused.data() + token * rows, rows, columns,
                                      nullptr);
   }
-  gufo::hip::LaunchBatchedQuantGEMMFp32(gate_type, gate.data(), input.data(),
+  mbufo::hip::LaunchBatchedQuantGEMMFp32(gate_type, gate.data(), input.data(),
                                         gate_out.data(), batch, rows, columns,
                                         nullptr);
-  gufo::hip::LaunchBatchedQuantGEMMFp32(up_type, up.data(), input.data(),
+  mbufo::hip::LaunchBatchedQuantGEMMFp32(up_type, up.data(), input.data(),
                                         up_out.data(), batch, rows, columns,
                                         nullptr);
-  gufo::hip::LaunchBatchedSwiGLUActivation(gate_out.data(), up_out.data(),
+  mbufo::hip::LaunchBatchedSwiGLUActivation(gate_out.data(), up_out.data(),
                                            split.data(), nullptr, batch * rows,
                                            nullptr);
   HIP_CHECK(hipDeviceSynchronize());
@@ -469,7 +469,7 @@ void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
   DeviceBuffer<float> packed_output(batch * rows);
   HIP_CHECK(
       hipMemset(packed_output.data(), 0xFF, batch * rows * sizeof(float)));
-  gufo::hip::LaunchPackedSwiGLUActivation(
+  mbufo::hip::LaunchPackedSwiGLUActivation(
       packed_input.data(), packed_output.data(), batch, rows, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
   const auto packed = packed_output.CopyToHost();
@@ -486,8 +486,8 @@ void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
   }
   std::cout << (mismatches == 0 ? "[ OK ] " : "[FAIL] ")
             << "fused/packed SwiGLU vs verification "
-            << gufo::core::ToString(gate_type) << "/"
-            << gufo::core::ToString(up_type) << " " << rows << "x" << columns
+            << mbufo::core::ToString(gate_type) << "/"
+            << mbufo::core::ToString(up_type) << " " << rows << "x" << columns
             << ": " << mismatches << " of " << actual.size() << " differ\n";
   g_failed |= mismatches != 0;
 }
@@ -495,7 +495,7 @@ void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
 // Concurrent fused projections must retain the scalar FFN result for each
 // independent input, including the final incomplete output-row group.
 void TestPackedProjectionSwiGLU(const FormatCase& format) {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   constexpr std::size_t rows = 17408;
   constexpr std::size_t columns = 5120;
   constexpr std::size_t max_batch = 64;
@@ -512,7 +512,7 @@ void TestPackedProjectionSwiGLU(const FormatCase& format) {
   const DeviceBuffer<float> input(x);
   DeviceBuffer<float> scalar(max_batch * rows), batched(max_batch * rows);
   for (std::size_t token = 0; token < max_batch; ++token) {
-    gufo::hip::LaunchFusedSwiGLUGEMV(
+    mbufo::hip::LaunchFusedSwiGLUGEMV(
         weights.data(), format.type, weights.data() + host_weights.size() / 2,
         format.type, input.data() + token * columns,
         scalar.data() + token * rows, rows, columns, nullptr);
@@ -521,7 +521,7 @@ void TestPackedProjectionSwiGLU(const FormatCase& format) {
   for (const std::size_t batch : {14U, 16U, 32U, 48U, 64U}) {
     HIP_CHECK(
         hipMemset(batched.data(), 0xFF, max_batch * rows * sizeof(float)));
-    const bool launched = gufo::hip::TryLaunchPackedQuantSwiGLUFp32(
+    const bool launched = mbufo::hip::TryLaunchPackedQuantSwiGLUFp32(
         format.type, weights.data(), input.data(), batched.data(), batch, rows,
         columns, nullptr);
     const auto actual = batched.CopyToHost();
@@ -545,7 +545,7 @@ void TestPackedProjectionSwiGLU(const FormatCase& format) {
 // Every format shares this test; large and ragged tiles exercise both stores.
 void TestFp16Prefill(const FormatCase& format, std::size_t rows,
                      std::size_t batch) {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   const auto weights = MakeWeights(format.type, rows, kK, 0x821314U);
   std::uint32_t state = 0x726135U;
   const auto value = [&] {
@@ -562,14 +562,14 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
       d_a8_y(batch * rows);
   DeviceBuffer<std::uint16_t> d_half_x(batch * kK);
   DeviceBuffer<std::uint8_t> d_q8(
-      gufo::hip::QuantizedActivationBytes(batch, kK));
-  gufo::hip::LaunchFloatToFp16(d_x.data(), d_half_x.data(), x.size(), nullptr);
-  gufo::hip::LaunchBatchedQuantGEMMFp16(format.type, d_weights.data(),
+      mbufo::hip::QuantizedActivationBytes(batch, kK));
+  mbufo::hip::LaunchFloatToFp16(d_x.data(), d_half_x.data(), x.size(), nullptr);
+  mbufo::hip::LaunchBatchedQuantGEMMFp16(format.type, d_weights.data(),
                                         d_half_x.data(), d_half_y.data(), batch,
                                         rows, kK, nullptr);
-  gufo::hip::LaunchQuantizeActivationQ8_1FromFp32(d_x.data(), d_q8.data(),
+  mbufo::hip::LaunchQuantizeActivationQ8_1FromFp32(d_x.data(), d_q8.data(),
                                                   batch, kK, nullptr);
-  gufo::hip::LaunchBatchedQuantGEMMPreQuantized(format.type, d_weights.data(),
+  mbufo::hip::LaunchBatchedQuantGEMMPreQuantized(format.type, d_weights.data(),
                                                 d_q8.data(), d_a8_y.data(),
                                                 batch, rows, kK, nullptr);
   const auto actual = d_half_y.CopyToHost();
@@ -578,7 +578,7 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
       actual, [](float item) { return std::isfinite(item); });
   double half_error = 0.0, a8_error = 0.0, half_max = 0.0, a8_max = 0.0;
   std::vector<float> decoded(kK);
-  const std::size_t row_bytes = gufo::quant::QuantizedRowBytes(format.type, kK);
+  const std::size_t row_bytes = mbufo::quant::QuantizedRowBytes(format.type, kK);
   for (std::size_t sample = 0; sample < 256; ++sample) {
     const std::size_t row = (sample * 137 + 17) % rows;
     const std::size_t token = (sample * 61 + 7) % batch;
@@ -599,10 +599,10 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
   // The residual must be added after the complete dot product, including
   // when the output reuses the live residual buffer.
   DeviceBuffer<float> d_residual(gate), d_residual_expected(batch * rows);
-  gufo::hip::LaunchBatchedResidualAdd(d_gate.data(), d_half_y.data(),
+  mbufo::hip::LaunchBatchedResidualAdd(d_gate.data(), d_half_y.data(),
                                       d_residual_expected.data(), batch, rows,
                                       nullptr);
-  gufo::hip::LaunchBatchedQuantGEMMResidualFp16(
+  mbufo::hip::LaunchBatchedQuantGEMMResidualFp16(
       format.type, d_weights.data(), d_half_x.data(), d_residual.data(), batch,
       rows, kK, nullptr);
   const auto residual = d_residual.CopyToHost();
@@ -615,12 +615,12 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
     // activation after the up projection, while the norm input stays live.
     DeviceBuffer<float> d_activation(batch * rows), d_up_storage(batch * rows);
     DeviceBuffer<std::uint16_t> d_expected(batch * rows);
-    gufo::hip::LaunchBatchedSwiGLUActivation(d_gate.data(), d_half_y.data(),
+    mbufo::hip::LaunchBatchedSwiGLUActivation(d_gate.data(), d_half_y.data(),
                                              d_activation.data(), nullptr,
                                              batch * rows, nullptr);
-    gufo::hip::LaunchFloatToFp16(d_activation.data(), d_expected.data(),
+    mbufo::hip::LaunchFloatToFp16(d_activation.data(), d_expected.data(),
                                  batch * rows, nullptr);
-    gufo::hip::LaunchBatchedQuantGEMMSwiGLUFp16(
+    mbufo::hip::LaunchBatchedQuantGEMMSwiGLUFp16(
         format.type, d_weights.data(), d_half_x.data(), d_gate.data(),
         d_up_storage.data(), batch, rows, kK, nullptr);
     std::vector<std::uint16_t> fused(batch * rows);
@@ -639,28 +639,28 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
     for (float& item : paired_input)
       item *= 0.03125F;
     d_x.CopyFrom(paired_input);
-    gufo::hip::LaunchFloatToFp16(d_x.data(), d_half_x.data(), x.size(),
+    mbufo::hip::LaunchFloatToFp16(d_x.data(), d_half_x.data(), x.size(),
                                  nullptr);
-    gufo::hip::LaunchBatchedQuantGEMMFp16(format.type, d_weights.data(),
+    mbufo::hip::LaunchBatchedQuantGEMMFp16(format.type, d_weights.data(),
                                           d_half_x.data(), d_half_y.data(),
                                           batch, rows, kK, nullptr);
     DeviceBuffer<std::uint8_t> d_gate_weights(
         MakeWeights(format.type, rows, kK, 0x173841U));
-    gufo::hip::LaunchBatchedQuantGEMMFp16(format.type, d_gate_weights.data(),
+    mbufo::hip::LaunchBatchedQuantGEMMFp16(format.type, d_gate_weights.data(),
                                           d_half_x.data(), d_gate.data(), batch,
                                           rows, kK, nullptr);
-    gufo::hip::LaunchBatchedSwiGLUActivation(d_gate.data(), d_half_y.data(),
+    mbufo::hip::LaunchBatchedSwiGLUActivation(d_gate.data(), d_half_y.data(),
                                              d_activation.data(), nullptr,
                                              batch * rows, nullptr);
-    gufo::hip::LaunchFloatToFp16(d_activation.data(), d_expected.data(),
+    mbufo::hip::LaunchFloatToFp16(d_activation.data(), d_expected.data(),
                                  batch * rows, nullptr);
-    const bool paired = gufo::hip::TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
+    const bool paired = mbufo::hip::TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
         format.type, format.type, d_gate_weights.data(), d_weights.data(),
         d_half_x.data(), d_up_storage.data(), batch, rows, kK, nullptr);
-    const bool supported = format.type == gufo::core::GgmlType::kQ4_K ||
-                           format.type == gufo::core::GgmlType::kQ5_K ||
-                           format.type == gufo::core::GgmlType::kQ6_K ||
-                           format.type == gufo::core::GgmlType::kIQ4_XS;
+    const bool supported = format.type == mbufo::core::GgmlType::kQ4_K ||
+                           format.type == mbufo::core::GgmlType::kQ5_K ||
+                           format.type == mbufo::core::GgmlType::kQ6_K ||
+                           format.type == mbufo::core::GgmlType::kIQ4_XS;
     passed &= paired == supported;
     if (paired) {
       HIP_CHECK(hipMemcpy(fused.data(), d_up_storage.data(),
@@ -678,10 +678,10 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
   g_failed |= !passed;
 }
 
-void TestFp16MixedPair(gufo::core::GgmlType gate_type,
-                       gufo::core::GgmlType up_type, std::size_t rows,
+void TestFp16MixedPair(mbufo::core::GgmlType gate_type,
+                       mbufo::core::GgmlType up_type, std::size_t rows,
                        std::size_t batch) {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   constexpr std::size_t kK = 768;
   std::uint32_t state = 0x493578U;
   std::vector<float> input(batch * kK);
@@ -698,19 +698,19 @@ void TestFp16MixedPair(gufo::core::GgmlType gate_type,
   DeviceBuffer<float> x(input), gate(batch * rows), up(batch * rows),
       activation(batch * rows), output(batch * rows);
   DeviceBuffer<std::uint16_t> half_x(input.size()), expected(batch * rows);
-  gufo::hip::LaunchFloatToFp16(x.data(), half_x.data(), input.size(), nullptr);
-  gufo::hip::LaunchBatchedQuantGEMMFp16(gate_type, gate_weights.data(),
+  mbufo::hip::LaunchFloatToFp16(x.data(), half_x.data(), input.size(), nullptr);
+  mbufo::hip::LaunchBatchedQuantGEMMFp16(gate_type, gate_weights.data(),
                                         half_x.data(), gate.data(), batch, rows,
                                         kK, nullptr);
-  gufo::hip::LaunchBatchedQuantGEMMFp16(up_type, up_weights.data(),
+  mbufo::hip::LaunchBatchedQuantGEMMFp16(up_type, up_weights.data(),
                                         half_x.data(), up.data(), batch, rows,
                                         kK, nullptr);
-  gufo::hip::LaunchBatchedSwiGLUActivation(gate.data(), up.data(),
+  mbufo::hip::LaunchBatchedSwiGLUActivation(gate.data(), up.data(),
                                            activation.data(), nullptr,
                                            batch * rows, nullptr);
-  gufo::hip::LaunchFloatToFp16(activation.data(), expected.data(), batch * rows,
+  mbufo::hip::LaunchFloatToFp16(activation.data(), expected.data(), batch * rows,
                                nullptr);
-  bool passed = gufo::hip::TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
+  bool passed = mbufo::hip::TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
       gate_type, up_type, gate_weights.data(), up_weights.data(), half_x.data(),
       output.data(), batch, rows, kK, nullptr);
   std::vector<std::uint16_t> actual(batch * rows);
@@ -734,7 +734,7 @@ void TestFp16MixedPair(gufo::core::GgmlType gate_type,
 }
 
 void TestFp16Norm() {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   // A full chunk exposes rare FP16 ties affected by contracting the first
   // two squared values in a different order.
   constexpr std::size_t dim = 5120, batch = 2048, elements = batch * dim;
@@ -756,16 +756,16 @@ void TestFp16Norm() {
   for (bool add_residual : {false, true}) {
     d_input.CopyFrom(input);
     if (add_residual)
-      gufo::hip::LaunchBatchedResidualAdd(d_input.data(), d_residual.data(),
+      mbufo::hip::LaunchBatchedResidualAdd(d_input.data(), d_residual.data(),
                                           d_sum.data(), batch, dim, nullptr);
     else
       d_sum.CopyFrom(input);
-    gufo::hip::LaunchBatchedRMSNorm(d_sum.data(), d_weight.data(),
+    mbufo::hip::LaunchBatchedRMSNorm(d_sum.data(), d_weight.data(),
                                     d_norm.data(), nullptr, batch, dim, 1e-6F,
                                     nullptr);
-    gufo::hip::LaunchFloatToFp16(d_norm.data(), d_expected.data(), elements,
+    mbufo::hip::LaunchFloatToFp16(d_norm.data(), d_expected.data(), elements,
                                  nullptr);
-    gufo::hip::LaunchBatchedRMSNormFp16(
+    mbufo::hip::LaunchBatchedRMSNormFp16(
         d_input.data(), add_residual ? d_residual.data() : nullptr,
         d_weight.data(), add_residual ? d_input.data() : nullptr,
         d_actual.data(), batch, dim, 1e-6F, nullptr);
@@ -784,7 +784,7 @@ void TestFp16Norm() {
 }
 
 void TestRaggedFfnProjections() {
-  const FormatCase format{gufo::core::GgmlType::kIQ4_XS, "IQ4_XS"};
+  const FormatCase format{mbufo::core::GgmlType::kIQ4_XS, "IQ4_XS"};
   for (const auto rows : {17408U, 34816U})
     TestSmallBatchExactness(format, 5, rows, 5120);
   TestSmallBatchExactness(format, 5, 5120, 17408);
@@ -793,10 +793,10 @@ void TestRaggedFfnProjections() {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const FormatCase q4{gufo::core::GgmlType::kQ4_K, "Q4_K"};
+  const FormatCase q4{mbufo::core::GgmlType::kQ4_K, "Q4_K"};
   if (argc == 2 && std::string_view(argv[1]) == "--verify-projections") {
     TestDecodeGemv(q4);
-    TestDecodeGemv({gufo::core::GgmlType::kIQ4_XS, "IQ4_XS"});
+    TestDecodeGemv({mbufo::core::GgmlType::kIQ4_XS, "IQ4_XS"});
     TestRaggedFfnProjections();
     for (const auto batch : {4U, 8U}) {
       for (const auto rows : {17408U, 34816U})
@@ -809,21 +809,21 @@ int main(int argc, char** argv) {
   TestFp16Norm();
   for (const auto& format : kFormats) {
     TestFp16Prefill(format, 4097, 257);
-    if (format.type == gufo::core::GgmlType::kQ4_K ||
-        format.type == gufo::core::GgmlType::kQ5_K) {
+    if (format.type == mbufo::core::GgmlType::kQ4_K ||
+        format.type == mbufo::core::GgmlType::kQ5_K) {
       TestFp16Prefill(format, 4096, 256);
     }
   }
-  TestFp16Prefill({gufo::core::GgmlType::kQ8_0, "Q8_0"}, 48, 129);
-  TestFp16Prefill({gufo::core::GgmlType::kQ6_K, "Q6_K"}, 1057, 129);
-  TestFp16Prefill({gufo::core::GgmlType::kIQ4_NL, "IQ4_NL"}, 48, 129);
-  TestFp16Prefill({gufo::core::GgmlType::kIQ4_XS, "IQ4_XS"}, 1057, 129);
+  TestFp16Prefill({mbufo::core::GgmlType::kQ8_0, "Q8_0"}, 48, 129);
+  TestFp16Prefill({mbufo::core::GgmlType::kQ6_K, "Q6_K"}, 1057, 129);
+  TestFp16Prefill({mbufo::core::GgmlType::kIQ4_NL, "IQ4_NL"}, 48, 129);
+  TestFp16Prefill({mbufo::core::GgmlType::kIQ4_XS, "IQ4_XS"}, 1057, 129);
   // Attention K/V projections use the larger tile at long prefill widths.
   // An incomplete final token tile must preserve the same FP32 dot order.
-  for (const auto& format : {FormatCase{gufo::core::GgmlType::kQ4_K, "Q4_K"},
-                             FormatCase{gufo::core::GgmlType::kQ5_K, "Q5_K"},
-                             FormatCase{gufo::core::GgmlType::kQ6_K, "Q6_K"},
-                             FormatCase{gufo::core::GgmlType::kQ8_0, "Q8_0"}}) {
+  for (const auto& format : {FormatCase{mbufo::core::GgmlType::kQ4_K, "Q4_K"},
+                             FormatCase{mbufo::core::GgmlType::kQ5_K, "Q5_K"},
+                             FormatCase{mbufo::core::GgmlType::kQ6_K, "Q6_K"},
+                             FormatCase{mbufo::core::GgmlType::kQ8_0, "Q8_0"}}) {
     TestFp16Prefill(format, 1024, 1025);
   }
   for (const auto& format : kFormats) {
@@ -836,19 +836,19 @@ int main(int argc, char** argv) {
     // route launches, so between them they cover a partially and a fully
     // populated token block plus a ragged tail.
     TestPrefillGemm(format, 288);
-    if (format.type == gufo::core::GgmlType::kQ4_K ||
-        format.type == gufo::core::GgmlType::kQ5_K ||
-        format.type == gufo::core::GgmlType::kQ6_K ||
-        format.type == gufo::core::GgmlType::kQ8_0) {
+    if (format.type == mbufo::core::GgmlType::kQ4_K ||
+        format.type == mbufo::core::GgmlType::kQ5_K ||
+        format.type == mbufo::core::GgmlType::kQ6_K ||
+        format.type == mbufo::core::GgmlType::kQ8_0) {
       // Native wave64: partial token tiles and a partial output-row tile.
       TestPrefillGemm(format, 129, 1057);
     }
-    if (format.type == gufo::core::GgmlType::kIQ4_XS) {
+    if (format.type == mbufo::core::GgmlType::kIQ4_XS) {
       TestPrefillGemm(format, 129, 1024);
     }
   }
   for (const auto& format : kFormats) {
-    if (format.type == gufo::core::GgmlType::kQ8_0) {
+    if (format.type == mbufo::core::GgmlType::kQ8_0) {
       continue;  // Q8_0's concurrent projection shapes are checked below.
     }
     for (const std::size_t batch :
@@ -861,8 +861,8 @@ int main(int argc, char** argv) {
   for (const auto rows : {17408U, 34816U})
     TestSmallBatchExactness(q4, 4, rows, 5120);
   TestSmallBatchExactness(q4, 4, 5120, 17408);
-  TestSmallBatchExactness({gufo::core::GgmlType::kQ4_K, "Q4_K"}, 8, 1280, 5120);
-  const FormatCase q8{gufo::core::GgmlType::kQ8_0, "Q8_0"};
+  TestSmallBatchExactness({mbufo::core::GgmlType::kQ4_K, "Q4_K"}, 8, 1280, 5120);
+  const FormatCase q8{mbufo::core::GgmlType::kQ8_0, "Q8_0"};
   TestSmallBatchExactness(q8, 16, 34816, 5120);
   TestSmallBatchExactness(q8, 32, 10240, 5120);
   TestSmallBatchExactness(q8, 64, 5120, 17408);
@@ -878,12 +878,12 @@ int main(int argc, char** argv) {
   TestSmallBatchExactness(q8, 28, 5120, 6144);
   // Production IQ4 verification shapes cover the two lane partials, grouped
   // requests and the longer down projection with independent token inputs.
-  const FormatCase iq4{gufo::core::GgmlType::kIQ4_XS, "IQ4_XS"};
+  const FormatCase iq4{mbufo::core::GgmlType::kIQ4_XS, "IQ4_XS"};
   TestSmallBatchExactness(iq4, 12, 34816, 5120);
   TestSmallBatchExactness(iq4, 28, 34816, 5120);
   TestSmallBatchExactness(iq4, 16, 5120, 17408);
   TestSmallBatchExactness(iq4, 42, 5120, 17408);
-  using Type = gufo::core::GgmlType;
+  using Type = mbufo::core::GgmlType;
   // Q3_K and IQ4_NL FFNs share complete fourteen/sixteen-position groups,
   // including multiple requests and the last incomplete output-row tile.
   for (const auto& format :

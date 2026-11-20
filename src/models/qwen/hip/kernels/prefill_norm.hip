@@ -11,7 +11,7 @@
 #include "src/models/qwen/hip/ops/norm_residual.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 template<std::size_t CachedDim = 0>
 __global__ void BatchedRMSNormKernel(const float* __restrict__ x,
@@ -173,5 +173,5 @@ void LaunchBatchedPerHeadRMSNorm(const float* x, const float* weight,
   BatchedPerHeadRMSNormKernel<<<grid, 256, 0, stream>>>(
       x, weight, out, batch_size, num_heads, head_dim, eps);
 }
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

@@ -7,7 +7,7 @@
 #include <utility>
 #include <variant>
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 namespace {
 
 constexpr std::string_view kArchitecture = "qwen4exp";
@@ -290,4 +290,4 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   return c;
 }
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next

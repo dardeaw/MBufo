@@ -1,5 +1,5 @@
-#ifndef GUFO_TOKENIZATION_QWEN_TOKENIZER_HPP_
-#define GUFO_TOKENIZATION_QWEN_TOKENIZER_HPP_
+#ifndef MBUFO_TOKENIZATION_QWEN_TOKENIZER_HPP_
+#define MBUFO_TOKENIZATION_QWEN_TOKENIZER_HPP_
 
 #include <array>
 #include <cstddef>
@@ -13,11 +13,11 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::core {
+namespace mbufo::core {
 class GgufReader;
 }
 
-namespace gufo::tokenization {
+namespace mbufo::tokenization {
 
 using TokenId = std::uint32_t;
 
@@ -140,6 +140,6 @@ private:
   PreTokenizer pre_tokenizer_{PreTokenizer::kNone};
 };
 
-}  // namespace gufo::tokenization
+}  // namespace mbufo::tokenization
 
-#endif  // GUFO_TOKENIZATION_QWEN_TOKENIZER_HPP_
+#endif  // MBUFO_TOKENIZATION_QWEN_TOKENIZER_HPP_

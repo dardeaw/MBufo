@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_HIP_DETAIL_HIP_GRAPH_DECODE_EXECUTOR_HPP_
-#define GUFO_CORE_HIP_DETAIL_HIP_GRAPH_DECODE_EXECUTOR_HPP_
+#ifndef MBUFO_CORE_HIP_DETAIL_HIP_GRAPH_DECODE_EXECUTOR_HPP_
+#define MBUFO_CORE_HIP_DETAIL_HIP_GRAPH_DECODE_EXECUTOR_HPP_
 
 #include <hip/hip_runtime.h>
 
@@ -8,7 +8,7 @@
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 
-namespace gufo::hip::detail {
+namespace mbufo::hip::detail {
 
 struct HipGraphCaptureKey {
   std::uint64_t execution_identity{0};
@@ -146,6 +146,6 @@ private:
   bool is_enabled_{true};
 };
 
-}  // namespace gufo::hip::detail
+}  // namespace mbufo::hip::detail
 
-#endif  // GUFO_CORE_HIP_DETAIL_HIP_GRAPH_DECODE_EXECUTOR_HPP_
+#endif  // MBUFO_CORE_HIP_DETAIL_HIP_GRAPH_DECODE_EXECUTOR_HPP_

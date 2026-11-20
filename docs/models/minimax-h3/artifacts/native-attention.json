@@ -152,7 +152,7 @@
       "strict_gate": "passed; native short arithmetic retains the baseline teacher errors"
     },
     "pytorch_7136_block": {
-      "teacher_source": "tools/gufo/h3_dit_golden.py at baseline_revision, with ProfileBlock input and block 0 checkpoint weights",
+      "teacher_source": "tools/mbufo/h3_dit_golden.py at baseline_revision, with ProfileBlock input and block 0 checkpoint weights",
       "model_source": "tests/fixtures/minimax_h3/dit-block0-oracle-v1.json",
       "baseline_relative_l2": 0.003876928493197356,
       "native_relative_l2": 0.0038768976051234776,
@@ -176,7 +176,7 @@
     },
     "frozen_complete_forward": {
       "shape": "256x256x22",
-      "source": "tools/gufo/h3_denoiser_golden.py; denoiser-256x256x22-forward-v2",
+      "source": "tools/mbufo/h3_denoiser_golden.py; denoiser-256x256x22-forward-v2",
       "video_relative_l2": 0.0193639,
       "video_relative_max": 0.0458577,
       "audio_relative_l2": 0.0112591,

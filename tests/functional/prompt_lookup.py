@@ -32,7 +32,7 @@ def main():
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1:3] != ["serve", "llm"]:
-        parser.error("pass a production gufo serve llm command after --")
+        parser.error("pass a production mbufo serve llm command after --")
     mode = option(command, "--speculative")
     if mode not in ("mtp", "dflash2"):
         parser.error("this test requires --speculative mtp or dflash2")
@@ -109,7 +109,7 @@ def main():
                         response = metrics.get(base + "/metrics")
                         response.raise_for_status()
                     match = re.search(
-                        r"^gufo_spec_lookup_accepted_tokens_total (\d+)$",
+                        r"^mbufo_spec_lookup_accepted_tokens_total (\d+)$",
                         response.text, re.MULTILINE)
                     assert match, "missing accepted lookup metric"
                     return int(match[1])
@@ -127,7 +127,7 @@ def main():
                     record(f"C{width}", results)
                     assert copied() > start, "cohort accepted no lookup copies"
                     actual_width = max(
-                        r["usage"]["gufo"]["physical_execution_width"]
+                        r["usage"]["mbufo"]["physical_execution_width"]
                         for r in results)
                     assert actual_width == width, (
                         "requested cohort never executed together",
@@ -158,7 +158,7 @@ def main():
                     results = list(pool.map(run_mixed, mixed))
                 record(f"mixed-greedy-C{cohort_size}", results)
                 assert copied() > start, "mixed greedy cohort accepted no copies"
-                assert max(r["usage"]["gufo"]["physical_execution_width"]
+                assert max(r["usage"]["mbufo"]["physical_execution_width"]
                            for r in results) == cohort_size, "mixed cohort never ran at requested width"
                 for row, result in enumerate(results):
                     same(ordinary_control if row % 2 else controls[row], result)
@@ -190,7 +190,7 @@ def main():
                     replay = record(
                         f"sampling-{label}-replay", chat_result(client, body))
                     same(control, replay)
-                    assert replay["usage"]["gufo"]["prefill_tokens"] == 0, replay
+                    assert replay["usage"]["mbufo"]["prefill_tokens"] == 0, replay
                     marker = "Friday, Monday"
                     stopped = record(f"sampling-{label}-stop", chat_result(
                         client, {**body, "stop": marker}, True))
@@ -244,7 +244,7 @@ def main():
                             f"image-resume-{row}", chat_result(client, body, True))
                         same(control, replay)
                         assert replay["usage"]["cached_tokens"] > 0, replay
-                        assert replay["usage"]["gufo"]["prefill_tokens"] == 0, replay
+                        assert replay["usage"]["mbufo"]["prefill_tokens"] == 0, replay
                 report["accepted_lookup_tokens"] = copied()
         join_server_timings(output)
         report["execution"] = execution_coverage(output, mode)

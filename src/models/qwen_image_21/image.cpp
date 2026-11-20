@@ -13,7 +13,7 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/models/qwen_image_21/model.hpp"
 
-namespace gufo::models::qwen_image_21 {
+namespace mbufo::models::qwen_image_21 {
 namespace {
 
 void CheckImage(const Image& image) {
@@ -278,4 +278,4 @@ std::vector<float> FlowSigmas(int steps, int image_tokens) {
   return sigmas;
 }
 
-}  // namespace gufo::models::qwen_image_21
+}  // namespace mbufo::models::qwen_image_21

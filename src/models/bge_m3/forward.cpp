@@ -7,7 +7,7 @@
 #include "src/core/compute/gelu/gelu.hpp"
 #include "src/core/compute/layernorm/layernorm.hpp"
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 namespace {
 
 void UpcastInto(const BgeM3TensorRef& ref, std::vector<float>& out,
@@ -425,4 +425,4 @@ bool CpuForwardBatch(const BgeM3F32Weights& weights,
   return true;
 }
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3

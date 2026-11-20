@@ -1,5 +1,5 @@
 {
-  "schema": "gufo.eval-cases.v2",
+  "schema": "mbufo.eval-cases.v2",
   "benchmark": "Antirez DS4 capability subset",
   "source_repository": "https://github.com/antirez/ds4",
   "source_revision": "84cc882352757baf628a1776badf7cc54d584e28",
@@ -282,7 +282,7 @@
       "dataset": "GPQA Diamond",
       "dataset_url": "https://huggingface.co/datasets/Wanfq/gpqa",
       "license": "CC BY 4.0",
-      "audit_note": "DS4 marks this row as modified; Gufo preserves the DS4 prompt and key without further local repair."
+      "audit_note": "DS4 marks this row as modified; MBufo preserves the DS4 prompt and key without further local repair."
     },
     {
       "ds4_index": 13,

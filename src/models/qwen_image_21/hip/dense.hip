@@ -4,7 +4,7 @@
 #include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 
-namespace gufo::models::qwen_image_21::hip {
+namespace mbufo::models::qwen_image_21::hip {
 namespace {
 using Fragment = __attribute__((ext_vector_type(16))) unsigned short;
 using Accumulator = __attribute__((ext_vector_type(8))) float;
@@ -247,4 +247,4 @@ bool DenseSwiGlu(const std::uint16_t* gate, const std::uint16_t* up,
             gate, up, input, y, rows, channels, inner);
   return true;
 }
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace mbufo::models::qwen_image_21::hip

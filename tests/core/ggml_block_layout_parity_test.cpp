@@ -20,7 +20,7 @@
 
 #include "src/core/quant/ggml_dequant.hpp"
 
-using gufo::quant::Fp16ToFloat;
+using mbufo::quant::Fp16ToFloat;
 
 namespace {
 
@@ -208,7 +208,7 @@ int main() {
     std::vector<std::uint8_t> bytes(34);
     FillPattern(bytes, 0x1234);
     std::vector<float> ref(k), ind(k);
-    gufo::quant::DequantizeQ8_0(bytes.data(), ref.data(), k);
+    mbufo::quant::DequantizeQ8_0(bytes.data(), ref.data(), k);
     for (std::size_t i = 0; i < k; ++i)
       ind[i] = Q8_0Val(bytes.data(), i);
     failures += Compare("Q8_0", k, ref, ind);
@@ -220,7 +220,7 @@ int main() {
     std::vector<std::uint8_t> bytes(292);
     FillPattern(bytes, 0x5678);
     std::vector<float> ref(k), ind(k);
-    gufo::quant::DequantizeQ8_K(bytes.data(), ref.data(), k);
+    mbufo::quant::DequantizeQ8_K(bytes.data(), ref.data(), k);
     for (std::size_t i = 0; i < k; ++i)
       ind[i] = Q8_KVal(bytes.data(), i);
     failures += Compare("Q8_K", k, ref, ind);
@@ -232,7 +232,7 @@ int main() {
     std::vector<std::uint8_t> bytes(144);
     FillPattern(bytes, 0x9abc);
     std::vector<float> ref(k), ind(k);
-    gufo::quant::DequantizeQ4_K(bytes.data(), ref.data(), k);
+    mbufo::quant::DequantizeQ4_K(bytes.data(), ref.data(), k);
     for (std::size_t i = 0; i < k; ++i)
       ind[i] = Q4Val(bytes.data(), i);
     failures += Compare("Q4_K", k, ref, ind);
@@ -244,7 +244,7 @@ int main() {
     std::vector<std::uint8_t> bytes(176);
     FillPattern(bytes, 0xdef0);
     std::vector<float> ref(k), ind(k);
-    gufo::quant::DequantizeQ5_K(bytes.data(), ref.data(), k);
+    mbufo::quant::DequantizeQ5_K(bytes.data(), ref.data(), k);
     for (std::size_t i = 0; i < k; ++i)
       ind[i] = Q5Val(bytes.data(), i);
     failures += Compare("Q5_K", k, ref, ind);
@@ -256,7 +256,7 @@ int main() {
     std::vector<std::uint8_t> bytes(210);
     FillPattern(bytes, 0x1357);
     std::vector<float> ref(k), ind(k);
-    gufo::quant::DequantizeQ6_K(bytes.data(), ref.data(), k);
+    mbufo::quant::DequantizeQ6_K(bytes.data(), ref.data(), k);
     for (std::size_t i = 0; i < k; ++i)
       ind[i] = Q6Val(bytes.data(), i);
     failures += Compare("Q6_K", k, ref, ind);
@@ -268,7 +268,7 @@ int main() {
     std::vector<std::uint8_t> bytes(110);
     FillPattern(bytes, 0x2468);
     std::vector<float> ref(k), ind(k);
-    gufo::quant::DequantizeQ3_K(bytes.data(), ref.data(), k);
+    mbufo::quant::DequantizeQ3_K(bytes.data(), ref.data(), k);
     for (std::size_t i = 0; i < k; ++i)
       ind[i] = Q3Val(bytes.data(), i);
     failures += Compare("Q3_K", k, ref, ind);

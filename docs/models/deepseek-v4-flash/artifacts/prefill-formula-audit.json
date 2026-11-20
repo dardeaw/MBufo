@@ -1,5 +1,5 @@
 {
-  "schema": "gufo.ds4-prefill-formula-audit.v1",
+  "schema": "mbufo.ds4-prefill-formula-audit.v1",
   "date": "2026-09-11",
   "decision": "Retain official-formula HC arithmetic. Delete inactive code only. Four independent post-prefill alerts remain unresolved; no official full-distribution parity claim.",
   "official_source": {
@@ -16,20 +16,20 @@
     ]
   },
   "reference_run": {
-    "schema": "gufo.ds4-independent-ar-comparison.v1",
+    "schema": "mbufo.ds4-independent-ar-comparison.v1",
     "upstream_revision": "6289c516273979173abbc062209a81dd3706b804",
     "upstream_build": "/nix/store/5d8sfj44drjkzxqj5qa32dcfxvgg6y74-ds4-independent-reference-6289c516",
     "model_file": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
     "model_sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0",
     "fixture_sha256": "0ec57ef24cc0cb5838a4c0ccacf806edc12cbe09f27f0c13efdf90eb33591a4d",
-    "gufo_production_sha256": "0a19eae1a890bffaf2074a208ac9c23243cb6db49f245f43ed6611846e964fec",
-    "gufo_native_test_sha256": "538770a8dd226ff58d022b87c1aad6d28bd457be79d7fe353217d20233beb4e6",
-    "gufo_git_revision": "d5df345a5e1799acaae294434465bf26480a734d",
+    "mbufo_production_sha256": "0a19eae1a890bffaf2074a208ac9c23243cb6db49f245f43ed6611846e964fec",
+    "mbufo_native_test_sha256": "538770a8dd226ff58d022b87c1aad6d28bd457be79d7fe353217d20233beb4e6",
+    "mbufo_git_revision": "d5df345a5e1799acaae294434465bf26480a734d",
     "flake_lock_sha256": "9cc7e436adfeb41106deeb3466ea8e68d335b569439ee5ddd1b1d6199774b66f",
-    "gufo_build_preset": "gpu-test",
+    "mbufo_build_preset": "gpu-test",
     "scope": "prefill-only",
     "gates": {
-      "exact_gufo_repeat": true,
+      "exact_mbufo_repeat": true,
       "full_logits_within_existing_bounds": false
     }
   },
@@ -177,7 +177,7 @@
   ],
   "cross_prefill": [
     {
-      "engine": "gufo",
+      "engine": "mbufo",
       "depth": 0,
       "phase": "before",
       "rmse": 0.0,
@@ -191,7 +191,7 @@
       "within_existing_vector_bounds": true
     },
     {
-      "engine": "gufo",
+      "engine": "mbufo",
       "depth": 4096,
       "phase": "before",
       "rmse": 0.8406778382387426,
@@ -205,7 +205,7 @@
       "within_existing_vector_bounds": true
     },
     {
-      "engine": "gufo",
+      "engine": "mbufo",
       "depth": 8192,
       "phase": "before",
       "rmse": 0.8088372853806511,
@@ -219,7 +219,7 @@
       "within_existing_vector_bounds": true
     },
     {
-      "engine": "gufo",
+      "engine": "mbufo",
       "depth": 12288,
       "phase": "before",
       "rmse": 0.7494799219531539,
@@ -233,7 +233,7 @@
       "within_existing_vector_bounds": true
     },
     {
-      "engine": "gufo",
+      "engine": "mbufo",
       "depth": 16384,
       "phase": "before",
       "rmse": 0.7973562461046403,
@@ -511,7 +511,7 @@
   },
   "retained_layer_trace": {
     "scope": "Historical 16K prefix, 4096-token calls; last row of final chunk, selected layer boundaries. This is not a trace of every failing frontier.",
-    "final_gufo_prefill_sha256": "cdef2ee17a0a7304c7128e99ae7fd9076aa8044b1b0d8f1234803e4947c273dc",
+    "final_mbufo_prefill_sha256": "cdef2ee17a0a7304c7128e99ae7fd9076aa8044b1b0d8f1234803e4947c273dc",
     "final_logits_match_current": true,
     "rows": [
       {
@@ -519,7 +519,7 @@
         "layer": 0,
         "stage": "hc_attn_post",
         "rmse": 0.00040365034070665514,
-        "gufo_rms": 0.07052610562688512,
+        "mbufo_rms": 0.07052610562688512,
         "relative_rmse": 0.005723417408613873
       },
       {
@@ -527,7 +527,7 @@
         "layer": 0,
         "stage": "hc_ffn_post",
         "rmse": 0.0005403259214809866,
-        "gufo_rms": 0.10899946371127374,
+        "mbufo_rms": 0.10899946371127374,
         "relative_rmse": 0.004957142935237222
       },
       {
@@ -535,7 +535,7 @@
         "layer": 8,
         "stage": "hc_attn_post",
         "rmse": 0.01674147963600457,
-        "gufo_rms": 0.160716166963858,
+        "mbufo_rms": 0.160716166963858,
         "relative_rmse": 0.10416798728014344
       },
       {
@@ -543,7 +543,7 @@
         "layer": 8,
         "stage": "hc_ffn_post",
         "rmse": 0.0209129112360129,
-        "gufo_rms": 0.18424923481504063,
+        "mbufo_rms": 0.18424923481504063,
         "relative_rmse": 0.11350338174813271
       },
       {
@@ -551,7 +551,7 @@
         "layer": 16,
         "stage": "hc_attn_post",
         "rmse": 0.05709604494773356,
-        "gufo_rms": 0.33217159462429596,
+        "mbufo_rms": 0.33217159462429596,
         "relative_rmse": 0.1718871988807841
       },
       {
@@ -559,7 +559,7 @@
         "layer": 16,
         "stage": "hc_ffn_post",
         "rmse": 0.07049686509654714,
-        "gufo_rms": 0.38548507370231944,
+        "mbufo_rms": 0.38548507370231944,
         "relative_rmse": 0.1828783263109857
       },
       {
@@ -567,7 +567,7 @@
         "layer": 24,
         "stage": "hc_attn_post",
         "rmse": 0.14956639713323097,
-        "gufo_rms": 1.1359811538242688,
+        "mbufo_rms": 1.1359811538242688,
         "relative_rmse": 0.13166274513421042
       },
       {
@@ -575,7 +575,7 @@
         "layer": 24,
         "stage": "hc_ffn_post",
         "rmse": 0.14986653983358011,
-        "gufo_rms": 1.1345914507021684,
+        "mbufo_rms": 1.1345914507021684,
         "relative_rmse": 0.13208855023615038
       },
       {
@@ -583,7 +583,7 @@
         "layer": 32,
         "stage": "hc_attn_post",
         "rmse": 0.25160517686741807,
-        "gufo_rms": 1.5022404958167008,
+        "mbufo_rms": 1.5022404958167008,
         "relative_rmse": 0.16748661587013844
       },
       {
@@ -591,7 +591,7 @@
         "layer": 32,
         "stage": "hc_ffn_post",
         "rmse": 0.26659684547899976,
-        "gufo_rms": 1.5289843684458357,
+        "mbufo_rms": 1.5289843684458357,
         "relative_rmse": 0.1743620477624549
       },
       {
@@ -599,7 +599,7 @@
         "layer": 42,
         "stage": "hc_attn_post",
         "rmse": 0.994053839410809,
-        "gufo_rms": 4.187111915034262,
+        "mbufo_rms": 4.187111915034262,
         "relative_rmse": 0.23740799376332763
       },
       {
@@ -607,7 +607,7 @@
         "layer": 42,
         "stage": "hc_ffn_post",
         "rmse": 1.0882346564632894,
-        "gufo_rms": 4.413247092202442,
+        "mbufo_rms": 4.413247092202442,
         "relative_rmse": 0.2465836681535552
       }
     ],
@@ -688,7 +688,7 @@
       "ablation_oracle": "0e11c0b8a539294d59788e9f0f6f41ab30be5c43533bfa1d62a09a2f457f6396"
     },
     "release_build": {
-      "result_path": "/nix/store/55b8arjr2qv1bf684czlcfqy0bj4ymns-gufo-d5df345-dirty",
+      "result_path": "/nix/store/55b8arjr2qv1bf684czlcfqy0bj4ymns-mbufo-d5df345-dirty",
       "binary_sha256": "8b1b3fd1dd5c77d98ec287c82d8a4003ca576d86ee6e548c43c7c9175e570a97",
       "build_log_sha256": "5ca0de9e2d9d392d37bc2a8432bd9bf24df7c96c733899295b0567fed257c24c",
       "build_exit_code": 0

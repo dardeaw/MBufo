@@ -1,4 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -17,7 +18,7 @@
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 constexpr std::size_t kMaxDecodeBatch = 8;
@@ -248,8 +249,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   const std::size_t time_step_rank = config.ssm_time_step_rank;
 
   // Phase A: the shared attention-dispatcher policy for this decode batch
-  // (measured thresholds + GUFO_ATTN_* env overrides).
-  const auto attn_policy = ::gufo::core::compute::attention_dispatcher::
+  // (measured thresholds + MBUFO_ATTN_* env overrides).
+  const auto attn_policy = ::mbufo::core::compute::attention_dispatcher::
       AttentionDispatchPolicy::WithEnvDefaults();
   std::array<std::uint32_t, kMaxDecodeBatch> host_tokens{};
   std::array<std::uint32_t, kMaxDecodeBatch> host_positions{};
@@ -342,9 +343,9 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
         // Phase A: route decode attention through the shared dispatcher.
         // This batch is F16-only (blocked throws above), so the dispatcher
         // returns kLegacy and the LaunchAttention path below runs unchanged;
-        // the consult is the single policy choke point (GUFO_ATTN_DISPATCH=0
+        // the consult is the single policy choke point (MBUFO_ATTN_DISPATCH=0
         // kill-switch included).
-        namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+        namespace attn_disp = ::mbufo::core::compute::attention_dispatcher;
         attn_disp::AttentionDispatchInput attn_in;
         attn_in.q_len = 1;
         attn_in.kv_len = position + 1;
@@ -522,6 +523,9 @@ QwenGpuExecutor::ForwardVerificationBatch(
   // and the read goes through the shared blocked direct-read kernel, exactly
   // like the single-row decode path. Positional writes need no rollback.
   const bool use_blocked_kv = coordinator.policy_.UsesBlockedAttentionKv();
+  // Same rule as the single-token decode step (verification must read exactly what AR decode reads).
+  static const bool kNoBlockedSplitK = std::getenv("MBUFO_QWEN_BLOCKED_NO_SPLITK") != nullptr;
+  const bool blocked_splitk = !kNoBlockedSplitK && use_blocked_kv && arena_.d_split_k_qtile != nullptr;
   const bool capture_prompt_hidden_ = coordinator.capture_prompt_hidden_;
   const auto policy = coordinator.policy_.Fingerprint();
   constexpr std::size_t kMaxRows = kMaxDecodeBatch * kMaxDecodeBatch;
@@ -747,7 +751,13 @@ QwenGpuExecutor::ForwardVerificationBatch(
                 scratch.ssm.out.data() + offset * attention_size,
                 static_cast<std::uint32_t>(sequence_size), d_item_pos,
                 config.num_attention_heads, config.num_key_value_heads,
-                config.head_dim, arena_.stream);
+                config.head_dim, arena_.stream,
+                blocked_splitk ? start_pos + static_cast<std::uint32_t>(sequence_size) : 0U,
+                blocked_splitk ? arena_.d_split_k_qtile : nullptr,
+                blocked_splitk ? 8 * detail::DecodeAttentionScratchElements(
+                                         config.num_attention_heads, config.head_dim) *
+                                     sizeof(float)
+                               : 0);
           } else {
             // Exact verification projections do not use weight dequantization
             // scratch. Reuse it for independent split-K rows without allocating
@@ -953,5 +963,5 @@ QwenGpuExecutor::ForwardVerificationBatch(
   return predictions;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

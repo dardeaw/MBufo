@@ -3,7 +3,7 @@
 #include <string>
 #include <unordered_set>
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 namespace {
 
 struct Binder {
@@ -162,4 +162,4 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   return w;
 }
 
-}  // namespace gufo::models::glimmer
+}  // namespace mbufo::models::glimmer

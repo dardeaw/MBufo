@@ -12,8 +12,8 @@
 // bge_m3::EngineModel (CPU reference + HIP prefill twin) and only adds the
 // four head tensors. Registry: model kinds self-register by name; serve and
 // drivers resolve "bge-reranker" through ModelRegistry::Create.
-#ifndef GUFO_MODELS_BGE_RERANKER_ENGINE_HPP_
-#define GUFO_MODELS_BGE_RERANKER_ENGINE_HPP_
+#ifndef MBUFO_MODELS_BGE_RERANKER_ENGINE_HPP_
+#define MBUFO_MODELS_BGE_RERANKER_ENGINE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -31,7 +31,7 @@
 #include "src/models/bge_reranker/config.hpp"
 #include "src/models/bge_reranker/weights.hpp"
 
-namespace gufo::models::bge_reranker {
+namespace mbufo::models::bge_reranker {
 
 class EngineModel;
 
@@ -136,6 +136,6 @@ private:
   std::map<std::string, Factory> factories_;
 };
 
-}  // namespace gufo::models::bge_reranker
+}  // namespace mbufo::models::bge_reranker
 
-#endif  // GUFO_MODELS_BGE_RERANKER_ENGINE_HPP_
+#endif  // MBUFO_MODELS_BGE_RERANKER_ENGINE_HPP_

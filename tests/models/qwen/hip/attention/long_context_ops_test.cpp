@@ -67,12 +67,12 @@ void TestLongContextBatchedAttention(bool fp16) {
   for (auto allocation :
        {std::pair{&d_q, query.size()}, std::pair{&d_gate, gate.size()},
         std::pair{&d_batch, query.size()}, std::pair{&d_scalar, query.size()}})
-    HIP_CHECK(gufo::hip::AllocateDevice(allocation.first,
+    HIP_CHECK(mbufo::hip::AllocateDevice(allocation.first,
                                         allocation.second * sizeof(float)));
-  HIP_CHECK(gufo::hip::AllocateDevice(&d_k, cache_bytes));
-  HIP_CHECK(gufo::hip::AllocateDevice(&d_v, cache_bytes));
+  HIP_CHECK(mbufo::hip::AllocateDevice(&d_k, cache_bytes));
+  HIP_CHECK(mbufo::hip::AllocateDevice(&d_v, cache_bytes));
   HIP_CHECK(
-      gufo::hip::AllocateDevice(&d_bf16, query.size() * sizeof(hip_bfloat16)));
+      mbufo::hip::AllocateDevice(&d_bf16, query.size() * sizeof(hip_bfloat16)));
   HIP_CHECK(hipMemcpy(d_q, query.data(), query.size() * sizeof(float),
                       hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(d_gate, gate.data(), gate.size() * sizeof(float),
@@ -84,14 +84,14 @@ void TestLongContextBatchedAttention(bool fp16) {
       d_v, fp16 ? static_cast<const void*>(half_values.data()) : values.data(),
       cache_bytes, hipMemcpyHostToDevice));
   for (const std::uint32_t first : {16125U, 16382U, 32766U, 99998U}) {
-    gufo::hip::LaunchBatchedAttention(
+    mbufo::hip::LaunchBatchedAttention(
         d_q, nullptr, nullptr, d_gate,
         fp16 ? nullptr : static_cast<float*>(d_k),
         fp16 ? nullptr : static_cast<float*>(d_v), fp16 ? d_k : nullptr,
         fp16 ? d_v : nullptr, d_batch, 0, first, rows, capacity, heads,
         kv_heads, dim, nullptr, true, d_bf16);
     for (std::size_t row = 0; row < rows; ++row)
-      gufo::hip::LaunchAttention(
+      mbufo::hip::LaunchAttention(
           d_q + row * width, nullptr, nullptr, d_gate + row * width,
           fp16 ? nullptr : static_cast<float*>(d_k),
           fp16 ? nullptr : static_cast<float*>(d_v), fp16 ? d_k : nullptr,
@@ -108,8 +108,8 @@ void TestLongContextBatchedAttention(bool fp16) {
                         hipMemcpyDeviceToHost));
     HIP_CHECK(hipMemcpy(bf16.data(), d_bf16, bf16.size() * sizeof(hip_bfloat16),
                         hipMemcpyDeviceToHost));
-    if (!gufo::hip::detail::BatchedAttentionScoresFitLds(first + rows))
-      gufo::test::Expect(std::ranges::equal(batch, scalar),
+    if (!mbufo::hip::detail::BatchedAttentionScoresFitLds(first + rows))
+      mbufo::test::Expect(std::ranges::equal(batch, scalar),
                          "long rows changed scalar online arithmetic");
     float max_error = 0;
     for (std::size_t row = 0; row < rows; ++row) {
@@ -136,7 +136,7 @@ void TestLongContextBatchedAttention(bool fp16) {
             weighted += scores[token] * values[token * dim + d];
           const auto expected =
               float(weighted / sum / (1 + std::exp(-double(gate[offset + d]))));
-          gufo::test::ExpectNear(expected, batch[offset + d], 1e-5F,
+          mbufo::test::ExpectNear(expected, batch[offset + d], 1e-5F,
                                  "long batch differs from FP64 oracle");
           max_error =
               std::max(max_error, std::abs(expected - batch[offset + d]));
@@ -146,7 +146,7 @@ void TestLongContextBatchedAttention(bool fp16) {
               (bits + 0x7fffU + ((bits >> 16) & 1U)) >> 16);
           std::uint16_t actual_bits = 0;
           std::memcpy(&actual_bits, &bf16[offset + d], sizeof(actual_bits));
-          gufo::test::Expect(actual_bits == rounded,
+          mbufo::test::Expect(actual_bits == rounded,
                              "long batch changed BF16 output rounding");
         }
       }
@@ -228,7 +228,7 @@ void TestLongContextDecodeAttention(bool fp16) {
   HIP_CHECK(hipMalloc(&d_out, attention_width * sizeof(float)));
   HIP_CHECK(hipMalloc(
       &d_split_k_scratch,
-      gufo::hip::detail::DecodeAttentionScratchElements(num_heads, head_dim) *
+      mbufo::hip::detail::DecodeAttentionScratchElements(num_heads, head_dim) *
           sizeof(float)));
 
   HIP_CHECK(hipMemcpy(d_q, h_q.data(), attention_width * sizeof(float),
@@ -248,7 +248,7 @@ void TestLongContextDecodeAttention(bool fp16) {
     HIP_CHECK(
         hipMemcpy(d_v_cache, cache_data, cache_bytes, hipMemcpyHostToDevice));
 
-    gufo::hip::LaunchAttention(
+    mbufo::hip::LaunchAttention(
         d_q, d_k, d_v, d_gate, fp16 ? nullptr : static_cast<float*>(d_k_cache),
         fp16 ? nullptr : static_cast<float*>(d_v_cache),
         fp16 ? d_k_cache : nullptr, fp16 ? d_v_cache : nullptr, d_out, 0,
@@ -401,7 +401,7 @@ void TestBaselineToTiledKvCacheTransition() {
 
   // 1. Golden sequential reference token-by-token
   for (std::size_t token = 0; token < total_batch; ++token) {
-    gufo::hip::LaunchAttention(d_q + token * attention_width,
+    mbufo::hip::LaunchAttention(d_q + token * attention_width,
                                d_k + token * kv_width, d_v + token * kv_width,
                                d_gate + token * attention_width, d_cache_seq,
                                d_cache_seq + cache_elements, nullptr, nullptr,
@@ -412,7 +412,7 @@ void TestBaselineToTiledKvCacheTransition() {
 
   // 2. Incremental transition:
   // Chunk 0 (0..512): LaunchBatchedAttention (Baseline)
-  gufo::hip::LaunchBatchedAttention(
+  mbufo::hip::LaunchBatchedAttention(
       d_q, d_k, d_v, d_gate, d_cache_trans, d_cache_trans + cache_elements,
       d_cache_trans_f16,
       static_cast<std::uint16_t*>(d_cache_trans_f16) + cache_elements,
@@ -421,7 +421,7 @@ void TestBaselineToTiledKvCacheTransition() {
 
   // Chunk 1 (512..1536): LaunchBatchedAttentionTile (Tiled FP16 at start_pos =
   // 512)
-  const bool chunk1_ok = gufo::hip::LaunchBatchedAttentionTile(
+  const bool chunk1_ok = mbufo::hip::LaunchBatchedAttentionTile(
       d_q + chunk0_size * attention_width, d_k + chunk0_size * kv_width,
       d_v + chunk0_size * kv_width, d_gate + chunk0_size * attention_width,
       d_cache_trans, d_cache_trans + cache_elements, d_cache_trans_f16,
@@ -429,7 +429,7 @@ void TestBaselineToTiledKvCacheTransition() {
       d_out_trans + chunk0_size * attention_width, 0,
       static_cast<std::uint32_t>(chunk0_size), chunk1_size, max_context,
       num_heads, num_kv_heads, head_dim);
-  gufo::test::Expect(chunk1_ok,
+  mbufo::test::Expect(chunk1_ok,
                      "long-context tiled attention launch was rejected");
 
   HIP_CHECK(hipDeviceSynchronize());
@@ -461,7 +461,7 @@ done_diff:
     max_diff = std::max(max_diff, std::abs(golden[i] - transition[i]));
   }
   std::cout << "Baseline-to-Tiled transition max diff: " << max_diff << "\n";
-  gufo::test::Expect(max_diff < 5e-3F,
+  mbufo::test::Expect(max_diff < 5e-3F,
                      "baseline-to-tiled attention transition mismatch");
 
   HIP_CHECK(hipFree(d_q));
@@ -480,9 +480,9 @@ done_diff:
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen long-context attention ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

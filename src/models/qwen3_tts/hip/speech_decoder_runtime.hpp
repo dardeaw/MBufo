@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_TTS_HIP_SPEECH_DECODER_RUNTIME_HPP_
-#define GUFO_MODELS_QWEN3_TTS_HIP_SPEECH_DECODER_RUNTIME_HPP_
+#ifndef MBUFO_MODELS_QWEN3_TTS_HIP_SPEECH_DECODER_RUNTIME_HPP_
+#define MBUFO_MODELS_QWEN3_TTS_HIP_SPEECH_DECODER_RUNTIME_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 
 struct SpeechDecoderTrace {
   // Convolutional tensors use row-major [time, channels] layout. Transformer
@@ -75,6 +75,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
-#endif  // GUFO_MODELS_QWEN3_TTS_HIP_SPEECH_DECODER_RUNTIME_HPP_
+#endif  // MBUFO_MODELS_QWEN3_TTS_HIP_SPEECH_DECODER_RUNTIME_HPP_

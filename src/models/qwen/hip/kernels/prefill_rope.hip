@@ -12,7 +12,7 @@
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // opt-c010-qk-rope-kv: batched variant of FusedQKNormRoPEKvWriteKernel.
 // Block (h, b) handles token b; blocks [0, num_heads) process Q heads in place,
@@ -268,5 +268,5 @@ void LaunchBatchedRoPE(float* q, float* k, std::size_t batch_size,
       q, k, batch_size, num_heads, num_kv_heads, head_dim, rotary_dim,
       start_pos, rope_theta, rope);
 }
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

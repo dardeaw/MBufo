@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GPTOSS_ENGINE_HPP_
-#define GUFO_MODELS_GPTOSS_ENGINE_HPP_
+#ifndef MBUFO_MODELS_GPTOSS_ENGINE_HPP_
+#define MBUFO_MODELS_GPTOSS_ENGINE_HPP_
 
 #include <cstdint>
 #include <memory>
@@ -14,7 +14,7 @@
 #include "src/models/gptoss/weights.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::models::gptoss {
+namespace mbufo::models::gptoss {
 
 struct ModelOptions {
   std::uint32_t max_context = 8192;
@@ -136,6 +136,6 @@ class Session final {
   friend class Model;
 };
 
-}  // namespace gufo::models::gptoss
+}  // namespace mbufo::models::gptoss
 
-#endif  // GUFO_MODELS_GPTOSS_ENGINE_HPP_
+#endif  // MBUFO_MODELS_GPTOSS_ENGINE_HPP_

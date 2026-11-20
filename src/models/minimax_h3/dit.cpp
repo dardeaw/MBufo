@@ -2,7 +2,7 @@
 
 #include <utility>
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 #if !defined(ENGINE_ENABLE_HIP)
 
@@ -78,4 +78,4 @@ double DitBlockSession::load_ms() const noexcept {
 
 #endif
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3

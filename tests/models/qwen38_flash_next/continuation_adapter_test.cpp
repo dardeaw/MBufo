@@ -15,9 +15,9 @@
 #include "src/models/qwen/chat_template.hpp"
 #include "tests/models/qwen38_flash_next/mtp_replay.hpp"
 
-namespace qfn = gufo::models::qwen38_flash_next;
-namespace cache = gufo::cache;
-namespace sampling = gufo::sampling;
+namespace qfn = mbufo::models::qwen38_flash_next;
+namespace cache = mbufo::cache;
+namespace sampling = mbufo::sampling;
 void FailNextResetSubmission();
 void FailNextTransferWait();
 namespace {
@@ -54,7 +54,7 @@ void Wait(cache::Completion done) {
   Require(done.Wait() == cache::TransferResult::kSucceeded, "transfer failed");
 }
 Checkpoint Capture(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
-                   gufo::hip::TransferPool& streams, bool registered = false) {
+                   mbufo::hip::TransferPool& streams, bool registered = false) {
   Checkpoint result{adapter.Positions(slot), {}};
   constexpr std::size_t piece = (1 << 20) + 13;
   for (const auto& component : adapter.Components()) {
@@ -101,7 +101,7 @@ Checkpoint Capture(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
   return result;
 }
 void Load(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
-          const Checkpoint& checkpoint, gufo::hip::TransferPool& streams,
+          const Checkpoint& checkpoint, mbufo::hip::TransferPool& streams,
           bool omit_last = false,
           const std::vector<cache::RowPin>* native_rows = nullptr) {
   adapter.BeginRestore(slot, checkpoint.positions);
@@ -161,7 +161,7 @@ void Load(qfn::ContinuationAdapter& adapter, cache::Slot& slot,
 struct Guard final : cache::MutationGuard {
   qfn::ContinuationAdapter* adapter{};
   cache::Slot* slot{};
-  gufo::hip::TransferPool* streams{};
+  mbufo::hip::TransferPool* streams{};
   const Checkpoint* borrowed{};
   std::vector<std::vector<std::byte>> preserved;
   std::vector<bool> detached;
@@ -229,8 +229,8 @@ void SameLogits(const qfn::Session& a, const qfn::Session& b) {
           "restored next-step logits differ");
 }
 void CheckSlotReuse(const std::shared_ptr<qfn::Model>& model, bool mtp) {
-  const auto mode = mtp ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive;
+  const auto mode = mtp ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive;
   qfn::ContinuationAdapter adapter(model, mode, 4096,
                                    {'r', 'e', 'u', 's', 'e'});
   Guard guard;
@@ -287,11 +287,11 @@ void CheckSlotReuse(const std::shared_ptr<qfn::Model>& model, bool mtp) {
 }
 void CheckInPass(const std::shared_ptr<qfn::Model>& model, bool mtp,
                  std::span<const std::int32_t> prompt) {
-  gufo::hip::TransferPool streams(2);
+  mbufo::hip::TransferPool streams(2);
   qfn::ContinuationAdapter adapter(
       model,
-      mtp ? gufo::core::SessionMode::kSpeculative
-          : gufo::core::SessionMode::kAutoregressive,
+      mtp ? mbufo::core::SessionMode::kSpeculative
+          : mbufo::core::SessionMode::kAutoregressive,
       16384, {'i', 'n', 'p', 'a', 's', 's'});
   Guard source_guard, reference_guard;
   auto source = adapter.CreateSlot(source_guard);
@@ -373,17 +373,17 @@ void CheckTransferAndGuardLifetime(const std::shared_ptr<qfn::Model>& model,
             << std::endl;
   qfn::ContinuationAdapter adapter(
       model,
-      mtp ? gufo::core::SessionMode::kSpeculative
-          : gufo::core::SessionMode::kAutoregressive,
+      mtp ? mbufo::core::SessionMode::kSpeculative
+          : mbufo::core::SessionMode::kAutoregressive,
       16384, {'l', 'i', 'f', 'e'});
-  gufo::hip::TransferPool streams(2);
+  mbufo::hip::TransferPool streams(2);
   Guard source_guard, destination_guard;
   auto source = adapter.CreateSlot(source_guard);
   auto destination = adapter.CreateSlot(destination_guard);
   const auto checkpoint = Capture(adapter, *source, streams);
   for (const bool overwrite : {false, true}) {
     Load(adapter, *destination, checkpoint, streams);
-    gufo::hip::TransferPool failed_streams(1);
+    mbufo::hip::TransferPool failed_streams(1);
     auto stream = failed_streams.TryAcquire();
     {
       auto copy =
@@ -554,11 +554,11 @@ void BatchIsolation(qfn::Session& rejected, qfn::Session& healthy,
 }
 void Check(const std::shared_ptr<qfn::Model>& model, bool mtp,
            std::span<const std::int32_t> prompt) {
-  gufo::hip::TransferPool streams(2);
+  mbufo::hip::TransferPool streams(2);
   qfn::ContinuationAdapter adapter(
       model,
-      mtp ? gufo::core::SessionMode::kSpeculative
-          : gufo::core::SessionMode::kAutoregressive,
+      mtp ? mbufo::core::SessionMode::kSpeculative
+          : mbufo::core::SessionMode::kAutoregressive,
       16384, {'t', 'e', 's', 't'});
   Guard source_guard, destination_guard;
   auto source = adapter.CreateSlot(source_guard);
@@ -760,7 +760,7 @@ void Check(const std::shared_ptr<qfn::Model>& model, bool mtp,
   std::cout << private_bytes << ",PASS\n";
 }
 void CheckImages(const std::shared_ptr<qfn::Model>& model, bool mtp) {
-  namespace vision = gufo::models::qwen::vision;
+  namespace vision = mbufo::models::qwen::vision;
   std::cout << (mtp ? "MTP" : "AR") << ",images" << std::endl;
   Require(bool(model->VisionEncoder()),
           "image adapter qualification requires the adjacent projector");
@@ -770,13 +770,13 @@ void CheckImages(const std::shared_ptr<qfn::Model>& model, bool mtp) {
     prompt->tokens = {vision::kImageToken, vision::kImageToken,
                       vision::kImageToken, vision::kImageToken, 42};
     prompt->rope.images.push_back(grid);
-    gufo::core::Image pixels;
+    mbufo::core::Image pixels;
     pixels.width = pixels.height = 64;
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = blue ? 2 : 0; i < pixels.pixels.size(); i += 3)
       pixels.pixels[i] = 255;
     prompt->images.push_back(
-        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
+        {std::make_shared<const mbufo::core::Image>(std::move(pixels)), grid});
     prompt->images.back().prefix_identity.fill(blue ? 2 : 1);
     prompt->cache_identity.assign(32, blue ? 2 : 1);
     return prompt;
@@ -784,11 +784,11 @@ void CheckImages(const std::shared_ptr<qfn::Model>& model, bool mtp) {
   const auto red = image(false), blue = image(true);
   const std::vector<std::int32_t> tokens(red->tokens.begin(),
                                          red->tokens.end());
-  gufo::hip::TransferPool streams(2);
+  mbufo::hip::TransferPool streams(2);
   qfn::ContinuationAdapter adapter(
       model,
-      mtp ? gufo::core::SessionMode::kSpeculative
-          : gufo::core::SessionMode::kAutoregressive,
+      mtp ? mbufo::core::SessionMode::kSpeculative
+          : mbufo::core::SessionMode::kAutoregressive,
       64, {'i', 'm', 'a', 'g', 'e'});
   Guard first_guard, second_guard;
   auto first = adapter.CreateSlot(first_guard);
@@ -839,8 +839,8 @@ void CheckImages(const std::shared_ptr<qfn::Model>& model, bool mtp) {
   for (const std::size_t boundary : {1, 6}) {
     qfn::ContinuationAdapter suffix_adapter(
         model,
-        mtp ? gufo::core::SessionMode::kSpeculative
-            : gufo::core::SessionMode::kAutoregressive,
+        mtp ? mbufo::core::SessionMode::kSpeculative
+            : mbufo::core::SessionMode::kAutoregressive,
         64, {'s', 'u', 'f', 'f', 'i', 'x'});
     Guard ga, gb;
     auto source = suffix_adapter.CreateSlot(ga);
@@ -864,9 +864,9 @@ void CheckImages(const std::shared_ptr<qfn::Model>& model, bool mtp) {
   std::cout << (mtp ? "MTP" : "AR") << ",image_restore,PASS\n";
 }
 void CheckLearnedDraftPolicy(const std::shared_ptr<qfn::Model>& model) {
-  namespace qt = gufo::tokenization;
-  gufo::hip::TransferPool streams(2);
-  qfn::ContinuationAdapter adapter(model, gufo::core::SessionMode::kSpeculative,
+  namespace qt = mbufo::tokenization;
+  mbufo::hip::TransferPool streams(2);
+  qfn::ContinuationAdapter adapter(model, mbufo::core::SessionMode::kSpeculative,
                                    4096, {'p', 'o', 'l', 'i', 'c', 'y'});
   Guard source_guard, destination_guard;
   auto source = adapter.CreateSlot(source_guard);
@@ -887,16 +887,16 @@ void CheckLearnedDraftPolicy(const std::shared_ptr<qfn::Model>& model) {
       {.temperature = 0.8F, .top_k = 20, .top_p = 0.95F, .seed = 73},
       std::vector<sampling::TokenId>(prompt.begin(), prompt.end()));
   auto stale_sampler = sampler;
-  (void)gufo::test::DecodeMtpReplay(restored, stale_sampler, 32);
-  (void)gufo::test::DecodeMtpReplay(live, sampler, 128);
+  (void)mbufo::test::DecodeMtpReplay(restored, stale_sampler, 32);
+  (void)mbufo::test::DecodeMtpReplay(live, sampler, 128);
   const auto checkpoint = Capture(adapter, *source, streams);
   Load(adapter, *destination, checkpoint, streams);
   Require(adapter.Validate(*destination, checkpoint.positions),
           "learned MTP policy checkpoint rejected");
   SameLogits(live, restored);
   auto replay_sampler = sampler;
-  Require(gufo::test::DecodeMtpReplay(live, sampler, 64) ==
-              gufo::test::DecodeMtpReplay(restored, replay_sampler, 64),
+  Require(mbufo::test::DecodeMtpReplay(live, sampler, 64) ==
+              mbufo::test::DecodeMtpReplay(restored, replay_sampler, 64),
           "component restore lost learned MTP acceptance history");
   SameLogits(live, restored);
   std::cout << "MTP,learned_draft_policy,PASS\n";
@@ -947,7 +947,7 @@ int main(int argc, char** argv) {
     // The repeated prefix can accept every draft. End the
     // sampled boundary with real code generation to exercise rejection and
     // residual replay as well as the long recurrent/KV state.
-    namespace qt = gufo::tokenization;
+    namespace qt = mbufo::tokenization;
     const std::array messages{
         qt::ChatMessage{qt::ChatRole::kUser,
                         "Write a Python LRU cache implementation with get, "

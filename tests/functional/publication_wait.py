@@ -86,9 +86,9 @@ def run_case(args, command, case, report):
         command += ["--cache-ram-bytes", str(
             RECLAIM_RAM_BYTES if case == "reclaim" else 1024**3)]
     environment = {**os.environ, "LD_PRELOAD": str(args.fault_library),
-                   "GUFO_TEST_DISK_GATE": str(gate),
-                   "GUFO_TEST_DISK_DIRECTORY": str(disk),
-                   "GUFO_TEST_DISK_MANIFEST_ONLY": "1"}
+                   "MBUFO_TEST_DISK_GATE": str(gate),
+                   "MBUFO_TEST_DISK_DIRECTORY": str(disk),
+                   "MBUFO_TEST_DISK_MANIFEST_ONLY": "1"}
     row = {"command": command, "status": "running", "requests": {}}
     report["cases"][case] = row
     write_json(args.output / "report.json", report)
@@ -179,8 +179,8 @@ def run_case(args, command, case, report):
             else:
                 assert answer_of(waited) == answer_of(cold), (answer_of(waited), answer_of(cold))
             usage = waited["usage"]
-            timing = usage["gufo"]
-            assert retried["usage"]["gufo"]["cache_disk_hit"], retried["usage"]
+            timing = usage["mbufo"]
+            assert retried["usage"]["mbufo"]["cache_disk_hit"], retried["usage"]
             assert cold["usage"]["cached_tokens"] == 0, cold["usage"]
             if option(command, "--speculative", "off") != "off":
                 assert usage.get("draft_tokens", 0) > 0, usage
@@ -257,7 +257,7 @@ def main():
     args.fault_library = args.fault_library.resolve(strict=True)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1:3] != ["serve", "llm"]:
-        parser.error("pass a production gufo serve llm command after --")
+        parser.error("pass a production mbufo serve llm command after --")
     if int(option(command, "--context", "0")) < 60000:
         parser.error("use context >= 60000 for the 55K-token controlled workload")
     if "reclaim" in (args.case or ()) and int(option(

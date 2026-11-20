@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 namespace {
 
 constexpr std::uint32_t kMaximumChannels = 8;
@@ -552,4 +552,4 @@ std::vector<AudioChunk> SplitAudio(std::span<const float> waveform,
   return chunks;
 }
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr

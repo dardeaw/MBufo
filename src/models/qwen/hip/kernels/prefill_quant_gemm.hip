@@ -2,7 +2,7 @@
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 template<bool StoreActivationSum, typename T>
 __global__ void QuantizeActivationToQ8_1Kernel(const T* __restrict__ x,
@@ -1274,23 +1274,23 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                         RowsPerWave, WType>
         <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
   };
-#define GUFO_KQUANT_SMALL_BATCH(N)   \
+#define MBUFO_KQUANT_SMALL_BATCH(N)   \
   case N:                            \
     launch.template operator()<N>(); \
     return;
   switch (batch) {
-    GUFO_KQUANT_SMALL_BATCH(1)
-    GUFO_KQUANT_SMALL_BATCH(2)
-    GUFO_KQUANT_SMALL_BATCH(3)
-    GUFO_KQUANT_SMALL_BATCH(4)
-    GUFO_KQUANT_SMALL_BATCH(5)
-    GUFO_KQUANT_SMALL_BATCH(6)
-    GUFO_KQUANT_SMALL_BATCH(7)
-    GUFO_KQUANT_SMALL_BATCH(8)
+    MBUFO_KQUANT_SMALL_BATCH(1)
+    MBUFO_KQUANT_SMALL_BATCH(2)
+    MBUFO_KQUANT_SMALL_BATCH(3)
+    MBUFO_KQUANT_SMALL_BATCH(4)
+    MBUFO_KQUANT_SMALL_BATCH(5)
+    MBUFO_KQUANT_SMALL_BATCH(6)
+    MBUFO_KQUANT_SMALL_BATCH(7)
+    MBUFO_KQUANT_SMALL_BATCH(8)
     default:
       return;
   }
-#undef GUFO_KQUANT_SMALL_BATCH
+#undef MBUFO_KQUANT_SMALL_BATCH
 }
 
 void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
@@ -1540,7 +1540,7 @@ void LaunchBatchedQuantGEMMPreQuantized(core::GgmlType type, const void* w,
   // BatchedQuantGEMVKernel, one warp per (row, token), which re-reads the whole
   // weight matrix once per token and is unusable at prefill batch.
   if (type != core::GgmlType::kQ8_0) {
-    if (::gufo::quant::QuantizedBlockElements(type) != 0) {
+    if (::mbufo::quant::QuantizedBlockElements(type) != 0) {
       LaunchKQuantWmmaGEMM(type, w, q8_1_x, y, batch, m, k, stream);
     }
     return;
@@ -1854,7 +1854,7 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
   const std::size_t num_blocks_x = (m + kWarpsPerBlock - 1) / kWarpsPerBlock;
   // opt-q4kxl: K-quant/IQ formats share one weight stream across the whole
   // draft block instead of re-reading it per token.
-  if ((::gufo::hip::detail::IsNativeWmmaQuant(type) ||
+  if ((::mbufo::hip::detail::IsNativeWmmaQuant(type) ||
        type == core::GgmlType::kQ4_0_ROCMFP4 ||
        type == core::GgmlType::kQ4_0_ROCMFP4_FAST) &&
       batch <= 8) {
@@ -2006,5 +2006,5 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
       <<<grid, block, 0, stream>>>(type, w, fp32_x, y, m, k);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

@@ -4,7 +4,7 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 void LaunchHipblasGEMM(hipblasHandle_t handle, const void* A, bool is_bf16,
                        const float* X, float* Y, std::size_t batch_size,
@@ -62,5 +62,5 @@ void LaunchHipblasGEMMBF16(hipblasHandle_t handle, const void* A_bf16,
       HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT));
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

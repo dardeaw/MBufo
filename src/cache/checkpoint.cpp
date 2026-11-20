@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 namespace {
 std::atomic<std::uint64_t> next_id{1};
 std::uint64_t NextId() {
@@ -690,4 +690,4 @@ void ExecutionHistory::Prune() {
   }
   std::erase_if(entries_, [](const auto& entry) { return !entry.metadata; });
 }
-}  // namespace gufo::cache
+}  // namespace mbufo::cache

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_MODULES_MODULE_CTX_HPP_
-#define GUFO_MODELS_QWEN_MODULES_MODULE_CTX_HPP_
+#ifndef MBUFO_MODELS_QWEN_MODULES_MODULE_CTX_HPP_
+#define MBUFO_MODELS_QWEN_MODULES_MODULE_CTX_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #include "src/core/model_config.hpp"
 #include "src/models/qwen/state.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 /// Capability token for stateless CPU module calls.
 struct CpuModuleContext final {};
@@ -70,6 +70,6 @@ private:
   std::size_t preq_bytes_;
 };
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 
-#endif  // GUFO_MODELS_QWEN_MODULES_MODULE_CTX_HPP_
+#endif  // MBUFO_MODELS_QWEN_MODULES_MODULE_CTX_HPP_

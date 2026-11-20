@@ -14,7 +14,7 @@
 #include "tests/models/qwen/hip/support/device_buffer.hpp"
 
 namespace {
-using gufo::test::DeviceBuffer;
+using mbufo::test::DeviceBuffer;
 
 __device__ unsigned Hash(unsigned value) {
   value ^= value >> 16;
@@ -66,11 +66,11 @@ private:
   hipEvent_t event_{};
 };
 
-template<gufo::core::GgmlType Type>
+template<mbufo::core::GgmlType Type>
 void RunQuant(std::size_t m, std::size_t k, std::size_t batch,
               unsigned iterations) {
-  using namespace gufo::hip;
-  using gufo::core::GgmlType;
+  using namespace mbufo::hip;
+  using mbufo::core::GgmlType;
   if (m < 1024 || k < 1024 || k % 256 || batch < 96 || iterations == 0)
     throw std::invalid_argument(
         "require M/K >= 1024, K % 256 = 0, batch >= 96");
@@ -144,8 +144,8 @@ void RunQuant(std::size_t m, std::size_t k, std::size_t batch,
 }
 
 void RunEpilogue(std::size_t batch, unsigned iterations) {
-  using namespace gufo::hip;
-  using gufo::core::GgmlType;
+  using namespace mbufo::hip;
+  using mbufo::core::GgmlType;
   constexpr GgmlType type = GgmlType::kQ8_0;
   constexpr std::size_t m = 17408, k = 5120;
   const std::size_t output_bytes =
@@ -228,7 +228,7 @@ int main(int argc, char** argv) {
       const auto m = std::stoul(argv[2]), k = std::stoul(argv[3]);
       const auto batch = argc > 4 ? std::stoul(argv[4]) : 2048;
       const auto iterations = argc > 5 ? std::stoul(argv[5]) : 12;
-      using gufo::core::GgmlType;
+      using mbufo::core::GgmlType;
       if (type == "q4")
         RunQuant<GgmlType::kQ4_K>(m, k, batch, iterations);
       else if (type == "q5")

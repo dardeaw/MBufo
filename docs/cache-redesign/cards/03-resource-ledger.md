@@ -50,7 +50,7 @@ from eight threads (microbenchmark).
 reservations, shared charges, persistence pins, limits and snapshots. The
 implementation uses one mutex for counter/state changes; host bookkeeping is
 allocated before acquiring it. No payload allocation, I/O, callbacks or device
-waits happen under the lock. It is part of `gufo_cache`, with the reviewed
+waits happen under the lock. It is part of `mbufo_cache`, with the reviewed
 `Threads::Threads` dependency, and is not linked into serving.
 
 `ResourceLedger::Reserve` admits a new allocation against total and RAM or
@@ -124,8 +124,8 @@ ctest --preset cpu-sanitizer -R '^cache_(ledger|adapter(_lifecycle)?|boundary)_t
 cmake --preset gpu-test
 cmake --build --preset gpu-test --target cache_ledger_test --parallel 4
 ctest --preset gpu-full -R '^cache_(ledger|boundary)_test$' --output-on-failure
-cmake --preset release -DGUFO_BUILD_TOOLS=ON
-cmake --build --preset release --target gufo_cache cache_ledger_bench --parallel 4
+cmake --preset release -DMBUFO_BUILD_TOOLS=ON
+cmake --build --preset release --target mbufo_cache cache_ledger_bench --parallel 4
 build/release/src/cache/cache_ledger_bench
 ```
 

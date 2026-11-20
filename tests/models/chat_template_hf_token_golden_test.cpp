@@ -18,10 +18,10 @@
 
 namespace {
 
-namespace json = gufo::json;
-namespace qwen = gufo::tokenization;
+namespace json = mbufo::json;
+namespace qwen = mbufo::tokenization;
 
-using namespace gufo::testing::chat_goldens;
+using namespace mbufo::testing::chat_goldens;
 
 void CheckQwenCase(const json::Value& fixture, std::string_view case_name,
                    const qwen::QwenTokenizer& tokenizer,
@@ -55,7 +55,7 @@ void CheckQwenCase(const json::Value& fixture, std::string_view case_name,
 void TestQwenGoldens(const json::Value& fixture,
                      const std::string& model_path) {
   std::string error;
-  const auto reader = gufo::core::GgufReader::OpenFile(model_path, &error);
+  const auto reader = mbufo::core::GgufReader::OpenFile(model_path, &error);
   Expect(reader != nullptr, "Qwen GGUF opens: " + error);
   Expect(reader->GetMetadataString("tokenizer.ggml.pre") ==
              std::optional<std::string_view>{"qwen35"},
@@ -130,13 +130,13 @@ void TestQwenGoldens(const json::Value& fixture,
 }  // namespace
 
 int main() {
-  const char* qwen_model = std::getenv("GUFO_QWEN_GGUF");
+  const char* qwen_model = std::getenv("MBUFO_QWEN_GGUF");
   if (qwen_model == nullptr || qwen_model[0] == '\0') {
-    std::cout << "SKIP: set GUFO_QWEN_GGUF\n";
+    std::cout << "SKIP: set MBUFO_QWEN_GGUF\n";
     return 77;
   }
 
-  std::ifstream input(GUFO_CHAT_TEMPLATE_HF_GOLDENS, std::ios::binary);
+  std::ifstream input(MBUFO_CHAT_TEMPLATE_HF_GOLDENS, std::ios::binary);
   Expect(input.good(), "Hugging Face golden fixture opens");
   const std::string fixture_text{std::istreambuf_iterator<char>(input),
                                  std::istreambuf_iterator<char>()};

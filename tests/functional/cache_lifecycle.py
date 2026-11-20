@@ -119,9 +119,9 @@ class Lifecycle:
         assert result["text"].strip() == "ALPHA" and not result["reasoning"] \
             and not result["tools"] and result["finish"] == "stop", result
         passed = cached >= floor and (ceiling is None or cached <= ceiling) \
-            and (not disk or result["usage"]["gufo"]["cache_disk_hit"])
+            and (not disk or result["usage"]["mbufo"]["cache_disk_hit"])
         self.require(label, passed, f"cached={cached}, boundary=[{floor}, {ceiling}], "
-                     f"disk={result['usage']['gufo']['cache_disk_hit']}, prefilled={prefilled}")
+                     f"disk={result['usage']['mbufo']['cache_disk_hit']}, prefilled={prefilled}")
         result["expectation"] = {"status": "passed" if passed else "failed", "floor": floor,
                                  "ceiling": ceiling, "disk_required": disk}
         self.row["requests"][label] = result
@@ -265,8 +265,8 @@ class Lifecycle:
         gate = root / "gate"
         gate.mkdir()
         environment = {**os.environ, "LD_PRELOAD": str(self.library),
-                       "GUFO_TEST_DISK_GATE": str(gate),
-                       "GUFO_TEST_DISK_DIRECTORY": str(self.disk)}
+                       "MBUFO_TEST_DISK_GATE": str(gate),
+                       "MBUFO_TEST_DISK_DIRECTORY": str(self.disk)}
         with self.stage("initial", environment=environment) as process:
             try:
                 first = self.chat("seed", seed)
@@ -278,7 +278,7 @@ class Lifecycle:
                 long = continue_history(seed, first, ARCHIVE_LINE * 800 + "Reply with only ALPHA.")
                 deep = self.chat("queued_append", long, work(first)[0] - 16)
                 wait_until(lambda: (gate / "blocked").is_file(), "an unpublished write at fsync")
-                assert deep["usage"]["gufo"]["cache_disk_queued_bytes"] > 0, deep
+                assert deep["usage"]["mbufo"]["cache_disk_queued_bytes"] > 0, deep
                 request_id = continuation.TRACE.rows[-1]["request_id"]
                 wait_until(lambda: f"request={request_id} event=completed" in
                            (self.stage_path / "server.log").read_text(),
@@ -289,7 +289,7 @@ class Lifecycle:
                 stored = published_tokens((self.stage_path / "server.log").read_text())
                 self.row["crash"] = {"signal": 9, "write_blocked": True,
                                      "published_tokens": stored,
-                                     "queued_bytes": deep["usage"]["gufo"]["cache_disk_queued_bytes"]}
+                                     "queued_bytes": deep["usage"]["mbufo"]["cache_disk_queued_bytes"]}
             finally:
                 (gate / "release").touch()
         assert stored and max(stored) < work(deep)[0], stored
@@ -326,7 +326,7 @@ def main():
         parser.error("--require-over-ram requires --case oversized or side-traffic")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1:3] != ["serve", "llm"]:
-        parser.error("pass a gufo serve llm command after --")
+        parser.error("pass a mbufo serve llm command after --")
     for reserved in ("--host", "--port", "--cache-disk", "--cache-disk-bytes",
                      "--cache-disk-staging-bytes", "--api-key"):
         if option(command, reserved) is not None:

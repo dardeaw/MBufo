@@ -32,7 +32,7 @@ std::size_t OpenDescriptors() {
 }  // namespace
 
 int main() {
-  char directory[] = "/tmp/gufo-ds4-load-XXXXXX";
+  char directory[] = "/tmp/mbufo-ds4-load-XXXXXX";
   assert(::mkdtemp(directory));
   const auto root = std::filesystem::path(directory);
   const auto path = root / "invalid.gguf";

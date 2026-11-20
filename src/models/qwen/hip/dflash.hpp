@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_DFLASH_HPP_
-#define GUFO_MODELS_QWEN_HIP_DFLASH_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_DFLASH_HPP_
+#define MBUFO_MODELS_QWEN_HIP_DFLASH_HPP_
 
 #include <array>
 #include <cstddef>
@@ -22,7 +22,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 namespace kernels {
 struct DFlashSampling;
@@ -395,7 +395,7 @@ private:
   bool proposal_active_{false};
 };
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_DFLASH_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_DFLASH_HPP_

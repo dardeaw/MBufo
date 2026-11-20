@@ -4,8 +4,8 @@
 if (ENGINE_ENABLE_HIP)
   add_executable(glimmer_decode_batch_test EXCLUDE_FROM_ALL
     decode_batch_test.cpp)
-  target_link_libraries(glimmer_decode_batch_test PRIVATE gufo_glimmer
-    gufo_core hip::host)
+  target_link_libraries(glimmer_decode_batch_test PRIVATE mbufo_glimmer
+    mbufo_core hip::host)
   add_executable(glimmer_dflash_test EXCLUDE_FROM_ALL
     dflash_test.cpp)
   # Whole-archive: the test validates the "glimmer-dflash" registry entry,
@@ -14,8 +14,8 @@ if (ENGINE_ENABLE_HIP)
   # real). HIP builds are Linux-only, so the GNU --whole-archive form is
   # fine here.
   target_link_libraries(glimmer_dflash_test PRIVATE
-    -Wl,--whole-archive gufo_glimmer -Wl,--no-whole-archive
-    gufo_core hip::host)
+    -Wl,--whole-archive mbufo_glimmer -Wl,--no-whole-archive
+    mbufo_core hip::host)
 endif()
 # Glimmer registry pilot (direct adapter vs registry, DecodeStep
 # fallback, read-only Verify, q8 smoke; needs weights + GPU).
@@ -23,6 +23,6 @@ endif()
 if (ENGINE_ENABLE_HIP)
   add_executable(glimmer_registry_pilot_test EXCLUDE_FROM_ALL
     registry_pilot_test.cpp)
-  target_link_libraries(glimmer_registry_pilot_test PRIVATE gufo_glimmer
-    gufo_core hip::host)
+  target_link_libraries(glimmer_registry_pilot_test PRIVATE mbufo_glimmer
+    mbufo_core hip::host)
 endif()

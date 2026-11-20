@@ -25,8 +25,8 @@
 
 namespace {
 
-namespace h3 = gufo::minimax_h3;
-namespace ops = gufo::minimax_h3::dit_ops;
+namespace h3 = mbufo::minimax_h3;
+namespace ops = mbufo::minimax_h3::dit_ops;
 
 int failures = 0;
 
@@ -916,7 +916,7 @@ void CheckNativeAttention(std::uint32_t rows, float query_scale = 1.7F,
   CHECK(replay == actual);
 
   // Independent dense FP64 softmax/PV, including the final key and query tails.
-  // Do not compare against another optimized Gufo attention implementation.
+  // Do not compare against another optimized MBufo attention implementation.
   double error_squared = 0, norm_squared = 0, max_error = 0, max_reference = 0;
   for (std::uint32_t head = 0; head < kHeads; ++head) {
     for (std::uint32_t row : {0U, rows / 2, rows - 1}) {
@@ -1100,16 +1100,16 @@ int CheckReal() {
     std::cout << "SKIP: integrated gfx1151 is unavailable\n";
     return 77;
   }
-  const char* root_value = std::getenv("GUFO_H3_MODEL_ROOT");
-  const char* golden_value = std::getenv("GUFO_H3_DIT_GOLDEN");
+  const char* root_value = std::getenv("MBUFO_H3_MODEL_ROOT");
+  const char* golden_value = std::getenv("MBUFO_H3_DIT_GOLDEN");
   if (root_value == nullptr || *root_value == '\0' || golden_value == nullptr ||
       *golden_value == '\0') {
-    std::cout << "SKIP: GUFO_H3_MODEL_ROOT or GUFO_H3_DIT_GOLDEN unset\n";
+    std::cout << "SKIP: MBUFO_H3_MODEL_ROOT or MBUFO_H3_DIT_GOLDEN unset\n";
     return 77;
   }
   std::string error;
   auto inventory =
-      h3::ModelInventory::Inspect(root_value, GUFO_H3_SOURCE_MANIFEST, &error);
+      h3::ModelInventory::Inspect(root_value, MBUFO_H3_SOURCE_MANIFEST, &error);
   CHECK(inventory.has_value());
   if (!inventory.has_value()) {
     std::cerr << error << '\n';
@@ -1232,9 +1232,9 @@ int ProfileBlock(std::size_t rows, bool row_parallel) {
     std::cout << "SKIP: integrated gfx1151 is unavailable\n";
     return 77;
   }
-  const char* root_value = std::getenv("GUFO_H3_MODEL_ROOT");
+  const char* root_value = std::getenv("MBUFO_H3_MODEL_ROOT");
   if (root_value == nullptr || *root_value == '\0') {
-    std::cout << "SKIP: GUFO_H3_MODEL_ROOT unset\n";
+    std::cout << "SKIP: MBUFO_H3_MODEL_ROOT unset\n";
     return 77;
   }
 
@@ -1265,7 +1265,7 @@ int ProfileBlock(std::size_t rows, bool row_parallel) {
 
   std::string error;
   auto inventory =
-      h3::ModelInventory::Inspect(root_value, GUFO_H3_SOURCE_MANIFEST, &error);
+      h3::ModelInventory::Inspect(root_value, MBUFO_H3_SOURCE_MANIFEST, &error);
   CHECK(inventory.has_value());
   if (!inventory.has_value()) {
     std::cerr << error << '\n';
@@ -1301,7 +1301,7 @@ int ProfileBlock(std::size_t rows, bool row_parallel) {
   const auto bytes = std::span<const unsigned char>(
       reinterpret_cast<const unsigned char*>(output.data()),
       output.size() * sizeof(output.front()));
-  if (const char* output_path = std::getenv("GUFO_H3_DIT_PROFILE_OUTPUT");
+  if (const char* output_path = std::getenv("MBUFO_H3_DIT_PROFILE_OUTPUT");
       output_path != nullptr && *output_path != '\0') {
     std::ofstream output_file(output_path, std::ios::binary);
     output_file.write(

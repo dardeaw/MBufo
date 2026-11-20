@@ -1,9 +1,9 @@
-#ifndef GUFO_EVAL_REGRADE_HPP_
-#define GUFO_EVAL_REGRADE_HPP_
+#ifndef MBUFO_EVAL_REGRADE_HPP_
+#define MBUFO_EVAL_REGRADE_HPP_
 
 #include "src/eval/trace.hpp"
 
-namespace gufo::eval {
+namespace mbufo::eval {
 
 struct RegradeSummary {
   std::size_t total_cases{0};
@@ -17,6 +17,6 @@ struct RegradeSummary {
 [[nodiscard]] RegradeSummary RegradeTrace(
     const EvalTraceReport& report) noexcept;
 
-}  // namespace gufo::eval
+}  // namespace mbufo::eval
 
-#endif  // GUFO_EVAL_REGRADE_HPP_
+#endif  // MBUFO_EVAL_REGRADE_HPP_

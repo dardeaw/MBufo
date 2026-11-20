@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_MINIMAX_H3_JSON_HPP_
-#define GUFO_MODELS_MINIMAX_H3_JSON_HPP_
+#ifndef MBUFO_MODELS_MINIMAX_H3_JSON_HPP_
+#define MBUFO_MODELS_MINIMAX_H3_JSON_HPP_
 
 #include <cstdint>
 #include <filesystem>
@@ -10,7 +10,7 @@
 #include <variant>
 #include <vector>
 
-namespace gufo::minimax_h3::json {
+namespace mbufo::minimax_h3::json {
 
 class Error : public std::runtime_error {
 public:
@@ -59,6 +59,6 @@ private:
 [[nodiscard]] Value ParseFile(const std::filesystem::path& path,
                               std::size_t maximum_bytes);
 
-}  // namespace gufo::minimax_h3::json
+}  // namespace mbufo::minimax_h3::json
 
-#endif  // GUFO_MODELS_MINIMAX_H3_JSON_HPP_
+#endif  // MBUFO_MODELS_MINIMAX_H3_JSON_HPP_

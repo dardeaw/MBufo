@@ -3,7 +3,7 @@
 #include <map>
 #include <stdexcept>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 namespace {
 template<class Visit>
 void Dependencies(const DiskManifest& manifest, Visit visit) {
@@ -234,4 +234,4 @@ std::size_t DiskCatalog::ReclaimInvalid() {
 std::size_t DiskCatalog::Size() const {
   return impl_->records.size();
 }
-}  // namespace gufo::cache
+}  // namespace mbufo::cache

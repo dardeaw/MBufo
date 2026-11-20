@@ -12,7 +12,7 @@
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 #include "src/models/qwen_image_21/tokenizer.hpp"
 
-namespace gufo::models::qwen_image_21 {
+namespace mbufo::models::qwen_image_21 {
 namespace {
 
 using hip::Activation;
@@ -609,4 +609,4 @@ Result Model::Generate(const Request& request,
   }
 }
 
-}  // namespace gufo::models::qwen_image_21
+}  // namespace mbufo::models::qwen_image_21

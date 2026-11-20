@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_PLATFORM_PREFETCH_HPP_
-#define GUFO_CORE_PLATFORM_PREFETCH_HPP_
+#ifndef MBUFO_CORE_PLATFORM_PREFETCH_HPP_
+#define MBUFO_CORE_PLATFORM_PREFETCH_HPP_
 
 #include <algorithm>
 #include <atomic>
@@ -19,7 +19,7 @@
 #include <unistd.h>
 #endif
 
-namespace gufo::platform {
+namespace mbufo::platform {
 #if defined(_WIN32)
 namespace detail {
 
@@ -134,6 +134,6 @@ inline void PrefaultMappedRange(const void* data, std::size_t bytes) {
   }
 }
 
-}  // namespace gufo::platform
+}  // namespace mbufo::platform
 
-#endif  // GUFO_CORE_PLATFORM_PREFETCH_HPP_
+#endif  // MBUFO_CORE_PLATFORM_PREFETCH_HPP_

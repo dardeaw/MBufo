@@ -18,8 +18,8 @@
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/quant/quant_traits.hpp"
 
-namespace gufo::core::compute::gemm {
-namespace q = ::gufo::core::quant;
+namespace mbufo::core::compute::gemm {
+namespace q = ::mbufo::core::quant;
 
 q::Status GemvDecode(const void* w, int type, const float* x, float* y, std::size_t n_tokens, std::size_t m,
                      std::size_t k, void* preq_scratch, std::size_t preq_bytes, hipStream_t stream) {
@@ -52,14 +52,14 @@ q::Status GemvDecode(const void* w, int type, const float* x, float* y, std::siz
         st = q::Status::kOk;
         break;
       case q::DecodePath::kBlockGemv:
-        // One token: rows share a single load of each activation slice (GUFO_NO_SINGLE_GEMV=1 keeps the block GEMV).
-        if (n_tokens == 1 && std::getenv("GUFO_NO_SINGLE_GEMV") == nullptr && QuantGemvSingle(w, type, x, y, m, k, stream)) {
+        // One token: rows share a single load of each activation slice (MBUFO_NO_SINGLE_GEMV=1 keeps the block GEMV).
+        if (n_tokens == 1 && std::getenv("MBUFO_NO_SINGLE_GEMV") == nullptr && QuantGemvSingle(w, type, x, y, m, k, stream)) {
           st = q::Status::kOk;
           break;
         }
         // 2..192 tokens: read every weight once per group of <= 32 tokens (the loop below re-reads the matrix per token).
-        // GUFO_NO_MULTI_GEMV=1 keeps the per-token loop for A/B runs.
-        if (n_tokens >= 2 && std::getenv("GUFO_NO_MULTI_GEMV") == nullptr) {
+        // MBUFO_NO_MULTI_GEMV=1 keeps the per-token loop for A/B runs.
+        if (n_tokens >= 2 && std::getenv("MBUFO_NO_MULTI_GEMV") == nullptr) {
           const std::size_t groups = (n_tokens + kQuantGemvMultiMaxTokens - 1) / kQuantGemvMultiMaxTokens;
           const std::size_t per = (n_tokens + groups - 1) / groups;
           std::size_t done = 0;
@@ -86,7 +86,7 @@ q::Status GemvDecode(const void* w, int type, const float* x, float* y, std::siz
           break;
         }
         for (std::size_t t = 0; t < n_tokens; ++t)
-          LaunchQ8KBlockGEMV(w, static_cast<::gufo::core::GgmlType>(type), x + t * k, y + t * m, m, k, stream);
+          LaunchQ8KBlockGEMV(w, static_cast<::mbufo::core::GgmlType>(type), x + t * k, y + t * m, m, k, stream);
         st = q::Status::kOk;
         break;
       case q::DecodePath::kLegacyGemv:
@@ -127,8 +127,8 @@ q::Status QuantGemmPrefill(const void* w, int type, const __half* x16, float* y,
           break;
         }
         // Wide batches: dequantize into the tiled layout and run the shared WMMA GEMM (3x the row-major kernel's
-        // memory efficiency). GUFO_NO_TILED_GEMM=1 keeps the previous route for A/B runs.
-        if (batch >= 256 && m % kTiledRows == 0 && k % 32 == 0 && std::getenv("GUFO_NO_TILED_GEMM") == nullptr &&
+        // memory efficiency). MBUFO_NO_TILED_GEMM=1 keeps the previous route for A/B runs.
+        if (batch >= 256 && m % kTiledRows == 0 && k % 32 == 0 && std::getenv("MBUFO_NO_TILED_GEMM") == nullptr &&
             DequantRowsF16Tiled(w, type, wdq_scratch, m, k, stream)) {
           st = TiledF16Gemm(wdq_scratch, x16, y, batch, m, k, stream) ? q::Status::kOk : q::Status::kBadShape;
           break;
@@ -145,6 +145,6 @@ q::Status QuantGemmPrefill(const void* w, int type, const __half* x16, float* y,
   return known ? st : q::Status::kUnsupportedType;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // ENGINE_ENABLE_HIP

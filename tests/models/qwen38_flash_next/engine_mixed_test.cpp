@@ -14,7 +14,7 @@
 
 #include "src/models/qwen38_flash_next/engine.hpp"
 
-namespace qfn = gufo::models::qwen38_flash_next;
+namespace qfn = mbufo::models::qwen38_flash_next;
 
 static double Worst(const std::vector<float>& a, std::span<const float> b) {
   double w = 0.0;
@@ -62,8 +62,8 @@ int main(int argc, char** argv) {
     return 1;
   }
   const auto mode = !mtp_path.empty()
-                        ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive;
+                        ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive;
   auto make = [&](const char* what) {
     auto s = model->CreateSession(mode, 2048, &error);
     if (!s)

@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
-using Lookup = gufo::speculative::PromptLookup<>;
+using Lookup = mbufo::speculative::PromptLookup<>;
 
 void Require(bool condition, const char* message) {
   if (!condition)

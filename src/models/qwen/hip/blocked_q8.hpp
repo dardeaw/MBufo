@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_BLOCKED_Q8_HPP_
-#define GUFO_MODELS_QWEN_HIP_BLOCKED_Q8_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_BLOCKED_Q8_HPP_
+#define MBUFO_MODELS_QWEN_HIP_BLOCKED_Q8_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@
 
 #include "src/core/model_config.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // Shared blocked-Q8 attention KV for Qwen attention layers (opt-in q8 path).
 // Element codec: symmetric INT8 (amax/127) with a per-32-block f16 scale,
@@ -20,6 +20,8 @@ namespace gufo::hip {
 // d == 256-only); every other shape must stay on the F16 path.
 inline constexpr std::uint32_t kQwenBlockedQ8BlockBytes{34};
 inline constexpr float kQwenBlockedQ8Range{127.0F};
+// Smallest Split-K chunk (keys) of the blocked-Q8 decode read; longer rows use ~1/32 of their length (RowChunkKeys).
+inline constexpr std::uint32_t kQwenSplitKChunkBase{128};
 
 // Loud prerequisite check for the q8 path. Returns false with a reason when
 // the model cannot run blocked-Q8 attention (wrong head_dim, no attention
@@ -40,20 +42,24 @@ void WriteQwenBlockedKv(const float* k_rows, const float* v_rows,
 
 // Decode read: shared blocked direct-read (fused dequant, 1/sqrt(d) scale,
 // no F16 staging) plus the SiLU gate the F16 decode kernels fuse into the
-// output. `out` holds `n_tokens * heads * head_dim` floats; `gate` may be
+// output. With `kv_len` (host-visible length of the last row) and caller scratch the read is split across the key range by
+// the core row-chunk Split-K kernel (a deterministic summation order, independent of the batch the row is in); when that
+// kernel refuses the shape the single-block scan runs. `out` holds `n_tokens * heads * head_dim` floats; `gate` may be
 // null (no gating) but is always present for full-attention layers.
 void ReadQwenBlockedAttention(const float* q, const std::uint8_t* blocked_k,
                               const std::uint8_t* blocked_v, const float* gate,
                               float* out, std::uint32_t n_tokens,
                               const std::uint32_t* d_pos, std::uint32_t heads,
                               std::uint32_t kv_heads, std::uint32_t head_dim,
-                              hipStream_t stream);
+                              hipStream_t stream, std::uint32_t kv_len = 0,
+                              float* splitk_partials = nullptr,
+                              std::size_t splitk_partial_bytes = 0);
 
 // Elementwise out[i] *= sigmoid(gate[i]) over `n` floats.
 void LaunchSigmoidGateMultiply(float* out, const float* gate, std::size_t n,
                                hipStream_t stream);
 #endif
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
-#endif  // GUFO_MODELS_QWEN_HIP_BLOCKED_Q8_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_BLOCKED_Q8_HPP_

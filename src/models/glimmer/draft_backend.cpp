@@ -19,7 +19,7 @@
 #include "src/models/glimmer/engine.hpp"
 
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 
 std::shared_ptr<GlimmerDflashDraftBackend::SharedDraft> GlimmerDflashDraftBackend::LoadShared(
     std::shared_ptr<const Model> target, const std::string& draft_model_path, std::uint32_t max_context,
@@ -41,7 +41,7 @@ std::shared_ptr<GlimmerDflashDraftBackend::SharedDraft> GlimmerDflashDraftBacken
     return nullptr;
   }
   // Normalize the artifact's 1-based layer-input taps to zero-based layer outputs (27B DFlash2 convention: the
-  // converter numbers layer inputs, Gufo taps layer outputs).
+  // converter numbers layer inputs, MBufo taps layer outputs).
   std::vector<std::uint32_t> taps;
   taps.reserve(draft_model->TargetLayerIds().size());
   const std::uint32_t num_target_layers = target->weights().config.num_layers;
@@ -381,4 +381,4 @@ const bool kGlimmerDflashDraftRegistered = RegisterGlimmerDflashDraftBackend();
 
 }  // namespace
 
-}  // namespace gufo::models::glimmer
+}  // namespace mbufo::models::glimmer

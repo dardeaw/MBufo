@@ -1,5 +1,5 @@
-#ifndef GUFO_CACHE_STREAMING_HPP_
-#define GUFO_CACHE_STREAMING_HPP_
+#ifndef MBUFO_CACHE_STREAMING_HPP_
+#define MBUFO_CACHE_STREAMING_HPP_
 
 #include <algorithm>
 #include <chrono>
@@ -12,7 +12,7 @@
 #include "src/cache/adapter.hpp"
 #include "src/cache/disk.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 class BorrowedRows;
 inline constexpr std::size_t kDefaultDiskStagingBytes = 1ULL << 20;
 inline constexpr std::chrono::milliseconds kPersistenceYieldLimit{500};
@@ -172,5 +172,5 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 #endif

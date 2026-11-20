@@ -23,7 +23,7 @@
 #include "src/models/qwen/state.hpp"
 #include "tests/testing/test_common.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 /// A small ModelConfig satisfying core::ModelConfig::IsValidQwen() (the full/
 /// SSM repeating-block structure with a 4-block interval, 128-wide SSM value
@@ -80,7 +80,7 @@ inline SyntheticQwenWeights build_synthetic_qwen_weights(
   out.config = config;
   out.weights.config = config;
 
-  auto rng = gufo::test::make_seeded_rng(seed);
+  auto rng = mbufo::test::make_seeded_rng(seed);
 
   // First pass: compute the exact number of float elements needed so the pool
   // can be resized once (pool.data() is then stable for the holder's lifetime).
@@ -180,4 +180,4 @@ inline SyntheticQwenWeights build_synthetic_qwen_weights(
   return out;
 }
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

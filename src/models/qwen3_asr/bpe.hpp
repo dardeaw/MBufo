@@ -10,8 +10,8 @@
 // safetensors checkpoint and only ever builds from an explicit vocabulary, and
 // dropping the GGUF path is what removes the last src/core dependency.
 
-#ifndef GUFO_MODELS_QWEN3_ASR_BPE_HPP_
-#define GUFO_MODELS_QWEN3_ASR_BPE_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_BPE_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_BPE_HPP_
 
 #include <array>
 #include <cstddef>
@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::models::qwen3_asr::tokenization {
+namespace mbufo::models::qwen3_asr::tokenization {
 
 using TokenId = std::uint32_t;
 
@@ -115,6 +115,6 @@ private:
   TokenId pad_token_id_{kDefaultEndoftextId};
 };
 
-}  // namespace gufo::models::qwen3_asr::tokenization
+}  // namespace mbufo::models::qwen3_asr::tokenization
 
-#endif  // GUFO_MODELS_QWEN3_ASR_BPE_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_BPE_HPP_

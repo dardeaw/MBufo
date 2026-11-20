@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_OPS_HIP_HPP_
-#define GUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_OPS_HIP_HPP_
+#ifndef MBUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_OPS_HIP_HPP_
+#define MBUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_OPS_HIP_HPP_
 
 // BF16 text-encoder operation boundaries translated from antirez/h3.c
 // h3_shaders.metal at 8974cc055ea9c02fcd14cc27dfda3e1027c05153 (MIT).
@@ -11,7 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::minimax_h3::ops {
+namespace mbufo::minimax_h3::ops {
 
 __device__ __forceinline__ float Bf16ToFloat(std::uint16_t value) {
   return __uint_as_float(static_cast<std::uint32_t>(value) << 16U);
@@ -521,6 +521,6 @@ inline void LaunchSwiGlu(const std::uint16_t* gate, const std::uint16_t* up,
                      dim3(kThreads), 0, stream, gate, up, output, elements);
 }
 
-}  // namespace gufo::minimax_h3::ops
+}  // namespace mbufo::minimax_h3::ops
 
-#endif  // GUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_OPS_HIP_HPP_
+#endif  // MBUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_OPS_HIP_HPP_

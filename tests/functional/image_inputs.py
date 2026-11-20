@@ -56,8 +56,8 @@ def assert_color(result, color):
     tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
     details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
     assert tokens > 0 and details["cached_tokens"] == 0, usage
-    if "gufo" in usage:  # Responses exposes these counters outside usage.
-        assert usage["gufo"]["prefill_tokens"] == tokens, usage
+    if "mbufo" in usage:  # Responses exposes these counters outside usage.
+        assert usage["mbufo"]["prefill_tokens"] == tokens, usage
 
 
 def messages_color_requests(png):

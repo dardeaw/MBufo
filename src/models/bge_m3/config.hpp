@@ -17,8 +17,8 @@
 //   core::embedding::PoolingStrategyFromGgufType mapping.
 // * the leg-1 window caps single-prefill inputs (N^2 attention transient);
 //   longer inputs are refused explicitly, never truncated silently.
-#ifndef GUFO_MODELS_BGE_M3_CONFIG_HPP_
-#define GUFO_MODELS_BGE_M3_CONFIG_HPP_
+#ifndef MBUFO_MODELS_BGE_M3_CONFIG_HPP_
+#define MBUFO_MODELS_BGE_M3_CONFIG_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -27,7 +27,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/model_config.hpp"
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 
 /// Single-prefill leg-1 window: full bidirectional attention is O(n^2)
 /// transient. 2048 keeps the worst-case attention matrix at 16 MiB/layer in
@@ -101,6 +101,6 @@ struct BgeM3ConfigOptions {
   return out;
 }
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3
 
-#endif  // GUFO_MODELS_BGE_M3_CONFIG_HPP_
+#endif  // MBUFO_MODELS_BGE_M3_CONFIG_HPP_

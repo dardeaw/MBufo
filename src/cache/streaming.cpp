@@ -14,7 +14,7 @@
 
 #include "src/cache/slot.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 namespace {
 template<class F>
 struct Finally {
@@ -857,4 +857,4 @@ PersistenceQueueStats PersistenceQueue::Stats() const {
   std::lock_guard guard(impl_->mutex);
   return impl_->stats;
 }
-}  // namespace gufo::cache
+}  // namespace mbufo::cache

@@ -17,7 +17,7 @@
 // kernels.hip.cpp). Only the enclosing namespace changed, so launches stay
 // bitwise identical.
 
-namespace gufo::core::compute::blocked_kv {
+namespace mbufo::core::compute::blocked_kv {
 namespace {
 
 constexpr unsigned kThreads = 256;
@@ -182,7 +182,7 @@ __global__ void PrepareAttentionKvKernel(
     std::uint32_t kv_heads, std::uint32_t d, std::uint32_t rotary,
     const std::uint32_t* start_pos, float theta, float eps, float k_range,
     float v_range, std::uint32_t k_block_bytes, std::uint32_t v_block_bytes,
-    const gufo::models::qwen::vision::DeviceRope* rope) {
+    const mbufo::models::qwen::vision::DeviceRope* rope) {
   __shared__ float partial[kHeadsPerBlock][8];
   __shared__ float norm[kHeadsPerBlock][256];
   const std::uint32_t t = blockIdx.x, first = blockIdx.y * kHeadsPerBlock,
@@ -236,7 +236,7 @@ __global__ void PrepareAttentionKvKernel(
   if (tid < half) {
     const float freq = powf(
         theta, -2.0f * static_cast<float>(tid) / static_cast<float>(rotary));
-    sincosf(gufo::models::qwen::vision::RopePosition(rope, *start_pos + t, tid) * freq, &sine,
+    sincosf(mbufo::models::qwen::vision::RopePosition(rope, *start_pos + t, tid) * freq, &sine,
             &cosine);
   }
 // Phase 1: rotate K rows, stash back into norm.
@@ -938,7 +938,7 @@ bool PrepareAttentionKv(const float* packed, std::uint32_t stride,
                         std::uint32_t d, std::uint32_t rotary_dim,
                         const std::uint32_t* start_pos, float theta, float eps,
                         hipStream_t stream,
-                        const gufo::models::qwen::vision::DeviceRope* rope, bool prefill) {
+                        const mbufo::models::qwen::vision::DeviceRope* rope, bool prefill) {
   if (d == 0 || d > 256 || rotary_dim == 0 || rotary_dim > d ||
       rotary_dim % 2 != 0 || kv_heads == 0 ||
       stride < static_cast<std::size_t>(2) * (heads + kv_heads) * d) {
@@ -964,7 +964,7 @@ bool PrepareAttentionKv(const float* packed, std::uint32_t stride,
                          rotary_dim, start_pos, theta, eps, k_range, v_range,
                          key_block_bytes, value_block_bytes, rope);
   });
-  if (const char* dump = std::getenv("GUFO_KV_DUMP")) {
+  if (const char* dump = std::getenv("MBUFO_KV_DUMP")) {
     // Offline audit hook: append the raw blocked K/V rows written by this call
     // so the cache can be compared against a CPU emulation of the same
     // quantization. Layout: u32 n_tokens, kv_heads, d, k_row_bytes,
@@ -1067,4 +1067,4 @@ void AttentionKv(const float* q, const std::uint8_t* k_cache,
   }
 }
 
-}  // namespace gufo::core::compute::blocked_kv
+}  // namespace mbufo::core::compute::blocked_kv

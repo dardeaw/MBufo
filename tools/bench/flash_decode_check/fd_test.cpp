@@ -12,7 +12,7 @@
 
 #include "src/core/compute/attention/flash_sink.hpp"
 
-using namespace gufo::core::compute::flash_sink;
+using namespace mbufo::core::compute::flash_sink;
 
 #define CK(x) do { hipError_t err__ = (x); if (err__ != hipSuccess) { std::fprintf(stderr, "HIP error %s at %d\n", hipGetErrorString(err__), __LINE__); return 2; } } while (0)
 

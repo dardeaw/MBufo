@@ -1,11 +1,11 @@
-#ifndef GUFO_MODELS_QWEN_HIP_OPS_PREFILL_FP16_HPP_
-#define GUFO_MODELS_QWEN_HIP_OPS_PREFILL_FP16_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_OPS_PREFILL_FP16_HPP_
+#define MBUFO_MODELS_QWEN_HIP_OPS_PREFILL_FP16_HPP_
 #include <cstddef>
 
 #include "src/core/gguf_reader.hpp"
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
-namespace gufo::hip {
+namespace mbufo::hip {
 // The half buffers contain IEEE FP16, not BF16. Callers reuse the existing
 // scratch allocations after their BF16 contents are no longer live.
 void LaunchFloatToFp16(const float* input, void* output, std::size_t elements,
@@ -45,6 +45,6 @@ bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
     core::GgmlType gate_type, core::GgmlType up_type, const void* gate_weights,
     const void* up_weights, const void* input, void* output, std::size_t batch,
     std::size_t m, std::size_t k, hipStream_t stream);
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif
 #endif

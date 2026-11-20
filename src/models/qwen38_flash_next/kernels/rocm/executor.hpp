@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_EXECUTOR_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_EXECUTOR_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_EXECUTOR_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_EXECUTOR_HPP_
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -27,7 +27,7 @@
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace mbufo::models::qwen38_flash_next::rocm {
 
 class Executor;
 class SnapshotAllocator;
@@ -142,7 +142,7 @@ public:
 private:
   friend class Executor;
   friend struct PrefillCheckpoint;
-  friend class gufo::models::qwen38_flash_next::ContinuationAdapter;
+  friend class mbufo::models::qwen38_flash_next::ContinuationAdapter;
   Session() = default;
 
   struct LinearState {
@@ -776,7 +776,7 @@ private:
   mutable GdnBatchItem* batch_gdn_host_{nullptr};
   mutable GdnBatchItem* batch_gdn_{nullptr};
   // Device scratch for the unified mixed-batch attention launcher
-  // (gufo::core::compute::mixed_batch): device descriptor table, position
+  // (mbufo::core::compute::mixed_batch): device descriptor table, position
   // scalars and split-K partials. Allocated once, freed with allocations_
   // at teardown. The caller owns the arena (§4.2).
   mutable void* mixed_scratch_{nullptr};
@@ -908,6 +908,6 @@ private:
   mutable ReadyRows mixed_q8_ready_;
 };
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace mbufo::models::qwen38_flash_next::rocm
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_EXECUTOR_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_EXECUTOR_HPP_

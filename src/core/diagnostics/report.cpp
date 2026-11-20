@@ -5,7 +5,7 @@
 #include <iomanip>
 #include <sstream>
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 namespace {
 
@@ -237,7 +237,7 @@ std::string DiagnosticReport::ToJson() const {
 
 std::string DiagnosticReport::ToHuman() const {
   std::ostringstream oss;
-  oss << "=== Gufo Diagnostics ===\n";
+  oss << "=== MBufo Diagnostics ===\n";
   oss << "Engine Revision : " << engine_revision_ << "\n";
   oss << "Schema Version  : " << schema_version_ << "\n";
   oss << "Timestamp       : " << timestamp_ << "\n";
@@ -281,4 +281,4 @@ std::string DiagnosticReport::ToHuman() const {
   return oss.str();
 }
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

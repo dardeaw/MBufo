@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_TTS_HIP_ENCODER_OPS_HPP_
-#define GUFO_MODELS_QWEN3_TTS_HIP_ENCODER_OPS_HPP_
+#ifndef MBUFO_MODELS_QWEN3_TTS_HIP_ENCODER_OPS_HPP_
+#define MBUFO_MODELS_QWEN3_TTS_HIP_ENCODER_OPS_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 
 enum class EncoderPaddingMode : std::uint32_t {
   kZero,
@@ -65,7 +65,7 @@ void LaunchQuantizeCodebook(float* residual, const float* embedding,
                             std::size_t code_groups, std::size_t group_index,
                             bool update_residual, hipStream_t stream);
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 #endif
 
-#endif  // GUFO_MODELS_QWEN3_TTS_HIP_ENCODER_OPS_HPP_
+#endif  // MBUFO_MODELS_QWEN3_TTS_HIP_ENCODER_OPS_HPP_

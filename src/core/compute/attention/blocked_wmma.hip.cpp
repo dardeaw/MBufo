@@ -18,7 +18,7 @@
 
 #include "src/core/compute/attention/blocked_wmma.hpp"
 
-namespace gufo::core::compute::blocked_wmma {
+namespace mbufo::core::compute::blocked_wmma {
 
 // Device-side decode traits for the blocked KV codecs (the header stays
 // host-safe, so the bodies live here). Q8 is the symmetric INT8 grid over
@@ -605,17 +605,17 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
   // the per-byte code reads below look as if they must lose to the F16
   // staging route. They do not. Replacing each group of eight 1-byte loads
   // with four 16-bit loads (decode unchanged, byte-identical output) left
-  // pp2048 unchanged in ABBA runs with QWEN_KV_QUANT=q8 GUFO_KV_WMMA=1:
+  // pp2048 unchanged in ABBA runs with QWEN_KV_QUANT=q8 MBUFO_KV_WMMA=1:
   // d2048 1706-1708 (before) vs 1704.6-1704.8 (after) vs 1704.3 (staging,
-  // GUFO_KV_I8=0) tok/s; d16384 1627-1640 vs 1628-1630 vs 1628. The earlier
+  // MBUFO_KV_I8=0) tok/s; d16384 1627-1640 vs 1628-1630 vs 1628. The earlier
   // claim that I8=2 trails staging by ~5% at a 2K increment did not
-  // reproduce with `gufo bench -p 2048 -d 2048`. Do not change the KV layout
+  // reproduce with `mbufo bench -p 2048 -d 2048`. Do not change the KV layout
   // on that claim without a fresh measurement that does reproduce it.
   const auto load_v = [&](const Tile& tile, uint4* dst) {
     if constexpr (kBlockedKv) {
       // Blocked Q8 rows (34-byte blocks: 32 int8 codes, f16 scale at +32)
       // or packed 4-bit values (18-byte blocks: 16 nibbles, f16 scale at
-      // +16, selected by GUFO_KV_V4). Group starts are 8-aligned with
+      // +16, selected by MBUFO_KV_V4). Group starts are 8-aligned with
       // (dim % 32) <= 24, so eight halves never cross a block boundary:
       // one block + one scale each. Decodes in registers to halves; the
       // WMMA S/PV path below is shared.
@@ -727,7 +727,7 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
     if constexpr (kBlockedKv) {
       // Blocked Q8 K rows decoded in registers to halves (same one-block
       // argument as load_v: d8 is 8-aligned with (d8 % 32) <= 24), or the
-      // packed 4-bit key grid (GUFO_KV_Q4) with the same nibble layout as
+      // packed 4-bit key grid (MBUFO_KV_Q4) with the same nibble layout as
       // the value path above.
       (void)kbank;
       if (k_block_bytes != 34 && k_block_bytes != 18)
@@ -1270,8 +1270,8 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
 // the cache base and rebasing the position, keeping dense-causal semantics.
 // `score_scale` multiplies the QK scores (gemma4 f_attention_scale = 1.0:
 // no 1/sqrt(d)). `key_block_bytes` / `value_block_bytes` select each side's
-// block layout (34 = 8-bit codes, 18 = packed 4-bit codes for the GUFO_KV_Q4
-// / GUFO_KV_V4 grids). Returns false when the shape is unsupported so the
+// block layout (34 = 8-bit codes, 18 = packed 4-bit codes for the MBUFO_KV_Q4
+// / MBUFO_KV_V4 grids). Returns false when the shape is unsupported so the
 // caller falls back to the scalar direct read.
 template <typename Codec, std::uint32_t kHeadDim>
 bool AttentionBlockedWmma(const float* q, const std::uint8_t* k_cache,
@@ -1321,5 +1321,5 @@ template bool AttentionBlockedWmma<KvCodecQ8, 256>(
     std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
     hipStream_t, float, std::uint32_t, std::uint32_t);
 
-}  // namespace gufo::core::compute::blocked_wmma
+}  // namespace mbufo::core::compute::blocked_wmma
 #endif  // ENGINE_ENABLE_HIP

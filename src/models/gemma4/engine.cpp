@@ -19,32 +19,33 @@
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/blocked_wmma.hpp"
 #include "src/core/compute/attention/blocked_splitk.hpp"
+#include "src/core/compute/attention/flash_wmma_large.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 
 #include "src/models/gemma4/weights.hpp"
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 
 namespace {
 
 
-/// 4-bit key grid (GUFO_KV_Q4): keys quantize onto the packed 18-byte nibble
+/// 4-bit key grid (MBUFO_KV_Q4): keys quantize onto the packed 18-byte nibble
 /// blocks (range 7) instead of the 34-byte INT8 blocks. Same study hook as
 /// flash-next, off unless set, and meaningful only under kv_cache_quant=q8.
 [[nodiscard]] bool KvKey4Bit(const ModelOptions& options) noexcept {
   if (options.kv_cache_quant != "q8")
     return false;
-  const char* value = std::getenv("GUFO_KV_Q4");
+  const char* value = std::getenv("MBUFO_KV_Q4");
   return value != nullptr && *value != '\0' && *value != '0';
 }
 
-/// 4-bit value grid (GUFO_KV_V4): values pack onto the 18-byte nibble blocks
+/// 4-bit value grid (MBUFO_KV_V4): values pack onto the 18-byte nibble blocks
 /// (range 7), the production K8V4 combination. Gated identically to the key
 /// grid above.
 [[nodiscard]] bool KvValue4Bit(const ModelOptions& options) noexcept {
   if (options.kv_cache_quant != "q8")
     return false;
-  const char* value = std::getenv("GUFO_KV_V4");
+  const char* value = std::getenv("MBUFO_KV_V4");
   return value != nullptr && *value != '\0' && *value != '0';
 }
 
@@ -74,6 +75,22 @@ const float* StageGemvInput(float*& stage, std::size_t& cap, const float* x,
 }
 }  // namespace
 
+/// y[n][m] = x[n][k] @ W[m][k]^T for a Q6_K weight (the E-models' tied embedding / LM head, which has no GEMV decode kernel
+/// of its own): the multi-token WMMA kernel, groups of <= 32 tokens (each group reads the matrix once).
+static bool Q6KGemm(const TensorRef& w, const float* x, float* y, std::uint32_t n_tokens, std::uint32_t m,
+                    std::uint32_t k, float softcap, hipStream_t stream) {
+  const void* dev = w.device != nullptr ? w.device : w.data;
+  constexpr std::uint32_t kGroup = static_cast<std::uint32_t>(core::compute::gemm::kQuantGemvMultiMaxTokens);
+  for (std::uint32_t done = 0; done < n_tokens; done += kGroup) {
+    const std::uint32_t cnt = std::min(kGroup, n_tokens - done);
+    if (!core::compute::gemm::QuantGemvMulti(dev, static_cast<int>(w.type), x + static_cast<std::size_t>(done) * k,
+                                             y + static_cast<std::size_t>(done) * m, cnt, m, k, stream))
+      return false;
+  }
+  if (softcap > 0.0F) kernels::SoftCap(y, softcap, static_cast<std::size_t>(n_tokens) * m, stream);
+  return true;
+}
+
 /// y[n][m] = x[n][k] @ W[m][k]^T over GGML quant weights.
 void F32Gemm(const TensorRef& w, const float* x, float* y,
              std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
@@ -81,6 +98,13 @@ void F32Gemm(const TensorRef& w, const float* x, float* y,
              float softcap, std::uint8_t* x_q8_slab, bool reuse_x,
              float*& gemv_stage, std::size_t& gemv_stage_cap,
              void* preq_scratch, std::size_t preq_bytes) {
+  if (w.type == core::GgmlType::kQ6_K && w.f16 == nullptr) {
+    if (!Q6KGemm(w, x, y, n_tokens, m, k, softcap, stream)) {
+      std::fprintf(stderr, "[gemma4] Q6_K projection refused (m=%u k=%u n=%u)\n", m, k, n_tokens);
+      std::abort();
+    }
+    return;
+  }
   if (n_tokens <= 8 && getenv("GEMMA4_NO_FUSED_GEMV") == nullptr) {
     const float* xr = x;
     if (x == y) {
@@ -232,6 +256,9 @@ struct DeviceBuffers {
   };
   collect(w.token_embd);
   collect(w.output_norm);
+  collect(w.per_layer_token_embd);
+  collect(w.per_layer_model_proj);
+  collect(w.per_layer_proj_norm);
   const bool tied_output =
       !w.output.empty() && w.output.data == w.token_embd.data;
   if (!w.output.empty() && !tied_output)
@@ -242,7 +269,7 @@ struct DeviceBuffers {
                          &l.attn_post_norm,
                          &l.out_scale, &l.rope_freqs, &l.ffn_norm,
                          &l.ffn_gate, &l.ffn_up, &l.ffn_down,
-                         &l.ffn_post_norm, &l.router, &l.router_scale,
+                         &l.ffn_post_norm, &l.ple_inp_gate, &l.ple_proj, &l.ple_post_norm, &l.router, &l.router_scale,
                          &l.ffn_pre_norm_2, &l.ffn_post_norm_1,
                          &l.ffn_post_norm_2, &l.gate_exps, &l.up_exps,
                          &l.gate_up_exps, &l.down_exps, &l.down_exps_scale})
@@ -265,6 +292,9 @@ struct DeviceBuffers {
   }
   if (tied_output)
     w.output.device = w.token_embd.device;
+  // The per-layer projection is F16: the F16 GEMV / hipBLAS routes read it as the persistent F16 mirror.
+  if (!w.per_layer_model_proj.empty() && w.per_layer_model_proj.type == core::GgmlType::kF16)
+    w.per_layer_model_proj.f16 = w.per_layer_model_proj.device;
   return true;
 }
 
@@ -358,7 +388,11 @@ inline void QuantizeQ80Block(const float* x, std::uint8_t* out) {
     if (!t.empty() && t.f16 == nullptr && IsKQuantForF16(t.type))
       refs.push_back(&t);
   };
-  consider(w.token_embd);
+  // The Q6_K embedding table / LM head of the E-models stays packed: the gather decodes Q6_K directly and Q6KGemm reads
+  // 0.55 GB per token instead of the 1.34 GB an F16 copy would cost (and 2.6 GB of resident memory).
+  const bool packed_q6k_table = !w.token_embd.empty() && w.token_embd.type == core::GgmlType::kQ6_K;
+  if (!packed_q6k_table)
+    consider(w.token_embd);
   for (auto& l : w.layers) {
     consider(l.wq);
     consider(l.wk);
@@ -368,7 +402,8 @@ inline void QuantizeQ80Block(const float* x, std::uint8_t* out) {
     consider(l.ffn_up);
     consider(l.ffn_down);
   }
-  consider(w.output);
+  if (!(packed_q6k_table && w.output.type == core::GgmlType::kQ6_K))
+    consider(w.output);
   if (refs.empty())
     return true;
   // Dedupe aliased tensors (the LM head may share the embedding table):
@@ -464,19 +499,19 @@ inline void QuantizeQ80Block(const float* x, std::uint8_t* out) {
           float* rdst = host_f32 + r * row_elems;
           switch (t->type) {
             case core::GgmlType::kQ3_K:
-              gufo::quant::DequantizeQ3_K(rsrc, rdst, row_elems);
+              mbufo::quant::DequantizeQ3_K(rsrc, rdst, row_elems);
               break;
             case core::GgmlType::kQ4_K:
-              gufo::quant::DequantizeQ4_K(rsrc, rdst, row_elems);
+              mbufo::quant::DequantizeQ4_K(rsrc, rdst, row_elems);
               break;
             case core::GgmlType::kQ5_K:
-              gufo::quant::DequantizeQ5_K(rsrc, rdst, row_elems);
+              mbufo::quant::DequantizeQ5_K(rsrc, rdst, row_elems);
               break;
             case core::GgmlType::kQ6_K:
-              gufo::quant::DequantizeQ6_K(rsrc, rdst, row_elems);
+              mbufo::quant::DequantizeQ6_K(rsrc, rdst, row_elems);
               break;
             case core::GgmlType::kQ8_K:
-              gufo::quant::DequantizeQ8_K(rsrc, rdst, row_elems);
+              mbufo::quant::DequantizeQ8_K(rsrc, rdst, row_elems);
               break;
             default:
               dequant_ok = false;
@@ -628,7 +663,8 @@ inline void QuantizeQ80Block(const float* x, std::uint8_t* out) {
         refs.push_back(t);
     }
   }
-  if (!w.output.empty() && w.output.f16 == nullptr)
+  // A packed Q6_K head is served by Q6KGemm (212 GB/s over 0.55 GB); its F16 copy would be 1.3 GB per token.
+  if (!w.output.empty() && w.output.f16 == nullptr && w.output.type != core::GgmlType::kQ6_K)
     refs.push_back(&w.output);
   std::size_t total = 0;
   for (auto* t : refs)
@@ -727,7 +763,8 @@ inline void QuantizeQ80Block(const float* x, std::uint8_t* out) {
   }
   if (!w.output.empty() && w.output.q8 == nullptr && w.output.experts == 1 &&
       w.output.rows >= 256 && (w.output.cols % 32) == 0 &&
-      (w.output.cols % 256) == 0 && IsKQuantForF16(w.output.type)) {
+      (w.output.cols % 256) == 0 && IsKQuantForF16(w.output.type) &&
+      w.output.type != core::GgmlType::kQ6_K /* served packed by Q6KGemm */) {
     refs.push_back(&w.output);
   }
   if (refs.empty())
@@ -773,19 +810,19 @@ inline void QuantizeQ80Block(const float* x, std::uint8_t* out) {
         float* rdst = stage_f32 + r * row_elems;
         switch (t->type) {
           case core::GgmlType::kQ3_K:
-            gufo::quant::DequantizeQ3_K(rsrc, rdst, row_elems);
+            mbufo::quant::DequantizeQ3_K(rsrc, rdst, row_elems);
             break;
           case core::GgmlType::kQ4_K:
-            gufo::quant::DequantizeQ4_K(rsrc, rdst, row_elems);
+            mbufo::quant::DequantizeQ4_K(rsrc, rdst, row_elems);
             break;
           case core::GgmlType::kQ5_K:
-            gufo::quant::DequantizeQ5_K(rsrc, rdst, row_elems);
+            mbufo::quant::DequantizeQ5_K(rsrc, rdst, row_elems);
             break;
           case core::GgmlType::kQ6_K:
-            gufo::quant::DequantizeQ6_K(rsrc, rdst, row_elems);
+            mbufo::quant::DequantizeQ6_K(rsrc, rdst, row_elems);
             break;
           case core::GgmlType::kQ8_K:
-            gufo::quant::DequantizeQ8_K(rsrc, rdst, row_elems);
+            mbufo::quant::DequantizeQ8_K(rsrc, rdst, row_elems);
             break;
           default:
             dequant_ok = false;
@@ -1128,6 +1165,8 @@ struct Session::Impl {
   float* moe_vec_down{nullptr};
   std::uint32_t logit_cap{32};
   float* logits{nullptr};      // [logit_cap][vocab]
+  float* ple_in{nullptr};      // [chunk][layers * ple_dim] per-layer inputs (Gemma 4 E-models)
+  float* ple_tmp{nullptr};     // [chunk][layers * ple_dim] scratch (token-embedding gather)
   std::uint32_t last_chunk_n{0};  // logit rows in the last chunk
   std::uint32_t last_fwd_n{1};    // tokens in the last forward
   // MTP (Gemma 4 Assistant) speculative draft head, optional.
@@ -1140,6 +1179,7 @@ struct Session::Impl {
   std::int32_t* d_argmax_out{nullptr};
   float* d_pending_h{nullptr};
   bool has_pending_cur{false};
+  int norm_ready{-1};  // layer whose attention RmsNorm the previous layer's fused residual update already produced
   std::int32_t pending_cur{0};
   // MTP draft mirror of blocked SWA KV. The draft cross-attention kernel
   // reads F16, so the blocked rows it attends are dequantized here once per
@@ -1259,8 +1299,13 @@ struct Session::Impl {
         getenv("GEMMA4_FORCE_ALLLOGITS") != nullptr ? kMaxChunk : 32u;
     logits = buffers.Alloc<float>(
         static_cast<std::size_t>(logit_cap) * w.config.vocab_size, error);
+    if (w.config.ple_dim > 0) {
+      const std::size_t ple_total = static_cast<std::size_t>(w.config.ple_dim) * w.config.num_layers;
+      ple_in = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * ple_total, error);
+      ple_tmp = buffers.Alloc<float>(static_cast<std::size_t>(chunk) * ple_total, error);
+    }
     // Compact-routing buffers (used by the compact MoE prefill path).
-    compact_cap = ::gufo::core::compute::gemm::RoutedCompactRows(
+    compact_cap = ::mbufo::core::compute::gemm::RoutedCompactRows(
         static_cast<std::size_t>(chunk) * w.config.experts_used,
         w.config.num_experts);
     routed_bounds = buffers.Alloc<std::int32_t>(w.config.num_experts + 1, error);
@@ -1341,7 +1386,7 @@ struct Session::Impl {
     d_pending_h = buffers.Alloc<float>(hidden, error);
     // §4.2 arena for the shared blocked Split-K kernel (no statics).
     splitk_partials = buffers.Alloc<float>(
-        ::gufo::core::compute::blocked_splitk::
+        ::mbufo::core::compute::blocked_splitk::
             AttentionBlockedSplitKScratchBytes() / sizeof(float),
         error);
     // Dense Gemma 4 variants (12B) allocate no MoE routing scratch:
@@ -1355,7 +1400,8 @@ struct Session::Impl {
                       expert_out == nullptr)) ||
         mlp_out == nullptr || moe_out == nullptr || logits == nullptr ||
         w_slab == nullptr || w_slab2 == nullptr || x_slab == nullptr ||
-        splitk_partials == nullptr || preq_scratch == nullptr) {
+        splitk_partials == nullptr || preq_scratch == nullptr ||
+        (w.config.ple_dim > 0 && (ple_in == nullptr || ple_tmp == nullptr))) {
       if (error != nullptr && error->empty())
         *error = "gemma4 session allocation failed";
       return false;
@@ -1481,8 +1527,8 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
   if (options_.kv_cache_quant == "q8" &&
       (KvKey4Bit(options_) || KvValue4Bit(options_))) {
     std::fprintf(stderr,
-                 "[gemma4] blocked KV grids: K%s/V%s (GUFO_KV_Q4=%s "
-                 "GUFO_KV_V4=%s)\n",
+                 "[gemma4] blocked KV grids: K%s/V%s (MBUFO_KV_Q4=%s "
+                 "MBUFO_KV_V4=%s)\n",
                  KvKey4Bit(options_) ? "4" : "8",
                  KvValue4Bit(options_) ? "4" : "8",
                  KvKey4Bit(options_) ? "on" : "off",
@@ -1568,6 +1614,29 @@ constexpr std::uint32_t kBlockedWmmaMinTokens = 32;
 
 }  // namespace
 
+/// Per-layer inputs of the E-models (llama.cpp gemma4.cpp build_inp_per_layer / project_per_layer_inputs). Needs the scaled input
+/// embedding in impl_->hidden and the chunk's token ids on the device (kernels::DeviceTokens()):
+///   ple_in[t][l][:] = (rms_norm(W_proj . h[t] / sqrt(hidden))[l] * gain + token_table[t][l] * sqrt(ple_dim)) / sqrt(2)
+void Session::BuildPle(Session& s, std::uint32_t n, hipStream_t stream) {
+  auto& w = *s.model_->weights_;
+  const auto& c = w.config;
+  if (c.ple_dim == 0 || n == 0) return;
+  const std::uint32_t hidden = c.hidden_size;
+  const std::uint32_t P = c.ple_dim;
+  const std::uint32_t total = P * c.num_layers;
+  kernels::EmbedScaleDevice(w.per_layer_token_embd.device, w.per_layer_token_embd.type, kernels::DeviceTokens(),
+                            s.impl_->ple_tmp, n, total, std::sqrt(static_cast<float>(P)), stream);
+  F32Gemm(w.per_layer_model_proj, s.impl_->hidden, s.impl_->ple_in, n, total, hidden, stream, s.impl_->w_slab,
+          s.impl_->x_slab, 0.0F, s.impl_->x_q8_slab, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap,
+          s.impl_->preq_scratch, s.impl_->preq_bytes);
+  kernels::ScaleInplace(s.impl_->ple_in, 1.0F / std::sqrt(static_cast<float>(hidden)),
+                        static_cast<std::size_t>(n) * total, stream);
+  kernels::RmsNorm(s.impl_->ple_in, static_cast<const float*>(w.per_layer_proj_norm.device), s.impl_->ple_in,
+                   n * c.num_layers, P, c.rms_eps, stream);
+  kernels::AddScaled(s.impl_->ple_in, s.impl_->ple_tmp, s.impl_->ple_in, static_cast<std::size_t>(n) * total,
+                     1.0F / std::sqrt(2.0F), stream);
+}
+
 void Session::ForwardLayerPre(Session& s, std::uint32_t il,
                                std::uint32_t n, std::uint32_t start_pos,
                                hipStream_t stream) {
@@ -1620,9 +1689,13 @@ void Session::ForwardLayerPre(Session& s, std::uint32_t il,
     const bool allow_fused_decode =
         !debug_embed && getenv("GEMMA4_NO_FUSED_DECODE") == nullptr;
 
-    kernels::RmsNorm(s.impl_->hidden,
-                     static_cast<const float*>(l.attn_norm.device),
-                     s.impl_->normed, n, hidden, c.rms_eps, stream);
+    if (s.impl_->norm_ready == static_cast<int>(il)) {
+      s.impl_->norm_ready = -1;  // produced by the previous layer's final RmsNormAddNorm
+    } else {
+      kernels::RmsNorm(s.impl_->hidden,
+                       static_cast<const float*>(l.attn_norm.device),
+                       s.impl_->normed, n, hidden, c.rms_eps, stream);
+    }
 
     const bool use_fused_qkv_gemv =
         allow_fused_decode && n <= 8 &&
@@ -1748,7 +1821,7 @@ void Session::ForwardLayerPre(Session& s, std::uint32_t il,
           // The fused writer is disabled for blocked layers, so this is the
           // only writer: the final (post-norm, post-RoPE) rows quantize
           // straight into the shared blocked layout (per-32-block scale).
-          // Keys and values may use different grids (GUFO_KV_Q4/V4).
+          // Keys and values may use different grids (MBUFO_KV_Q4/V4).
           const std::uint32_t k_block_bytes = KvKey4Bit(s.model_->options_) ? 18 : 34;
           const std::uint32_t v_block_bytes = KvValue4Bit(s.model_->options_) ? 18 : 34;
           kernels::StoreBlockedKv(s.impl_->kbuf, s.impl_->vbuf,
@@ -1805,9 +1878,10 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il,
   const std::uint32_t kv_layer = c.KvProducingLayer(il);
   const std::uint32_t head_dim = c.HeadDim(il);
   const std::uint32_t kv_heads = c.KvHeads(kv_layer);
+  // A layer reads the blocked cache when its KV-producing layer (itself, or the earlier layer a shared-KV layer reuses) is blocked.
   const bool use_blocked =
-      s.model_->options_.kv_cache_quant == "q8" && l.has_kv && kv_heads > 0 &&
-      head_dim == 256 && kv_layer == il;
+      s.model_->options_.kv_cache_quant == "q8" && kv_heads > 0 &&
+      head_dim == 256 && s.impl_->kv_bk[kv_layer] != nullptr;
     if (use_blocked) {
       // Routed three-way via the shared attention dispatcher (Phase A):
       // long q8 prefill runs the shared blocked WMMA kernel (SWA shift
@@ -1816,13 +1890,13 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il,
       // (same shift/rebase as the scalar path below, score scale 1.0);
       // short q8 prompts stay on the scalar direct read; f16 keeps the
       // existing Attention path (WMMA inside) untouched. Each side carries
-      // its own block width (GUFO_KV_Q4/V4 select the 18-byte 4-bit grids).
+      // its own block width (MBUFO_KV_Q4/V4 select the 18-byte 4-bit grids).
       // Thresholds live in the dispatcher policy: the measured prefill
       // default stays kBlockedWmmaMinTokens, env-overridable via
-      // GUFO_ATTN_*. Single-session verify through this path keeps today's
+      // MBUFO_ATTN_*. Single-session verify through this path keeps today's
       // behavior by construction (n <= 8 never reaches WMMA; Split-K and
       // scalar are the same kernels as before).
-      namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+      namespace attn_disp = ::mbufo::core::compute::attention_dispatcher;
       attn_disp::AttentionDispatchPolicy attn_policy;
       attn_policy.wmma_min_tokens = kBlockedWmmaMinTokens;
       attn_policy.ApplyEnvOverrides();
@@ -1846,12 +1920,20 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il,
       const std::uint32_t v_block_bytes = KvValue4Bit(s.model_->options_) ? 18 : 34;
       const bool ran_blocked_wmma =
           attn_route == attn_disp::AttentionRoute::kBlockedWmma &&
-          ::gufo::core::compute::blocked_wmma::AttentionBlockedWmma<
-              ::gufo::core::compute::blocked_wmma::KvCodecQ8, 256>(
+          ::mbufo::core::compute::blocked_wmma::AttentionBlockedWmma<
+              ::mbufo::core::compute::blocked_wmma::KvCodecQ8, 256>(
               s.impl_->qbuf, s.impl_->kv_bk[kv_layer], s.impl_->kv_bv[kv_layer],
               s.impl_->attn_out, n, start_pos, c.num_heads, kv_heads, window,
               stream, 1.0F, k_block_bytes, v_block_bytes);
-      if (!ran_blocked_wmma) {
+      // Wide-head prefill over the blocked Q8 sliding-window cache (E-models; any head count the 16-head WMMA kernel above
+      // does not serve): the core large-head flash kernel, exact window, no pointer shift. GEMMA4_NO_LARGE_WMMA=1 keeps the scalar read.
+      const bool ran_large_q8 =
+          !ran_blocked_wmma && n > 8 && k_block_bytes == 34 && v_block_bytes == 34 &&
+          getenv("GEMMA4_NO_LARGE_WMMA") == nullptr &&
+          ::mbufo::core::compute::flash_wmma_large::FlashWmmaLargePrefillQ8(
+              s.impl_->qbuf, s.impl_->kv_bk[kv_layer], s.impl_->kv_bv[kv_layer], s.impl_->attn_out, n, start_pos,
+              c.num_heads, kv_heads, head_dim, window, 1.0F, stream);
+      if (!ran_blocked_wmma && !ran_large_q8) {
         const std::uint8_t* k2 = nullptr;
         const std::uint8_t* v2 = nullptr;
         const std::uint32_t* sp = nullptr;
@@ -1869,20 +1951,32 @@ void Session::ForwardLayerAttn(Session& s, std::uint32_t il,
         const attn_disp::AttentionRoute attn_route2 =
             attn_disp::RouteAttention(attn_in, attn_policy);
         bool ran_blocked_splitk = false;
+        // Narrow decode / verify rows (n <= 8) over Q8 blocks: the core row-chunk Split-K (also serves short windows; a row's
+        // split depends only on its own length). GEMMA4_NO_ROWCHUNK_ATTN=1 keeps the length-sized Split-K / scalar read.
+        if (n <= 8 && k_block_bytes == 34 && v_block_bytes == 34 && head_dim == 256 &&
+            getenv("GEMMA4_NO_ROWCHUNK_ATTN") == nullptr) {
+          const std::uint32_t rc_base = (sp == s.impl_->d_pos_win) ? shifted : start_pos;
+          ran_blocked_splitk =
+              ::mbufo::core::compute::blocked_splitk::AttentionBlockedSplitKRowChunk<
+                  ::mbufo::core::compute::blocked_splitk::KvCodecQ8, 256>(
+                  s.impl_->qbuf, k2, v2, s.impl_->attn_out, n, sp, rc_base + n, c.num_heads, kv_heads, head_dim,
+                  stream, 1.0F, k_block_bytes, v_block_bytes, s.impl_->splitk_partials,
+                  ::mbufo::core::compute::blocked_splitk::AttentionBlockedSplitKScratchBytes(), 128);
+        }
         if (getenv("GEMMA4_DUMP_ROUTE") != nullptr && il < 8)
           std::fprintf(stderr, "[route] il=%u n=%u route2=%d blocked=%d\n", il, n,
                        (int)attn_route2, (int)use_blocked);
-        if (attn_route2 == attn_disp::AttentionRoute::kBlockedSplitK &&
+        if (!ran_blocked_splitk && attn_route2 == attn_disp::AttentionRoute::kBlockedSplitK &&
             getenv("GEMMA4_NO_BLOCKED_SPLITK") == nullptr) {
           const std::uint32_t base =
               (sp == s.impl_->d_pos_win) ? shifted : start_pos;
           ran_blocked_splitk =
-              ::gufo::core::compute::blocked_splitk::AttentionBlockedSplitK<
-                  ::gufo::core::compute::blocked_splitk::KvCodecQ8, 256>(
+              ::mbufo::core::compute::blocked_splitk::AttentionBlockedSplitK<
+                  ::mbufo::core::compute::blocked_splitk::KvCodecQ8, 256>(
                   s.impl_->qbuf, k2, v2, s.impl_->attn_out, n, sp, base + n,
                   c.num_heads, kv_heads, head_dim, stream, 1.0F,
                   k_block_bytes, v_block_bytes, s.impl_->splitk_partials,
-                  ::gufo::core::compute::blocked_splitk::
+                  ::mbufo::core::compute::blocked_splitk::
                       AttentionBlockedSplitKScratchBytes());
         }
         if (!ran_blocked_splitk) {
@@ -1969,15 +2063,23 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
       std::fprintf(stderr, "[gemma4] L%u wo_out sync sum=%f maxabs=%f\n", il,
                    sum, mx);
     }
-    kernels::RmsNormAdd(s.impl_->mlp_out,
-                        static_cast<const float*>(l.attn_post_norm.device),
-                        s.impl_->hidden, n, hidden, c.rms_eps, 1.0F, stream);
-
     // FFN block (llama.cpp gemma4.cpp parity).
+    const bool fuse_ffn_norm = !l.IsMoe() && getenv("GEMMA4_NO_FUSE_NORM") == nullptr;
+    if (fuse_ffn_norm) {
+      kernels::RmsNormAddNorm(s.impl_->mlp_out, static_cast<const float*>(l.attn_post_norm.device), s.impl_->hidden,
+                              static_cast<const float*>(l.ffn_norm.device), s.impl_->normed, n, hidden, c.rms_eps, 1.0F,
+                              stream);
+    } else {
+      kernels::RmsNormAdd(s.impl_->mlp_out,
+                          static_cast<const float*>(l.attn_post_norm.device),
+                          s.impl_->hidden, n, hidden, c.rms_eps, 1.0F, stream);
+    }
     if (!l.IsMoe()) {
-      kernels::RmsNorm(s.impl_->hidden,
-                       static_cast<const float*>(l.ffn_norm.device),
-                       s.impl_->normed, n, hidden, c.rms_eps, stream);
+      const std::uint32_t ff = c.FfDim(il);
+      if (!fuse_ffn_norm)
+        kernels::RmsNorm(s.impl_->hidden,
+                         static_cast<const float*>(l.ffn_norm.device),
+                         s.impl_->normed, n, hidden, c.rms_eps, stream);
       if (n <= 8 && l.ffn_gate.type == l.ffn_up.type &&
           l.ffn_gate.f16 == nullptr && l.ffn_up.f16 == nullptr &&
           getenv("GEMMA4_NO_FUSED_GEMV") == nullptr &&
@@ -1989,25 +2091,64 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
         core::compute::gemm::GemvGateUpSwiglu(g_dev, u_dev,
                                   static_cast<int>(l.ffn_gate.type),
                                   l.ffn_gate.RowBytes(), hidden, s.impl_->normed,
-                                  s.impl_->mlp_out, n, c.shared_ff, stream);
+                                  s.impl_->mlp_out, n, ff, stream);
       } else {
-        F32Gemm(l.ffn_gate, s.impl_->normed, s.impl_->mlp_out, n, c.shared_ff,
+        F32Gemm(l.ffn_gate, s.impl_->normed, s.impl_->mlp_out, n, ff,
                 hidden, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
                 s.impl_->x_q8_slab, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap, s.impl_->preq_scratch, s.impl_->preq_bytes);
-        F32Gemm(l.ffn_up, s.impl_->normed, s.impl_->expert_out, n, c.shared_ff,
+        F32Gemm(l.ffn_up, s.impl_->normed, s.impl_->expert_out, n, ff,
                 hidden, stream, s.impl_->w_slab2, s.impl_->x_slab, 0.0F,
-                s.impl_->x_q8_slab, (n > 8u && c.shared_ff >= 256u), s.impl_->gemv_stage, s.impl_->gemv_stage_cap, s.impl_->preq_scratch, s.impl_->preq_bytes);
+                s.impl_->x_q8_slab, (n > 8u && ff >= 256u), s.impl_->gemv_stage, s.impl_->gemv_stage_cap, s.impl_->preq_scratch, s.impl_->preq_bytes);
         kernels::GeluTanhSwiglu(s.impl_->mlp_out, s.impl_->expert_out,
-                                static_cast<std::size_t>(n) * c.shared_ff,
+                                static_cast<std::size_t>(n) * ff,
                                 stream);
       }
       F32Gemm(l.ffn_down, s.impl_->mlp_out, s.impl_->moe_out, n, hidden,
-              c.shared_ff, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
+              ff, stream, s.impl_->w_slab, s.impl_->x_slab, 0.0F,
               s.impl_->x_q8_slab, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap, s.impl_->preq_scratch, s.impl_->preq_bytes);
+      // With per-layer embeddings (Gemma 4 E2B/E4B) the layer output scalar applies AFTER the per-layer block.
+      const bool ple = c.ple_dim > 0 && !l.ple_proj.empty();
+      // The residual update that ends the layer (no PLE block) feeds the next layer's attention RmsNorm directly.
+      const bool fuse_next = !ple && getenv("GEMMA4_NO_FUSE_NORM") == nullptr && il + 1 < c.num_layers &&
+                             s.model_->weights_->layers[il + 1].attn_norm.device != nullptr &&
+                             getenv("GEMMA4_DEBUG_EMBED") == nullptr;
+      if (fuse_next) {
+        kernels::RmsNormAddNorm(s.impl_->moe_out, static_cast<const float*>(l.ffn_post_norm.device), s.impl_->hidden,
+                                static_cast<const float*>(s.model_->weights_->layers[il + 1].attn_norm.device),
+                                s.impl_->normed, n, hidden, c.rms_eps, l.has_out_scale ? l.out_scale_val : 1.0F,
+                                stream);
+        s.impl_->norm_ready = static_cast<int>(il + 1);
+      } else {
       kernels::RmsNormAdd(
           s.impl_->moe_out, static_cast<const float*>(l.ffn_post_norm.device),
           s.impl_->hidden, n, hidden, c.rms_eps,
-          l.has_out_scale ? l.out_scale_val : 1.0F, stream);
+          (!ple && l.has_out_scale) ? l.out_scale_val : 1.0F, stream);
+      }
+      if (ple) {
+        // h += rms_norm(proj(gelu(inp_gate(h)) * ple_input[layer])), then h *= layer_output_scale (llama.cpp gemma4.cpp).
+        const std::uint32_t P = c.ple_dim;
+        const std::size_t ple_total = static_cast<std::size_t>(P) * c.num_layers;
+        F32Gemm(l.ple_inp_gate, s.impl_->hidden, s.impl_->expert_out, n, P, hidden, stream, s.impl_->w_slab,
+                s.impl_->x_slab, 0.0F, s.impl_->x_q8_slab, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap,
+                s.impl_->preq_scratch, s.impl_->preq_bytes);
+        kernels::GeluMulStrided(s.impl_->expert_out, s.impl_->ple_in, s.impl_->mlp_out, n, P, ple_total,
+                                static_cast<std::size_t>(il) * P, stream);
+        F32Gemm(l.ple_proj, s.impl_->mlp_out, s.impl_->moe_out, n, hidden, P, stream, s.impl_->w_slab,
+                s.impl_->x_slab, 0.0F, s.impl_->x_q8_slab, false, s.impl_->gemv_stage, s.impl_->gemv_stage_cap,
+                s.impl_->preq_scratch, s.impl_->preq_bytes);
+        if (getenv("GEMMA4_NO_FUSE_NORM") == nullptr && il + 1 < c.num_layers &&
+            s.model_->weights_->layers[il + 1].attn_norm.device != nullptr &&
+            getenv("GEMMA4_DEBUG_EMBED") == nullptr) {
+          kernels::RmsNormAddNorm(s.impl_->moe_out, static_cast<const float*>(l.ple_post_norm.device), s.impl_->hidden,
+                                  static_cast<const float*>(s.model_->weights_->layers[il + 1].attn_norm.device),
+                                  s.impl_->normed, n, hidden, c.rms_eps, l.has_out_scale ? l.out_scale_val : 1.0F,
+                                  stream);
+          s.impl_->norm_ready = static_cast<int>(il + 1);
+        } else {
+          kernels::RmsNormAdd(s.impl_->moe_out, static_cast<const float*>(l.ple_post_norm.device), s.impl_->hidden, n,
+                              hidden, c.rms_eps, l.has_out_scale ? l.out_scale_val : 1.0F, stream);
+        }
+      }
     } else {
       const bool decode_vec_moe =
           (n <= 8 && !l.gate_up_exps.empty() && !l.down_exps.empty() &&
@@ -2130,13 +2271,34 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
             static_cast<std::uint64_t>(hidden) * l.down_exps.RowBytes();
         const float* moe_x =
             fused_moe_norms ? s.impl_->expert_down : s.impl_->normed;
-        core::compute::gemm::MoeVecGateUpSwiglu(gu_dev, l.gate_up_exps.RowBytes(),
-                                    gu_stride, moe_x, s.impl_->expert_ids,
-                                    s.impl_->moe_vec_gate, slots, used, ff,
-                                    hidden, stream);
-        core::compute::gemm::GemvQSlot(dn_dev, l.down_exps.RowBytes(), dn_stride,
-                           s.impl_->moe_vec_gate, s.impl_->expert_ids,
-                           s.impl_->moe_vec_down, slots, hidden, ff, stream);
+        // Single-token decode goes through the shared lane-geometry MoE framework (bit-identical to the
+        // kernels below); verification batches (slots > used) keep the grouped unique-expert path.
+        static const bool no_framework = getenv("GEMMA4_NO_MOE_FRAMEWORK") != nullptr;
+        const bool fw_gate =
+            !no_framework && slots == used &&
+            core::compute::gemm::LaunchMoeWaveGateUp(
+                gu_dev,
+                static_cast<core::compute::gemm::WeightType>(static_cast<std::uint32_t>(l.gate_up_exps.type)),
+                l.gate_up_exps.RowBytes(), gu_stride, moe_x, s.impl_->expert_ids, s.impl_->moe_vec_gate, slots,
+                used, ff, hidden, core::compute::gemm::MoeGateAct::kGeluTanhMul, stream);
+        if (!fw_gate) {
+          core::compute::gemm::MoeVecGateUpSwiglu(gu_dev, l.gate_up_exps.RowBytes(),
+                                      gu_stride, moe_x, s.impl_->expert_ids,
+                                      s.impl_->moe_vec_gate, slots, used, ff,
+                                      hidden, stream);
+        }
+        const bool fw_down =
+            fw_gate &&
+            core::compute::gemm::LaunchMoeWaveDown(
+                dn_dev,
+                static_cast<core::compute::gemm::WeightType>(static_cast<std::uint32_t>(l.down_exps.type)),
+                l.down_exps.RowBytes(), dn_stride, s.impl_->moe_vec_gate, s.impl_->expert_ids,
+                s.impl_->moe_vec_down, slots, hidden, ff, stream);
+        if (!fw_down) {
+          core::compute::gemm::GemvQSlot(dn_dev, l.down_exps.RowBytes(), dn_stride,
+                             s.impl_->moe_vec_gate, s.impl_->expert_ids,
+                             s.impl_->moe_vec_down, slots, hidden, ff, stream);
+        }
         if (fused_moe_norms) {
           kernels::MoeCombinePostNormResidual(
               s.impl_->moe_vec_down, s.impl_->expert_ids, s.impl_->expert_weights,
@@ -2241,7 +2403,7 @@ void Session::ForwardLayerPost(Session& s, std::uint32_t il,
           hipMemcpy(&last_bound, s.impl_->routed_bounds + c.num_experts,
                     sizeof(std::int32_t), hipMemcpyDeviceToHost);
           const std::size_t cap =
-              ::gufo::core::compute::gemm::RoutedCompactRows(
+              ::mbufo::core::compute::gemm::RoutedCompactRows(
                   static_cast<std::size_t>(n) * c.experts_used, c.num_experts);
           if (static_cast<std::size_t>(last_bound) < cap) {
             hipMemsetAsync(s.impl_->rows_token + last_bound, 0xFF,
@@ -2597,6 +2759,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   const std::uint32_t n = static_cast<std::uint32_t>(tokens.size());
   hipStream_t stream = 0;
   impl_->has_pending_cur = false;
+  impl_->norm_ready = -1;
   // Device-side position scalar for the shared blocked kernels (blocked
   // writes and direct reads index the cache with *start_pos on-device).
   if (model_->options_.kv_cache_quant == "q8") {
@@ -2613,6 +2776,7 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   kernels::EmbedScale(w.token_embd.device, w.token_embd.type,
                       host_tokens.data(), impl_->hidden, n, hidden,
                       std::sqrt(static_cast<float>(hidden)), stream);
+  BuildPle(*this, n, stream);
 
   // Gemma 4 scales token embeddings by sqrt(hidden) (llama.cpp parity).
   // NOTE: llama.cpp scales token embeddings by sqrt(n_embd); Gemma 4's
@@ -2739,7 +2903,7 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
 bool Session::DecodeBatch(std::span<Session*> sessions,
                           std::span<const std::int32_t> tokens,
                           std::string* error_msg) {
-  namespace mb = ::gufo::core::compute::mixed_batch;
+  namespace mb = ::mbufo::core::compute::mixed_batch;
   const auto fail = [&](const std::string& m) {
     if (error_msg != nullptr && error_msg->empty()) *error_msg = m;
     return false;
@@ -2776,13 +2940,14 @@ bool Session::DecodeBatch(std::span<Session*> sessions,
     kernels::EmbedScale(w.token_embd.device, w.token_embd.type, &tokens[i],
                         s->impl_->hidden, 1, hidden,
                         std::sqrt(static_cast<float>(hidden)), stream);
+    BuildPle(*s, 1, stream);
   }
   // Caller-owned arena (§4.2): one buffer shared by every layer launch,
   // regrown when a wider batch needs more. Opt-out valve (default on):
-  // GUFO_GEMMA4_UNIFIED_BATCH=0 keeps the legacy single-session attention
+  // MBUFO_GEMMA4_UNIFIED_BATCH=0 keeps the legacy single-session attention
   // cores inside the batch envelope.
   const bool use_unified = [] {
-    const char* e = std::getenv("GUFO_GEMMA4_UNIFIED_BATCH");
+    const char* e = std::getenv("MBUFO_GEMMA4_UNIFIED_BATCH");
     return e == nullptr || e[0] != '0';
   };
   const std::size_t need = mb::MixedBatchScratchBytes(sessions.size());
@@ -2802,8 +2967,7 @@ bool Session::DecodeBatch(std::span<Session*> sessions,
     const std::uint32_t kv_heads = c.KvHeads(kv_layer);
     for (Session* s : sessions)
       ForwardLayerPre(*s, il, 1, s->impl_->length, stream);
-    const bool use_blocked = q8 && w.layers[il].has_kv && kv_heads > 0 &&
-                             head_dim == 256 && kv_layer == il;
+    const bool use_blocked = q8 && kv_heads > 0 && head_dim == 256 && sessions[0]->impl_->kv_bk[kv_layer] != nullptr;
     for (std::size_t i = 0; i < sessions.size(); ++i) {
       Session* s = sessions[i];
       const std::uint32_t pos = s->impl_->length;
@@ -2911,7 +3075,7 @@ bool Session::Impl::EnsureMtpBlockedMirror(std::uint32_t swa_layer,
     const std::uint8_t* src_v =
         kv_bv[swa_layer] +
         static_cast<std::size_t>(from) * kv_row_bytes_v[swa_layer];
-    namespace blocked_kv = ::gufo::core::compute::blocked_kv;
+    namespace blocked_kv = ::mbufo::core::compute::blocked_kv;
     if (!blocked_kv::DequantizeKvRows(
             src_k, mtp_blk_k + static_cast<std::size_t>(from) * mtp_blk_dim,
             src_v, mtp_blk_v + static_cast<std::size_t>(from) * mtp_blk_dim,
@@ -3268,4 +3432,4 @@ bool Session::SpeculativeRound(std::int32_t last_token, std::uint32_t n_draft,
 }
 
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4

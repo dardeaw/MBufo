@@ -2,7 +2,7 @@
 
 #include "src/models/qwen/oracles.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 void RopeForward(const CpuModuleContext&, const RopeLayerView& view,
                  std::span<float> q, std::span<float> k,
@@ -25,4 +25,4 @@ void RopeForward(const CpuModuleContext&, const RopeLayerView& view,
   }
 }
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

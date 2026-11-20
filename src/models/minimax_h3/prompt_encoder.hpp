@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_HPP_
-#define GUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_HPP_
+#ifndef MBUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_HPP_
+#define MBUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +9,7 @@
 
 #include "src/models/minimax_h3/runtime.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 inline constexpr std::size_t kPromptEncoderLayers = 50;
 inline constexpr std::size_t kPromptEncoderHiddenSize = 5120;
@@ -62,6 +62,6 @@ struct PromptEmbedding {
 
 [[nodiscard]] std::uint64_t PromptEncoderLiveRegisteredHostBytes() noexcept;
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3
 
-#endif  // GUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_HPP_
+#endif  // MBUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_HPP_

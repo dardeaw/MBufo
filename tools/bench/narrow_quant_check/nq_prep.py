@@ -6,18 +6,20 @@ y_ref = dequant(W) @ x (+ bias, + residual for Q4_K) in float64.
 
   python3 nq_prep.py <outdir>
   hipcc -O2 -std=c++20 --offload-arch=gfx1151 -DENGINE_ENABLE_HIP=1 -I<repo> -x hip nq_test.cpp \\
-      <repo>/src/core/compute/gemm/gemv_narrow_quant.hip -x none <build>/libgufo_core_gemm.a -o nq_test
+      <repo>/src/core/compute/gemm/gemv_narrow_quant.hip -x none <build>/libmbufo_core_gemm.a -o nq_test
   ./nq_test <outdir>     # relative L2 error (< 1%) and cold-cache GB/s vs the Q8_0 narrow kernel
 """
 """Reference data for the narrow Q5_0 / Q4_K GEMV check.
 Uses real gpt-oss-120b layer-0 attention tensors; y_ref = dequant(W) @ x in float64."""
+import os
+MODELS = os.environ.get('MBUFO_MODELS_DIR', 'models')
 import gguf, os, sys
 import numpy as np
 from gguf import quants
 
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
-fn = '/mnt/nvme-data/gufo-models/gpt-oss-120b/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf'
+fn = MODELS + '/gpt-oss-120b/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf'
 r = gguf.GGUFReader(fn)
 rng = np.random.RandomState(11)
 meta = []

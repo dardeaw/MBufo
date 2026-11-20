@@ -11,7 +11,7 @@
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::hip::kernels {
+namespace mbufo::hip::kernels {
 
 // The DFlash-2 draft head is the target LM head, which the Q8 target keeps in
 // BF16 at 2.54 GB -- half of everything the draft graph reads. Drafting is
@@ -969,5 +969,5 @@ void LaunchDFlashSelectorBatch(
       partial_count, selector_rank, selector_top_k);
 }
 
-}  // namespace gufo::hip::kernels
+}  // namespace mbufo::hip::kernels
 #endif  // defined(ENGINE_ENABLE_HIP)

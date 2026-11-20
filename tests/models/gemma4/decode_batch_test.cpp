@@ -10,7 +10,7 @@
 
 #include "src/models/gemma4/engine.hpp"
 
-namespace g4 = gufo::models::gemma4;
+namespace g4 = mbufo::models::gemma4;
 
 namespace {
 

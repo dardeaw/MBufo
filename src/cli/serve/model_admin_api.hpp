@@ -1,8 +1,8 @@
 // Admin API for the multi-model registry: list, load, eject, set-default,
 // catalog discovery, and embedded web dashboard at runtime on the same HTTP
 // port that serves inference.
-#ifndef GUFO_SERVER_MODEL_ADMIN_API_HPP_
-#define GUFO_SERVER_MODEL_ADMIN_API_HPP_
+#ifndef MBUFO_SERVER_MODEL_ADMIN_API_HPP_
+#define MBUFO_SERVER_MODEL_ADMIN_API_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +16,7 @@
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/model_registry.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 /// Parameters parsed from a POST /admin/load body.
 struct AdminLoadRequest {
@@ -79,6 +79,6 @@ private:
   std::uint64_t loading_started_ms_{0};
 };
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_MODEL_ADMIN_API_HPP_
+#endif  // MBUFO_SERVER_MODEL_ADMIN_API_HPP_

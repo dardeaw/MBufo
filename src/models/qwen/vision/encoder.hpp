@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_VISION_ENCODER_HPP_
-#define GUFO_MODELS_QWEN_VISION_ENCODER_HPP_
+#ifndef MBUFO_MODELS_QWEN_VISION_ENCODER_HPP_
+#define MBUFO_MODELS_QWEN_VISION_ENCODER_HPP_
 
 #include <cstdint>
 #include <filesystem>
@@ -11,7 +11,7 @@
 
 #include "src/core/image.hpp"
 
-namespace gufo::models::qwen::vision {
+namespace mbufo::models::qwen::vision {
 
 /// Shared Qwen3.8 ViT operator graph. Each model supplies and validates its
 /// own projector/output width; language-model state never lives here.
@@ -63,5 +63,5 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::models::qwen::vision
+}  // namespace mbufo::models::qwen::vision
 #endif

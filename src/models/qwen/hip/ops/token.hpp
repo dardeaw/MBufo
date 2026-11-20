@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_OPS_TOKEN_HPP_
-#define GUFO_MODELS_QWEN_HIP_OPS_TOKEN_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_OPS_TOKEN_HPP_
+#define MBUFO_MODELS_QWEN_HIP_OPS_TOKEN_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +13,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 inline constexpr std::uint32_t kInvalidSampleToken = UINT32_MAX;
 
@@ -170,8 +170,8 @@ void LaunchBatchedRoPE(float* q, float* k, std::size_t batch_size,
                        hipStream_t stream = nullptr,
                        const models::qwen::vision::DeviceRope* rope = nullptr);
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_OPS_TOKEN_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_OPS_TOKEN_HPP_

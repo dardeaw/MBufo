@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 namespace {
 
 BgeM3TensorRef ExtractTensorRef(const core::GgufReader& reader,
@@ -62,7 +62,7 @@ bool ValidateProjectionTensor(const BgeM3TensorRef& tensor,
   }
   if (!IsStorageType(tensor.type)) {
     const std::size_t block =
-        ::gufo::quant::QuantizedBlockElements(tensor.type);
+        ::mbufo::quant::QuantizedBlockElements(tensor.type);
     if (block == 0 || k_dim == 0 || (k_dim % block) != 0) {
       if (error_msg != nullptr) {
         *error_msg = "Quantized bge-m3 tensor " + std::string(name) +
@@ -127,12 +127,12 @@ bool UpcastTensorToF32(const BgeM3TensorRef& ref, std::vector<float>& out,
     }
     return true;
   }
-  const std::size_t block = ::gufo::quant::QuantizedBlockElements(ref.type);
+  const std::size_t block = ::mbufo::quant::QuantizedBlockElements(ref.type);
   if (block == 0 || row_elems % block != 0) {
     return refuse("bge-m3 upcast: unsupported quant type or row width");
   }
   const std::size_t row_bytes =
-      ::gufo::quant::QuantizedRowBytes(ref.type, row_elems);
+      ::mbufo::quant::QuantizedRowBytes(ref.type, row_elems);
   if (row_bytes == 0) {
     return refuse("bge-m3 upcast: quant row size unknown");
   }
@@ -143,16 +143,16 @@ bool UpcastTensorToF32(const BgeM3TensorRef& ref, std::vector<float>& out,
     float* row_dst = out.data() + r * row_elems;
     switch (ref.type) {
       case core::GgmlType::kQ4_K:
-        ::gufo::quant::DequantizeQ4_K(row_src, row_dst, row_elems);
+        ::mbufo::quant::DequantizeQ4_K(row_src, row_dst, row_elems);
         break;
       case core::GgmlType::kQ5_K:
-        ::gufo::quant::DequantizeQ5_K(row_src, row_dst, row_elems);
+        ::mbufo::quant::DequantizeQ5_K(row_src, row_dst, row_elems);
         break;
       case core::GgmlType::kQ6_K:
-        ::gufo::quant::DequantizeQ6_K(row_src, row_dst, row_elems);
+        ::mbufo::quant::DequantizeQ6_K(row_src, row_dst, row_elems);
         break;
       case core::GgmlType::kQ8_0:
-        ::gufo::quant::DequantizeQ8_0(row_src, row_dst, row_elems);
+        ::mbufo::quant::DequantizeQ8_0(row_src, row_dst, row_elems);
         break;
       default:
         return refuse("bge-m3 upcast: quant type without a decoder");
@@ -275,4 +275,4 @@ std::optional<BgeM3Weights> BgeM3Weights::LoadFromGguf(
   return weights;
 }
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3

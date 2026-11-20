@@ -7,7 +7,7 @@
 #include "src/core/json.hpp"
 #include "src/models/qwen3_tts/text_stream.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 HttpResponse HandleTtsWebSocket(const HttpRequest& request,
                                 TtsService& service) {
@@ -220,4 +220,4 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
   });
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

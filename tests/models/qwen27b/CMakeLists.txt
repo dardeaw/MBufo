@@ -5,7 +5,7 @@ set_tests_properties(qwen27b.tools PROPERTIES LABELS "cpu;qwen27b;tools")
 
 function(add_qwen27b_test target source labels)
   add_executable(${target} ${CMAKE_CURRENT_SOURCE_DIR}/${source})
-  target_link_libraries(${target} PRIVATE gufo_core)
+  target_link_libraries(${target} PRIVATE mbufo_core)
   add_test(NAME ${target} COMMAND ${target})
   set_tests_properties(${target} PROPERTIES LABELS "qwen27b;${labels}"
     SKIP_RETURN_CODE 77)
@@ -20,15 +20,15 @@ add_qwen27b_test(qwen_mtp_reference_test mtp_reference_test.cpp
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen27b_continuation_adapter_test EXCLUDE_FROM_ALL
     continuation_adapter_test.cpp continuation_fault.cpp)
-  target_link_libraries(qwen27b_continuation_adapter_test PRIVATE gufo_core ${CMAKE_DL_LIBS})
+  target_link_libraries(qwen27b_continuation_adapter_test PRIVATE mbufo_core ${CMAKE_DL_LIBS})
   add_qwen27b_test(qwen_sampling_hip_test sampling_test.hip
     "hip;gpu;sampling;correctness")
   target_link_libraries(qwen_sampling_hip_test PRIVATE hip::host)
   add_test(NAME qwen27b.cli-options COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/cli_test.py $<TARGET_FILE:gufo> --scope options)
+    ${CMAKE_CURRENT_SOURCE_DIR}/cli_test.py $<TARGET_FILE:mbufo> --scope options)
   set_tests_properties(qwen27b.cli-options PROPERTIES LABELS "qwen27b;cpu;cli")
   add_test(NAME qwen27b.cli COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/cli_test.py $<TARGET_FILE:gufo>)
+    ${CMAKE_CURRENT_SOURCE_DIR}/cli_test.py $<TARGET_FILE:mbufo>)
   set_tests_properties(qwen27b.cli PROPERTIES
     LABELS "qwen27b;gpu;hip;cli;external-model" SKIP_RETURN_CODE 77)
   add_qwen27b_test(qwen27b_target_test target_test.cpp
@@ -51,8 +51,8 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
-  target_link_libraries(qwen_serving_test_support PUBLIC gufo_logging
-    gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_cache_hip hip::host)
+  target_link_libraries(qwen_serving_test_support PUBLIC mbufo_logging
+    mbufo_core mbufo_deepseek_v4_flash mbufo_qwen38_flash_next mbufo_cache_hip hip::host)
   add_executable(inference_backend_gpu_test serving_test.cpp)
   target_link_libraries(inference_backend_gpu_test PRIVATE qwen_serving_test_support)
   add_executable(qwen_vision_serving_test ../qwen/vision_serving_test.cpp)
@@ -77,12 +77,12 @@ endif()
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen27b_mixed_batch_test EXCLUDE_FROM_ALL
     mixed_batch_test.cpp)
-  target_link_libraries(qwen27b_mixed_batch_test PRIVATE gufo_core hip::host)
+  target_link_libraries(qwen27b_mixed_batch_test PRIVATE mbufo_core hip::host)
 endif()
 
 # 27B registry pilot (explicit-only: needs weights + GPU).
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen27b_registry_pilot_test EXCLUDE_FROM_ALL
     registry_pilot_test.cpp)
-  target_link_libraries(qwen27b_registry_pilot_test PRIVATE gufo_core hip::host)
+  target_link_libraries(qwen27b_registry_pilot_test PRIVATE mbufo_core hip::host)
 endif()

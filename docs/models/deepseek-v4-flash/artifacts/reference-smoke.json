@@ -1,5 +1,5 @@
 {
-  "schema": "gufo-reference-smoke/1",
+  "schema": "mbufo-reference-smoke/1",
   "date_utc": "2026-09-23",
   "purpose": "Bounded build/functionality checks, not throughput or original-model qualification.",
   "reference": {
@@ -43,7 +43,7 @@
     "supports_multiple_sessions": false
   },
   "optional_packages": {
-    "default_gufo_reference_dependency": false,
+    "default_mbufo_reference_dependency": false,
     "default_dev_shell_reference_dependency": false,
     "hosted_pr_check_reference_dependency": false,
     "llama_release_runtime_unchanged": true,

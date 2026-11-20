@@ -1,5 +1,5 @@
-#ifndef GUFO_TOKENIZATION_QWEN_CHAT_TEMPLATE_HPP_
-#define GUFO_TOKENIZATION_QWEN_CHAT_TEMPLATE_HPP_
+#ifndef MBUFO_TOKENIZATION_QWEN_CHAT_TEMPLATE_HPP_
+#define MBUFO_TOKENIZATION_QWEN_CHAT_TEMPLATE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -15,7 +15,7 @@
 #include "src/core/reasoning.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::tokenization {
+namespace mbufo::tokenization {
 
 /// Chat message roles supported by the Qwen chat template.
 enum class ChatRole : std::uint8_t {
@@ -286,6 +286,6 @@ private:
   Profile profile_{Profile::kLegacyChatMl};
 };
 
-}  // namespace gufo::tokenization
+}  // namespace mbufo::tokenization
 
-#endif  // GUFO_TOKENIZATION_QWEN_CHAT_TEMPLATE_HPP_
+#endif  // MBUFO_TOKENIZATION_QWEN_CHAT_TEMPLATE_HPP_

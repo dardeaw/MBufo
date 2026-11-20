@@ -17,7 +17,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/core/utf8.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 std::mutex& TraceMutex() {
@@ -174,4 +174,4 @@ std::string Trace::CurrentRequest() {
   return current_request;
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

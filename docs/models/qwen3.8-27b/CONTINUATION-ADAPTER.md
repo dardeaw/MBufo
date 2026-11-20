@@ -121,7 +121,7 @@ The step probe uses the production release configuration and requires two
 native slots plus 8 GiB of committed checkpoint backing:
 
 ```sh
-nix develop -c cmake --preset release -DGUFO_BUILD_TOOLS=ON
+nix develop -c cmake --preset release -DMBUFO_BUILD_TOOLS=ON
 nix develop -c cmake --build --preset release --target qwen27b_continuation_probe
 nix develop -c build/release/src/models/qwen/qwen27b_continuation_probe "$MODEL" 32768
 nix develop -c build/release/src/models/qwen/qwen27b_continuation_probe "$MODEL" 100000

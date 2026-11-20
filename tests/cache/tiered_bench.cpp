@@ -5,7 +5,7 @@
 
 #include "src/cache/disk_catalog.hpp"
 
-using namespace gufo::cache;
+using namespace mbufo::cache;
 namespace fs = std::filesystem;
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -23,7 +23,7 @@ DiskFileId Id(unsigned tag, std::uint64_t n) {
 struct Directory {
   fs::path path;
   explicit Directory(const fs::path& parent) {
-    auto pattern = (parent / "gufo-tiered-bench-XXXXXX").string();
+    auto pattern = (parent / "mbufo-tiered-bench-XXXXXX").string();
     auto* result = mkdtemp(pattern.data());
     if (!result)
       throw std::runtime_error("cannot create benchmark directory");

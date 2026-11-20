@@ -9,10 +9,10 @@
 
 #include "src/core/json.hpp"
 
-namespace gufo::models::qwen3_tts {
+namespace mbufo::models::qwen3_tts {
 namespace {
 
-namespace json = gufo::json;
+namespace json = mbufo::json;
 
 const json::Value* FindPath(const json::Value& root,
                             std::initializer_list<std::string_view> path) {
@@ -361,4 +361,4 @@ bool LoadSpeechTokenizerConfigFromPath(const std::string& model_dir,
   }
 }
 
-}  // namespace gufo::models::qwen3_tts
+}  // namespace mbufo::models::qwen3_tts

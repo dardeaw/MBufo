@@ -1,6 +1,6 @@
 // bge-m3 HIP-vs-CPU agreement test (external-model gated).
 //
-// Loads the real artifact (GUFO_BGE_MODEL, else exit 77 skip), runs the CPU
+// Loads the real artifact (MBUFO_BGE_MODEL, else exit 77 skip), runs the CPU
 // reference Sync and the HIP HipSync over identical C++-tokenized prompts,
 // and pins: dims, unit norm, determinism, and CPU-vs-device cosine.
 // Short prompts keep the leg fast; one 256-token prompt exercises the
@@ -29,13 +29,13 @@ double Cosine(const std::vector<float>& a, const std::vector<float>& b) {
 }  // namespace
 
 int main() {
-  const char* model_path = std::getenv("GUFO_BGE_MODEL");
+  const char* model_path = std::getenv("MBUFO_BGE_MODEL");
   if (model_path == nullptr || model_path[0] == '\0') {
-    std::cout << "bge_m3_hip_test: skipped (GUFO_BGE_MODEL unset)\n";
+    std::cout << "bge_m3_hip_test: skipped (MBUFO_BGE_MODEL unset)\n";
     return 77;
   }
   std::string error;
-  auto model = gufo::models::bge_m3::ModelRegistry::Instance().Create(
+  auto model = mbufo::models::bge_m3::ModelRegistry::Instance().Create(
       "bge-m3", model_path, &error);
   if (model == nullptr) {
     std::cerr << "bge_m3_hip_test: load failed: " << error << "\n";
@@ -45,11 +45,11 @@ int main() {
   for (int i = 0; i < 64; ++i) long_prompt += " word" + std::to_string(i);
   const std::vector<std::string> prompts = {
       "Hello world", "BGE-M3 embedding test", long_prompt};
-  gufo::models::bge_m3::EngineSession session(model.get());
+  mbufo::models::bge_m3::EngineSession session(model.get());
   const std::size_t dim = model->Config().hidden_size;
   for (const auto& prompt : prompts) {
     auto ids = model->Tokenizer().Encode(
-        prompt, gufo::models::bge_m3::kBgeM3Leg1MaxTokens);
+        prompt, mbufo::models::bge_m3::kBgeM3Leg1MaxTokens);
     if (!ids.has_value()) {
       std::cerr << "bge_m3_hip_test: tokenize failed\n";
       return 1;

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_MODULES_MOE_HPP_
-#define GUFO_MODELS_QWEN_MODULES_MOE_HPP_
+#ifndef MBUFO_MODELS_QWEN_MODULES_MOE_HPP_
+#define MBUFO_MODELS_QWEN_MODULES_MOE_HPP_
 
 #include <cstddef>
 #include <span>
@@ -7,7 +7,7 @@
 #include "src/core/model_config.hpp"
 #include "src/models/qwen/state.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 /// Routed-MoE FFN (qwen35moe), CPU reference backend:
 ///   out = sum_s w_s * (down_e(silu(gate_e(x)) .* up_e(x)))
@@ -20,6 +20,6 @@ void MoeForwardCpu(const core::ModelConfig& config,
                    const QwenLayerWeights& layer, std::span<const float> x,
                    std::span<float> out);
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 
-#endif  // GUFO_MODELS_QWEN_MODULES_MOE_HPP_
+#endif  // MBUFO_MODELS_QWEN_MODULES_MOE_HPP_

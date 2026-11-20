@@ -8,7 +8,7 @@
 #include "src/models/qwen_image_21/model.hpp"
 
 int main(int argc, char** argv) {
-  using namespace gufo::models::qwen_image_21;
+  using namespace mbufo::models::qwen_image_21;
   if (argc < 3) {
     std::cerr << "usage: qwen_image_21_probe MODEL_DIR OUTPUT_DIR [PROMPT] "
                  "[SIZE] [STEPS] [IMAGE|-] [--trajectory] [--seed N]\n";
@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     request.steps = argc > 5 ? std::stoi(argv[5]) : 2;
     request.seed = 42;
     if (argc > 6 && std::string_view(argv[6]) != "-")
-      request.images.push_back(DecodeImage(gufo::core::ReadImageFile(argv[6])));
+      request.images.push_back(DecodeImage(mbufo::core::ReadImageFile(argv[6])));
     bool trajectory = false;
     for (int i = 7; i < argc; ++i) {
       const std::string_view option(argv[i]);

@@ -11,10 +11,10 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 
-using gufo::tokenization::kEndOfText;
-using gufo::tokenization::kImagePad;
-using gufo::tokenization::kImEnd;
-using gufo::tokenization::kImStart;
+using mbufo::tokenization::kEndOfText;
+using mbufo::tokenization::kImagePad;
+using mbufo::tokenization::kImEnd;
+using mbufo::tokenization::kImStart;
 
 namespace {
 
@@ -40,14 +40,14 @@ public:
 
   void AddMetadataString(std::string_view key, std::string_view val) {
     AppendString(key);
-    AppendPod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kString));
+    AppendPod(static_cast<std::uint32_t>(mbufo::core::GgufValueType::kString));
     AppendString(val);
     metadata_count_++;
   }
 
   void AddMetadataUint32(std::string_view key, std::uint32_t val) {
     AppendString(key);
-    AppendPod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kUint32));
+    AppendPod(static_cast<std::uint32_t>(mbufo::core::GgufValueType::kUint32));
     AppendPod(val);
     metadata_count_++;
   }
@@ -55,8 +55,8 @@ public:
   void AddMetadataStringArray(std::string_view key,
                               const std::vector<std::string>& arr) {
     AppendString(key);
-    AppendPod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kArray));
-    AppendPod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kString));
+    AppendPod(static_cast<std::uint32_t>(mbufo::core::GgufValueType::kArray));
+    AppendPod(static_cast<std::uint32_t>(mbufo::core::GgufValueType::kString));
     AppendPod(static_cast<std::uint64_t>(arr.size()));
     for (const auto& s : arr) {
       AppendString(s);
@@ -126,14 +126,14 @@ void TestDirectVocabularyTokenizer() {
       "W o",    "r d", "Wo r", "Wor d", "W orld",
   };
 
-  std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
+  std::unordered_map<std::string, mbufo::tokenization::TokenId> specials = {
       {std::string(kEndOfText), 0},
       {std::string(kImStart), 1},
       {std::string(kImEnd), 2},
   };
 
   std::string err;
-  auto tok = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto tok = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       tokens, merges, specials, &err);
   Expect(tok != nullptr, "CreateFromVocabulary succeeds: " + err);
   Expect(tok->GetVocabSize() == tokens.size(), "Vocab size matches");
@@ -145,7 +145,7 @@ void TestDirectVocabularyTokenizer() {
   Expect(!tok->IsSpecialToken(3), "Token 3 is not special");
 
   // Encode with special tokens
-  gufo::tokenization::TokenizerOptions opts;
+  mbufo::tokenization::TokenizerOptions opts;
   opts.parse_special_tokens = true;
 
   auto encoded = tok->Encode("<|im_start|>Hello World<|im_end|>", opts);
@@ -176,16 +176,16 @@ void TestGgufTokenizerLoading() {
   vocab.emplace_back(kImStart);
   vocab.emplace_back(kImEnd);
   const auto tool_call_start =
-      static_cast<gufo::tokenization::TokenId>(vocab.size());
+      static_cast<mbufo::tokenization::TokenId>(vocab.size());
   vocab.emplace_back("<tool_call>");
   const auto tool_call_end =
-      static_cast<gufo::tokenization::TokenId>(vocab.size());
+      static_cast<mbufo::tokenization::TokenId>(vocab.size());
   vocab.emplace_back("</tool_call>");
   const auto tool_response_start =
-      static_cast<gufo::tokenization::TokenId>(vocab.size());
+      static_cast<mbufo::tokenization::TokenId>(vocab.size());
   vocab.emplace_back("<tool_response>");
   const auto tool_response_end =
-      static_cast<gufo::tokenization::TokenId>(vocab.size());
+      static_cast<mbufo::tokenization::TokenId>(vocab.size());
   vocab.emplace_back("</tool_response>");
 
   builder.AddMetadataStringArray("tokenizer.ggml.tokens", vocab);
@@ -195,10 +195,10 @@ void TestGgufTokenizerLoading() {
 
   std::string err;
   auto reader =
-      gufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &err);
+      mbufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &err);
   Expect(reader != nullptr, "Reader open succeeds: " + err);
 
-  auto tok = gufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &err);
+  auto tok = mbufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &err);
   Expect(tok != nullptr, "Tokenizer created from GGUF: " + err);
   Expect(tok->GetEosTokenId() == 151645U, "EOS token ID matches");
   Expect(tok->GetPadTokenId() == 151643U, "PAD token ID matches");
@@ -221,7 +221,7 @@ void TestGgufTokenizerLoading() {
   // Independent short encodes provide exact token IDs at known regex
   // boundaries. Exercise repetition, memo saturation and unbounded pieces.
   std::string paragraph;
-  std::vector<gufo::tokenization::TokenId> expected;
+  std::vector<mbufo::tokenization::TokenId> expected;
   for (std::size_t i = 0; i < 768; ++i) {
     const auto line =
         (i % 3 == 0 ? std::string("the the e\u0301")
@@ -244,19 +244,19 @@ void TestStopTokensFollowVocabulary() {
   const std::vector<std::string> vocab{
       "text", std::string(kEndOfText), std::string(kImStart),
       std::string(kImEnd), std::string(kImagePad)};
-  const std::unordered_map<std::string, gufo::tokenization::TokenId> specials{
+  const std::unordered_map<std::string, mbufo::tokenization::TokenId> specials{
       {std::string(kEndOfText), 1},
       {std::string(kImStart), 2},
       {std::string(kImEnd), 3},
       {std::string(kImagePad), 4}};
-  auto direct = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto direct = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       vocab, {}, specials);
   Expect(direct && direct->IsStopToken(1) && direct->IsStopToken(3),
          "direct vocabulary derives both generation terminators");
   Expect(!direct->IsStopToken(0) && !direct->IsStopToken(4) &&
              !direct->IsStopToken(151643) && !direct->IsStopToken(248044) &&
              !direct->IsStopToken(248046) &&
-             !direct->IsStopToken(gufo::tokenization::kInvalidTokenId),
+             !direct->IsStopToken(mbufo::tokenization::kInvalidTokenId),
          "ordinary, image and foreign-vocabulary IDs do not end generation");
 
   GgufTokenizerBuilder builder;
@@ -264,9 +264,9 @@ void TestStopTokensFollowVocabulary() {
   builder.AddMetadataUint32("tokenizer.ggml.eos_token_id", 3);
   builder.AddMetadataUint32("tokenizer.ggml.padding_token_id", 4);
   auto bytes = builder.Build();
-  auto reader = gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size());
+  auto reader = mbufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size());
   Expect(reader != nullptr, "stop-token GGUF opens");
-  auto gguf = gufo::tokenization::QwenTokenizer::CreateFromGguf(*reader);
+  auto gguf = mbufo::tokenization::QwenTokenizer::CreateFromGguf(*reader);
   Expect(gguf && gguf->IsStopToken(1) && gguf->IsStopToken(3) &&
              !gguf->IsStopToken(gguf->GetPadTokenId()),
          "GGUF padding is not a generation terminator");
@@ -284,13 +284,13 @@ void TestUnicodeContractionBoundary() {
   auto binary = builder.Build();
   std::string error;
   auto reader =
-      gufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &error);
+      mbufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &error);
   Expect(reader != nullptr, error);
   auto tokenizer =
-      gufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &error);
+      mbufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &error);
   Expect(tokenizer != nullptr, error);
   Expect(tokenizer->Encode("'ſa") ==
-             std::vector<gufo::tokenization::TokenId>({0, 4, 3}),
+             std::vector<mbufo::tokenization::TokenId>({0, 4, 3}),
          "Unicode contraction prevents a merge into the following word");
 }
 
@@ -298,11 +298,11 @@ void TestEmptyAndSpecialEdgeCases() {
   std::vector<std::string> tokens = {std::string(kEndOfText), "a", "b", "c"};
   std::vector<std::string> merges = {};
   std::string err;
-  auto tok = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto tok = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       tokens, merges, {{std::string(kEndOfText), 0}}, &err);
   Expect(tok != nullptr, "Tokenizer initialized");
 
-  gufo::tokenization::TokenizerOptions opts;
+  mbufo::tokenization::TokenizerOptions opts;
   opts.add_bos = false;
   opts.add_eos = false;
   auto empty_encoded = tok->Encode("", opts);
@@ -324,7 +324,7 @@ void TestCorpusConformance() {
   vocab.emplace_back("<think>");
   vocab.emplace_back("</think>");
 
-  std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
+  std::unordered_map<std::string, mbufo::tokenization::TokenId> specials = {
       {std::string(kImStart), 256},
       {std::string(kImEnd), 257},
       {std::string(kEndOfText), 258},
@@ -333,7 +333,7 @@ void TestCorpusConformance() {
   };
 
   std::string err;
-  auto tok = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto tok = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       vocab, {}, specials, &err);
   Expect(tok != nullptr, "Tokenizer initialized for corpus conformance");
 
@@ -351,7 +351,7 @@ void TestCorpusConformance() {
       "3.1415926535 0xDEADBEEF 128*1024=131072",
   };
 
-  gufo::tokenization::TokenizerOptions opts;
+  mbufo::tokenization::TokenizerOptions opts;
   opts.parse_special_tokens = true;
 
   for (const auto& text : test_strings) {

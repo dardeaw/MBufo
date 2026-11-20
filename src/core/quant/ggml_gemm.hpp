@@ -1,12 +1,12 @@
-#ifndef GUFO_CORE_QUANT_GGML_GEMM_HPP_
-#define GUFO_CORE_QUANT_GGML_GEMM_HPP_
+#ifndef MBUFO_CORE_QUANT_GGML_GEMM_HPP_
+#define MBUFO_CORE_QUANT_GGML_GEMM_HPP_
 
 #include <cstddef>
 #include <span>
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::quant {
+namespace mbufo::quant {
 
 // Unified dequant/dot dispatch that routes by GgmlType. This is the single
 // dispatch point for the quant_gemm module; it lives beside (Parallel Change)
@@ -30,6 +30,6 @@ void Dequantize(core::GgmlType type, const void* src, float* dst,
 float Dot(core::GgmlType type, const void* row, std::span<const float> x,
           std::size_t k);
 
-}  // namespace gufo::quant
+}  // namespace mbufo::quant
 
-#endif  // GUFO_CORE_QUANT_GGML_GEMM_HPP_
+#endif  // MBUFO_CORE_QUANT_GGML_GEMM_HPP_

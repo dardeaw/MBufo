@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GEMMA4_DRAFT_BACKEND_HPP_
-#define GUFO_MODELS_GEMMA4_DRAFT_BACKEND_HPP_
+#ifndef MBUFO_MODELS_GEMMA4_DRAFT_BACKEND_HPP_
+#define MBUFO_MODELS_GEMMA4_DRAFT_BACKEND_HPP_
 
 // Gemma4 MTP draft backend: session-bound IDraftBackend adapter.
 //
@@ -44,7 +44,7 @@
 
 #include "src/core/speculative/draft_backend.hpp"
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 
 class Session;
 
@@ -135,6 +135,6 @@ class GemmaMtpDraftBackend final : public speculative::IDraftBackend {
   std::uint64_t accepted_{0};
 };
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4
 
-#endif  // GUFO_MODELS_GEMMA4_DRAFT_BACKEND_HPP_
+#endif  // MBUFO_MODELS_GEMMA4_DRAFT_BACKEND_HPP_

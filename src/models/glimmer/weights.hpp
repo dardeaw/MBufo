@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GLIMMER_WEIGHTS_HPP_
-#define GUFO_MODELS_GLIMMER_WEIGHTS_HPP_
+#ifndef MBUFO_MODELS_GLIMMER_WEIGHTS_HPP_
+#define MBUFO_MODELS_GLIMMER_WEIGHTS_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -9,7 +9,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/glimmer/config.hpp"
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 
 /// Non-owning view of one GGUF tensor (same convention as the llama runtime:
 /// cols = ne[0] contiguous reduction, rows = ne[1]).
@@ -54,6 +54,6 @@ struct ModelWeights {
       const core::GgufReader& reader, std::string* error_msg = nullptr);
 };
 
-}  // namespace gufo::models::glimmer
+}  // namespace mbufo::models::glimmer
 
-#endif  // GUFO_MODELS_GLIMMER_WEIGHTS_HPP_
+#endif  // MBUFO_MODELS_GLIMMER_WEIGHTS_HPP_

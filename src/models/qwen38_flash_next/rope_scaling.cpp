@@ -9,7 +9,7 @@
 #include <sstream>
 #include <utility>
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 bool ValidateRopeScaling(const RopeScaling& scaling,
                          std::uint32_t native_context, std::string* error) {
@@ -148,4 +148,4 @@ std::string RopePositionPolicy(const RopeScaling& scaling) {
   return out.str();
 }
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next

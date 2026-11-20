@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_IMAGE_API_HPP_
-#define GUFO_SERVER_IMAGE_API_HPP_
+#ifndef MBUFO_SERVER_IMAGE_API_HPP_
+#define MBUFO_SERVER_IMAGE_API_HPP_
 
 #include <filesystem>
 #include <functional>
@@ -9,7 +9,7 @@
 
 #include "src/models/qwen_image_21/model.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 struct HttpRequest;
 struct HttpResponse;
@@ -39,5 +39,5 @@ private:
 HttpResponse HandleImageApiRequest(const HttpRequest& request,
                                    ImageService& service);
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 #endif

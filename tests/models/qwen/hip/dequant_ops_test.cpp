@@ -34,7 +34,7 @@ void TestDequantizeQ8KToBf16Equivalence() {
   constexpr std::size_t num_blocks = 4;
   constexpr std::size_t n_elems = num_blocks * QK;
 
-  using Q8KBlockTest = gufo::quant::block_q8_K;
+  using Q8KBlockTest = mbufo::quant::block_q8_K;
   static_assert(sizeof(Q8KBlockTest) == 292, "Q8_K block must be 292 bytes");
 
   // Deterministic pseudo-random weights (same values every run).
@@ -61,7 +61,7 @@ void TestDequantizeQ8KToBf16Equivalence() {
 
   // CPU reference oracle (full-precision float dequant).
   std::vector<float> h_ref(n_elems);
-  gufo::quant::DequantizeQ8_K(h_w.data(), h_ref.data(), n_elems);
+  mbufo::quant::DequantizeQ8_K(h_w.data(), h_ref.data(), n_elems);
 
   void* d_w = nullptr;
   hip_bfloat16* d_out = nullptr;
@@ -71,7 +71,7 @@ void TestDequantizeQ8KToBf16Equivalence() {
   HIP_CHECK(hipMemcpy(d_w, h_w.data(), num_blocks * sizeof(Q8KBlockTest),
                       hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchDequantizeQ8KToBf16(d_w, d_out, n_elems, nullptr);
+  mbufo::hip::LaunchDequantizeQ8KToBf16(d_w, d_out, n_elems, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<hip_bfloat16> h_gpu(n_elems);
@@ -82,7 +82,7 @@ void TestDequantizeQ8KToBf16Equivalence() {
   for (std::size_t i = 0; i < n_elems; ++i) {
     std::uint16_t bits = 0;
     std::memcpy(&bits, &h_gpu[i], sizeof(bits));
-    const float gpu = gufo::test::Bf16BitsToFloat(bits);
+    const float gpu = mbufo::test::Bf16BitsToFloat(bits);
     const float ref = h_ref[i];
     if (!std::isfinite(gpu)) {
       std::cerr << "Q8K dequant produced non-finite output at " << i << ": "
@@ -111,7 +111,7 @@ static void CheckDequantToBf16(const char* name, const std::vector<float>& ref,
   for (std::size_t i = 0; i < ref.size(); ++i) {
     std::uint16_t bits = 0;
     std::memcpy(&bits, &gpu[i], sizeof(bits));
-    const float g = gufo::test::Bf16BitsToFloat(bits);
+    const float g = mbufo::test::Bf16BitsToFloat(bits);
     const float r = ref[i];
     if (!std::isfinite(g)) {
       std::cerr << name << " dequant produced non-finite output at " << i
@@ -157,7 +157,7 @@ void TestDequantizeToBf16Equivalence() {
   constexpr std::size_t Q80_QK = 32;
   constexpr std::size_t Q80_BLOCKS = 2;
   constexpr std::size_t Q80_ELEMS = Q80_BLOCKS * Q80_QK;
-  using Q8_0BlockTest = gufo::quant::block_q8_0;
+  using Q8_0BlockTest = mbufo::quant::block_q8_0;
   static_assert(sizeof(Q8_0BlockTest) == 34, "Q8_0 block must be 34 bytes");
 
   std::vector<Q8_0BlockTest> h_q80(Q80_BLOCKS);
@@ -168,7 +168,7 @@ void TestDequantizeToBf16Equivalence() {
     }
   }
   std::vector<float> h_ref_q80(Q80_ELEMS);
-  gufo::quant::DequantizeQ8_0(h_q80.data(), h_ref_q80.data(), Q80_ELEMS);
+  mbufo::quant::DequantizeQ8_0(h_q80.data(), h_ref_q80.data(), Q80_ELEMS);
 
   void* d_w = nullptr;
   hip_bfloat16* d_out = nullptr;
@@ -177,7 +177,7 @@ void TestDequantizeToBf16Equivalence() {
                       Q80_ELEMS * sizeof(hip_bfloat16)));
   HIP_CHECK(hipMemcpy(d_w, h_q80.data(), Q80_BLOCKS * sizeof(Q8_0BlockTest),
                       hipMemcpyHostToDevice));
-  gufo::hip::LaunchDequantizeToBf16(gufo::core::GgmlType::kQ8_0, d_w, d_out,
+  mbufo::hip::LaunchDequantizeToBf16(mbufo::core::GgmlType::kQ8_0, d_w, d_out,
                                     Q80_ELEMS, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
   std::vector<hip_bfloat16> h_gpu_q80(Q80_ELEMS);
@@ -190,7 +190,7 @@ void TestDequantizeToBf16Equivalence() {
   // ---- Q5_K: 1 block (256 elems), d=0.25 dmin=0.125, high-bit scales,
   // qh=0xFF, qs nibbles across the four 64-element groups.
   constexpr std::size_t QK = 256;
-  using Q5KBlockTest = gufo::quant::block_q5_K;
+  using Q5KBlockTest = mbufo::quant::block_q5_K;
   static_assert(sizeof(Q5KBlockTest) == 176, "Q5_K block must be 176 bytes");
 
   Q5KBlockTest q5k{};
@@ -205,13 +205,13 @@ void TestDequantizeToBf16Equivalence() {
     std::memset(q5k.qs + (g * 32), nibbles[g], 32);
   }
   std::vector<float> h_ref_q5k(QK);
-  gufo::quant::DequantizeQ5_K(&q5k, h_ref_q5k.data(), QK);
+  mbufo::quant::DequantizeQ5_K(&q5k, h_ref_q5k.data(), QK);
 
   HIP_CHECK(hipMalloc(&d_w, sizeof(Q5KBlockTest)));
   HIP_CHECK(
       hipMalloc(reinterpret_cast<void**>(&d_out), QK * sizeof(hip_bfloat16)));
   HIP_CHECK(hipMemcpy(d_w, &q5k, sizeof(Q5KBlockTest), hipMemcpyHostToDevice));
-  gufo::hip::LaunchDequantizeToBf16(gufo::core::GgmlType::kQ5_K, d_w, d_out, QK,
+  mbufo::hip::LaunchDequantizeToBf16(mbufo::core::GgmlType::kQ5_K, d_w, d_out, QK,
                                     nullptr);
   HIP_CHECK(hipDeviceSynchronize());
   std::vector<hip_bfloat16> h_gpu_q5k(QK);
@@ -222,7 +222,7 @@ void TestDequantizeToBf16Equivalence() {
   HIP_CHECK(hipFree(d_out));
 
   // ---- Q6_K: 1 block, d=0.3, ql varies, qh=0xFF, scales [7..4] (positive).
-  using Q6KBlockTest = gufo::quant::block_q6_K;
+  using Q6KBlockTest = mbufo::quant::block_q6_K;
   static_assert(sizeof(Q6KBlockTest) == 210, "Q6_K block must be 210 bytes");
 
   Q6KBlockTest q6k{};
@@ -235,13 +235,13 @@ void TestDequantizeToBf16Equivalence() {
     q6k.scales[i] = static_cast<std::int8_t>(7 - (i % 4));
   }
   std::vector<float> h_ref_q6k(QK);
-  gufo::quant::DequantizeQ6_K(&q6k, h_ref_q6k.data(), QK);
+  mbufo::quant::DequantizeQ6_K(&q6k, h_ref_q6k.data(), QK);
 
   HIP_CHECK(hipMalloc(&d_w, sizeof(Q6KBlockTest)));
   HIP_CHECK(
       hipMalloc(reinterpret_cast<void**>(&d_out), QK * sizeof(hip_bfloat16)));
   HIP_CHECK(hipMemcpy(d_w, &q6k, sizeof(Q6KBlockTest), hipMemcpyHostToDevice));
-  gufo::hip::LaunchDequantizeToBf16(gufo::core::GgmlType::kQ6_K, d_w, d_out, QK,
+  mbufo::hip::LaunchDequantizeToBf16(mbufo::core::GgmlType::kQ6_K, d_w, d_out, QK,
                                     nullptr);
   HIP_CHECK(hipDeviceSynchronize());
   std::vector<hip_bfloat16> h_gpu_q6k(QK);
@@ -256,7 +256,7 @@ void TestDequantizeToBf16Equivalence() {
   constexpr std::size_t Q8K_QK = 256;
   constexpr std::size_t Q8K_BLOCKS = 2;
   constexpr std::size_t Q8K_ELEMS = Q8K_BLOCKS * Q8K_QK;
-  using Q8KBlockTest = gufo::quant::block_q8_K;
+  using Q8KBlockTest = mbufo::quant::block_q8_K;
   static_assert(sizeof(Q8KBlockTest) == 292, "Q8_K block must be 292 bytes");
 
   std::vector<Q8KBlockTest> h_q8k(Q8K_BLOCKS);
@@ -269,14 +269,14 @@ void TestDequantizeToBf16Equivalence() {
     std::memset(blk.bsums, 0, sizeof(blk.bsums));
   }
   std::vector<float> h_ref_q8k(Q8K_ELEMS);
-  gufo::quant::DequantizeQ8_K(h_q8k.data(), h_ref_q8k.data(), Q8K_ELEMS);
+  mbufo::quant::DequantizeQ8_K(h_q8k.data(), h_ref_q8k.data(), Q8K_ELEMS);
 
   HIP_CHECK(hipMalloc(&d_w, Q8K_BLOCKS * sizeof(Q8KBlockTest)));
   HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_out),
                       Q8K_ELEMS * sizeof(hip_bfloat16)));
   HIP_CHECK(hipMemcpy(d_w, h_q8k.data(), Q8K_BLOCKS * sizeof(Q8KBlockTest),
                       hipMemcpyHostToDevice));
-  gufo::hip::LaunchDequantizeToBf16(gufo::core::GgmlType::kQ8_K, d_w, d_out,
+  mbufo::hip::LaunchDequantizeToBf16(mbufo::core::GgmlType::kQ8_K, d_w, d_out,
                                     Q8K_ELEMS, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
   std::vector<hip_bfloat16> h_gpu_q8k(Q8K_ELEMS);
@@ -291,9 +291,9 @@ void TestDequantizeToBf16Equivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = gufo::test::GateHipDevice(
-      gufo::test::HipDeviceRequirement::kOptional, "Qwen dequant ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  const int device_status = mbufo::test::GateHipDevice(
+      mbufo::test::HipDeviceRequirement::kOptional, "Qwen dequant ops test");
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

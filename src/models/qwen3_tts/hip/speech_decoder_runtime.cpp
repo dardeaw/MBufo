@@ -29,7 +29,7 @@
 #include "src/models/qwen3_tts/hip/speech_decoder_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -1282,11 +1282,11 @@ bool SpeechDecoderHipRuntime::DecodeAfterReference(
   }
 }
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
 #else
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 
 struct SpeechDecoderHipRuntime::Impl {};
 
@@ -1329,6 +1329,6 @@ bool SpeechDecoderHipRuntime::DecodeAfterReference(
   return false;
 }
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
 #endif

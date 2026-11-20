@@ -1,11 +1,11 @@
-#ifndef GUFO_CACHE_COMPLETION_HPP_
-#define GUFO_CACHE_COMPLETION_HPP_
+#ifndef MBUFO_CACHE_COMPLETION_HPP_
+#define MBUFO_CACHE_COMPLETION_HPP_
 
 #include <cstdint>
 #include <memory>
 #include <optional>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 
 enum class TransferResult : std::uint8_t {
   kSucceeded,
@@ -49,6 +49,6 @@ private:
   std::optional<TransferResult> result_;
 };
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 
 #endif

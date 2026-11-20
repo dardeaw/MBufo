@@ -19,9 +19,9 @@
 #include "src/cli/serve/text_model_runner.hpp"
 #include "tests/cache/fake_adapter.hpp"
 
-using namespace gufo;
-using namespace gufo::server;
-using namespace gufo::cache::testing;
+using namespace mbufo;
+using namespace mbufo::server;
+using namespace mbufo::cache::testing;
 namespace {
 struct State final : TextRunnerState {
   FakeAdapter& adapter;
@@ -985,7 +985,7 @@ void ReusedConversationOutlivesOneUseRequests() {
   assert(turn(conversation) == 16);
 }
 void RestartAndCorruption() {
-  char pattern[] = "/tmp/gufo-component-serving-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-serving-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                         .capacity_bytes = 1 << 20,
@@ -1213,7 +1213,7 @@ void FragmentedBackingKeepsCompletePrompt() {
   runner->adapter->Append(restored_state.slot, {&next, 1}, {&next, 1});
 }
 void DiskBudgetEvictsAnUnpinnedConversation() {
-  char pattern[] = "/tmp/gufo-component-budget-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-budget-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                         .capacity_bytes = 1024,
@@ -1250,7 +1250,7 @@ std::uintmax_t ManagedBytes(const std::filesystem::path& directory) {
   return bytes;
 }
 void LoweredDiskBudgetEvictsOldestAtStartup() {
-  char pattern[] = "/tmp/gufo-component-lowered-budget-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-lowered-budget-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                   .capacity_bytes = 1 << 20,
@@ -1283,7 +1283,7 @@ void LoweredDiskBudgetEvictsOldestAtStartup() {
   std::filesystem::remove_all(directory);
 }
 void OrphansLeaveBeforeCheckpoints() {
-  char pattern[] = "/tmp/gufo-component-orphan-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-orphan-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                   .capacity_bytes = 1 << 20,
@@ -1316,7 +1316,7 @@ void OrphansLeaveBeforeCheckpoints() {
   std::filesystem::remove_all(directory);
 }
 void StagingIsInternal() {
-  char pattern[] = "/tmp/gufo-component-staging-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-staging-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   // The legacy option is ignored: even a value below one four-byte row
   // still writes and restores through the internal staging buffer.
@@ -1358,7 +1358,7 @@ void StagingCountsAgainstRamCeiling() {
       return resources;
     }
   };
-  char pattern[] = "/tmp/gufo-component-ceiling-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-ceiling-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   // Pinned staging and RAM share the ceiling: an explicit 4 MiB beside the
   // internal 1 MiB of staging commits 3 MiB, whatever the ignored option says.
@@ -1431,7 +1431,7 @@ void PinnedSlotBytesCountOnce() {
   }
   assert(refused);
   // Staging shares the ceiling: the limit is 4 MiB less 1 MiB of staging.
-  char pattern[] = "/tmp/gufo-component-pinned-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-pinned-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   {
     const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
@@ -1494,7 +1494,7 @@ void DiskDirectoryHasOneOwner() {
       return resources;
     }
   };
-  char pattern[] = "/tmp/gufo-component-owner-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-owner-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                         .capacity_bytes = 1 << 20,
@@ -1522,7 +1522,7 @@ void DiskDirectoryHasOneOwner() {
   std::filesystem::remove_all(directory);
 }
 void GridDoesNotSuppressFirstDiskPrompt() {
-  char pattern[] = "/tmp/gufo-component-spacing-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-spacing-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                         .capacity_bytes = 1 << 20,
@@ -1566,7 +1566,7 @@ void PublishedResidentCheckpointKeepsDiskStep() {
   // A published checkpoint that is still resident restores from RAM, so its
   // lookup candidate carries no disk description. The next capture within
   // the step must still be refused.
-  char pattern[] = "/tmp/gufo-component-step-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-step-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                         .capacity_bytes = 1 << 20,
@@ -1607,7 +1607,7 @@ void PublishedResidentCheckpointKeepsDiskStep() {
   std::filesystem::remove_all(directory);
 }
 void NearTailDiskBranchSurvivesRestart() {
-  char pattern[] = "/tmp/gufo-component-branch-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-branch-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                         .capacity_bytes = 1 << 20,
@@ -1667,7 +1667,7 @@ void UnbackedDeepRowsSurviveDiskRestart() {
       return resources;
     }
   };
-  char pattern[] = "/tmp/gufo-component-deep-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-deep-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                         .capacity_bytes = 1 << 20,
@@ -1784,7 +1784,7 @@ void OverRamCaptureStagesPrivateStateUnderPressure(bool protect) {
   // from the live slot, but its private state is staged in RAM backing, and
   // two retained checkpoints fill that backing. Wide chunks keep the capture
   // metadata within RAM.
-  char pattern[] = "/tmp/gufo-component-over-ram-test-XXXXXX";
+  char pattern[] = "/tmp/mbufo-component-over-ram-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                         .capacity_bytes = 1 << 20,

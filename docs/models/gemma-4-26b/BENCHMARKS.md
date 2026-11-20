@@ -22,7 +22,7 @@ win, not the earlier regression.
 | Engine | MBufo dedicated Gemma 4 engine (Q4_0, WMMA flash attention, compact MoE, MTP) |
 | Weights | `gemma-4-26B-A4B-it-Q4_0.gguf` |
 | MTP draft | `MTP/mtp-gemma-4-26B-A4B-it.gguf` (4-layer dense draft, hidden 1024) |
-| Invocation | `gufo serve llm --multi-model -m <gemma4.gguf>` (greedy, temp 0) |
+| Invocation | `mbufo serve llm --multi-model -m <gemma4.gguf>` (greedy, temp 0) |
 
 ## 1. Tool-calling recall ladder (`tools_Ladder`, long-KV)
 
@@ -113,7 +113,7 @@ beats llama.cpp on prefill and is competitive on decode before MTP; with MTP
 python3 tools/bench/tool_ladder.py --port 8798 --model g4
 
 # MTP throughput matrix (essay / p2k / p8k × d=3/4/5)
-gufo serve llm --multi-model \
+mbufo serve llm --multi-model \
   -m gemma-4-26B-A4B-it-Q4_0.gguf \
   --served-model-name g4 --context 262144 -j 4
 # then drive /v1/chat/completions with the essay/p2k/p8k prompts, temp 0,

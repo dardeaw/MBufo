@@ -3,7 +3,7 @@
 
 #include <limits>
 
-namespace gufo::models::bge_reranker {
+namespace mbufo::models::bge_reranker {
 
 std::optional<BgeRerankerConfig> ExtractBgeRerankerConfig(
     const core::GgufReader& reader, std::string* error_msg) {
@@ -74,4 +74,4 @@ std::optional<BgeRerankerConfig> ExtractBgeRerankerConfig(
   return config;
 }
 
-}  // namespace gufo::models::bge_reranker
+}  // namespace mbufo::models::bge_reranker

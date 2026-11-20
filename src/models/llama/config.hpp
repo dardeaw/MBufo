@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_LLAMA_CONFIG_HPP_
-#define GUFO_MODELS_LLAMA_CONFIG_HPP_
+#ifndef MBUFO_MODELS_LLAMA_CONFIG_HPP_
+#define MBUFO_MODELS_LLAMA_CONFIG_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -7,7 +7,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::llama {
+namespace mbufo::models::llama {
 
 /// Architecture parameters of a `llama` GGUF artifact (dense decoder-only
 /// transformer: Llama-3.1-8B-Instruct and its quantizations). Every value is
@@ -28,6 +28,6 @@ struct Config {
       const core::GgufReader& gguf, std::string* error_msg = nullptr);
 };
 
-}  // namespace gufo::models::llama
+}  // namespace mbufo::models::llama
 
-#endif  // GUFO_MODELS_LLAMA_CONFIG_HPP_
+#endif  // MBUFO_MODELS_LLAMA_CONFIG_HPP_

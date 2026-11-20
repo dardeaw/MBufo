@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_DIAGNOSTICS_COMPATIBILITY_H_
-#define GUFO_CORE_DIAGNOSTICS_COMPATIBILITY_H_
+#ifndef MBUFO_CORE_DIAGNOSTICS_COMPATIBILITY_H_
+#define MBUFO_CORE_DIAGNOSTICS_COMPATIBILITY_H_
 
 #include <cstdint>
 #include <string>
@@ -8,7 +8,7 @@
 
 #include "src/core/diagnostics/system_inventory.h"
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 enum class CompatibilityVerdict : std::uint8_t {
   kSupported,
@@ -38,6 +38,6 @@ struct CompatibilityReport {
 [[nodiscard]] CompatibilityReport EvaluateCompatibility(
     const SystemInventory& inventory, std::string_view section = "all");
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics
 
-#endif  // GUFO_CORE_DIAGNOSTICS_COMPATIBILITY_H_
+#endif  // MBUFO_CORE_DIAGNOSTICS_COMPATIBILITY_H_

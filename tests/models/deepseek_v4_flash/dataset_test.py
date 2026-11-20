@@ -59,7 +59,7 @@ class EvalDatasetTest(unittest.TestCase):
         cls.document = json.loads(cls.path.read_text(encoding="utf-8"))
 
     def test_source_identity_and_counts(self) -> None:
-        self.assertEqual(self.document["schema"], "gufo.eval-cases.v2")
+        self.assertEqual(self.document["schema"], "mbufo.eval-cases.v2")
         self.assertEqual(
             self.document["source_revision"],
             "84cc882352757baf628a1776badf7cc54d584e28",

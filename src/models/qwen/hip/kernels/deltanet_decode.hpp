@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_KERNELS_DELTANET_DECODE_HPP_
-#define GUFO_MODELS_QWEN_HIP_KERNELS_DELTANET_DECODE_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_KERNELS_DELTANET_DECODE_HPP_
+#define MBUFO_MODELS_QWEN_HIP_KERNELS_DELTANET_DECODE_HPP_
 
 #include <hip/hip_runtime.h>
 
@@ -11,7 +11,7 @@
 #include "src/models/qwen/hip/detail/recurrent_state.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // The state tile is loaded once before the row loop and stored once after it.
 // A `Diverge` pass loads from `deltanet_in` (the buffer pinned for rollback)
@@ -388,5 +388,5 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
   }
 }
 
-}  // namespace gufo::hip
-#endif  // GUFO_MODELS_QWEN_HIP_KERNELS_DELTANET_DECODE_HPP_
+}  // namespace mbufo::hip
+#endif  // MBUFO_MODELS_QWEN_HIP_KERNELS_DELTANET_DECODE_HPP_

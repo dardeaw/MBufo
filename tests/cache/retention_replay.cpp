@@ -6,8 +6,8 @@
 
 #include "src/cache/retention.hpp"
 #include "tests/cache/fake_adapter.hpp"
-using namespace gufo::cache;
-using namespace gufo::cache::testing;
+using namespace mbufo::cache;
+using namespace mbufo::cache::testing;
 namespace {
 struct Empty final : MutationGuard {
   void BeforeOverwrite(ComponentId, Rows, Rows) override {}

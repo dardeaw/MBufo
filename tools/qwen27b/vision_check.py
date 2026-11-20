@@ -123,14 +123,14 @@ def check_http(directory, url, model):
     for color in ("red", "blue"):
         result = call(body(color))
         assert color in result["text"].lower(), result
-        assert not result["usage"]["gufo"]["cache_hit"], "use a fresh server"
+        assert not result["usage"]["mbufo"]["cache_hit"], "use a fresh server"
         cold.append(result)
     with ThreadPoolExecutor(2) as executor:
         cached = list(executor.map(call, [body("red"), body("blue")]))
     for expected, result in zip(cold, cached):
         assert result["text"] == expected["text"], result
-        assert result["usage"]["gufo"]["cache_hit"], result
-        assert result["usage"]["gufo"]["prefill_tokens"] == 0, result
+        assert result["usage"]["mbufo"]["cache_hit"], result
+        assert result["usage"]["mbufo"]["prefill_tokens"] == 0, result
     streamed = call(body("red", True))
     assert streamed["text"] == cold[0]["text"], streamed
     shapes_body = body("red")
@@ -197,9 +197,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--probe", type=Path, help="qwen27b_vision_test, for CPU pixel qualification")
-    parser.add_argument("--http-url", help="fresh running gufo server")
+    parser.add_argument("--http-url", help="fresh running mbufo server")
     parser.add_argument("--model", default="vision-test")
-    parser.add_argument("--binary", type=Path, help="gufo binary for prompt/chat checks")
+    parser.add_argument("--binary", type=Path, help="mbufo binary for prompt/chat checks")
     parser.add_argument("--target", type=Path, help="target GGUF for CLI checks")
     parser.add_argument("--draft", type=Path, help="draft GGUF for CLI checks")
     parser.add_argument("--speculative", choices=("dflash2",))

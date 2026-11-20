@@ -9,7 +9,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // The second buffer of the rollback pair; it holds only recurrent layers in
 // the same order as the first.
@@ -208,5 +208,5 @@ const float* QwenGpuArena::GetReplayBeta(std::uint32_t layer,
   return d_ssm_replay_beta_ + offset;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

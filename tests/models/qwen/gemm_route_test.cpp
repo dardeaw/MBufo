@@ -8,13 +8,13 @@
 
 namespace {
 
-using gufo::core::GgmlType;
-using gufo::models::qwen::DescribeQwenGemmFormat;
-using gufo::models::qwen::QwenGemmMode;
-using gufo::models::qwen::QwenGemmRejection;
-using gufo::models::qwen::QwenGemmRequest;
-using gufo::models::qwen::QwenGemmRoute;
-using gufo::models::qwen::ResolveQwenGemmRoute;
+using mbufo::core::GgmlType;
+using mbufo::models::qwen::DescribeQwenGemmFormat;
+using mbufo::models::qwen::QwenGemmMode;
+using mbufo::models::qwen::QwenGemmRejection;
+using mbufo::models::qwen::QwenGemmRequest;
+using mbufo::models::qwen::QwenGemmRoute;
+using mbufo::models::qwen::ResolveQwenGemmRoute;
 
 void Check(bool condition, const char* message) {
   if (!condition) {

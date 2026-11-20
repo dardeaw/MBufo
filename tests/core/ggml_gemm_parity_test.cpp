@@ -26,30 +26,30 @@ namespace {
 
 // ---- OLD reference (mirrors models/qwen/forward.cpp, anonymous namespace)
 // ----
-float OldQuantizedDot(gufo::core::GgmlType type, const void* row,
+float OldQuantizedDot(mbufo::core::GgmlType type, const void* row,
                       std::span<const float> x, std::size_t k) {
   switch (type) {
-    case gufo::core::GgmlType::kQ3_K:
-      return gufo::quant::DotProductQ3_K(row, x, k);
-    case gufo::core::GgmlType::kQ4_K:
-      return gufo::quant::DotProductQ4_K(row, x, k);
-    case gufo::core::GgmlType::kQ6_K:
-      return gufo::quant::DotProductQ6_K(row, x, k);
+    case mbufo::core::GgmlType::kQ3_K:
+      return mbufo::quant::DotProductQ3_K(row, x, k);
+    case mbufo::core::GgmlType::kQ4_K:
+      return mbufo::quant::DotProductQ4_K(row, x, k);
+    case mbufo::core::GgmlType::kQ6_K:
+      return mbufo::quant::DotProductQ6_K(row, x, k);
     default:
       return 0.0F;  // silent fallback the new dispatch removes
   }
 }
-void OldDequantizeRow(gufo::core::GgmlType type, const void* row, float* out,
+void OldDequantizeRow(mbufo::core::GgmlType type, const void* row, float* out,
                       std::size_t k) {
   switch (type) {
-    case gufo::core::GgmlType::kQ3_K:
-      gufo::quant::DequantizeQ3_K(row, out, k);
+    case mbufo::core::GgmlType::kQ3_K:
+      mbufo::quant::DequantizeQ3_K(row, out, k);
       break;
-    case gufo::core::GgmlType::kQ4_K:
-      gufo::quant::DequantizeQ4_K(row, out, k);
+    case mbufo::core::GgmlType::kQ4_K:
+      mbufo::quant::DequantizeQ4_K(row, out, k);
       break;
-    case gufo::core::GgmlType::kQ6_K:
-      gufo::quant::DequantizeQ6_K(row, out, k);
+    case mbufo::core::GgmlType::kQ6_K:
+      mbufo::quant::DequantizeQ6_K(row, out, k);
       break;
     default:
       break;  // no-op; leaves `out` untouched
@@ -69,8 +69,8 @@ bool AllFinite(const float* p, std::size_t n) {
   }
   return true;
 }
-std::size_t RowBytes(gufo::core::GgmlType type, std::size_t k) {
-  return gufo::quant::QuantizedRowBytes(type, k);
+std::size_t RowBytes(mbufo::core::GgmlType type, std::size_t k) {
+  return mbufo::quant::QuantizedRowBytes(type, k);
 }
 
 std::vector<std::uint8_t> RandomPackedBytes(std::mt19937& rng, std::size_t n) {
@@ -90,7 +90,7 @@ std::vector<float> RandomFloats(std::mt19937& rng, std::size_t n) {
 
 // ---- Valid block builders for the previously-silent types ----
 std::vector<std::uint8_t> BuildQ8_0() {
-  gufo::quant::block_q8_0 b{};
+  mbufo::quant::block_q8_0 b{};
   b.d = 0x3C00;  // fp16(1.0)
   for (int i = 0; i < 32; ++i)
     b.qs[i] = static_cast<std::int8_t>(i + 1);
@@ -99,7 +99,7 @@ std::vector<std::uint8_t> BuildQ8_0() {
   return out;
 }
 std::vector<std::uint8_t> BuildQ8_K() {
-  gufo::quant::block_q8_K b{};
+  mbufo::quant::block_q8_K b{};
   b.d = 0.5F;
   for (int i = 0; i < 256; ++i)
     b.qs[i] = static_cast<std::int8_t>(i % 64 + 1);
@@ -108,7 +108,7 @@ std::vector<std::uint8_t> BuildQ8_K() {
   return out;
 }
 std::vector<std::uint8_t> BuildQ5_K() {
-  gufo::quant::block_q5_K b{};
+  mbufo::quant::block_q5_K b{};
   b.d = 0x3C00;     // fp16(1.0)
   b.dmin = 0x0000;  // fp16(0.0)
   b.scales[0] = 1;
@@ -137,22 +137,22 @@ int main() {
 
   struct Case {
     const char* name;
-    gufo::core::GgmlType type;
+    mbufo::core::GgmlType type;
     std::size_t k;
   };
 
   // (1) Parity vs OLD behavior for the 3 types old code really handles.
   const Case old_cases[] = {
-      {"Q3_K", gufo::core::GgmlType::kQ3_K, 256},
-      {"Q4_K", gufo::core::GgmlType::kQ4_K, 256},
-      {"Q6_K", gufo::core::GgmlType::kQ6_K, 256},
+      {"Q3_K", mbufo::core::GgmlType::kQ3_K, 256},
+      {"Q4_K", mbufo::core::GgmlType::kQ4_K, 256},
+      {"Q6_K", mbufo::core::GgmlType::kQ6_K, 256},
   };
   for (const auto& c : old_cases) {
     const auto packed = RandomPackedBytes(rng, RowBytes(c.type, c.k));
     const auto x = RandomFloats(rng, c.k);
     std::vector<float> dst_new(c.k), dst_old(c.k);
 
-    gufo::quant::Dequantize(c.type, packed.data(), dst_new.data(), c.k);
+    mbufo::quant::Dequantize(c.type, packed.data(), dst_new.data(), c.k);
     OldDequantizeRow(c.type, packed.data(), dst_old.data(), c.k);
 
     bool deq_ok = true;
@@ -162,7 +162,7 @@ int main() {
         break;
       }
     }
-    const float dot_new = gufo::quant::Dot(c.type, packed.data(), x, c.k);
+    const float dot_new = mbufo::quant::Dot(c.type, packed.data(), x, c.k);
     const float dot_old = OldQuantizedDot(c.type, packed.data(), x, c.k);
     const bool dot_ok = SameBits(dot_new, dot_old);
 
@@ -176,32 +176,32 @@ int main() {
   // (2) Previously-silent types: new dispatch must be finite + nonzero and
   // matching the canonical routine; OLD must have been silent (0.0F / no-op).
   const Case new_cases[] = {
-      {"Q5_K", gufo::core::GgmlType::kQ5_K, 256},
-      {"Q8_0", gufo::core::GgmlType::kQ8_0, 32},
-      {"Q8_K", gufo::core::GgmlType::kQ8_K, 256},
+      {"Q5_K", mbufo::core::GgmlType::kQ5_K, 256},
+      {"Q8_0", mbufo::core::GgmlType::kQ8_0, 32},
+      {"Q8_K", mbufo::core::GgmlType::kQ8_K, 256},
   };
   const std::vector<std::uint8_t> q5 = BuildQ5_K();
   const std::vector<std::uint8_t> q80 = BuildQ8_0();
   const std::vector<std::uint8_t> q8k = BuildQ8_K();
   for (const auto& c : new_cases) {
     const std::vector<std::uint8_t>* block =
-        (c.type == gufo::core::GgmlType::kQ5_K)   ? &q5
-        : (c.type == gufo::core::GgmlType::kQ8_0) ? &q80
+        (c.type == mbufo::core::GgmlType::kQ5_K)   ? &q5
+        : (c.type == mbufo::core::GgmlType::kQ8_0) ? &q80
                                                   : &q8k;
     const auto x = RandomFloats(rng, c.k);
     std::vector<float> dst_new(c.k), dst_ref(c.k), dst_sentinel(c.k, 7.0F);
 
-    gufo::quant::Dequantize(c.type, block->data(), dst_new.data(), c.k);
+    mbufo::quant::Dequantize(c.type, block->data(), dst_new.data(), c.k);
     // canonical direct call:
     switch (c.type) {
-      case gufo::core::GgmlType::kQ5_K:
-        gufo::quant::DequantizeQ5_K(block->data(), dst_ref.data(), c.k);
+      case mbufo::core::GgmlType::kQ5_K:
+        mbufo::quant::DequantizeQ5_K(block->data(), dst_ref.data(), c.k);
         break;
-      case gufo::core::GgmlType::kQ8_0:
-        gufo::quant::DequantizeQ8_0(block->data(), dst_ref.data(), c.k);
+      case mbufo::core::GgmlType::kQ8_0:
+        mbufo::quant::DequantizeQ8_0(block->data(), dst_ref.data(), c.k);
         break;
       default:
-        gufo::quant::DequantizeQ8_K(block->data(), dst_ref.data(), c.k);
+        mbufo::quant::DequantizeQ8_K(block->data(), dst_ref.data(), c.k);
         break;
     }
 
@@ -215,7 +215,7 @@ int main() {
     const bool finite = AllFinite(dst_new.data(), c.k);
     const bool wrote = !AllEquals(dst_new.data(), 7.0F, c.k);
 
-    const float dot_new = gufo::quant::Dot(c.type, block->data(), x, c.k);
+    const float dot_new = mbufo::quant::Dot(c.type, block->data(), x, c.k);
     const float dot_old = OldQuantizedDot(c.type, block->data(), x, c.k);
 
     // OLD was silent:
@@ -244,7 +244,7 @@ int main() {
     const auto x = RandomFloats(rng, k);
     std::vector<float> f32 = RandomFloats(rng, k);
     std::vector<float> dst(k);
-    gufo::quant::Dequantize(gufo::core::GgmlType::kF32, f32.data(), dst.data(),
+    mbufo::quant::Dequantize(mbufo::core::GgmlType::kF32, f32.data(), dst.data(),
                             k);
     bool f32_deq = true;
     for (std::size_t i = 0; i < k; ++i)
@@ -255,7 +255,7 @@ int main() {
     float f32_dot = 0.0F, f32_ref = 0.0F;
     for (std::size_t i = 0; i < k; ++i)
       f32_ref += f32[i] * x[i];
-    f32_dot = gufo::quant::Dot(gufo::core::GgmlType::kF32, f32.data(), x, k);
+    f32_dot = mbufo::quant::Dot(mbufo::core::GgmlType::kF32, f32.data(), x, k);
     if (!f32_deq || !SameBits(f32_dot, f32_ref)) {
       std::printf("F32: FAIL (deq=%d dot=%d) dot=%.6f ref=%.6f\n", f32_deq,
                   SameBits(f32_dot, f32_ref), f32_dot, f32_ref);
@@ -270,11 +270,11 @@ int main() {
       std::memcpy(&u32, &f32[i], sizeof(u32));
       bf16[i] = static_cast<std::uint16_t>(u32 >> 16U);
     }
-    gufo::quant::Dequantize(gufo::core::GgmlType::kBF16, bf16.data(),
+    mbufo::quant::Dequantize(mbufo::core::GgmlType::kBF16, bf16.data(),
                             dst.data(), k);
     bool bf16_finite = AllFinite(dst.data(), k);
     float bf16_dot =
-        gufo::quant::Dot(gufo::core::GgmlType::kBF16, bf16.data(), x, k);
+        mbufo::quant::Dot(mbufo::core::GgmlType::kBF16, bf16.data(), x, k);
     if (!bf16_finite || !std::isfinite(bf16_dot)) {
       std::printf("BF16: FAIL (finite=%d dotfinite=%d)\n", bf16_finite,
                   std::isfinite(bf16_dot));
@@ -288,7 +288,7 @@ int main() {
       // encode a few known fp16 values (e.g. 1.0, 0.5, -2.0) by scanning.
       f16[i] = 0x3C00;  // 1.0
     }
-    gufo::quant::Dequantize(gufo::core::GgmlType::kF16, f16.data(), dst.data(),
+    mbufo::quant::Dequantize(mbufo::core::GgmlType::kF16, f16.data(), dst.data(),
                             k);
     bool f16_ok = true;
     for (std::size_t i = 0; i < k; ++i)
@@ -304,10 +304,10 @@ int main() {
   }
 
   // (4) IsSupported boundaries.
-  if (!gufo::quant::IsSupported(gufo::core::GgmlType::kF32) ||
-      !gufo::quant::IsSupported(gufo::core::GgmlType::kQ8_K) ||
-      gufo::quant::IsSupported(gufo::core::GgmlType::kQ4_0) ||
-      gufo::quant::IsSupported(static_cast<gufo::core::GgmlType>(65535))) {
+  if (!mbufo::quant::IsSupported(mbufo::core::GgmlType::kF32) ||
+      !mbufo::quant::IsSupported(mbufo::core::GgmlType::kQ8_K) ||
+      mbufo::quant::IsSupported(mbufo::core::GgmlType::kQ4_0) ||
+      mbufo::quant::IsSupported(static_cast<mbufo::core::GgmlType>(65535))) {
     std::printf("IsSupported: FAIL\n");
     return 1;
   }

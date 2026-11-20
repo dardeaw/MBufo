@@ -1,12 +1,12 @@
-#ifndef GUFO_MODELS_QWEN_IMAGE_21_HIP_BLAS_HPP_
-#define GUFO_MODELS_QWEN_IMAGE_21_HIP_BLAS_HPP_
+#ifndef MBUFO_MODELS_QWEN_IMAGE_21_HIP_BLAS_HPP_
+#define MBUFO_MODELS_QWEN_IMAGE_21_HIP_BLAS_HPP_
 
 #include <hip/hip_runtime_api.h>
 
 #include <cstdint>
 #include <memory>
 
-namespace gufo::models::qwen_image_21::hip {
+namespace mbufo::models::qwen_image_21::hip {
 
 // BF16 weights/activations, FP32 accumulation, BF16 or FP32 result. Cache
 // library plans by shape; no online tuning or request-dependent arithmetic.
@@ -26,5 +26,5 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace mbufo::models::qwen_image_21::hip
 #endif

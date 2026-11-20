@@ -3,9 +3,9 @@
 #include <iostream>
 #include <stdexcept>
 
-namespace qwen = gufo::models::qwen;
-namespace hip = gufo::hip;
-namespace cache = gufo::cache;
+namespace qwen = mbufo::models::qwen;
+namespace hip = mbufo::hip;
+namespace cache = mbufo::cache;
 namespace {
 void Require(bool condition, const char* message) {
   if (!condition)
@@ -22,7 +22,7 @@ void Reject(F&& fn) {
   Require(rejected, "invalid geometry/frontier was accepted");
 }
 void Check(bool fp16, bool bf16) {
-  gufo::core::ModelConfig c;
+  mbufo::core::ModelConfig c;
   c.num_layers = 64;
   c.hidden_size = 5120;
   c.num_attention_heads = 24;

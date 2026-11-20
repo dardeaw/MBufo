@@ -7,7 +7,7 @@
 
 #include "src/models/qwen/chat_template.hpp"
 
-namespace gufo::models {
+namespace mbufo::models {
 
 QwenGenerator::QwenGenerator(
     QwenModelWeights weights,
@@ -106,4 +106,4 @@ std::string QwenGenerator::GenerateText(std::string_view prompt,
   return tokenizer_->Decode(generated_tokens);
 }
 
-}  // namespace gufo::models
+}  // namespace mbufo::models

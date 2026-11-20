@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_GGUF_READER_HPP_
-#define GUFO_CORE_GGUF_READER_HPP_
+#ifndef MBUFO_CORE_GGUF_READER_HPP_
+#define MBUFO_CORE_GGUF_READER_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +16,7 @@
 
 #include "src/core/model_config.hpp"
 
-namespace gufo::core {
+namespace mbufo::core {
 
 /// GGML tensor types used by supported model artifacts.
 enum class GgmlType : std::uint16_t {
@@ -265,6 +265,6 @@ private:
   std::vector<std::unique_ptr<GgufReader>> shards_;
 };
 
-}  // namespace gufo::core
+}  // namespace mbufo::core
 
-#endif  // GUFO_CORE_GGUF_READER_HPP_
+#endif  // MBUFO_CORE_GGUF_READER_HPP_

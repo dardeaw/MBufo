@@ -68,12 +68,12 @@ def chat(label, messages, max_tokens=16):
     usage = result["usage"]
     row = {"label": label, "seconds": time.time() - started,
            "prompt": usage["prompt_tokens"], "cached": usage.get("prompt_tokens_details", {}).get("cached_tokens", 0),
-           "prefill": usage["gufo"]["prefill_tokens"],
-           "reuse": usage["gufo"].get("component_cache", {}).get("reuse"),
+           "prefill": usage["mbufo"]["prefill_tokens"],
+           "reuse": usage["mbufo"].get("component_cache", {}).get("reuse"),
            "text": result["choices"][0]["message"]["content"]}
     if label == "deep_cold" and row["prompt"] < 140000:
         raise RuntimeError("Deep fixture did not reach the required140K tokens")
-    if args.expect_component and not usage["gufo"].get("component_cache"):
+    if args.expect_component and not usage["mbufo"].get("component_cache"):
         raise RuntimeError("Candidate did not use component cache")
     if args.expect_component and label != "deep_cold":
         is_deep = label.startswith("deep_")

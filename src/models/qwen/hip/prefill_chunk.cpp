@@ -1,5 +1,6 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -11,6 +12,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/fused_fa_gqa128.hpp"
+#include "src/core/compute/attention/flash_wmma_large.hpp"
 #include "src/models/qwen/hip/moe.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
@@ -27,7 +29,7 @@
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/models/qwen/hip/ops/prefill_fp16.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 bool UseQwen27bFp16Prefill(const models::QwenModelWeights& weights,
                            std::size_t batch) {
@@ -41,9 +43,9 @@ bool UseQwen27bFp16Prefill(const models::QwenModelWeights& weights,
   // the fallback from batch 13 up). So FP4 uses WMMA for essentially all
   // prefill; only sub-8-token prompts (rare) fall back. Other low-bit types
   // keep 1024 because their fallback is already the fast int8 WMMA.
-  // GUFO_HALF_PREFILL_MIN_BATCH overrides for tuning.
+  // MBUFO_HALF_PREFILL_MIN_BATCH overrides for tuning.
   static const std::size_t kEnvMin = [] {
-    const char* e = std::getenv("GUFO_HALF_PREFILL_MIN_BATCH");
+    const char* e = std::getenv("MBUFO_HALF_PREFILL_MIN_BATCH");
     const unsigned long v = e ? std::strtoul(e, nullptr, 10) : 0UL;
     return v >= 2UL ? static_cast<std::size_t>(v) : 0UL;
   }();
@@ -88,7 +90,7 @@ bool UseQwen27bFp16Prefill(const models::QwenModelWeights& weights,
 // d=128) dense geometry (e.g. Qwen3-Embedding): route through the shared
 // attention dispatcher; anything the dispatcher does not route (or the
 // launcher refuses) returns false and the caller keeps the existing
-// wmma -> tiled -> baseline chain. GUFO_ATTN_DISPATCH=0 forces legacy.
+// wmma -> tiled -> baseline chain. MBUFO_ATTN_DISPATCH=0 forces legacy.
 bool TryLaunchFusedFaGqa128(
     const float* q, const float* k, const float* v, const float* gate,
     float* k_cache, float* v_cache, void* k_cache_f16, void* v_cache_f16,
@@ -96,7 +98,7 @@ bool TryLaunchFusedFaGqa128(
     std::size_t batch_size, std::uint32_t max_context,
     std::uint32_t num_heads, std::uint32_t num_kv_heads,
     std::uint32_t head_dim, hipStream_t stream, bool skip_kv_write) {
-  namespace attn_disp = gufo::core::compute::attention_dispatcher;
+  namespace attn_disp = mbufo::core::compute::attention_dispatcher;
   attn_disp::AttentionDispatchInput din;
   din.q_len = static_cast<std::uint32_t>(batch_size);
   din.kv_len = start_pos + static_cast<std::uint32_t>(batch_size);
@@ -110,7 +112,7 @@ bool TryLaunchFusedFaGqa128(
       attn_disp::AttentionRoute::kFusedFaGqa128) {
     return false;
   }
-  return gufo::core::compute::fused_fa_gqa128::LaunchFusedFaGqa128(
+  return mbufo::core::compute::fused_fa_gqa128::LaunchFusedFaGqa128(
       q, k, v, gate, k_cache, v_cache, k_cache_f16, v_cache_f16, out_context,
       layer_idx, start_pos, batch_size, max_context, num_heads, num_kv_heads,
       head_dim, stream, skip_kv_write);
@@ -468,8 +470,28 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       if (wmma_attention) {
         detail::EmitAttentionDispatch("prefill_wmma", "");
       }
+      // Geometries the Qwen3.8-27B tile / WMMA kernels above do not serve (Qwen3.5-35B-A3B: 16 heads over 2 kv heads) used to fall
+      // to the scalar score-row kernel (70% of a 6K prefill): the core large-head WMMA flash kernel over the F16 plane the fused
+      // QK-norm/RoPE kernel already filled (MBUFO_QWEN_NO_LARGE_WMMA=1 keeps the old fallback). The sigmoid gate is applied after.
+      bool large_wmma = false;
+      if (!fused_fa_attention && !wmma_attention && kv_already_written && arena_.d_attention_kv_f16 != nullptr &&
+          std::getenv("MBUFO_QWEN_NO_LARGE_WMMA") == nullptr &&
+          core::compute::flash_wmma_large::IsFlashWmmaLargeSupported(config.num_attention_heads, config.num_key_value_heads,
+                                                                     config.head_dim)) {
+        const std::size_t kv_width = static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+        const std::size_t layer_off = static_cast<std::size_t>(attn_layer_idx) * arena_.GetMaxContext() * kv_width;
+        large_wmma = core::compute::flash_wmma_large::FlashWmmaLargePrefill(
+            arena_.d_q, static_cast<const __half*>(arena_.d_attention_kv_f16) + layer_off,
+            reinterpret_cast<const __half*>(OffsetIfPresent(static_cast<std::uint16_t*>(arena_.d_attention_kv_f16), total_k)) + layer_off,
+            arena_.d_ssm_out, static_cast<std::uint32_t>(batch_size), start_pos, config.num_attention_heads,
+            config.num_key_value_heads, config.head_dim, 0, 1.0F / std::sqrt(static_cast<float>(config.head_dim)), arena_.stream);
+        if (large_wmma && q_gate != nullptr)
+          LaunchSigmoidGateMultiply(arena_.d_ssm_out, q_gate,
+                                    batch_size * config.num_attention_heads * config.head_dim, arena_.stream);
+        if (large_wmma) detail::EmitAttentionDispatch("prefill_wmma_large", "");
+      }
 
-      if (!fused_fa_attention && !wmma_attention) {
+      if (!fused_fa_attention && !wmma_attention && !large_wmma) {
         bool tiled_attention = false;
         detail::DispatchPrefillAttention(
             visible_context,
@@ -1160,7 +1182,27 @@ void QwenGpuExecutor::PrefillAttentionPost(const PrefillChunkCtx& ctx,
       if (wmma_attention) {
         detail::EmitAttentionDispatch("prefill_wmma", "");
       }
-      if (!fused_fa_attention && !wmma_attention) {
+      // Geometries the Qwen3.8-27B tile / WMMA kernels above do not serve (Qwen3.5-35B-A3B: 16 heads over 2 kv heads) used to fall
+      // to the scalar score-row kernel (70% of a 6K prefill): the core large-head WMMA flash kernel over the F16 plane the fused
+      // QK-norm/RoPE kernel already filled (MBUFO_QWEN_NO_LARGE_WMMA=1 keeps the old fallback). The sigmoid gate is applied after.
+      bool large_wmma = false;
+      if (!fused_fa_attention && !wmma_attention && kv_already_written && arena_.d_attention_kv_f16 != nullptr &&
+          std::getenv("MBUFO_QWEN_NO_LARGE_WMMA") == nullptr &&
+          core::compute::flash_wmma_large::IsFlashWmmaLargeSupported(config.num_attention_heads, config.num_key_value_heads,
+                                                                     config.head_dim)) {
+        const std::size_t kv_width = static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+        const std::size_t layer_off = static_cast<std::size_t>(attn_layer_idx) * arena_.GetMaxContext() * kv_width;
+        large_wmma = core::compute::flash_wmma_large::FlashWmmaLargePrefill(
+            arena_.d_q, static_cast<const __half*>(arena_.d_attention_kv_f16) + layer_off,
+            reinterpret_cast<const __half*>(OffsetIfPresent(static_cast<std::uint16_t*>(arena_.d_attention_kv_f16), total_k)) + layer_off,
+            arena_.d_ssm_out, static_cast<std::uint32_t>(batch_size), ctx.start_pos, config.num_attention_heads,
+            config.num_key_value_heads, config.head_dim, 0, 1.0F / std::sqrt(static_cast<float>(config.head_dim)), arena_.stream);
+        if (large_wmma && q_gate != nullptr)
+          LaunchSigmoidGateMultiply(arena_.d_ssm_out, q_gate,
+                                    batch_size * config.num_attention_heads * config.head_dim, arena_.stream);
+        if (large_wmma) detail::EmitAttentionDispatch("prefill_wmma_large", "");
+      }
+      if (!fused_fa_attention && !wmma_attention && !large_wmma) {
         bool tiled_attention = false;
         detail::DispatchPrefillAttention(
             visible_context,
@@ -1480,12 +1522,12 @@ void QwenGpuExecutor::PrefillFfnTail(const PrefillChunkCtx& ctx,
 
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardPromptBatchMulti(
     std::span<const QwenPromptBatchItem> items) {
-  namespace mb = ::gufo::core::compute::mixed_batch;
+  namespace mb = ::mbufo::core::compute::mixed_batch;
   constexpr std::size_t kMaxPromptBatchMulti = 8;
-  // Opt-out valve (default on): GUFO_27B_UNIFIED_BATCH=0 keeps the legacy
+  // Opt-out valve (default on): MBUFO_27B_UNIFIED_BATCH=0 keeps the legacy
   // per-session attention dispatch inside the batch envelope.
   const bool use_unified = [] {
-    const char* e = std::getenv("GUFO_27B_UNIFIED_BATCH");
+    const char* e = std::getenv("MBUFO_27B_UNIFIED_BATCH");
     return e == nullptr || e[0] != '0';
   }();
   if (items.size() < 2 || items.size() > kMaxPromptBatchMulti) {
@@ -1814,5 +1856,5 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardPromptBatchMulti(
   return next_tokens;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

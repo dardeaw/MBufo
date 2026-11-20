@@ -9,7 +9,7 @@
 
 #include "src/models/qwen38_flash_next/cpu_ops.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 using cpu::Sigmoid;
 using cpu::Silu;
@@ -810,4 +810,4 @@ bool ReferenceModel::MtpStep(const MtpWeights& mtp, std::int32_t token,
   return true;
 }
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next

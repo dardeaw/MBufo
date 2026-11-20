@@ -24,9 +24,9 @@ void CheckBackend(std::initializer_list<const char*> arguments,
                   std::string_view backend) {
   const std::span<const char* const> args(arguments.begin(), arguments.size());
   std::string error;
-  const auto prompt = gufo::cli::ParsePromptOptions(args, &error);
+  const auto prompt = mbufo::cli::ParsePromptOptions(args, &error);
   Expect(prompt.has_value(), error);
-  const auto bench = gufo::cli::ParseBenchOptions(args, &error);
+  const auto bench = mbufo::cli::ParseBenchOptions(args, &error);
   Expect(bench.has_value(), error);
   Expect(prompt->speculative_backend == backend &&
              bench->speculative_backend == backend,
@@ -37,8 +37,8 @@ void CheckBackend(std::initializer_list<const char*> arguments,
 }
 
 int CheckSampledChat() {
-  const char* model = std::getenv("GUFO_DEEPSEEK_V4_FLASH_MODEL");
-  const char* support = std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL");
+  const char* model = std::getenv("MBUFO_DEEPSEEK_V4_FLASH_MODEL");
+  const char* support = std::getenv("MBUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL");
   if (!model || !*model || !support || !*support) {
     std::cout << "SKIP: target and DSpark artifacts are required\n";
     return 77;
@@ -76,7 +76,7 @@ int CheckSampledChat() {
     } restore{std::cin.rdbuf(incoming.rdbuf()), std::cout.rdbuf(output.rdbuf()),
               std::cerr.rdbuf(diagnostics.rdbuf())};
     const int status =
-        chat ? gufo::cli::RunChat(args) : gufo::cli::RunPrompt(args);
+        chat ? mbufo::cli::RunChat(args) : mbufo::cli::RunPrompt(args);
     if (status != 0)
       throw std::runtime_error("CLI generation failed: " + diagnostics.str());
     std::vector<std::string> traces;
@@ -115,15 +115,15 @@ int main(int argc, char** argv) {
 
   const char* args[] = {"--dspark-model", "support.gguf", "--draft-tokens",
                         "3"};
-  const auto prompt = gufo::cli::ParsePromptOptions(args);
-  const auto bench = gufo::cli::ParseBenchOptions(args);
+  const auto prompt = mbufo::cli::ParsePromptOptions(args);
+  const auto bench = mbufo::cli::ParseBenchOptions(args);
   Expect(
       prompt && bench && prompt->draft_tokens == 3 && bench->draft_tokens == 3,
       "both commands retain the requested draft budget");
   const char* sweep_args[] = {
       "--concurrency",          "1,2,4,6,8", "-p", "2048", "-n", "128", "-d",
       "0,4096,8192,12288,16384"};
-  const auto sweep = gufo::cli::ParseBenchOptions(sweep_args);
+  const auto sweep = mbufo::cli::ParseBenchOptions(sweep_args);
   Expect(sweep &&
              sweep->concurrency == std::vector<std::size_t>{1, 2, 4, 6, 8} &&
              sweep->n_prompts == std::vector<std::size_t>{2048} &&
@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
          "depth workload");
   for (const char* invalid : {"0", "9", "2,0", "-1", ""}) {
     const char* invalid_args[] = {"--concurrency", invalid};
-    Expect(!gufo::cli::ParseBenchOptions(invalid_args),
+    Expect(!mbufo::cli::ParseBenchOptions(invalid_args),
            "invalid DS4 concurrency is rejected");
   }
   std::cout << "DS4 CLI option contract passed\n";

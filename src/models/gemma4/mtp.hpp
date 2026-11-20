@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GEMMA4_MTP_HPP_
-#define GUFO_MODELS_GEMMA4_MTP_HPP_
+#ifndef MBUFO_MODELS_GEMMA4_MTP_HPP_
+#define MBUFO_MODELS_GEMMA4_MTP_HPP_
 
 #include <cstdint>
 #include <memory>
@@ -7,7 +7,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 
 /// Gemma 4 Assistant (MTP draft head) — architecture per llama.cpp
 /// gemma4-assistant.cpp & common/speculative.cpp (draft-mtp):
@@ -54,6 +54,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4
 
-#endif  // GUFO_MODELS_GEMMA4_MTP_HPP_
+#endif  // MBUFO_MODELS_GEMMA4_MTP_HPP_

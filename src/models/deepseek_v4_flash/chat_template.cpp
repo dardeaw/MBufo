@@ -13,7 +13,7 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/models/deepseek_v4_flash/tool_calls.hpp"
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 namespace {
 
 constexpr std::string_view kBos = "<｜begin▁of▁sentence｜>";
@@ -462,4 +462,4 @@ bool ValidateGgufTemplate(const core::GgufReader& reader,
   return true;
 }
 
-}  // namespace gufo::models::deepseek_v4_flash
+}  // namespace mbufo::models::deepseek_v4_flash

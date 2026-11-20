@@ -26,10 +26,10 @@ bool Near(float got, double want, double tol = 1e-5) {
 }  // namespace
 
 int main() {
-  using gufo::core::rerank::RankIndices;
-  using gufo::core::rerank::SequenceHeadLogit;
-  using gufo::core::rerank::Sigmoid;
-  using gufo::core::rerank::YesNoScore;
+  using mbufo::core::rerank::RankIndices;
+  using mbufo::core::rerank::SequenceHeadLogit;
+  using mbufo::core::rerank::Sigmoid;
+  using mbufo::core::rerank::YesNoScore;
 
   Check(Sigmoid(0.0F) == 0.5F, "sigmoid(0) == 0.5");
   Check(Near(Sigmoid(2.0F), 0.8807970780), "sigmoid(2)");

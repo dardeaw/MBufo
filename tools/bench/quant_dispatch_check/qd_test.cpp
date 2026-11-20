@@ -2,7 +2,7 @@
 // (unlisted type code, missing decode kernel, short scratch, bad shape). Uses the dequant_rows_check data:
 //   python3 tools/bench/dequant_rows_check/dq_prep.py <dir>
 //   hipcc -O2 -std=c++20 --offload-arch=gfx1151 -DENGINE_ENABLE_HIP=1 -I<repo> -x hip qd_test.cpp \\
-//         -x none <build>/libgufo_core_gemm.a -o qd_test && ./qd_test <dir>
+//         -x none <build>/libmbufo_core_gemm.a -o qd_test && ./qd_test <dir>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -17,8 +17,8 @@
 
 #include "src/core/compute/gemm/gemm.hpp"
 
-using namespace gufo::core::compute::gemm;
-namespace q = gufo::core::quant;
+using namespace mbufo::core::compute::gemm;
+namespace q = mbufo::core::quant;
 
 #define CK(x) do { hipError_t err__ = (x); if (err__ != hipSuccess) { std::fprintf(stderr, "HIP error %s at %d\n", hipGetErrorString(err__), __LINE__); return 2; } } while (0)
 

@@ -32,7 +32,7 @@
 // DFlash2 uses in-place Q/K and no target KV-cache outputs. Context injection
 // also uses the key-only path with no query heads.
 void TestNormRoPEWithoutCache() {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   for (const unsigned dim : {128U, 256U}) {
     for (const unsigned rows : {1U, 7U, 8U, 16U}) {
       for (const unsigned position : {0U, 4096U, 16384U}) {
@@ -49,15 +49,15 @@ void TestNormRoPEWithoutCache() {
           DeviceBuffer<float> q_ref(q), k_ref(k), q_fused(q), k_fused(k),
               weight(weights);
           if (heads != 0) {
-            gufo::hip::LaunchBatchedPerHeadRMSNorm(
+            mbufo::hip::LaunchBatchedPerHeadRMSNorm(
                 q_ref.data(), weight.data(), q_ref.data(), rows, heads, dim);
           }
-          gufo::hip::LaunchBatchedPerHeadRMSNorm(
+          mbufo::hip::LaunchBatchedPerHeadRMSNorm(
               k_ref.data(), weight.data(), k_ref.data(), rows, kv_heads, dim);
-          gufo::hip::LaunchBatchedRoPE(q_ref.data(), k_ref.data(), rows, heads,
+          mbufo::hip::LaunchBatchedRoPE(q_ref.data(), k_ref.data(), rows, heads,
                                        kv_heads, dim, 64, position,
                                        10000000.0F);
-          gufo::hip::LaunchBatchedFusedQKNormRoPEKvWrite(
+          mbufo::hip::LaunchBatchedFusedQKNormRoPEKvWrite(
               heads != 0 ? q_fused.data() : nullptr, k_fused.data(),
               k_fused.data(), weight.data(), weight.data(), q_fused.data(),
               k_fused.data(), nullptr, nullptr, nullptr, nullptr, 0, position,
@@ -173,24 +173,24 @@ void TestFusedQKNormRoPEKvWriteEquivalence() {
   HIP_CHECK(hipMemset(d_vc16_fus, 0, f16_cache_elems * sizeof(std::uint16_t)));
 
   // Unfused reference chain
-  gufo::hip::LaunchPerHeadRMSNorm(d_q_ref, d_wq, d_q_ref, num_heads, head_dim,
+  mbufo::hip::LaunchPerHeadRMSNorm(d_q_ref, d_wq, d_q_ref, num_heads, head_dim,
                                   eps);
-  gufo::hip::LaunchPerHeadRMSNorm(d_k_ref, d_wk, d_k_ref, num_kv_heads,
+  mbufo::hip::LaunchPerHeadRMSNorm(d_k_ref, d_wk, d_k_ref, num_kv_heads,
                                   head_dim, eps);
-  gufo::hip::LaunchRoPE(d_q_ref, d_k_ref, num_heads, num_kv_heads, head_dim,
+  mbufo::hip::LaunchRoPE(d_q_ref, d_k_ref, num_heads, num_kv_heads, head_dim,
                         rotary_dim, d_pos, rope_theta);
-  gufo::hip::LaunchAttention(d_q_ref, d_k_ref, d_v_ref, d_gate, d_kc_ref,
+  mbufo::hip::LaunchAttention(d_q_ref, d_k_ref, d_v_ref, d_gate, d_kc_ref,
                              d_vc_ref, d_kc16_ref, d_vc16_ref, d_out_ref,
                              layer_idx, d_pos, max_context, num_heads,
                              num_kv_heads, head_dim, nullptr,
                              /*skip_kv_write=*/false);
 
   // Fused chain
-  gufo::hip::LaunchFusedQKNormRoPEKvWrite(
+  mbufo::hip::LaunchFusedQKNormRoPEKvWrite(
       d_q_fus, d_k_fus, d_v_fus, d_wq, d_wk, d_q_fus, d_k_fus, d_kc_fus,
       d_vc_fus, d_kc16_fus, d_vc16_fus, layer_idx, d_pos, max_context,
       num_heads, num_kv_heads, head_dim, rotary_dim, rope_theta, eps);
-  gufo::hip::LaunchAttention(d_q_fus, d_k_fus, d_v_fus, d_gate, d_kc_fus,
+  mbufo::hip::LaunchAttention(d_q_fus, d_k_fus, d_v_fus, d_gate, d_kc_fus,
                              d_vc_fus, d_kc16_fus, d_vc16_fus, d_out_fus,
                              layer_idx, d_pos, max_context, num_heads,
                              num_kv_heads, head_dim, nullptr,
@@ -400,17 +400,17 @@ void TestBatchedFusedQKNormRoPEKvWriteEquivalence() {
 
   // Per-token unfused reference chain
   for (std::size_t t = 0; t < batch; ++t) {
-    gufo::hip::LaunchPerHeadRMSNorm(d_q_ref + t * head_total, d_wq,
+    mbufo::hip::LaunchPerHeadRMSNorm(d_q_ref + t * head_total, d_wq,
                                     d_q_ref + t * head_total, num_heads,
                                     head_dim, eps);
-    gufo::hip::LaunchPerHeadRMSNorm(d_k_ref + t * kv_total, d_wk,
+    mbufo::hip::LaunchPerHeadRMSNorm(d_k_ref + t * kv_total, d_wk,
                                     d_k_ref + t * kv_total, num_kv_heads,
                                     head_dim, eps);
-    gufo::hip::LaunchRoPE(d_q_ref + t * head_total, d_k_ref + t * kv_total,
+    mbufo::hip::LaunchRoPE(d_q_ref + t * head_total, d_k_ref + t * kv_total,
                           num_heads, num_kv_heads, head_dim, rotary_dim,
                           static_cast<std::uint32_t>(start_pos + t),
                           rope_theta);
-    gufo::hip::LaunchAttention(
+    mbufo::hip::LaunchAttention(
         d_q_ref + t * head_total, d_k_ref + t * kv_total,
         d_v_ref + t * kv_total, d_gate + t * head_total, d_kc_ref, d_vc_ref,
         d_kc16_ref, d_vc16_ref, d_out_ref + t * head_total, layer_idx,
@@ -419,12 +419,12 @@ void TestBatchedFusedQKNormRoPEKvWriteEquivalence() {
   }
 
   // Batched fused chain
-  gufo::hip::LaunchBatchedFusedQKNormRoPEKvWrite(
+  mbufo::hip::LaunchBatchedFusedQKNormRoPEKvWrite(
       d_q_fus, d_k_fus, d_v_fus, d_wq, d_wk, d_q_fus, d_k_fus, d_kc_fus,
       d_vc_fus, d_kc16_fus, d_vc16_fus, layer_idx, start_pos, batch,
       max_context, num_heads, num_kv_heads, head_dim, rotary_dim, rope_theta,
       eps);
-  gufo::hip::LaunchBatchedAttention(d_q_fus, d_k_fus, d_v_fus, d_gate, d_kc_fus,
+  mbufo::hip::LaunchBatchedAttention(d_q_fus, d_k_fus, d_v_fus, d_gate, d_kc_fus,
                                     d_vc_fus, d_kc16_fus, d_vc16_fus, d_out_fus,
                                     layer_idx, start_pos, batch, max_context,
                                     num_heads, num_kv_heads, head_dim, nullptr,
@@ -541,9 +541,9 @@ void TestBatchedFusedQKNormRoPEKvWriteEquivalence() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen QK/RoPE/KV fusion ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

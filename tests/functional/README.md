@@ -7,10 +7,10 @@ Qwen 27B deep-history recovery uses separate, explicitly selected workloads:
 
 ```sh
 python3 tests/functional/deep_peers_qwen.py \
-  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --binary /path/to/production/mbufo --model /path/to/qwen27b.gguf \
   --mode ar --source-revision BUILD_SHA --expect-component --out /tmp/qwen-deep
 python3 tests/functional/over_ram_qwen.py \
-  --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+  --binary /path/to/production/mbufo --model /path/to/qwen27b.gguf \
   --mode dflash2 --draft /path/to/dflash2.gguf \
   --source-revision BUILD_SHA --expect-component --out /tmp/qwen-over-ram
 ```
@@ -38,7 +38,7 @@ serves a short cached peer, then verifies retained work and resumed output:
 ```sh
 nix develop -c python3 tests/functional/qwen_prefill_cancel.py \
   --output /tmp/qwen-prefill-cancel -- \
-  /path/to/production/gufo serve llm --model /path/to/qwen27b.gguf \
+  /path/to/production/mbufo serve llm --model /path/to/qwen27b.gguf \
   --speculative dflash2 --dflash-model /path/to/draft.gguf
 ```
 
@@ -60,7 +60,7 @@ sampled verification and its complete-vocabulary fallbacks:
 ```sh
 nix develop -c python3 tests/functional/prompt_lookup.py \
   --output /tmp/prompt-lookup -- \
-  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  /path/to/production/mbufo serve llm --model /path/to/model.gguf \
   --speculative mtp --mtp-model /path/to/mtp.gguf
 ```
 
@@ -121,7 +121,7 @@ and restore the same reply after a restart:
 ```sh
 nix develop -c python3 tests/functional/cache_startup.py \
   --output /tmp/cache-startup-mtp -- \
-  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  /path/to/production/mbufo serve llm --model /path/to/model.gguf \
   --speculative mtp --mtp-model /path/to/mtp.gguf --context 8192
 ```
 
@@ -133,7 +133,7 @@ Commands, startup times, request timings, responses and logs
 remain in the output directory. This check stays outside hosted model CI.
 
 The cluster workflow uses [impact.json](impact.json) to select suites from changed
-paths. Inspect a plan locally without running Gufo:
+paths. Inspect a plan locally without running MBufo:
 
 ```sh
 python3 tests/functional/impact.py --model flash-next-q4 \
@@ -169,7 +169,7 @@ plans with `--model flash-next-q4`; the default is `--model flash-next-q4/mtp`.
 and production binary all come from the PR, as in `CI`.
 While it builds, it fetches the pinned Q4 shards, MTP sidecar and vision projector
 in the background into a persistent
-cache under `$GUFO_CI_CACHE` (default `$RUNNER_TOOL_CACHE/gufo`; the weights need
+cache under `$MBUFO_CI_CACHE` (default `$RUNNER_TOOL_CACHE/mbufo`; the weights need
 about 110 GiB free), and retains reports and selection reasons as artifacts.
 Weight and `ccache` reuse depend on the cluster preserving that directory on the
 allocated machine. The job also builds the merge base. After the suites,
@@ -223,7 +223,7 @@ included, and the real server must answer all three after the listener handoff:
 ```sh
 nix develop -c python3 tests/functional/startup_loading.py \
   --output /tmp/startup-loading -- \
-  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  /path/to/production/mbufo serve llm --model /path/to/model.gguf \
   --cache-disk /tmp/startup-loading-disk
 ```
 
@@ -241,7 +241,7 @@ nix develop -c cmake --build --preset cpu-test --target device_loss_faults
 python3 tests/functional/device_loss.py \
   --fault-library build/cpu-test/libdevice_loss_faults.so \
   --output /tmp/device-loss-check -- \
-  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  /path/to/production/mbufo serve llm --model /path/to/model.gguf \
   --sessions 2 --context 4096 --think off --speculative off
 ```
 
@@ -264,7 +264,7 @@ write without loading weights.
 nix develop -c python3 tests/functional/run.py \
   --record-baseline --output /tmp/api-baseline --sampling-preset qwen38 \
   --suite tools --suite sampling-defaults --suite batch -- \
-  /path/to/baseline/gufo serve llm --model /path/to/model.gguf \
+  /path/to/baseline/mbufo serve llm --model /path/to/model.gguf \
   --mmproj /path/to/mmproj.gguf --sessions 4
 ```
 
@@ -430,7 +430,7 @@ controls and 128px image controls. It uses only the Python standard library:
 
 ```sh
 python3 tests/functional/image_history.py --output /tmp/image-history-main -- \
-  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  /path/to/production/mbufo serve llm --model /path/to/model.gguf \
   --mmproj /path/to/mmproj.gguf --sessions 1 --context 32768 \
   --cache-ram-bytes 8589934592 --think off
 ```
@@ -593,7 +593,7 @@ nix develop -c cmake --preset cpu-test
 nix develop -c cmake --build --preset cpu-test --target cache_disk_faults
 nix develop -c python3 tests/functional/cache_lifecycle.py \
   --output /tmp/cache-lifecycle --fault-library build/cpu-test/libcache_disk_faults.so -- \
-  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  /path/to/production/mbufo serve llm --model /path/to/model.gguf \
   --context 32768 --sessions 1 --think off --speculative off
 ```
 
@@ -641,7 +641,7 @@ expired recomputation budget and publication before that budget expires:
 ```sh
 nix develop -c python3 tests/functional/publication_wait.py \
   --output /tmp/publication-wait --fault-library build/cpu-test/libcache_disk_faults.so -- \
-  /path/to/production/gufo serve llm --model /path/to/flash-next.gguf \
+  /path/to/production/mbufo serve llm --model /path/to/flash-next.gguf \
   --mtp-model /path/to/mtp.gguf --speculative mtp --sessions 1 --context 65536
 ```
 
@@ -672,7 +672,7 @@ alone. For example:
 nix develop -c python3 tests/functional/publication_wait.py \
   --case reclaim --output /tmp/publication-reclaim \
   --fault-library build/cpu-test/libcache_disk_faults.so -- \
-  /path/to/production/gufo serve llm --model /path/to/flash-next.gguf \
+  /path/to/production/mbufo serve llm --model /path/to/flash-next.gguf \
   --mtp-model /path/to/mtp.gguf --speculative mtp --sessions 1 --context 65536
 ```
 

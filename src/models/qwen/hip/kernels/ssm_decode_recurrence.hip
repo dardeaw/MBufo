@@ -10,7 +10,7 @@
 #include "src/models/qwen/hip/kernels/deltanet_decode.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 __global__ void CaptureBatchedSsmReplayKernel(
     const float* __restrict__ qkv, const float* __restrict__ alpha,
@@ -305,5 +305,5 @@ void LaunchSSMConvRecurrenceBatch(
     launch_output.template operator()<float, false>();
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

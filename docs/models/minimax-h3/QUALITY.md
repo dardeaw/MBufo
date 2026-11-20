@@ -20,7 +20,7 @@ binds weights, inputs, shapes and thresholds.
 
 The block limit is 0.01 for both relative errors; denoiser/VAE limits are
 component-specific in the contract. All comparisons require finite outputs and
-identical input tensors. Equal Gufo/PyTorch seeds do not generate equal noise.
+identical input tensors. Equal MBufo/PyTorch seeds do not generate equal noise.
 
 ## Full-resolution kernel qualification
 

@@ -9,8 +9,8 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
-namespace gufo::testing::chat_goldens {
-namespace json = gufo::json;
+namespace mbufo::testing::chat_goldens {
+namespace json = mbufo::json;
 inline void Expect(bool condition, std::string_view message) {
   if (!condition) {
     std::cerr << "Assertion failed: " << message << '\n';
@@ -33,7 +33,7 @@ inline const json::Value& GoldenCase(const json::Value& fixture,
 
 inline std::string Sha256(std::string_view value) {
   const auto* data = reinterpret_cast<const std::uint8_t*>(value.data());
-  return gufo::crypto::Sha256Hex({data, value.size()});
+  return mbufo::crypto::Sha256Hex({data, value.size()});
 }
 
 template<typename Token>
@@ -47,7 +47,7 @@ std::string TokenSha256(std::span<const Token> tokens) {
     bytes.push_back(static_cast<std::uint8_t>(value >> 16U));
     bytes.push_back(static_cast<std::uint8_t>(value >> 24U));
   }
-  return gufo::crypto::Sha256Hex(bytes);
+  return mbufo::crypto::Sha256Hex(bytes);
 }
 
-}  // namespace gufo::testing::chat_goldens
+}  // namespace mbufo::testing::chat_goldens

@@ -14,13 +14,13 @@ results and qualification gaps live in:
 ## Model benchmark driver
 
 `tools/bench/model-bench.py` measures the tables of a model's `BENCHMARKS.md`
-over HTTP for Gufo and for the reference project of its category (llama.cpp
+over HTTP for MBufo and for the reference project of its category (llama.cpp
 for Qwen; antirez/ds4 for DeepSeek), writes per-table artifacts, and renders the tables
 and SVG charts between the `<!-- bench:<id> -->` markers. Workloads and table
 layouts are declared in `docs/models/<model>/artifacts/bench.json`; the
 `benchmark-model` skill in `.agents/skills` describes the procedure.
 
-Reference runtimes are explicitly selected Nix packages, excluded from Gufo,
+Reference runtimes are explicitly selected Nix packages, excluded from MBufo,
 the normal development shell and hosted checks:
 
 | Reference | Package | Executable |
@@ -56,17 +56,17 @@ For decode comparisons, set `prefill_first: true` in the concurrency table.
 Prepare every session with the full prompt and one output token, wait for all
 preparations, then time identical tg128 requests with prefix reuse. The driver
 pins llama.cpp slots and rejects replay exceeding four prompt tokens. This keeps
-peers' long prefills outside llama.cpp's elapsed generation timer; Gufo reports
+peers' long prefills outside llama.cpp's elapsed generation timer; MBufo reports
 active decode time. Preserve a separate fresh AR completion-hash control.
 
 ## Direct and serving measurements
 
-`gufo bench` measures the model path. Keep model artifact, prompt length,
+`mbufo bench` measures the model path. Keep model artifact, prompt length,
 generation length, context depth, speculative mode, and sampling controls
 fixed when comparing runs. `pp2048` means 2,048 new prompt tokens; context
 depth is separate from the amount of new prefill work.
 
-`tools/serving/gufo-serving-bench.py` measures HTTP serving with synchronized
+`tools/serving/mbufo-serving-bench.py` measures HTTP serving with synchronized
 requests. It distinguishes server-stage prefill/decode throughput, scheduler
 and client TTFT, token ITL, whole-request throughput, and aggregate concurrency
 throughput. C1 serving and a direct single-user benchmark are comparable only
@@ -108,21 +108,21 @@ NLL/perplexity, top-1 agreement, and top-k overlap as applicable. Aggregates
 are over scored positions. A changed tokenizer, template, suite, or history
 changes the comparison identity.
 
-Capability evaluation is separate: [gufo eval](CLI.md#benchmarks-and-evaluations) grades free-running
+Capability evaluation is separate: [mbufo eval](CLI.md#benchmarks-and-evaluations) grades free-running
 answers through the OpenAI-compatible server.
 
 ## Focused kernel measurements
 
 Build development tools with `cmake --preset gpu-test` and
-`cmake --build --preset gpu-test --target gufo-kernel-bench tune_hipblaslt`.
+`cmake --build --preset gpu-test --target mbufo-kernel-bench tune_hipblaslt`.
 They are omitted from the production package.
 
-`gufo-kernel-bench` exercises production HIP entry points without loading a
+`mbufo-kernel-bench` exercises production HIP entry points without loading a
 model. Correctness sentinels run outside the timed interval:
 
 ```sh
-./build/gpu-test/gufo-kernel-bench --help
-./build/gpu-test/gufo-kernel-bench \
+./build/gpu-test/mbufo-kernel-bench --help
+./build/gpu-test/mbufo-kernel-bench \
   --case decode-attention --context 4096,8192,12288,16384 \
   --warmup 5 --repetitions 30 --json
 ```
@@ -150,7 +150,7 @@ maintained correctness test.
 Serving reports exclude endpoint hosts, prompts, generated text, model paths,
 raw token IDs, and timestamps. The canonical machine fingerprint excludes
 hostnames, usernames, secrets, timestamps, and private paths.
-`gufo diagnose --validate-artifact` validates its supported diagnostic schema;
+`mbufo diagnose --validate-artifact` validates its supported diagnostic schema;
 each model/tool owns the validation of its own result schema.
 
 Downloaded tokenizer files and `.direnv` shell state are local artifacts.

@@ -14,7 +14,7 @@
 
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
-namespace q = gufo::models::qwen38_flash_next::rocm;
+namespace q = mbufo::models::qwen38_flash_next::rocm;
 namespace {
 
 // The model's linear-attention geometry: 16 key heads, 48 value heads,

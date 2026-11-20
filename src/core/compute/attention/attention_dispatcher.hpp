@@ -48,19 +48,19 @@
 // over the input + policy, noexcept, no statics, no device state. Callers
 // map their own codec enums onto DispatchCodec.
 //
-// Env降级阀 (same style as the existing GUFO_*_UNIFIED_BATCH=0 valves):
-//   GUFO_ATTN_DISPATCH=0        master kill-switch -> always kLegacy.
-//   GUFO_ATTN_WMMA_MIN_TOKENS   override wmma_min_tokens.
-//   GUFO_ATTN_SPLITK_MAX_TOKENS override splitk_max_tokens.
-//   GUFO_ATTN_SPLITK_MIN_KV     override splitk_min_kv.
+// Env降级阀 (same style as the existing MBUFO_*_UNIFIED_BATCH=0 valves):
+//   MBUFO_ATTN_DISPATCH=0        master kill-switch -> always kLegacy.
+//   MBUFO_ATTN_WMMA_MIN_TOKENS   override wmma_min_tokens.
+//   MBUFO_ATTN_SPLITK_MAX_TOKENS override splitk_max_tokens.
+//   MBUFO_ATTN_SPLITK_MIN_KV     override splitk_min_kv.
 // Malformed values are ignored (measured defaults stand).
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_ATTENTION_DISPATCHER_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_ATTENTION_DISPATCHER_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_ATTENTION_DISPATCHER_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_ATTENTION_DISPATCHER_HPP_
 
 #include <cstdint>
 #include <cstdlib>
 
-namespace gufo::core::compute::attention_dispatcher {
+namespace mbufo::core::compute::attention_dispatcher {
 
 // Which kernel the caller should run for this attention call.
 // kLegacy means "run your existing code path unchanged": F16 inputs outside
@@ -95,7 +95,7 @@ struct AttentionDispatchPolicy {
   std::uint32_t splitk_min_kv = 256;    // visible keys to pay off Split-K
   bool dispatch_enabled = true;         // false -> always kLegacy
 
-  // Measured defaults with the GUFO_ATTN_* env overrides applied.
+  // Measured defaults with the MBUFO_ATTN_* env overrides applied.
   // No statics: the env is re-read per call so test harnesses can force
   // routes (e.g. scalar-vs-WMMA parity) within one process.
   static AttentionDispatchPolicy WithEnvDefaults() {
@@ -105,21 +105,21 @@ struct AttentionDispatchPolicy {
   }
 
   void ApplyEnvOverrides() {
-    if (const char* e = std::getenv("GUFO_ATTN_DISPATCH")) {
+    if (const char* e = std::getenv("MBUFO_ATTN_DISPATCH")) {
       if (e[0] == '0' && e[1] == '\0')
         dispatch_enabled = false;
     }
-    if (const char* e = std::getenv("GUFO_ATTN_WMMA_MIN_TOKENS")) {
+    if (const char* e = std::getenv("MBUFO_ATTN_WMMA_MIN_TOKENS")) {
       const unsigned long v = std::strtoul(e, nullptr, 10);
       if (v > 0 && v <= 1048576)
         wmma_min_tokens = static_cast<std::uint32_t>(v);
     }
-    if (const char* e = std::getenv("GUFO_ATTN_SPLITK_MAX_TOKENS")) {
+    if (const char* e = std::getenv("MBUFO_ATTN_SPLITK_MAX_TOKENS")) {
       const unsigned long v = std::strtoul(e, nullptr, 10);
       if (v > 0 && v <= 1024)
         splitk_max_tokens = static_cast<std::uint32_t>(v);
     }
-    if (const char* e = std::getenv("GUFO_ATTN_SPLITK_MIN_KV")) {
+    if (const char* e = std::getenv("MBUFO_ATTN_SPLITK_MIN_KV")) {
       const unsigned long v = std::strtoul(e, nullptr, 10);
       if (v > 0 && v <= 1048576)
         splitk_min_kv = static_cast<std::uint32_t>(v);
@@ -241,6 +241,6 @@ inline const char* AttentionRouteName(AttentionRoute route) noexcept {
   return "unknown";
 }
 
-}  // namespace gufo::core::compute::attention_dispatcher
+}  // namespace mbufo::core::compute::attention_dispatcher
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_ATTENTION_DISPATCHER_HPP_
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_ATTENTION_DISPATCHER_HPP_

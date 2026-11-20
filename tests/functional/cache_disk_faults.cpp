@@ -12,7 +12,7 @@
 
 namespace {
 bool MatchesManifest(int descriptor) {
-  if (std::getenv("GUFO_TEST_DISK_MANIFEST_ONLY") == nullptr)
+  if (std::getenv("MBUFO_TEST_DISK_MANIFEST_ONLY") == nullptr)
     return true;
   char path[64]{};
   std::snprintf(path, sizeof(path), "/proc/self/fd/%d", descriptor);
@@ -22,7 +22,7 @@ bool MatchesManifest(int descriptor) {
   char magic[8]{};
   const auto count = pread(input, magic, sizeof(magic), 0);
   close(input);
-  return count == 8 && std::memcmp(magic, "GUFOMNF2", 8) == 0;
+  return count == 8 && std::memcmp(magic, "MBUFOMNF2", 8) == 0;
 }
 }  // namespace
 
@@ -31,8 +31,8 @@ extern "C" int fsync(int descriptor) {
   static const auto original =
       reinterpret_cast<Function>(dlsym(RTLD_NEXT, "fsync"));
   static std::atomic<bool> held{false};
-  const char* gate = std::getenv("GUFO_TEST_DISK_GATE");
-  const char* directory = std::getenv("GUFO_TEST_DISK_DIRECTORY");
+  const char* gate = std::getenv("MBUFO_TEST_DISK_GATE");
+  const char* directory = std::getenv("MBUFO_TEST_DISK_DIRECTORY");
   if (gate != nullptr && directory != nullptr && !held.load()) {
     struct stat status{};
     char descriptor_path[64]{};

@@ -116,7 +116,7 @@ def source_model(source, output_width):
 
 
 def load_weights(path, source):
-    spec = importlib.util.spec_from_file_location("vision_gguf", ROOT / "tools/gufo/gguf.py")
+    spec = importlib.util.spec_from_file_location("vision_gguf", ROOT / "tools/mbufo/gguf.py")
     codec = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(codec)
     metadata = codec.parse_gguf(path)
@@ -234,20 +234,20 @@ def compare(args):
         value = torch.from_numpy(trace(prior).reshape(-1, 1152)).cuda().bfloat16()
         isolated[f"layer{index}"] = difference(
             trace(f"layer{index}"), array(model.blocks[index](value, **kwargs)))
-    # An FP32 run provides an independent numerical control. Compare Gufo's
+    # An FP32 run provides an independent numerical control. Compare MBufo's
     # distance from it with the original BF16 implementation's rounding error.
     model.float()
     fp32 = array(model(patches, grid).pooler_output)
-    gufo_fp32 = difference(trace("embedding"), fp32)
+    mbufo_fp32 = difference(trace("embedding"), fp32)
     bf16_fp32 = difference(bf16, fp32)
     passed = (
         max(stage["relative_l2"] for stage in reports.values()) < 0.05
         and max(stage["relative_l2"] for stage in isolated.values()) < 0.015
-        and gufo_fp32["relative_l2"] <= 1.25 * bf16_fp32["relative_l2"] + 0.001
+        and mbufo_fp32["relative_l2"] <= 1.25 * bf16_fp32["relative_l2"] + 0.001
     )
     return dict(passed=passed, source_revision=REVISION, pixel_exact=True,
                 stages=reports, isolated_layers=isolated,
-                gufo_vs_fp32=gufo_fp32, upstream_bf16_vs_fp32=bf16_fp32)
+                mbufo_vs_fp32=mbufo_fp32, upstream_bf16_vs_fp32=bf16_fp32)
 
 
 def main():
@@ -262,7 +262,7 @@ def main():
     report = compare(args)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({key: report[key] for key in (
-        "passed", "pixel_exact", "isolated_layers", "gufo_vs_fp32", "upstream_bf16_vs_fp32")}))
+        "passed", "pixel_exact", "isolated_layers", "mbufo_vs_fp32", "upstream_bf16_vs_fp32")}))
     if not report["passed"]:
         raise SystemExit("vision operator qualification failed")
 

@@ -9,7 +9,7 @@
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 const QwenGpuModel& RequireModel(
@@ -566,5 +566,5 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::GenerateFromPrefix(
   return output_tokens;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

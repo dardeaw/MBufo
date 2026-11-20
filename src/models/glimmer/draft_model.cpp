@@ -8,7 +8,7 @@
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 
-namespace gufo::models::glimmer::draft {
+namespace mbufo::models::glimmer::draft {
 namespace {
 
 struct Reader {
@@ -105,7 +105,7 @@ namespace {
 // and Q8_0 ride the shared core dequantizers).
 bool DequantToF32(const core::GgufTensorInfo& info, std::vector<float>& out,
                   std::string* error) {
-  namespace quant = gufo::quant;
+  namespace quant = mbufo::quant;
   const std::uint64_t elems = info.ElementCount();
   if (elems == 0) {
     if (error != nullptr && error->empty())
@@ -210,8 +210,11 @@ std::optional<DraftModelWeights> DraftModelWeights::Bind(
       }
       return false;
     }
-    // Q4_K matrices stay packed; other matrices go to F16; vectors stay F32.
-    const bool keep_packed = info->type == core::GgmlType::kQ4_K && rows > 1 && cols % 256 == 0;
+    // Q4_K and Q6_K matrices stay packed (the Q6_K ones through the multi-token WMMA kernel: 0.82 byte/weight instead of
+    // the 2 of an F16 copy); other matrices go to F16; vectors stay F32.
+    const bool packed_q6k = info->type == core::GgmlType::kQ6_K && rows % 16 == 0 &&
+                            std::getenv("MBUFO_DRAFT_NO_PACKED_Q6K") == nullptr;  // env: A/B against the F16 copy
+    const bool keep_packed = (info->type == core::GgmlType::kQ4_K || packed_q6k) && rows > 1 && cols % 256 == 0;
     std::vector<float> host;
     std::vector<__half> half;
     const void* src = nullptr;
@@ -220,7 +223,7 @@ std::optional<DraftModelWeights> DraftModelWeights::Bind(
     if (keep_packed) {
       src = info->data;
       bytes = info->size_bytes;
-      ref_type = 12;
+      ref_type = info->type == core::GgmlType::kQ6_K ? 14 : 12;
     } else {
       if (!DequantToF32(*info, host, error_msg))
         return false;
@@ -303,4 +306,4 @@ std::optional<DraftModelWeights> DraftModelWeights::Bind(
   return w;
 }
 
-}  // namespace gufo::models::glimmer::draft
+}  // namespace mbufo::models::glimmer::draft

@@ -38,7 +38,7 @@ def check_system_injection(client, model, checks, chat_result):
     def chat_work(result):
         usage = result["usage"]
         total, reused = usage["prompt_tokens"], usage["cached_tokens"]
-        prefilled = usage["gufo"]["prefill_tokens"]
+        prefilled = usage["mbufo"]["prefill_tokens"]
         assert reused + prefilled == total, usage
         return total, reused, prefilled
 

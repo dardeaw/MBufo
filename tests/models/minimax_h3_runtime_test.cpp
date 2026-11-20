@@ -23,15 +23,15 @@
 
 namespace {
 
-using gufo::minimax_h3::CancellationToken;
-using gufo::minimax_h3::FailureInjector;
-using gufo::minimax_h3::InspectionOptions;
-using gufo::minimax_h3::LoadOptions;
-using gufo::minimax_h3::ModelInventory;
-using gufo::minimax_h3::Phase;
-using gufo::minimax_h3::PhaseSession;
-using gufo::minimax_h3::ResidencyBackend;
-using gufo::minimax_h3::ResidencyMode;
+using mbufo::minimax_h3::CancellationToken;
+using mbufo::minimax_h3::FailureInjector;
+using mbufo::minimax_h3::InspectionOptions;
+using mbufo::minimax_h3::LoadOptions;
+using mbufo::minimax_h3::ModelInventory;
+using mbufo::minimax_h3::Phase;
+using mbufo::minimax_h3::PhaseSession;
+using mbufo::minimax_h3::ResidencyBackend;
+using mbufo::minimax_h3::ResidencyMode;
 
 void Expect(bool condition, const std::string& message) {
   if (!condition) {
@@ -43,7 +43,7 @@ void Expect(bool condition, const std::string& message) {
 struct TemporaryDirectory {
   TemporaryDirectory() {
     std::array<char, 64> pattern{};
-    std::strcpy(pattern.data(), "/tmp/gufo-h3-runtime-XXXXXX");
+    std::strcpy(pattern.data(), "/tmp/mbufo-h3-runtime-XXXXXX");
     char* result = mkdtemp(pattern.data());
     if (result == nullptr) {
       throw std::runtime_error("mkdtemp failed");
@@ -175,7 +175,7 @@ struct ModelFixture {
 
   void WriteManifest() const {
     std::ostringstream manifest;
-    manifest << "{\"schema\":\"gufo.minimax-h3-source.v1\","
+    manifest << "{\"schema\":\"mbufo.minimax-h3-source.v1\","
              << "\"model_kind\":\"minimax-h3-fl2va-bf16\","
              << "\"revision\":\"42ed227ee7df40d41602854ae760620d6eb651fe\","
              << "\"files\":[";
@@ -294,8 +294,8 @@ ModelInventory InspectFixture(const ModelFixture& fixture) {
 }
 
 void TestStrictJson() {
-  using gufo::minimax_h3::json::Error;
-  using gufo::minimax_h3::json::Parse;
+  using mbufo::minimax_h3::json::Error;
+  using mbufo::minimax_h3::json::Parse;
   const auto parsed = Parse(
       "{\"u\":18446744073709551615,\"s\":-7,\"f\":1e-6,"
       "\"unicode\":\"\\uD83E\\uDD8A\"}");
@@ -311,7 +311,7 @@ void TestStrictJson() {
   }
   Expect(duplicate_rejected, "JSON duplicate keys rejected");
   const std::string abc = "abc";
-  Expect(gufo::minimax_h3::Sha256(std::span(
+  Expect(mbufo::minimax_h3::Sha256(std::span(
              reinterpret_cast<const unsigned char*>(abc.data()), abc.size())) ==
              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
          "SHA-256 known-answer test");
@@ -357,7 +357,7 @@ void TestPinnedManifestRequiredByDefault() {
   Expect(!inventory.has_value(), "look-alike source manifest rejected");
   Expect(error.find("SHA-256") != std::string::npos,
          "pinned-manifest rejection identifies SHA-256");
-  Expect(gufo::minimax_h3::DefaultResidencyMode() == ResidencyMode::kDeviceCopy,
+  Expect(mbufo::minimax_h3::DefaultResidencyMode() == ResidencyMode::kDeviceCopy,
          "measured initial default is explicit device copy");
 }
 
@@ -438,7 +438,7 @@ void TestFailureInjectionIsTransactional() {
                              nullptr, &failure, &error);
       Expect(!session.has_value(),
              "injected failure must reject " +
-                 std::string(gufo::minimax_h3::ToString(mode)) +
+                 std::string(mbufo::minimax_h3::ToString(mode)) +
                  " at operation " + std::to_string(fail_after));
       Expect(backend.LiveResources() == 0,
              "injected failure restores resource baseline");

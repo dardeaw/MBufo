@@ -24,7 +24,7 @@ def reply(total, cached, code="ALPHA", tools=None):
             "finish": "tool_calls" if tools else "stop", "usage": {
                 "prompt_tokens": total, "cached_tokens": cached,
                 "completion_tokens": 12 if tools else 2,
-                "gufo": {"prefill_tokens": total - cached, "cache_snapshot_bytes": 300}}}
+                "mbufo": {"prefill_tokens": total - cached, "cache_snapshot_bytes": 300}}}
 
 
 class CacheWorkloadsTest(unittest.TestCase):
@@ -291,7 +291,7 @@ class CacheWorkloadsTest(unittest.TestCase):
 
             with patch.object(Lifecycle, "crash_case", fail), \
                     patch("cache_lifecycle.provenance", return_value={"harness_sha256": "fixture"}):
-                runner = Lifecycle(["gufo", "serve", "llm", "--speculative", "off"],
+                runner = Lifecycle(["mbufo", "serve", "llm", "--speculative", "off"],
                                    root, 1, root / "library.so")
                 with patch("cache_lifecycle.shutil.disk_usage") as usage:
                     usage.return_value.free = 32 * 1024**3

@@ -15,7 +15,7 @@
 #include "src/core/json.hpp"
 #include "src/models/qwen3_asr/bpe.hpp"
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 namespace {
 
 constexpr std::size_t kMaximumVocabularyBytes = 16U << 20U;
@@ -206,4 +206,4 @@ std::string Tokenizer::Decode(std::span<const std::uint32_t> ids,
   return result;
 }
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr

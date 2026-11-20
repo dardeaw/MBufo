@@ -17,7 +17,7 @@
 #include "src/models/glimmer/draft_backend.hpp"
 #include "src/models/glimmer/engine.hpp"
 
-namespace g = gufo::models::glimmer;
+namespace g = mbufo::models::glimmer;
 
 namespace {
 
@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
   auto model = g::Model::Load(argv[1], options, &error);
   if (!model)
     return Fail("target load: " + error);
-  if (!gufo::speculative::DraftBackendRegistry::Instance().Contains(
+  if (!mbufo::speculative::DraftBackendRegistry::Instance().Contains(
           "glimmer-dflash"))
     return Fail("glimmer-dflash backend is not registered");
 
@@ -107,12 +107,12 @@ int main(int argc, char** argv) {
   std::uint64_t drafted = 0, accepted = 0;
   std::uint64_t rounds = 0;
   {
-    gufo::speculative::DraftBackendRequest request;
+    mbufo::speculative::DraftBackendRequest request;
     request.target_kind = "glimmer";
     request.target_model = model;
     request.draft_model_path = argv[2];
     request.max_draft_tokens = n_draft;
-    auto backend = gufo::speculative::CreateDraftBackend(
+    auto backend = mbufo::speculative::CreateDraftBackend(
         "glimmer-dflash", request, &error);
     if (!backend)
       return Fail("backend create: " + error);
@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
     }
     {
       {
-      FILE* ff = std::fopen("/home/dardeaw/gufo_feats.bin", "wb");
+      FILE* ff = std::fopen("mbufo_feats.bin", "wb");
       if (ff != nullptr) {
         std::fwrite(prompt_feats.data(), sizeof(float), prompt_feats.size(),
                     ff);
@@ -191,11 +191,11 @@ int main(int argc, char** argv) {
       }
       std::fprintf(stderr, "\n");
     }
-    std::vector<gufo::tokenization::TokenId> ptoks;
+    std::vector<mbufo::tokenization::TokenId> ptoks;
     ptoks.reserve(prompt.size());
     for (const auto t : prompt)
-      ptoks.push_back(static_cast<gufo::tokenization::TokenId>(t));
-    if (const char* fp = std::getenv("GUFO_FEATS_BIN")) {
+      ptoks.push_back(static_cast<mbufo::tokenization::TokenId>(t));
+    if (const char* fp = std::getenv("MBUFO_FEATS_BIN")) {
       FILE* f = std::fopen(fp, "rb");
       if (f == nullptr)
         return Fail("cannot open feats file");
@@ -212,7 +212,7 @@ int main(int argc, char** argv) {
         return Fail("feats file size mismatch");
       prompt_feats.swap(ext);
     }
-    gufo::speculative::DraftTargetContext prime;
+    mbufo::speculative::DraftTargetContext prime;
     prime.prompt_tokens = ptoks;
     prime.prompt_hidden_states = prompt_feats;
     prime.hidden_size = taps.size() * hidden;

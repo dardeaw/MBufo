@@ -1,13 +1,13 @@
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace mbufo::models::qwen38_flash_next::rocm {
 
 hipError_t PrepareW8A8GemmWave64() {
   hipFuncAttributes attributes{};
   return hipFuncGetAttributes(
       &attributes, reinterpret_cast<const void*>(
-                       gufo::hip::WKQuantA8BlockedWmmaGEMMKernel<
+                       mbufo::hip::WKQuantA8BlockedWmmaGEMMKernel<
                            128, 128, 2, 4, 1, core::GgmlType::kQ8_0, 64>));
 }
 
@@ -18,9 +18,9 @@ void W8A8GemmWave64(const void* w, const void* x_tiled, float* out,
                   static_cast<unsigned>((m + 127) / 128));
   // Keep Flash-Next's compilation and scale order. This geometry is distinct
   // from Qwen27B's Q8 instantiation, so each retains its qualified schedule.
-  gufo::hip::WKQuantA8BlockedWmmaGEMMKernel<128, 128, 2, 4, 1,
+  mbufo::hip::WKQuantA8BlockedWmmaGEMMKernel<128, 128, 2, 4, 1,
                                             core::GgmlType::kQ8_0, 64>
       <<<grid, 256, 0, stream>>>(w, x_tiled, out, batch, m, k);
 }
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace mbufo::models::qwen38_flash_next::rocm

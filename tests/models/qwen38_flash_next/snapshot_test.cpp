@@ -16,8 +16,8 @@
 
 void LimitReportedDeviceFree(std::size_t bytes);
 
-namespace qfn = gufo::models::qwen38_flash_next;
-namespace sampling = gufo::sampling;
+namespace qfn = mbufo::models::qwen38_flash_next;
+namespace sampling = mbufo::sampling;
 
 namespace {
 
@@ -88,7 +88,7 @@ std::vector<std::uint8_t> Payload(qfn::Session& session) {
 
 void CheckPrefillCheckpoint(const std::shared_ptr<qfn::Model>& model,
                             std::span<const std::int32_t> prompt,
-                            gufo::core::SessionMode mode, std::size_t warm = 0,
+                            mbufo::core::SessionMode mode, std::size_t warm = 0,
                             std::uint32_t suffix = 7) {
   std::string error;
   auto source = model->CreateSession(mode, 8192, &error);
@@ -155,7 +155,7 @@ void CheckPrefillCheckpoint(const std::shared_ptr<qfn::Model>& model,
 
 void CheckBorrowedSnapshots(const std::shared_ptr<qfn::Model>& model,
                             std::span<const std::int32_t> prompt,
-                            gufo::core::SessionMode mode) {
+                            mbufo::core::SessionMode mode) {
   std::string error;
   auto source = model->CreateSession(mode, 8192, &error);
   Require(source != nullptr, error);
@@ -278,7 +278,7 @@ void CheckBorrowedSnapshots(const std::shared_ptr<qfn::Model>& model,
 
 void CheckCheckpointRetention(const std::shared_ptr<qfn::Model>& model,
                               std::span<const std::int32_t> prompt,
-                              gufo::core::SessionMode mode) {
+                              mbufo::core::SessionMode mode) {
   std::string error;
   auto source = model->CreateSession(mode, 8192, &error);
   Require(source && source->Sync(prompt.first(32), &error), error);
@@ -312,7 +312,7 @@ void CheckCheckpointRetention(const std::shared_ptr<qfn::Model>& model,
 /// checkpoints in their host payloads instead of failing the request.
 void CheckDeviceExhaustion(const std::shared_ptr<qfn::Model>& model,
                            std::span<const std::int32_t> prompt,
-                           gufo::core::SessionMode mode) {
+                           mbufo::core::SessionMode mode) {
   struct Unlimit {
     ~Unlimit() {
       LimitReportedDeviceFree(std::numeric_limits<std::size_t>::max());
@@ -353,7 +353,7 @@ void CheckDeviceExhaustion(const std::shared_ptr<qfn::Model>& model,
 // memory. Borrowed checkpoints preserve the warm prefix while its short tail
 // is replayed through the independent ordinary Sync path.
 void CheckExtendedPrefillCheckpoint(const std::shared_ptr<qfn::Model>& model,
-                                    gufo::core::SessionMode mode,
+                                    mbufo::core::SessionMode mode,
                                     std::uint32_t boundary) {
   std::string error;
   auto session = model->CreateSession(mode, model->MaxContext(), &error);
@@ -419,8 +419,8 @@ int main(int argc, char** argv) {
         &error);
     Require(model != nullptr, error);
     if (extended) {
-      for (const auto mode : {gufo::core::SessionMode::kAutoregressive,
-                              gufo::core::SessionMode::kSpeculative}) {
+      for (const auto mode : {mbufo::core::SessionMode::kAutoregressive,
+                              mbufo::core::SessionMode::kSpeculative}) {
         for (const auto boundary : {262145U, 294913U})
           CheckExtendedPrefillCheckpoint(model, mode, boundary);
       }
@@ -436,16 +436,16 @@ int main(int argc, char** argv) {
     for (std::size_t i = 0; i < prompt.size(); ++i)
       prompt[i] = pattern[i % pattern.size()];
     CheckPrefillCheckpoint(model, prompt,
-                           gufo::core::SessionMode::kAutoregressive);
+                           mbufo::core::SessionMode::kAutoregressive);
     CheckPrefillCheckpoint(model, prompt,
-                           gufo::core::SessionMode::kSpeculative);
+                           mbufo::core::SessionMode::kSpeculative);
     std::vector<std::int32_t> overflow_prompt(prompt);
     overflow_prompt.insert(overflow_prompt.end(), prompt.begin(),
                            prompt.begin() + 2051);
     std::vector<std::int32_t> warm_prompt(prompt);
     warm_prompt.insert(warm_prompt.end(), prompt.begin(), prompt.begin() + 33);
-    for (const auto mode : {gufo::core::SessionMode::kAutoregressive,
-                            gufo::core::SessionMode::kSpeculative}) {
+    for (const auto mode : {mbufo::core::SessionMode::kAutoregressive,
+                            mbufo::core::SessionMode::kSpeculative}) {
       CheckPrefillCheckpoint(model, warm_prompt, mode, prompt.size());
       CheckPrefillCheckpoint(model, overflow_prompt, mode, prompt.size());
       CheckPrefillCheckpoint(
@@ -455,23 +455,23 @@ int main(int argc, char** argv) {
           model, std::span<const std::int32_t>(warm_prompt).first(2055), mode);
     }
     CheckBorrowedSnapshots(model, prompt,
-                           gufo::core::SessionMode::kAutoregressive);
+                           mbufo::core::SessionMode::kAutoregressive);
     CheckBorrowedSnapshots(model, prompt,
-                           gufo::core::SessionMode::kSpeculative);
+                           mbufo::core::SessionMode::kSpeculative);
     CheckCheckpointRetention(model, prompt,
-                             gufo::core::SessionMode::kAutoregressive);
+                             mbufo::core::SessionMode::kAutoregressive);
     CheckCheckpointRetention(model, prompt,
-                             gufo::core::SessionMode::kSpeculative);
+                             mbufo::core::SessionMode::kSpeculative);
     CheckDeviceExhaustion(model, prompt,
-                          gufo::core::SessionMode::kAutoregressive);
-    CheckDeviceExhaustion(model, prompt, gufo::core::SessionMode::kSpeculative);
+                          mbufo::core::SessionMode::kAutoregressive);
+    CheckDeviceExhaustion(model, prompt, mbufo::core::SessionMode::kSpeculative);
     const sampling::SamplingConfig config{
         .temperature = 0.8F, .top_k = 40, .top_p = 0.9F, .seed = 7};
     constexpr std::size_t kTokens = 48;
 
     auto origin = model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         kContext, &error);
     Require(origin != nullptr, error);
     Require(origin->Sync(prompt, &error), error);
@@ -493,8 +493,8 @@ int main(int argc, char** argv) {
 
     // Restore into a fresh session.
     auto restored = model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         kContext, &error);
     Require(restored != nullptr, error);
     start = std::chrono::steady_clock::now();
@@ -514,8 +514,8 @@ int main(int argc, char** argv) {
     std::vector<std::uint8_t> bytes(at_prompt->SizeBytes());
     Require(at_prompt->CopyTo(bytes), "snapshot copy");
     auto persisted = model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         kContext, &error);
     Require(persisted != nullptr, error);
     Require(persisted->RestoreSnapshot(bytes, &error), error);
@@ -551,8 +551,8 @@ int main(int argc, char** argv) {
     // Capture a rejected proposal before its residual has been evaluated.
     // The context snapshot and the request-owned sampler must replay together.
     auto pending = model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         kContext, &error);
     const auto short_prompt = std::span(prompt).first(16);
     Require(pending && pending->Sync(short_prompt, &error), error);
@@ -606,8 +606,8 @@ int main(int argc, char** argv) {
     Require(restored->Position() == extended.size(),
             "rejected payload disturbed the session");
     auto small = model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         2048, &error);
     Require(small != nullptr, error);
     Require(!small->RestoreSnapshot(*at_prompt, &error),

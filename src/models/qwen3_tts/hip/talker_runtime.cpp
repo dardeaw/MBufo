@@ -33,7 +33,7 @@
 #include "src/models/qwen3_tts/hip/talker_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 namespace {
 
 void SetError(std::string* error, std::string message) {
@@ -582,7 +582,7 @@ struct TalkerHipRuntime::Impl {
                            columns, stream)) {
       return;
     }
-    gufo::hip::LaunchHipblasGEMMBF16(blas, weights, inputs_bfloat16, output,
+    mbufo::hip::LaunchHipblasGEMMBF16(blas, weights, inputs_bfloat16, output,
                                      batch, rows, columns, stream);
   }
 
@@ -668,10 +668,10 @@ struct TalkerHipRuntime::Impl {
                               token_ids.size() * sizeof(std::uint32_t),
                               hipMemcpyHostToDevice, stream),
                "hipMemcpyAsync text token ids");
-    gufo::hip::LaunchBatchedEmbeddingLookup(
+    mbufo::hip::LaunchBatchedEmbeddingLookup(
         text_embedding, core::GgmlType::kBF16, prompt_ids.get(), hidden.get(),
         token_ids.size(), config.text_hidden_size, stream);
-    gufo::hip::LaunchFloatToBfloat16(hidden.get(), bfloat16_scratch.get(),
+    mbufo::hip::LaunchFloatToBfloat16(hidden.get(), bfloat16_scratch.get(),
                                      elements, stream);
     Gemm(text_projection_fc1, bfloat16_scratch.get(), normalized.get(),
          token_ids.size(), config.text_hidden_size, config.text_hidden_size);
@@ -709,7 +709,7 @@ struct TalkerHipRuntime::Impl {
                               token_ids.size() * sizeof(std::uint32_t),
                               hipMemcpyHostToDevice, stream),
                "hipMemcpyAsync codec token ids");
-    gufo::hip::LaunchBatchedEmbeddingLookup(
+    mbufo::hip::LaunchBatchedEmbeddingLookup(
         codec_embedding, core::GgmlType::kBF16, prompt_ids.get(), hidden.get(),
         token_ids.size(), config.hidden_size, stream);
     std::vector<float> result(token_ids.size() * config.hidden_size);
@@ -728,7 +728,7 @@ struct TalkerHipRuntime::Impl {
     if (rows == 0 || rows > talker.num_code_groups) {
       throw std::length_error("Qwen3-TTS predictor input shape is invalid");
     }
-    gufo::hip::LaunchFloatToBfloat16(input, bfloat16_scratch.get(),
+    mbufo::hip::LaunchFloatToBfloat16(input, bfloat16_scratch.get(),
                                      rows * talker.hidden_size, stream);
     Gemm(predictor_projection, bfloat16_scratch.get(), hidden.get(), rows,
          predictor.hidden_size, talker.hidden_size);
@@ -826,7 +826,7 @@ struct TalkerHipRuntime::Impl {
       return SampleCodec(candidate_scratch, predictor_top_k, predictor_top_p,
                          predictor_temperature, sampling_rng);
     }
-    gufo::hip::LaunchGPUArgmax(logits.get(), predictor_token.get(),
+    mbufo::hip::LaunchGPUArgmax(logits.get(), predictor_token.get(),
                                config.vocab_size, stream);
     std::uint32_t token = 0;
     RequireHip(hipMemcpyAsync(&token, predictor_token.get(), sizeof(token),
@@ -834,7 +834,7 @@ struct TalkerHipRuntime::Impl {
                "hipMemcpyAsync predictor token");
     RequireHip(hipStreamSynchronize(stream), "hipStreamSynchronize predictor");
     RequireHip(hipGetLastError(), "Qwen3-TTS code predictor");
-    return gufo::hip::CheckedSampleToken(token, config.vocab_size);
+    return mbufo::hip::CheckedSampleToken(token, config.vocab_size);
   }
 
   void RunTalkerToken(TalkerPrefillOutput* output) {
@@ -1483,7 +1483,7 @@ bool TalkerHipRuntime::PredictFrame(
                        talker.hidden_size * sizeof(float),
                        hipMemcpyHostToDevice, impl_->stream),
         "hipMemcpyAsync predictor talker hidden");
-    gufo::hip::LaunchEmbeddingLookup(
+    mbufo::hip::LaunchEmbeddingLookup(
         impl_->codec_embedding, core::GgmlType::kBF16, first_code,
         impl_->attention_output.get() + talker.hidden_size, talker.hidden_size,
         impl_->stream);
@@ -1516,7 +1516,7 @@ bool TalkerHipRuntime::PredictFrame(
     }
     output->codes.push_back(code);
     for (std::size_t head = 1; head < impl_->predictor_heads.size(); ++head) {
-      gufo::hip::LaunchEmbeddingLookup(
+      mbufo::hip::LaunchEmbeddingLookup(
           impl_->predictor_embeddings[head - 1], core::GgmlType::kBF16,
           reference_codes.empty() ? code : reference_codes[head],
           impl_->attention_output.get(), talker.hidden_size, impl_->stream);
@@ -1740,11 +1740,11 @@ bool TalkerHipRuntime::Generate(
   }
 }
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
 #else
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 
 struct TalkerHipRuntime::Impl {};
 
@@ -1870,6 +1870,6 @@ bool TalkerHipRuntime::Generate(
   return false;
 }
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)

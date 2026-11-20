@@ -28,11 +28,11 @@ class DiskGateTest(unittest.TestCase):
                 (gate / "armed").touch()
             target = (cache if inside else root) / "checkpoint"
             environment = {**os.environ, "LD_PRELOAD": str(LIBRARY),
-                           "GUFO_TEST_DISK_GATE": str(gate),
-                           "GUFO_TEST_DISK_DIRECTORY": str(cache)}
+                           "MBUFO_TEST_DISK_GATE": str(gate),
+                           "MBUFO_TEST_DISK_DIRECTORY": str(cache)}
             if manifest_only:
-                environment["GUFO_TEST_DISK_MANIFEST_ONLY"] = "1"
-            blocked = armed and inside and (not manifest_only or payload.startswith("GUFOMNF2"))
+                environment["MBUFO_TEST_DISK_MANIFEST_ONLY"] = "1"
+            blocked = armed and inside and (not manifest_only or payload.startswith("MBUFOMNF2"))
             process = subprocess.Popen([sys.executable, "-c", SCRIPT, str(target), payload],
                                        env=environment, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE)
@@ -71,7 +71,7 @@ class DiskGateTest(unittest.TestCase):
 
     def test_manifest_filter_leaves_payload_writes_running(self):
         self.run_gate(True, True, manifest_only=True)
-        self.run_gate(True, True, release=True, manifest_only=True, payload="GUFOMNF2checkpoint")
+        self.run_gate(True, True, release=True, manifest_only=True, payload="MBUFOMNF2checkpoint")
 
 
 if __name__ == "__main__":

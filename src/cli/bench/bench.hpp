@@ -1,5 +1,5 @@
-#ifndef GUFO_CLI_BENCH_HPP_
-#define GUFO_CLI_BENCH_HPP_
+#ifndef MBUFO_CLI_BENCH_HPP_
+#define MBUFO_CLI_BENCH_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -12,7 +12,7 @@
 #include "src/core/sampling.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
-namespace gufo::cli {
+namespace mbufo::cli {
 
 struct BenchOptions {
   std::string model_path;
@@ -50,6 +50,6 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
                                               std::string* error_msg = nullptr);
 int RunBench(std::span<const char* const> args);
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli
 
-#endif  // GUFO_CLI_BENCH_HPP_
+#endif  // MBUFO_CLI_BENCH_HPP_

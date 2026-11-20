@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run SDK and continuation checks against an isolated Gufo text server.
+"""Run SDK and continuation checks against an isolated MBufo text server.
 
 Pass the production server command after --. Only loopback requests are made.
 The runner owns its process and cache directory, and restarts it for disk checks.
@@ -97,7 +97,7 @@ def provenance():
                 "HSA_USERPTR_FOR_PAGED_MEM", "HSA_USE_SVM",
                 "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
                 "LD_LIBRARY_PATH", "LD_PRELOAD",
-                "GUFO_KV_WMMA", "GUFO_KV_I8", "GUFO_KV_V4")}},
+                "MBUFO_KV_WMMA", "MBUFO_KV_I8", "MBUFO_KV_V4")}},
     }
 
 
@@ -198,7 +198,7 @@ def server(command, log_path, startup_timeout, environment=None):
         environment = os.environ.copy()
     else:
         environment = dict(environment)
-    for var in ("GUFO_KV_WMMA", "GUFO_KV_I8", "GUFO_KV_V4"):
+    for var in ("MBUFO_KV_WMMA", "MBUFO_KV_I8", "MBUFO_KV_V4"):
         environment.setdefault(var, "1")
 
     with log_path.open("w") as log:
@@ -274,7 +274,7 @@ def main():
     parser.add_argument("--allow-missing-progress", action="store_true",
                         help="Baseline only: older revisions without progress events")
     parser.add_argument("command", nargs=argparse.REMAINDER,
-                        help="-- ./result/bin/gufo serve llm --model PATH [server options]")
+                        help="-- ./result/bin/mbufo serve llm --model PATH [server options]")
     args = parser.parse_args()
     if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
         parser.error("--request-timeout must be finite and positive")
@@ -284,7 +284,7 @@ def main():
         parser.error("--allow-missing-progress is only for --record-baseline")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1] != "serve" or "llm" not in command:
-        parser.error("pass a gufo serve llm command after --")
+        parser.error("pass a mbufo serve llm command after --")
     for reserved in ("--host", "--port", "--cache-disk", "--cache-disk-bytes",
                      "--cache-disk-staging-bytes"):
         if option(command, reserved) is not None:
@@ -323,8 +323,8 @@ def main():
         parser.error(str(error))
     output = args.output.resolve()
     # Every suite process inherits the tier; see tier.py.
-    os.environ["GUFO_FUNCTIONAL_TIER"] = args.tier
-    for var in ("GUFO_KV_WMMA", "GUFO_KV_I8", "GUFO_KV_V4"):
+    os.environ["MBUFO_FUNCTIONAL_TIER"] = args.tier
+    for var in ("MBUFO_KV_WMMA", "MBUFO_KV_I8", "MBUFO_KV_V4"):
         os.environ.setdefault(var, "1")
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))

@@ -14,8 +14,8 @@
 #include "src/cache/slot.hpp"
 #include "tests/cache/fake_adapter.hpp"
 
-using namespace gufo::cache;
-using namespace gufo::cache::testing;
+using namespace mbufo::cache;
+using namespace mbufo::cache::testing;
 using namespace std::chrono_literals;
 namespace {
 // A submitted read completes only after the test grants one permit. The fake

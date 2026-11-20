@@ -16,14 +16,14 @@
 
 namespace {
 
-using gufo::speculative::CreateDraftBackend;
-using gufo::speculative::DraftBackendInfo;
-using gufo::speculative::DraftBackendRegistry;
-using gufo::speculative::DraftBackendRequest;
-using gufo::speculative::IDraftBackend;
-using gufo::speculative::ListDraftBackends;
-using gufo::speculative::MockDraftBackend;
-using gufo::speculative::RegisterDraftBackend;
+using mbufo::speculative::CreateDraftBackend;
+using mbufo::speculative::DraftBackendInfo;
+using mbufo::speculative::DraftBackendRegistry;
+using mbufo::speculative::DraftBackendRequest;
+using mbufo::speculative::IDraftBackend;
+using mbufo::speculative::ListDraftBackends;
+using mbufo::speculative::MockDraftBackend;
+using mbufo::speculative::RegisterDraftBackend;
 
 void Expect(bool condition, std::string_view message) {
   if (!condition) {
@@ -35,7 +35,7 @@ void Expect(bool condition, std::string_view message) {
 std::unique_ptr<IDraftBackend> MakeMock(const DraftBackendRequest&,
                                         std::string*) {
   return std::make_unique<MockDraftBackend>(
-      std::vector<gufo::tokenization::TokenId>{11, 22, 33});
+      std::vector<mbufo::tokenization::TokenId>{11, 22, 33});
 }
 
 }  // namespace

@@ -19,7 +19,7 @@
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/core/speculative/draft_registry.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 constexpr std::array<std::uint8_t, 8> kDFlashDraftPersistentMagic = {
@@ -883,5 +883,5 @@ const bool kQwenDFlashDraftRegistered = RegisterQwenDFlashDraftBackend();
 
 }  // namespace
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

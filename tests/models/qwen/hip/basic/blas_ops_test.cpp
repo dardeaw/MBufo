@@ -48,7 +48,7 @@ void TestGpuGEMV() {
     HIP_CHECK(
         hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-    gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kF32, d_x, d_y, M, K, nullptr, nullptr, 0);
+    mbufo::hip::LaunchGEMV(d_A, mbufo::core::GgmlType::kF32, d_x, d_y, M, K, nullptr, nullptr, 0);
     HIP_CHECK(hipDeviceSynchronize());
 
     HIP_CHECK(
@@ -56,7 +56,7 @@ void TestGpuGEMV() {
 
     // Each row has K=8 ones * 2.0 = 16.0
     for (std::size_t m = 0; m < M; ++m) {
-      gufo::test::ExpectNear(16.0F, h_y[m], 1e-4F, "FP32 GEMV result mismatch");
+      mbufo::test::ExpectNear(16.0F, h_y[m], 1e-4F, "FP32 GEMV result mismatch");
     }
 
     HIP_CHECK(hipFree(d_A));
@@ -86,7 +86,7 @@ void TestGpuGEMV() {
       const float val =
           0.05F * static_cast<float>(static_cast<int>(i % 13) - 6);
       h_A_f32[i] = val;
-      h_A[i] = gufo::test::FloatToBf16Bits(val);
+      h_A[i] = mbufo::test::FloatToBf16Bits(val);
     }
     for (std::size_t k = 0; k < K; ++k) {
       h_x[k] = 0.1F * static_cast<float>(static_cast<int>(k % 17) - 8);
@@ -96,7 +96,7 @@ void TestGpuGEMV() {
     for (std::size_t m = 0; m < M; ++m) {
       float dot = 0.0F;
       for (std::size_t k = 0; k < K; ++k) {
-        dot += gufo::test::Bf16BitsToFloat(h_A[m * K + k]) * h_x[k];
+        dot += mbufo::test::Bf16BitsToFloat(h_A[m * K + k]) * h_x[k];
       }
       h_y_ref[m] = dot;
     }
@@ -112,14 +112,14 @@ void TestGpuGEMV() {
     HIP_CHECK(
         hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-    gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kBF16, d_x, d_y, M, K, nullptr, nullptr, 0);
+    mbufo::hip::LaunchGEMV(d_A, mbufo::core::GgmlType::kBF16, d_x, d_y, M, K, nullptr, nullptr, 0);
     HIP_CHECK(hipDeviceSynchronize());
 
     HIP_CHECK(
         hipMemcpy(h_y.data(), d_y, M * sizeof(float), hipMemcpyDeviceToHost));
 
     std::cout << "M=" << M << " K=" << K
-              << " h_A[0]=" << gufo::test::Bf16BitsToFloat(h_A[0])
+              << " h_A[0]=" << mbufo::test::Bf16BitsToFloat(h_A[0])
               << " h_x[0]=" << h_x[0] << " ref[0]=" << h_y_ref[0]
               << " y[0]=" << h_y[0] << "\n";
 
@@ -129,7 +129,7 @@ void TestGpuGEMV() {
     }
     std::cout << "Shape M=" << M << " K=" << K << " max diff=" << max_diff
               << " y[0]=" << h_y[0] << " ref[0]=" << h_y_ref[0] << "\n";
-    gufo::test::Expect(max_diff < 1e-2F, "BF16 GEMV result mismatch");
+    mbufo::test::Expect(max_diff < 1e-2F, "BF16 GEMV result mismatch");
 
     HIP_CHECK(hipFree(d_A));
     HIP_CHECK(hipFree(d_x));
@@ -161,7 +161,7 @@ void TestBatchedGEMM() {
   HIP_CHECK(hipMemcpy(d_X, h_X.data(), batch * K * sizeof(float),
                       hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchBatchedGEMM(d_A, false, d_X, d_Y, batch, M, K);
+  mbufo::hip::LaunchBatchedGEMM(d_A, false, d_X, d_Y, batch, M, K);
   HIP_CHECK(hipDeviceSynchronize());
 
   HIP_CHECK(hipMemcpy(h_Y.data(), d_Y, batch * M * sizeof(float),
@@ -176,7 +176,7 @@ void TestBatchedGEMM() {
         std::cerr << "BatchedGEMM mismatch at b=" << b << " m=" << m
                   << " got=" << h_Y[b * M + m] << " expected=" << expected
                   << "\n";
-        gufo::test::Expect(false, "batched GEMM result mismatch");
+        mbufo::test::Expect(false, "batched GEMM result mismatch");
       }
     }
   }
@@ -193,7 +193,7 @@ void TestExactBf16SmallBatchGEMM(std::size_t batch, std::size_t M = 65,
   for (std::size_t index = 0; index < h_A.size(); ++index) {
     const float value =
         0.03125F * static_cast<float>(static_cast<int>(index % 29) - 14);
-    h_A[index] = gufo::test::FloatToBf16Bits(value);
+    h_A[index] = mbufo::test::FloatToBf16Bits(value);
   }
   for (std::size_t index = 0; index < h_X.size(); ++index) {
     h_X[index] =
@@ -213,10 +213,10 @@ void TestExactBf16SmallBatchGEMM(std::size_t batch, std::size_t M = 65,
   HIP_CHECK(hipMemcpy(d_X, h_X.data(), h_X.size() * sizeof(float),
                       hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchExactBf16GEMMFp32SmallBatch(d_A, d_X, d_batched, batch, M,
+  mbufo::hip::LaunchExactBf16GEMMFp32SmallBatch(d_A, d_X, d_batched, batch, M,
                                                K);
   for (std::size_t token = 0; token < batch; ++token) {
-    gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kBF16, d_X + (token * K),
+    mbufo::hip::LaunchGEMV(d_A, mbufo::core::GgmlType::kBF16, d_X + (token * K),
                           d_sequential + (token * M), M, K, nullptr, nullptr,
                           0);
   }
@@ -229,7 +229,7 @@ void TestExactBf16SmallBatchGEMM(std::size_t batch, std::size_t M = 65,
   HIP_CHECK(hipMemcpy(h_sequential.data(), d_sequential,
                       h_sequential.size() * sizeof(float),
                       hipMemcpyDeviceToHost));
-  gufo::test::Expect(
+  mbufo::test::Expect(
       std::memcmp(h_batched.data(), h_sequential.data(),
                   h_batched.size() * sizeof(float)) == 0,
       "exact BF16 small-batch GEMM differs from sequential decode");
@@ -269,7 +269,7 @@ void TestHipblasGEMM() {
     HIP_CHECK(hipMemcpy(d_X, h_X.data(), batch * K * sizeof(float),
                         hipMemcpyHostToDevice));
 
-    gufo::hip::LaunchHipblasGEMM(handle, d_A, false, d_X, d_Y, batch, M, K,
+    mbufo::hip::LaunchHipblasGEMM(handle, d_A, false, d_X, d_Y, batch, M, K,
                                  nullptr);
     HIP_CHECK(hipDeviceSynchronize());
 
@@ -298,7 +298,7 @@ void TestHipblasGEMM() {
   {
     std::vector<std::uint16_t> h_A(M * K);
     for (std::size_t i = 0; i < M * K; ++i) {
-      h_A[i] = gufo::test::FloatToBf16Bits(1.5F);
+      h_A[i] = mbufo::test::FloatToBf16Bits(1.5F);
     }
     std::vector<float> h_X(batch * K);
     for (std::size_t b = 0; b < batch; ++b) {
@@ -321,7 +321,7 @@ void TestHipblasGEMM() {
     HIP_CHECK(hipMemcpy(d_X, h_X.data(), batch * K * sizeof(float),
                         hipMemcpyHostToDevice));
 
-    gufo::hip::LaunchHipblasGEMM(handle, d_A, true, d_X, d_Y, batch, M, K,
+    mbufo::hip::LaunchHipblasGEMM(handle, d_A, true, d_X, d_Y, batch, M, K,
                                  d_x_bf16);
     HIP_CHECK(hipDeviceSynchronize());
 
@@ -356,10 +356,10 @@ void TestHipblasLtGEMM() {
   constexpr std::size_t m = 256;
   constexpr std::size_t k = 64;
 
-  std::vector<std::uint16_t> h_a(m * k, gufo::test::FloatToBf16Bits(1.5F));
+  std::vector<std::uint16_t> h_a(m * k, mbufo::test::FloatToBf16Bits(1.5F));
   std::vector<std::uint16_t> h_x(batch * k);
   for (std::size_t b = 0; b < batch; ++b) {
-    const auto value = gufo::test::FloatToBf16Bits(static_cast<float>(b + 1));
+    const auto value = mbufo::test::FloatToBf16Bits(static_cast<float>(b + 1));
     std::fill_n(h_x.begin() + static_cast<std::ptrdiff_t>(b * k), k, value);
   }
   std::vector<float> h_y(batch * m, 0.0F);
@@ -375,7 +375,7 @@ void TestHipblasLtGEMM() {
   HIP_CHECK(hipMemcpy(d_x, h_x.data(), h_x.size() * sizeof(std::uint16_t),
                       hipMemcpyHostToDevice));
 
-  gufo::hip::HipblasLtGemm gemm;
+  mbufo::hip::HipblasLtGemm gemm;
   if (!gemm.RunBf16(d_a, d_x, d_y, batch, m, k)) {
     std::cerr << "hipBLASLt did not return a supported BF16 GEMM plan\n";
     std::abort();
@@ -407,9 +407,9 @@ void TestHipblasLtGEMM() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen dense GEMM and BLAS ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

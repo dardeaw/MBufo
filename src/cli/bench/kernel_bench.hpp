@@ -1,12 +1,12 @@
-#ifndef GUFO_BENCH_KERNEL_BENCH_HPP_
-#define GUFO_BENCH_KERNEL_BENCH_HPP_
+#ifndef MBUFO_BENCH_KERNEL_BENCH_HPP_
+#define MBUFO_BENCH_KERNEL_BENCH_HPP_
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace gufo::bench {
+namespace mbufo::bench {
 
 struct KernelBenchOptions {
   std::uint32_t warmup{3};
@@ -90,6 +90,6 @@ struct KernelBenchReport {
 [[nodiscard]] KernelBenchStatistics ComputeKernelBenchStatistics(
     const std::vector<double>& samples_us);
 
-}  // namespace gufo::bench
+}  // namespace mbufo::bench
 
-#endif  // GUFO_BENCH_KERNEL_BENCH_HPP_
+#endif  // MBUFO_BENCH_KERNEL_BENCH_HPP_

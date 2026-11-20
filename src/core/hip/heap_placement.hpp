@@ -1,9 +1,9 @@
-#ifndef GUFO_CORE_HIP_HEAP_PLACEMENT_HPP_
-#define GUFO_CORE_HIP_HEAP_PLACEMENT_HPP_
+#ifndef MBUFO_CORE_HIP_HEAP_PLACEMENT_HPP_
+#define MBUFO_CORE_HIP_HEAP_PLACEMENT_HPP_
 
 #include <cstdint>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 /// Keep this much free in the device heap for driver command submission.
 inline constexpr std::uint64_t kDispatchReserve = 4ull << 30;
@@ -24,6 +24,6 @@ enum class Placement { kMalloc, kManaged };
              : Placement::kManaged;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
-#endif  // GUFO_CORE_HIP_HEAP_PLACEMENT_HPP_
+#endif  // MBUFO_CORE_HIP_HEAP_PLACEMENT_HPP_

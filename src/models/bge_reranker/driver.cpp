@@ -91,13 +91,13 @@ int main(int argc, char** argv) {
   }
 
   std::string error;
-  auto model = gufo::models::bge_reranker::ModelRegistry::Instance().Create(
+  auto model = mbufo::models::bge_reranker::ModelRegistry::Instance().Create(
       "bge-reranker", model_path, &error);
   if (model == nullptr) {
     std::cerr << "bge_rerank_score: load failed: " << error << "\n";
     return 3;
   }
-  gufo::models::bge_reranker::EngineSession session(model.get());
+  mbufo::models::bge_reranker::EngineSession session(model.get());
   std::vector<float> logits;
   logits.reserve(documents.size());
   std::vector<float> scores;
@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
   std::size_t prompt_tokens = 0;
   if (use_batch) {
     // Verification path: the ScoreBatch under test (padded multi-sequence
-    // fast path, or the legacy loop under GUFO_BGE_BATCH=0 / over capacity).
+    // fast path, or the legacy loop under MBUFO_BGE_BATCH=0 / over capacity).
     auto batched =
         session.ScoreBatch(query, documents, use_hip, &total_ms,
                            &prompt_tokens, &error);
@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
     if (use_hip) {
 #ifdef ENGINE_ENABLE_HIP
       if (use_batch) {
-        auto cls = gufo::models::bge_m3::HipClsHiddenBatch(
+        auto cls = mbufo::models::bge_m3::HipClsHiddenBatch(
             model->Encoder(), dump_batch, model->Config().pad_token_id,
             &dump_error);
         if (!cls.has_value() || cls->cls.empty()) {
@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
         }
         cls_hidden = cls->cls.front();
       } else {
-        auto cls = gufo::models::bge_m3::HipClsHidden(model->Encoder(),
+        auto cls = mbufo::models::bge_m3::HipClsHidden(model->Encoder(),
                                                       dump_first, &dump_error);
         if (!cls.has_value()) {
           std::cerr << "bge_rerank_score: dump HipClsHidden failed: "
@@ -197,12 +197,12 @@ int main(int argc, char** argv) {
 #endif
     } else {
       const std::size_t h = model->Encoder().Config().hidden_size;
-      auto scratch = gufo::models::bge_m3::BgeM3Scratch::Create(
+      auto scratch = mbufo::models::bge_m3::BgeM3Scratch::Create(
           model->Encoder().Config(),
-          gufo::models::bge_reranker::kBgeRerankerMaxTokens);
+          mbufo::models::bge_reranker::kBgeRerankerMaxTokens);
       if (use_batch) {
         std::vector<float> last_hidden(dump_batch.size() * dump_lmax * h);
-        if (!gufo::models::bge_m3::CpuForwardBatch(
+        if (!mbufo::models::bge_m3::CpuForwardBatch(
                 model->Encoder().F32(), dump_batch,
                 model->Config().pad_token_id, scratch, last_hidden)) {
           std::cerr << "bge_rerank_score: dump CpuForwardBatch failed\n";
@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
         cls_hidden.assign(last_hidden.begin(), last_hidden.begin() + h);
       } else {
         std::vector<float> last_hidden(dump_first.size() * h);
-        if (!gufo::models::bge_m3::CpuForward(
+        if (!mbufo::models::bge_m3::CpuForward(
                 model->Encoder().F32(), dump_first, scratch, last_hidden)) {
           std::cerr << "bge_rerank_score: dump CpuForward failed\n";
           return 3;
@@ -236,7 +236,7 @@ int main(int argc, char** argv) {
   if (!use_batch) {
     scores.reserve(logits.size());
     for (const float logit : logits) {
-      scores.push_back(gufo::core::rerank::Sigmoid(logit));
+      scores.push_back(mbufo::core::rerank::Sigmoid(logit));
     }
   }
   std::cout << "{\"model\":\"" << JsonEscape(model_path) << "\",\"scores\":[";
@@ -250,7 +250,7 @@ int main(int argc, char** argv) {
   }
   std::cout << "],\"prompt_tokens\":" << prompt_tokens
             << ",\"prefill_ms\":" << total_ms;
-  const auto order = gufo::core::rerank::RankIndices(scores, top_n);
+  const auto order = mbufo::core::rerank::RankIndices(scores, top_n);
   std::cout << ",\"ranking\":[";
   for (std::size_t i = 0; i < order.size(); ++i) {
     if (i > 0)

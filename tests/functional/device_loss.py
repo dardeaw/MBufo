@@ -80,7 +80,7 @@ def run_case(args, name):
     command = args.server + ["--host", "127.0.0.1", "--port", str(port)]
     environment = dict(os.environ)
     environment["LD_PRELOAD"] = str(args.fault_library)
-    environment["GUFO_TEST_DEVICE_LOSS_DIR"] = str(output)
+    environment["MBUFO_TEST_DEVICE_LOSS_DIR"] = str(output)
     record = {"case": name, "command": command, "fault_library": str(args.fault_library)}
     log_path = output / "server.log"
     peer = None
@@ -269,7 +269,7 @@ def main():
     if args.server and args.server[0] == "--":
         args.server.pop(0)
     if len(args.server) < 3 or args.server[1:3] != ["serve", "llm"]:
-        parser.error("provide a production gufo serve llm command after --")
+        parser.error("provide a production mbufo serve llm command after --")
     if "--speculative" not in args.server:
         parser.error("select --speculative explicitly so loaded mode can be verified")
     for option in ("--host", "--port", "--api-key", "--cache-disk"):

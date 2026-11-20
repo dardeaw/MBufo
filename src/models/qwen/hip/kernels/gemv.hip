@@ -14,7 +14,7 @@
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 template<std::uint32_t WavesPerBlock>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
@@ -223,5 +223,5 @@ void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
   }
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif

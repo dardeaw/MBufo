@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_SPECULATIVE_SPECULATIVE_VERIFIER_HPP_
-#define GUFO_CORE_SPECULATIVE_SPECULATIVE_VERIFIER_HPP_
+#ifndef MBUFO_CORE_SPECULATIVE_SPECULATIVE_VERIFIER_HPP_
+#define MBUFO_CORE_SPECULATIVE_SPECULATIVE_VERIFIER_HPP_
 
 #include <cstdint>
 #include <deque>
@@ -20,7 +20,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #endif
 
-namespace gufo::speculative {
+namespace mbufo::speculative {
 
 struct SpeculativeOptions {
   std::uint32_t max_draft_tokens{4};
@@ -401,6 +401,6 @@ private:
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-}  // namespace gufo::speculative
+}  // namespace mbufo::speculative
 
-#endif  // GUFO_CORE_SPECULATIVE_SPECULATIVE_VERIFIER_HPP_
+#endif  // MBUFO_CORE_SPECULATIVE_SPECULATIVE_VERIFIER_HPP_

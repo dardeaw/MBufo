@@ -1,12 +1,12 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_ADAPTER_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_ADAPTER_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_ADAPTER_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_ADAPTER_HPP_
 
 #include "src/cache/adapter.hpp"
 #include "src/core/hip/transfer_pool.hpp"
 #include "src/models/qwen38_flash_next/continuation_layout.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 // The caller supplies the complete artifact/tokenizer/template identity. The
 // adapter adds its state ABI, context and execution policy. Slots own public
@@ -83,7 +83,7 @@ private:
   [[nodiscard]] void* RowData(State&, const ContinuationComponent&) const;
   [[nodiscard]] cache::Completion Transfer(
       State&, bool load, cache::Stream&,
-      const std::function<void(gufo::hip::TransferStream&)>&);
+      const std::function<void(mbufo::hip::TransferStream&)>&);
   std::shared_ptr<Model> model_;
   core::SessionMode mode_;
   std::uint32_t context_;
@@ -91,5 +91,5 @@ private:
   std::vector<cache::ComponentDescriptor> descriptors_;
   cache::Identity identity_;
 };
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 #endif

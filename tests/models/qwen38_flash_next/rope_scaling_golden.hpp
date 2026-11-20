@@ -1,5 +1,5 @@
-#ifndef GUFO_TESTS_QWEN38_FLASH_NEXT_ROPE_SCALING_GOLDEN_HPP_
-#define GUFO_TESTS_QWEN38_FLASH_NEXT_ROPE_SCALING_GOLDEN_HPP_
+#ifndef MBUFO_TESTS_QWEN38_FLASH_NEXT_ROPE_SCALING_GOLDEN_HPP_
+#define MBUFO_TESTS_QWEN38_FLASH_NEXT_ROPE_SCALING_GOLDEN_HPP_
 
 // YaRN parameters against Hugging Face transformers 5.17.0
 // `_compute_yarn_parameters` (Flash-Next: rotary 64 of 256, theta 1e7,
@@ -33,7 +33,7 @@
 
 #include <array>
 
-namespace gufo::models::qwen38_flash_next::testing {
+namespace mbufo::models::qwen38_flash_next::testing {
 
 struct Golden {
   float factor;
@@ -80,6 +80,6 @@ constexpr std::array<Golden, 3> kGolden{{
      }},
 }};
 
-}  // namespace gufo::models::qwen38_flash_next::testing
+}  // namespace mbufo::models::qwen38_flash_next::testing
 
-#endif  // GUFO_TESTS_QWEN38_FLASH_NEXT_ROPE_SCALING_GOLDEN_HPP_
+#endif  // MBUFO_TESTS_QWEN38_FLASH_NEXT_ROPE_SCALING_GOLDEN_HPP_

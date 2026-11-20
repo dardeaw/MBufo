@@ -82,17 +82,17 @@ void TestBatchedFusedProjectionsEquivalence() {
 
   // Sequential
   for (std::size_t t = 0; t < batch; ++t) {
-    gufo::hip::LaunchFusedSSMInputProjections(
-        d_qkv_w, gufo::core::GgmlType::kF32, d_gate_w,
-        gufo::core::GgmlType::kF32, d_alpha_w, gufo::core::GgmlType::kF32,
-        d_beta_w, gufo::core::GgmlType::kF32, d_x + t * hidden_size,
+    mbufo::hip::LaunchFusedSSMInputProjections(
+        d_qkv_w, mbufo::core::GgmlType::kF32, d_gate_w,
+        mbufo::core::GgmlType::kF32, d_alpha_w, mbufo::core::GgmlType::kF32,
+        d_beta_w, mbufo::core::GgmlType::kF32, d_x + t * hidden_size,
         d_qkv_seq + t * qkv_size, d_gate_seq + t * inner_size,
         d_alpha_seq + t * time_step_rank, d_beta_seq + t * time_step_rank,
         hidden_size, qkv_size, inner_size, time_step_rank);
   }
 
   // Batched
-  gufo::hip::LaunchBatchedFusedSSMInputProjections(
+  mbufo::hip::LaunchBatchedFusedSSMInputProjections(
       d_qkv_w, false, d_gate_w, false, d_alpha_w, false, d_beta_w, false, d_x,
       d_qkv_batch, d_gate_batch, d_alpha_batch, d_beta_batch, batch,
       hidden_size, qkv_size, inner_size, time_step_rank);
@@ -127,13 +127,13 @@ void TestBatchedFusedProjectionsEquivalence() {
                       beta_batch.size() * sizeof(float),
                       hipMemcpyDeviceToHost));
 
-  gufo::test::ExpectSpanNear(qkv_seq, qkv_batch, 1e-4F,
+  mbufo::test::ExpectSpanNear(qkv_seq, qkv_batch, 1e-4F,
                              "batched SSM QKV projection mismatch");
-  gufo::test::ExpectSpanNear(gate_seq, gate_batch, 1e-4F,
+  mbufo::test::ExpectSpanNear(gate_seq, gate_batch, 1e-4F,
                              "batched SSM gate projection mismatch");
-  gufo::test::ExpectSpanNear(alpha_seq, alpha_batch, 1e-4F,
+  mbufo::test::ExpectSpanNear(alpha_seq, alpha_batch, 1e-4F,
                              "batched SSM alpha projection mismatch");
-  gufo::test::ExpectSpanNear(beta_seq, beta_batch, 1e-4F,
+  mbufo::test::ExpectSpanNear(beta_seq, beta_batch, 1e-4F,
                              "batched SSM beta projection mismatch");
 
   HIP_CHECK(hipFree(d_x));
@@ -156,9 +156,9 @@ void TestBatchedFusedProjectionsEquivalence() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen attention projection ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

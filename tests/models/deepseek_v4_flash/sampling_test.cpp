@@ -13,9 +13,9 @@
 #include "src/models/deepseek_v4_flash/runtime/dspark_policy.h"
 #include "src/models/deepseek_v4_flash/runtime/native_internal.h"
 
-using gufo::models::deepseek_v4_flash::DsparkSamplerBridge;
-using gufo::sampling::SamplerState;
-using gufo::sampling::SamplingConfig;
+using mbufo::models::deepseek_v4_flash::DsparkSamplerBridge;
+using mbufo::sampling::SamplerState;
+using mbufo::sampling::SamplingConfig;
 
 namespace {
 void Expect(bool ok, const char* message) {
@@ -49,7 +49,7 @@ void ExpectThrows(F action) {
 void CheckDistribution(SamplingConfig config, bool sharp = false) {
   constexpr std::array<float, 10> target{0.5F,  -0.3F, 0.7F, 0.1F, 0.2F,
                                          -0.5F, -0.2F, 0.4F, 0.9F, -0.1F};
-  constexpr std::array<gufo::sampling::TokenId, 5> history{8, 2, 2, 1, 0};
+  constexpr std::array<mbufo::sampling::TokenId, 5> history{8, 2, 2, 1, 0};
   config.seed = 731;
   SamplerState state(config, history);
   const auto expected = state.Distribution(target);
@@ -91,7 +91,7 @@ void CheckConditionalProposals() {
                               .seed = 73,
                               .repeat_last_n = 3,
                               .frequency_penalty = 0.3F};
-  const std::array<gufo::sampling::TokenId, 3> history{1, 1, 4};
+  const std::array<mbufo::sampling::TokenId, 3> history{1, 1, 4};
   SamplerState initial(config, history);
   std::array<float, 10> first{};
   std::array<std::array<float, 10>, 10> second{};
@@ -276,15 +276,15 @@ int main() {
     const std::array<std::string, 3> pieces{
         tool ? "<tool_call>{\"name\":\"f\",\"arguments\":{" : "{", "\"x\":1",
         tool ? "}}</tool_call>" : "}"};
-    auto constraint = std::make_shared<gufo::sampling::TokenConstraint>();
-    constraint->grammar = gufo::sampling::JsonConstraint::Object();
+    auto constraint = std::make_shared<mbufo::sampling::TokenConstraint>();
+    constraint->grammar = mbufo::sampling::JsonConstraint::Object();
     if (tool)
-      constraint->grammar = gufo::sampling::JsonConstraint::WithTools(
+      constraint->grammar = mbufo::sampling::JsonConstraint::WithTools(
           nullptr, {{"f", constraint->grammar}}, true, false);
     constraint->vocabulary =
-        std::make_shared<gufo::sampling::ConstraintVocabulary>(
+        std::make_shared<mbufo::sampling::ConstraintVocabulary>(
             pieces.size(), [&](std::uint32_t i) {
-              return gufo::sampling::ConstraintVocabulary::Piece{pieces[i],
+              return mbufo::sampling::ConstraintVocabulary::Piece{pieces[i],
                                                                  false};
             });
     SamplerState constrained({.seed = 19, .constraint = constraint});

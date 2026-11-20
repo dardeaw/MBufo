@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_TRANSCRIPTION_HPP_
-#define GUFO_MODELS_QWEN3_ASR_TRANSCRIPTION_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_TRANSCRIPTION_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_TRANSCRIPTION_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 
 struct TranscriptionRequest {
   std::span<const std::byte> wav;
@@ -49,6 +49,6 @@ struct TranscriptionResult {
 
 using CancellationCheck = std::function<bool()>;
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr
 
-#endif  // GUFO_MODELS_QWEN3_ASR_TRANSCRIPTION_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_TRANSCRIPTION_HPP_

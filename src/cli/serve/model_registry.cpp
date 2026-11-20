@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <chrono>
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 std::uint64_t NowMs() {
@@ -181,4 +181,4 @@ std::size_t ModelRegistry::Size() const {
   return order_.size();
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

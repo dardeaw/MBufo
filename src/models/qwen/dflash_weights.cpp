@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::speculative {
+namespace mbufo::speculative {
 namespace {
 
 models::QwenTensorRef TensorRef(const core::GgufReader& reader,
@@ -255,7 +255,7 @@ std::optional<QwenDFlashWeights> QwenDFlashWeights::LoadFromGguf(
   }
 
   // GGUF target_layers are layer-input indices (the convention used by the
-  // converter). Gufo taps layer outputs, so normalize N to zero-based N - 1.
+  // converter). MBufo taps layer outputs, so normalize N to zero-based N - 1.
   const auto encoded_target_layers =
       GetNonnegativeIntegerArray(reader, prefix + "target_layers");
   if (!encoded_target_layers.has_value()) {
@@ -411,4 +411,4 @@ std::optional<QwenDFlashWeights> QwenDFlashWeights::LoadFromGguf(
   return weights;
 }
 
-}  // namespace gufo::speculative
+}  // namespace mbufo::speculative

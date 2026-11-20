@@ -1,5 +1,5 @@
-#ifndef GUFO_CACHE_LEDGER_HPP_
-#define GUFO_CACHE_LEDGER_HPP_
+#ifndef MBUFO_CACHE_LEDGER_HPP_
+#define MBUFO_CACHE_LEDGER_HPP_
 
 #include <array>
 #include <cstddef>
@@ -8,7 +8,7 @@
 #include <new>
 #include <span>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 
 // Actual capacity exhaustion permits retention to reclaim eligible owners.
 // Allocation and injected failures remain ordinary bad_alloc and must not
@@ -195,5 +195,5 @@ private:
   std::shared_ptr<detail::LedgerState> state_;
 };
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 #endif

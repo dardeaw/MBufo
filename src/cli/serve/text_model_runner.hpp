@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
-#define GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
+#ifndef MBUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
+#define MBUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -22,7 +22,7 @@
 #include "src/cli/serve/text_publication_wait.hpp"
 #include "src/core/sampling.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 struct ComponentCacheResources;
 
@@ -732,6 +732,6 @@ private:
     sampling::SamplingConfig* sampling,
     std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr);
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
+#endif  // MBUFO_SERVER_TEXT_MODEL_RUNNER_HPP_

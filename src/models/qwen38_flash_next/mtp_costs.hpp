@@ -1,12 +1,12 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_COSTS_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_COSTS_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_MTP_COSTS_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_MTP_COSTS_HPP_
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 // gfx1151, pinned Flash-Next Q4 target/Q8 MTP, 2026-09-20. Milliseconds per
 // cohort, including catch-up, recursive proposals and target verification.
@@ -76,6 +76,6 @@ inline constexpr float kMtpCycleMilliseconds[3][5][8] = {
   return costs;
 }
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_COSTS_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_MTP_COSTS_HPP_

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_KERNELS_ATTENTION_DECODE_SPLIT_K_HPP_
-#define GUFO_MODELS_QWEN_HIP_KERNELS_ATTENTION_DECODE_SPLIT_K_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_KERNELS_ATTENTION_DECODE_SPLIT_K_HPP_
+#define MBUFO_MODELS_QWEN_HIP_KERNELS_ATTENTION_DECODE_SPLIT_K_HPP_
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_fp16.h>
@@ -18,7 +18,7 @@
 // score tree, the same online-softmax recurrence and the same rounded value
 // products. Only the lane packaging and the exchange instructions of the
 // score tree differ between kernels.
-namespace gufo::hip::detail {
+namespace mbufo::hip::detail {
 
 // XOR exchange inside a 16-lane DPP row (gfx10 and later) on the ALU path
 // instead of ds_bpermute. Both lanes of a pair add the same two values, so
@@ -210,7 +210,7 @@ struct SplitKAttentionHead {
   }
 };
 
-}  // namespace gufo::hip::detail
+}  // namespace mbufo::hip::detail
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_KERNELS_ATTENTION_DECODE_SPLIT_K_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_KERNELS_ATTENTION_DECODE_SPLIT_K_HPP_

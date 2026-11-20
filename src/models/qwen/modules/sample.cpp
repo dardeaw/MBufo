@@ -2,7 +2,7 @@
 
 #include "src/models/qwen/forward.hpp"  // GreedyArgmax
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 std::uint32_t SampleForward(const CpuModuleContext&,
                             std::span<const float> logits) noexcept {
@@ -11,4 +11,4 @@ std::uint32_t SampleForward(const CpuModuleContext&,
   return GreedyArgmax(logits);
 }
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

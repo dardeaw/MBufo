@@ -1,5 +1,5 @@
-// Repack the ROCmFP4 v2 GGUF for gufo's kernel set: every Q6_K tensor is
-// decoded with gufo's own CPU Q6_K reference and requantized to Q8_0
+// Repack the ROCmFP4 v2 GGUF for mbufo's kernel set: every Q6_K tensor is
+// decoded with mbufo's own CPU Q6_K reference and requantized to Q8_0
 // (llama.cpp quantize_row_q8_0_ref semantics); all other tensors are copied
 // byte-identical. MIT, same family as the port itself.
 #include <cmath>
@@ -65,10 +65,10 @@ std::uint16_t F32ToF16(float x) {
 }
 
 std::size_t TypeBytes(std::uint32_t type, std::uint64_t elements) {
-  using gufo::quant::block_iq4_nl;
-  using gufo::quant::block_q3_0_rocmfpx;
-  using gufo::quant::block_q4_0_rocmfp4;
-  using gufo::quant::block_q4_0_rocmfp4_fast;
+  using mbufo::quant::block_iq4_nl;
+  using mbufo::quant::block_q3_0_rocmfpx;
+  using mbufo::quant::block_q4_0_rocmfp4;
+  using mbufo::quant::block_q4_0_rocmfp4_fast;
   std::size_t block = 1, bytes = 4;
   switch (type) {
     case 0: block = 1; bytes = 4; break;
@@ -356,7 +356,7 @@ int main(int argc, char** argv) {
         return 1;
       }
       dec.resize(t.elements);
-      gufo::quant::DequantizeQ6_K(raw.data(), dec.data(), t.elements);
+      mbufo::quant::DequantizeQ6_K(raw.data(), dec.data(), t.elements);
       for (float& v : dec)
         if (!std::isfinite(v))
           v = 0.0F;
@@ -371,7 +371,7 @@ int main(int argc, char** argv) {
       for (std::size_t e = 0; e < t.elements; ++e) {
         const std::uint16_t h = static_cast<std::uint16_t>(
             raw[2 * e] | (raw[2 * e + 1] << 8));
-        dec[e] = gufo::quant::Fp16ToFloat(h);
+        dec[e] = mbufo::quant::Fp16ToFloat(h);
         if (!std::isfinite(dec[e])) dec[e] = 0.0F;
       }
       std::fwrite(dec.data(), 1, dec.size() * 4, out);
@@ -384,7 +384,7 @@ int main(int argc, char** argv) {
       }
       std::fwrite(raw.data(), 1, raw.size(), out);
     } else {
-      // Q6_K -> Q8_0: decode with the gufo reference, requantize per 32.
+      // Q6_K -> Q8_0: decode with the mbufo reference, requantize per 32.
       raw.resize(t.old_bytes);
       if (std::fread(raw.data(), 1, raw.size(), in) != raw.size()) {
         std::fprintf(stderr, "short read %s\n", t.name.c_str());
@@ -392,9 +392,9 @@ int main(int argc, char** argv) {
       }
       dec.resize(t.elements);
       if (t.type == 14)
-        gufo::quant::DequantizeQ6_K(raw.data(), dec.data(), t.elements);
+        mbufo::quant::DequantizeQ6_K(raw.data(), dec.data(), t.elements);
       else
-        gufo::quant::DequantizeQ4_0_ROCMFP4_FAST(raw.data(), dec.data(),
+        mbufo::quant::DequantizeQ4_0_ROCMFP4_FAST(raw.data(), dec.data(),
                                                  t.elements);
       // The v2 quantizer leaves NaN/inf f16 super-block scales in a few
       // percent of embedding blocks; the source engine treats those rows as
@@ -406,14 +406,14 @@ int main(int argc, char** argv) {
       }
       enc.resize(t.new_bytes);
       const std::size_t blocks = t.elements / 32;
-      auto* q8 = reinterpret_cast<gufo::quant::block_q8_0*>(enc.data());
+      auto* q8 = reinterpret_cast<mbufo::quant::block_q8_0*>(enc.data());
       for (std::size_t b = 0; b < blocks; ++b) {
         float max_abs = 0.0F;
         for (std::size_t j = 0; j < 32; ++j)
           max_abs = std::fmax(max_abs, std::fabs(dec[b * 32 + j]));
         const std::uint16_t dh = F32ToF16(max_abs / 127.0F);
         q8[b].d = dh;
-        const float d = gufo::quant::Fp16ToFloat(dh);
+        const float d = mbufo::quant::Fp16ToFloat(dh);
         for (std::size_t j = 0; j < 32; ++j) {
           const float x = dec[b * 32 + j];
           int q = d == 0.0F ? 0 : static_cast<int>(std::lroundf(x / d));

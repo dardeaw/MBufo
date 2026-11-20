@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_LLAMA_KERNELS_KERNELS_HPP_
-#define GUFO_MODELS_LLAMA_KERNELS_KERNELS_HPP_
+#ifndef MBUFO_MODELS_LLAMA_KERNELS_KERNELS_HPP_
+#define MBUFO_MODELS_LLAMA_KERNELS_KERNELS_HPP_
 
 // Llama dense-decoder kernels (gfx1151): embedding gather, RMSNorm,
 // standard NeoX RoPE, SiLU-gated MLP activation, dense F16 KV store,
@@ -14,7 +14,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::llama::kernels {
+namespace mbufo::models::llama::kernels {
 
 /// Embedding lookup from a device-mirrored table (Q8_0 / F32 / F16).
 /// `ids` are device token ids; one gathered row per id.
@@ -71,6 +71,6 @@ void AttentionF16(const float* q, const __half* k_cache,
                   std::uint32_t kv_heads, std::uint32_t d, hipStream_t stream,
                   float score_scale);
 
-}  // namespace gufo::models::llama::kernels
+}  // namespace mbufo::models::llama::kernels
 
-#endif  // GUFO_MODELS_LLAMA_KERNELS_KERNELS_HPP_
+#endif  // MBUFO_MODELS_LLAMA_KERNELS_KERNELS_HPP_

@@ -115,6 +115,6 @@ loading, AdaLN precompute, fresh forwards, sampler, VAE, mux, faults/swap and
 memory peaks. Record model/engine, seed, geometry, schedule and input hashes.
 `first_preview_ms` is the requested frame set, not streamed first-frame latency.
 
-`tools/gufo/h3_profile.py` handles telemetry; full generation requires explicit
+`tools/mbufo/h3_profile.py` handles telemetry; full generation requires explicit
 `--allow-full-generation`. Routine iteration uses one block/forward or selected
 frames with independent [quality gates](QUALITY.md), not full videos.

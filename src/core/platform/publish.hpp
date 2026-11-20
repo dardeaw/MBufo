@@ -1,11 +1,11 @@
-#ifndef GUFO_CORE_PLATFORM_PUBLISH_HPP_
-#define GUFO_CORE_PLATFORM_PUBLISH_HPP_
+#ifndef MBUFO_CORE_PLATFORM_PUBLISH_HPP_
+#define MBUFO_CORE_PLATFORM_PUBLISH_HPP_
 
 #include <cstddef>
 #include <filesystem>
 #include <string>
 
-namespace gufo::platform {
+namespace mbufo::platform {
 namespace detail {
 #if defined(_WIN32)
 using PublicationHandle = void*;
@@ -80,6 +80,6 @@ private:
   std::filesystem::path temporary_;
 };
 
-}  // namespace gufo::platform
+}  // namespace mbufo::platform
 
-#endif  // GUFO_CORE_PLATFORM_PUBLISH_HPP_
+#endif  // MBUFO_CORE_PLATFORM_PUBLISH_HPP_

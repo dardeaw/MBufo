@@ -1,5 +1,5 @@
-#ifndef GUFO_CACHE_CHECKPOINT_HPP_
-#define GUFO_CACHE_CHECKPOINT_HPP_
+#ifndef MBUFO_CACHE_CHECKPOINT_HPP_
+#define MBUFO_CACHE_CHECKPOINT_HPP_
 
 #include <array>
 #include <cstddef>
@@ -15,7 +15,7 @@
 #include "src/cache/ledger.hpp"
 #include "src/cache/slot.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 struct LineageId {
   std::uint64_t value{};
   bool operator==(const LineageId&) const = default;
@@ -305,5 +305,5 @@ private:
   // are sorted before publication; pruning preserves the order.
   std::vector<Entry> entries_;
 };
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 #endif

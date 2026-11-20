@@ -22,7 +22,7 @@ void Check(bool condition, std::string_view message) {
 }
 
 void TestDispatchThresholdAndFallbackOrder() {
-  using gufo::hip::detail::DispatchPrefillAttention;
+  using mbufo::hip::detail::DispatchPrefillAttention;
   for (const std::size_t length : {1023U, 1024U}) {
     for (const bool supported : {false, true}) {
       std::vector<Attempt> attempts;
@@ -43,8 +43,8 @@ void TestDispatchThresholdAndFallbackOrder() {
 }
 
 void TestBackendSupportPredicates() {
-  using gufo::hip::detail::AttentionSupportParams;
-  using gufo::hip::detail::IsTiledAttentionSupported;
+  using mbufo::hip::detail::AttentionSupportParams;
+  using mbufo::hip::detail::IsTiledAttentionSupported;
   const AttentionSupportParams valid{.batch_size = 1024,
                                      .start_pos = 0,
                                      .max_context = 4096,
@@ -87,10 +87,10 @@ void TestBackendSupportPredicates() {
 }
 
 void TestDecodeSplitPolicy() {
-  using gufo::hip::detail::DecodeAttentionScratchElements;
-  using gufo::hip::detail::IsFusedQkNormSupported;
-  using gufo::hip::detail::IsSplitKDecodeAttentionSupported;
-  using gufo::hip::detail::SelectDecodeAttentionSplitCount;
+  using mbufo::hip::detail::DecodeAttentionScratchElements;
+  using mbufo::hip::detail::IsFusedQkNormSupported;
+  using mbufo::hip::detail::IsSplitKDecodeAttentionSupported;
+  using mbufo::hip::detail::SelectDecodeAttentionSplitCount;
 
   Check(SelectDecodeAttentionSplitCount(1) == 1,
         "the first decode token uses one online-softmax partition");
@@ -134,11 +134,11 @@ int main() {
   TestDispatchThresholdAndFallbackOrder();
   TestBackendSupportPredicates();
   TestDecodeSplitPolicy();
-  Check(gufo::hip::detail::BatchedAttentionScoresFitLds(16128),
+  Check(mbufo::hip::detail::BatchedAttentionScoresFitLds(16128),
         "last score row fits alongside the reduction scratch");
-  Check(!gufo::hip::detail::BatchedAttentionScoresFitLds(16129),
+  Check(!mbufo::hip::detail::BatchedAttentionScoresFitLds(16129),
         "score rows cannot consume the reduction scratch reserve");
-  Check(!gufo::hip::detail::BatchedAttentionScoresFitLds(100000),
+  Check(!mbufo::hip::detail::BatchedAttentionScoresFitLds(100000),
         "long prefill needs bounded-memory attention");
   if (failures != 0) {
     std::cerr << failures << " Qwen attention policy test(s) failed.\n";

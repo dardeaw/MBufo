@@ -129,19 +129,19 @@ int main() {
              name.c_str());
       fflush(stdout);
     }
-    if (!fp32 && gufo::models::qwen_image_21::hip::DenseShape(m, k)) {
+    if (!fp32 && mbufo::models::qwen_image_21::hip::DenseShape(m, k)) {
       unsigned short *packed_w, *packed_x;
       H(hipMalloc(&packed_w, w.size() * 2));
       H(hipMalloc(&packed_x, xc * 2));
       for (int replica = 0; replica < replicas; ++replica)
-        gufo::models::qwen_image_21::hip::PackDense16(
+        mbufo::models::qwen_image_21::hip::PackDense16(
             static_cast<unsigned short*>(dw) + replica * wc,
             packed_w + replica * wc, m, k, nullptr);
       auto call = [&](int t) {
         // Include activation packing; weights are packed once when loaded.
-        gufo::models::qwen_image_21::hip::PackDense16(
+        mbufo::models::qwen_image_21::hip::PackDense16(
             static_cast<unsigned short*>(dx), packed_x, n, k, nullptr);
-        return gufo::models::qwen_image_21::hip::DenseBf16(
+        return mbufo::models::qwen_image_21::hip::DenseBf16(
             packed_w + (t % replicas) * wc, packed_x,
             static_cast<unsigned short*>(dy), n, m, k, nullptr);
       };

@@ -6,7 +6,7 @@
 #include <iostream>
 
 #include "src/cache/disk.hpp"
-using namespace gufo::cache;
+using namespace mbufo::cache;
 DiskFileId Id(unsigned n) {
   DiskFileId id{};
   id[0] = n;
@@ -16,7 +16,7 @@ DiskFileId Id(unsigned n) {
 int main(int argc, char** argv) {
   std::filesystem::path parent = argc > 1 ? argv[1] : "/tmp";
   for (std::size_t tokens : {128, 100000}) {
-    auto pattern = (parent / "gufo-publication-bench-XXXXXX").string();
+    auto pattern = (parent / "mbufo-publication-bench-XXXXXX").string();
     auto root = std::filesystem::path(mkdtemp(pattern.data()));
     {
       ResourceLedger ledger{{1ULL << 32, 1ULL << 32, 0, 0}};

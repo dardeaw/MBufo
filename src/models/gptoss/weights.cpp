@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace gufo::models::gptoss {
+namespace mbufo::models::gptoss {
 namespace {
 
 // GGML block layouts (canonical, must match ggml-quants.c).
@@ -477,7 +477,8 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   }
   if (getenv("GPTOSS_DUMP_CONV") != nullptr) {
     const auto dump = [&](const char* name, const TensorRef& t) {
-      std::string path = std::string("/home/dardeaw/conv_dump/") + name;
+      const char* dump_dir = std::getenv("MBUFO_CONV_DUMP_DIR");
+      std::string path = std::string(dump_dir != nullptr ? dump_dir : ".") + "/" + name;
       FILE* f = std::fopen(path.c_str(), "wb");
       if (f != nullptr) {
         (void)std::fwrite(t.data, 1, t.size_bytes, f);
@@ -497,4 +498,4 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   return w;
 }
 
-}  // namespace gufo::models::gptoss
+}  // namespace mbufo::models::gptoss

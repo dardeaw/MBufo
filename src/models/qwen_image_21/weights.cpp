@@ -15,7 +15,7 @@
 
 #include "src/core/mapped_prefetch.hpp"
 
-namespace gufo::models::qwen_image_21 {
+namespace mbufo::models::qwen_image_21 {
 namespace {
 
 std::size_t Integer(const json::Value& value) {
@@ -316,4 +316,4 @@ bool Weights::Contains(std::string_view name) const {
   return weights_.contains(name);
 }
 
-}  // namespace gufo::models::qwen_image_21
+}  // namespace mbufo::models::qwen_image_21

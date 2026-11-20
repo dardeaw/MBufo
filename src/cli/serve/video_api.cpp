@@ -17,7 +17,7 @@
 
 #include "src/core/json.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 constexpr std::string_view kVideosPath = "/v1/videos";
@@ -329,16 +329,16 @@ std::optional<json::Value> ParseMultipartBody(const HttpRequest& request,
     }
     const std::string_view content =
         body.substr(content_begin, content_end - content_begin);
-    if (field_name == "gufo" && !filename_present) {
+    if (field_name == "mbufo" && !filename_present) {
       try {
         json::Value extension = json::parse(std::string(content));
         if (!extension.is_object()) {
-          *error = "multipart 'gufo' field must contain a JSON object";
+          *error = "multipart 'mbufo' field must contain a JSON object";
           return std::nullopt;
         }
         result[field_name] = std::move(extension);
       } catch (const std::exception&) {
-        *error = "multipart 'gufo' field must contain valid JSON";
+        *error = "multipart 'mbufo' field must contain valid JSON";
         return std::nullopt;
       }
     } else {
@@ -415,7 +415,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
                  "image and ordered-reference conditioning are not supported",
                  "unsupported_input_reference");
   }
-  if (!HasOnlyMembers(body, {"model", "prompt", "size", "seconds", "gufo"})) {
+  if (!HasOnlyMembers(body, {"model", "prompt", "size", "seconds", "mbufo"})) {
     return Error(400, "Bad Request",
                  "request contains an unsupported video field",
                  "unsupported_field");
@@ -476,17 +476,17 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
   std::optional<int> frames;
   std::optional<int> selected_frame;
   bool preset_explicit = false;
-  if (const json::Value* extension = body.find("gufo")) {
+  if (const json::Value* extension = body.find("mbufo")) {
     if (!extension->is_object() ||
         !HasOnlyMembers(*extension, {"preset", "seed", "frames",
                                      "output_format", "selected_frame"})) {
       return Error(400, "Bad Request",
-                   "'gufo' must contain only supported video options",
+                   "'mbufo' must contain only supported video options",
                    "invalid_strix_options");
     }
     if (extension->contains("preset")) {
       if (!extension->find("preset")->is_string()) {
-        return Error(400, "Bad Request", "'gufo.preset' must be a string",
+        return Error(400, "Bad Request", "'mbufo.preset' must be a string",
                      "invalid_preset");
       }
       preset = extension->member_str("preset");
@@ -494,7 +494,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
     }
     if (extension->contains("output_format") &&
         !extension->find("output_format")->is_string()) {
-      return Error(400, "Bad Request", "'gufo.output_format' must be a string",
+      return Error(400, "Bad Request", "'mbufo.output_format' must be a string",
                    "invalid_output_format");
     }
     output_format = extension->member_str("output_format", output_format);
@@ -502,7 +502,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
       const auto parsed = JsonUnsigned(extension->find("seed"));
       if (!parsed.has_value()) {
         return Error(400, "Bad Request",
-                     "'gufo.seed' must be a non-negative exact integer",
+                     "'mbufo.seed' must be a non-negative exact integer",
                      "invalid_seed");
       }
       seed = *parsed;
@@ -511,7 +511,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
       frames = JsonFrame(extension->find("frames"));
       if (!frames.has_value()) {
         return Error(400, "Bad Request",
-                     "'gufo.frames' must be a positive legal frame count",
+                     "'mbufo.frames' must be a positive legal frame count",
                      "invalid_frames");
       }
     }
@@ -519,14 +519,14 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
       selected_frame = JsonFrame(extension->find("selected_frame"));
       if (!selected_frame.has_value()) {
         return Error(400, "Bad Request",
-                     "'gufo.selected_frame' must be a non-negative integer",
+                     "'mbufo.selected_frame' must be a non-negative integer",
                      "invalid_selected_frame");
       }
     }
   }
   if (preset_explicit && !model_preset.empty() && preset != model_preset) {
     return Error(400, "Bad Request",
-                 "model alias and 'gufo.preset' must select the same preset",
+                 "model alias and 'mbufo.preset' must select the same preset",
                  "preset_model_mismatch");
   }
 
@@ -553,7 +553,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
     }
   } else {
     return Error(400, "Bad Request",
-                 "'gufo.output_format' must be 'mp4' or 'ppm'",
+                 "'mbufo.output_format' must be 'mp4' or 'ppm'",
                  "invalid_output_format");
   }
   std::string parameter_error;
@@ -563,7 +563,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
   }
   if (parameters->frames != *duration_frames) {
     return Error(400, "Bad Request",
-                 "'gufo.frames' must match the aligned 'seconds' duration",
+                 "'mbufo.frames' must match the aligned 'seconds' duration",
                  "invalid_frames");
   }
 
@@ -802,4 +802,4 @@ HttpResponse HandleVideoApiRequest(const HttpRequest& request,
                "method_not_allowed");
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

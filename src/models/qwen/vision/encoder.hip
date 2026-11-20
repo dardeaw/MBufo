@@ -21,7 +21,7 @@
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/vision/encoder.hpp"
 
-namespace gufo::models::qwen::vision {
+namespace mbufo::models::qwen::vision {
 namespace {
 using Bf16 = hip_bfloat16;
 constexpr unsigned kHidden = 1152;
@@ -52,7 +52,7 @@ struct Allocation {
     // Movable managed pages can evict text inference queues even when no
     // image request is using this sidecar.
     Allocation allocation;
-    Check(gufo::hip::AllocateDevice(&allocation.data, bytes));
+    Check(mbufo::hip::AllocateDevice(&allocation.data, bytes));
     return allocation;
   }
   ~Allocation() {
@@ -105,7 +105,7 @@ public:
 
 private:
   static constexpr std::size_t kBytes = 16ULL << 20;
-  gufo::hip::HostAllocations allocations_;
+  mbufo::hip::HostAllocations allocations_;
   void* data_{nullptr};
   std::size_t capacity_;
   hipStream_t stream_;
@@ -366,7 +366,7 @@ struct Encoder::Impl {
   std::unordered_map<std::string, Allocation> weights;
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
-  std::unique_ptr<gufo::hip::HipblasLtGemm> lt;
+  std::unique_ptr<mbufo::hip::HipblasLtGemm> lt;
   bool uploaded{false};
 
   Impl(const std::filesystem::path& path, std::uint32_t width)
@@ -499,8 +499,8 @@ struct Encoder::Impl {
     if (blas == nullptr)
       CheckBlas(hipblasCreate(&blas));
     CheckBlas(hipblasSetStream(blas, stream));
-    lt = std::make_unique<gufo::hip::HipblasLtGemm>(
-        gufo::hip::HipblasLtGemmOptions{.ignore_environment = true});
+    lt = std::make_unique<mbufo::hip::HipblasLtGemm>(
+        mbufo::hip::HipblasLtGemmOptions{.ignore_environment = true});
     PinnedUpload upload(stream);
     for (const auto& tensor : reader->GetTensors()) {
       if (tensor.name == "v.patch_embd.weight" ||
@@ -770,4 +770,4 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
           std::size_t{merged} * embedding->width_);
   return embedding;
 }
-}  // namespace gufo::models::qwen::vision
+}  // namespace mbufo::models::qwen::vision

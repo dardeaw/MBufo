@@ -18,15 +18,15 @@
 #include "src/cli/arg_parser.hpp"
 #include "src/models/minimax_h3/sha256.hpp"
 
-#ifndef GUFO_H3_SOURCE_MANIFEST
-#define GUFO_H3_SOURCE_MANIFEST \
-  "share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+#ifndef MBUFO_H3_SOURCE_MANIFEST
+#define MBUFO_H3_SOURCE_MANIFEST \
+  "share/mbufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
 #endif
-#ifndef GUFO_H3_INSTALLED_SOURCE_MANIFEST
-#define GUFO_H3_INSTALLED_SOURCE_MANIFEST GUFO_H3_SOURCE_MANIFEST
+#ifndef MBUFO_H3_INSTALLED_SOURCE_MANIFEST
+#define MBUFO_H3_INSTALLED_SOURCE_MANIFEST MBUFO_H3_SOURCE_MANIFEST
 #endif
 
-namespace gufo::cli {
+namespace mbufo::cli {
 
 namespace {
 
@@ -184,7 +184,7 @@ bool WriteAtomic(const std::filesystem::path& path, std::string_view contents,
                         filesystem_error.message());
     return false;
   }
-  const std::filesystem::path partial = path.string() + ".gufo-partial-" +
+  const std::filesystem::path partial = path.string() + ".mbufo-partial-" +
                                         std::to_string(getpid()) + "-" +
                                         std::to_string(NextReportNonce());
   {
@@ -232,12 +232,12 @@ void PrintProgress(std::string_view phase, int completed, int total,
 }  // namespace
 
 std::filesystem::path DefaultH3SourceManifest() {
-  std::filesystem::path build_path = GUFO_H3_SOURCE_MANIFEST;
+  std::filesystem::path build_path = MBUFO_H3_SOURCE_MANIFEST;
   std::error_code error;
   if (std::filesystem::is_regular_file(build_path, error)) {
     return build_path;
   }
-  return GUFO_H3_INSTALLED_SOURCE_MANIFEST;
+  return MBUFO_H3_INSTALLED_SOURCE_MANIFEST;
 }
 
 void PrintVideoHelp(std::string_view program_name) {
@@ -258,7 +258,7 @@ std::optional<VideoCliOptions> ParseVideoOptions(
   options.request.seed = 42;
   options.request.source_manifest = DefaultH3SourceManifest();
   VideoOverrides overrides;
-  ArgParser parser("gufo video");
+  ArgParser parser("mbufo video");
   RegisterVideoOptions(parser, options, overrides);
   if (!parser.Parse(args, error) || parser.IsHelpRequested()) {
     return std::nullopt;
@@ -332,11 +332,11 @@ int RunVideo(std::span<const char* const> args) {
   auto options = ParseVideoOptions(args, &error);
   if (!options.has_value()) {
     if (error.empty()) {
-      PrintVideoHelp("gufo");
+      PrintVideoHelp("mbufo");
       return 0;
     }
     std::cerr << "Error: " << error << '\n';
-    PrintVideoHelp("gufo");
+    PrintVideoHelp("mbufo");
     return 2;
   }
   if (!WriteAtomic(options->parameters_path,
@@ -387,4 +387,4 @@ int RunVideo(std::span<const char* const> args) {
   return 0;
 }
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli

@@ -174,7 +174,7 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
     limit = body.get("max_completion_tokens", body.get("max_tokens", body.get("max_output_tokens")))
     if limit is not None:
         require(output_count <= limit, "output exceeds the request token limit")
-    timing = usage.get("gufo", {})
+    timing = usage.get("mbufo", {})
     required_timings = ["prefill_ms", "decode_ms", "cache_restore_ms",
                         "cache_snapshot_ms", "cache_disk_enqueue_ms"]
     if endpoint == "/v1/chat/completions":
@@ -236,7 +236,7 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
                 schema = {"type": "object", "properties": {}, "additionalProperties": False}
             Draft202012Validator(schema,
                                  format_checker=FormatChecker()).validate(arguments)
-    # Validate complete structured answers independently from Gufo's grammar.
+    # Validate complete structured answers independently from MBufo's grammar.
     specification = body.get("response_format", body.get("text", {}).get("format", {}))
     if specification.get("type") not in ("json_object", "json_schema"):
         return
@@ -323,12 +323,12 @@ def summarize(parts, streaming, ended, contract=None):
                 call["arguments"] += function.get("arguments") or ""
             if choice.get("finish_reason"):
                 target["finish"] = choice["finish_reason"]
-    if usage and "gufo" not in usage and timings:
+    if usage and "mbufo" not in usage and timings:
         # Legacy Completions sends timings with its terminal choice, then usage
         # in a separate final chunk. Responses nests both in the final response.
         aliases = {"prompt_n": "prefill_tokens", "prompt_ms": "prefill_ms",
                    "predicted_ms": "decode_ms"}
-        usage["gufo"] = {aliases.get(key, key): value for key, value in timings.items()}
+        usage["mbufo"] = {aliases.get(key, key): value for key, value in timings.items()}
     if contract:
         validate_response(events, *contract, ended, usage, output, choices)
         if contract[0] == "/v1/messages/count_tokens":
@@ -347,7 +347,7 @@ def summarize(parts, streaming, ended, contract=None):
                 value = {**value, "data": [{k: v for k, v in entry.items() if k != "created"}
                                           for entry in value["data"]]}
             return {}, digest(value)
-    measured = {key: value for key, value in usage.get("gufo", {}).items()
+    measured = {key: value for key, value in usage.get("mbufo", {}).items()
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
                 and math.isfinite(value)}
     for field, alias in (("draft_tokens", "draft_n"),

@@ -56,8 +56,8 @@ def production_sha256() -> str:
 
 
 def compare_official(directory: Path) -> dict:
-    candidate = load(directory / "gufo-1.json")
-    repeat = load(directory / "gufo-2.json")
+    candidate = load(directory / "mbufo-1.json")
+    repeat = load(directory / "mbufo-2.json")
     require(candidate == repeat, "official AR scoring is not exactly reproducible")
     report = {"exact_repeat": True, "groups": {}}
     for group, count, tokens in (("continuation-100", 100, 2313), ("smoke-5", 5, 14)):
@@ -75,17 +75,17 @@ def compare_official(directory: Path) -> dict:
                     "non-finite official likelihood")
             pairs.append({
                 "id": after["id"], "tokens": after["target_tokens"],
-                "upstream_nll": old_nll, "gufo_nll": new_nll,
+                "upstream_nll": old_nll, "mbufo_nll": new_nll,
                 "delta": new_nll - old_nll,
                 "upstream_first": int(before["first_match"]),
-                "gufo_first": after["first_match"],
+                "mbufo_first": after["first_match"],
                 "upstream_prefix": int(before["greedy_lcp"]),
-                "gufo_prefix": after["greedy_lcp"],
+                "mbufo_prefix": after["greedy_lcp"],
             })
         require(sum(pair["tokens"] for pair in pairs) == tokens,
                 "official target token coverage changed")
         old_nll = sum(pair["upstream_nll"] for pair in pairs) / tokens
-        new_nll = sum(pair["gufo_nll"] for pair in pairs) / tokens
+        new_nll = sum(pair["mbufo_nll"] for pair in pairs) / tokens
         rng = random.Random(731)
         deltas = []
         for _ in range(10000):
@@ -95,13 +95,13 @@ def compare_official(directory: Path) -> dict:
         deltas.sort()
         summary = {
             "cases": count, "tokens": tokens,
-            "upstream_nll": old_nll, "gufo_nll": new_nll,
+            "upstream_nll": old_nll, "mbufo_nll": new_nll,
             "relative_nll_change_percent": 100 * (new_nll / old_nll - 1),
             "upstream_first_matches": sum(pair["upstream_first"] for pair in pairs),
-            "gufo_first_matches": sum(pair["gufo_first"] for pair in pairs),
+            "mbufo_first_matches": sum(pair["mbufo_first"] for pair in pairs),
             "upstream_mean_prefix": statistics.mean(pair["upstream_prefix"] for pair in pairs),
-            "gufo_mean_prefix": statistics.mean(pair["gufo_prefix"] for pair in pairs),
-            "nll_case_wins_gufo": sum(pair["delta"] < -1e-8 for pair in pairs),
+            "mbufo_mean_prefix": statistics.mean(pair["mbufo_prefix"] for pair in pairs),
+            "nll_case_wins_mbufo": sum(pair["delta"] < -1e-8 for pair in pairs),
             "nll_case_wins_upstream": sum(pair["delta"] > 1e-8 for pair in pairs),
             "paired_case_bootstrap_delta_nll_95pct": [deltas[250], deltas[9749]],
         }
@@ -158,7 +158,7 @@ def compare_logits(ours: bytes, old: bytes, vocabulary: int) -> dict:
 
 def compare_frontiers(directory: Path) -> dict:
     base, repeat, upstream = (directory / name for name in
-                              ("frontiers-gufo-1", "frontiers-gufo-2", "frontiers-upstream"))
+                              ("frontiers-mbufo-1", "frontiers-mbufo-2", "frontiers-upstream"))
     report = load(base / "summary.json")
     require(report == load(repeat / "summary.json"),
             "AR frontier scoring is not exactly reproducible")
@@ -216,7 +216,7 @@ def compare_frontiers(directory: Path) -> dict:
     for field in ("greedy", "target_logprobs", *(phase + "_sha256" for phase in phases)):
         require(first[field] == second[field],
                 "identical short-prefill calls changed output")
-    for engine, location in (("gufo", base), ("upstream", upstream)):
+    for engine, location in (("mbufo", base), ("upstream", upstream)):
         for depth in DEPTHS:
             for phase in phases:
                 a = (location / f"2048-{depth}-{phase}.f32").read_bytes()
@@ -276,39 +276,39 @@ def run(model: Path, output: Path, upstream: Path, environment: dict,
     control = output / "upstream-build/bin"
     if not prefill_only:
         for repeat in (1, 2):
-            execute([native, "--official", output / f"gufo-{repeat}.json"],
-                    f"gufo-{repeat}")
+            execute([native, "--official", output / f"mbufo-{repeat}.json"],
+                    f"mbufo-{repeat}")
         for group, context in (("continuation-100", 4096), ("smoke-5", 16384)):
             execute([control / "score_official", model, manifests[group],
                      output / f"upstream-{group}.tsv", context], f"upstream-{group}")
     frontier_options = ["--prefill-only"] if prefill_only else []
     for repeat in (1, 2):
-        execute([native, "--reference-frontiers", output / f"frontiers-gufo-{repeat}", *frontier_options],
-                f"frontiers-gufo-{repeat}")
+        execute([native, "--reference-frontiers", output / f"frontiers-mbufo-{repeat}", *frontier_options],
+                f"frontiers-mbufo-{repeat}")
     (output / "frontiers-upstream").mkdir()
-    execute([control / "frontier_reference", model, output / "frontiers-gufo-1",
+    execute([control / "frontier_reference", model, output / "frontiers-mbufo-1",
              output / "frontiers-upstream", *frontier_options], "frontiers-upstream")
     require(source_hash == production_sha256(),
             "production sources changed during the reference comparison")
     require(native_hash == sha256(native),
             "native test binary changed during the reference comparison")
     report = {
-        "schema": "gufo.ds4-independent-ar-comparison.v1",
+        "schema": "mbufo.ds4-independent-ar-comparison.v1",
         "upstream_revision": revision,
         "upstream_build": str((output / "upstream-build").resolve()),
         "model_file": model.name, "model_sha256": sha256(model),
         "fixture_sha256": sha256(fixture_path),
-        "gufo_production_sha256": source_hash,
-        "gufo_native_test_sha256": native_hash,
-        "gufo_git_revision": subprocess.check_output(
+        "mbufo_production_sha256": source_hash,
+        "mbufo_native_test_sha256": native_hash,
+        "mbufo_git_revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "flake_lock_sha256": sha256(ROOT / "flake.lock"),
-        "gufo_build_preset": "gpu-test",
+        "mbufo_build_preset": "gpu-test",
         "scope": "prefill-only" if prefill_only else "full",
         "frontiers": compare_frontiers(output),
     }
     report["gates"] = {
-        "exact_gufo_repeat": True,
+        "exact_mbufo_repeat": True,
         "full_logits_within_existing_bounds": all(
             vector["within_existing_vector_bounds"]
             for vector in report["frontiers"]["vectors"]),

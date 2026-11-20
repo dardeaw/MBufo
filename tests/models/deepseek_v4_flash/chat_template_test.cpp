@@ -16,10 +16,10 @@
 
 namespace {
 
-using gufo::ReasoningEffort;
-using gufo::models::deepseek_v4_flash::ChatMessage;
-using gufo::models::deepseek_v4_flash::ChatTemplateOptions;
-using gufo::models::deepseek_v4_flash::ChatTool;
+using mbufo::ReasoningEffort;
+using mbufo::models::deepseek_v4_flash::ChatMessage;
+using mbufo::models::deepseek_v4_flash::ChatTemplateOptions;
+using mbufo::models::deepseek_v4_flash::ChatTool;
 
 void Expect(bool condition, std::string_view message) {
   if (!condition) {
@@ -30,7 +30,7 @@ void Expect(bool condition, std::string_view message) {
 
 std::string Sha256(std::string_view value) {
   const auto* data = reinterpret_cast<const std::uint8_t*>(value.data());
-  return gufo::crypto::Sha256Hex({data, value.size()});
+  return mbufo::crypto::Sha256Hex({data, value.size()});
 }
 
 class GgufTemplateBuilder {
@@ -46,7 +46,7 @@ public:
 
   void AddString(std::string_view key, std::string_view value) {
     AppendString(key);
-    AppendPod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kString));
+    AppendPod(static_cast<std::uint32_t>(mbufo::core::GgufValueType::kString));
     AppendString(value);
     ++metadata_count_;
   }
@@ -88,7 +88,7 @@ void TestChatAndThinkingPrefixes() {
   };
 
   const std::string chat =
-      gufo::models::deepseek_v4_flash::RenderChat(messages);
+      mbufo::models::deepseek_v4_flash::RenderChat(messages);
   Expect(chat ==
              "<｜begin▁of▁sentence｜>Be concise.<｜User｜>Answer."
              "<｜Assistant｜></think>",
@@ -98,22 +98,22 @@ void TestChatAndThinkingPrefixes() {
   options.enable_thinking = true;
   options.reasoning_effort = ReasoningEffort::kHigh;
   const std::string thinking =
-      gufo::models::deepseek_v4_flash::RenderChat(messages, options);
+      mbufo::models::deepseek_v4_flash::RenderChat(messages, options);
   Expect(
       thinking.find("Reasoning Effort: Absolute maximum") != std::string::npos,
       "High effort uses the pinned DeepSeek instruction");
   Expect(thinking.ends_with("<｜Assistant｜><think>"),
          "Thinking mode starts inside a reasoning block");
 
-  using gufo::models::deepseek_v4_flash::ResolveDeepSeekChatOptions;
+  using mbufo::models::deepseek_v4_flash::ResolveDeepSeekChatOptions;
   const auto defaults = ResolveDeepSeekChatOptions({});
   Expect(defaults.enable_thinking &&
              defaults.reasoning_effort == ReasoningEffort::kHigh,
          "User-facing DeepSeek defaults match the API's thinking/high");
-  Expect(gufo::models::deepseek_v4_flash::RenderChat(messages, defaults) ==
+  Expect(mbufo::models::deepseek_v4_flash::RenderChat(messages, defaults) ==
              thinking,
          "Default serving prompt matches the official high-effort encoding");
-  Expect(gufo::models::deepseek_v4_flash::RenderChat(
+  Expect(mbufo::models::deepseek_v4_flash::RenderChat(
              messages, ResolveDeepSeekChatOptions({.enabled = false})) == chat,
          "Explicit thinking off overrides the serving default");
   const auto low = ResolveDeepSeekChatOptions(
@@ -136,7 +136,7 @@ void TestHistoricalThinkingPolicy() {
   options.enable_thinking = true;
   options.reasoning_effort = ReasoningEffort::kLow;
   const std::string dropped =
-      gufo::models::deepseek_v4_flash::RenderChat(messages, options);
+      mbufo::models::deepseek_v4_flash::RenderChat(messages, options);
   Expect(dropped.find("Private reasoning.") == std::string::npos,
          "DeepSeek drops old thinking by default");
   Expect(dropped.find("<｜Assistant｜></think>Visible answer.") !=
@@ -145,7 +145,7 @@ void TestHistoricalThinkingPolicy() {
 
   options.preserve_thinking = true;
   const std::string preserved =
-      gufo::models::deepseek_v4_flash::RenderChat(messages, options);
+      mbufo::models::deepseek_v4_flash::RenderChat(messages, options);
   Expect(
       preserved.find(
           "<｜Assistant｜><think>Private reasoning.</think>Visible answer.") !=
@@ -154,7 +154,7 @@ void TestHistoricalThinkingPolicy() {
 
   options.enable_thinking = false;
   const std::string chat_mode =
-      gufo::models::deepseek_v4_flash::RenderChat(messages, options);
+      mbufo::models::deepseek_v4_flash::RenderChat(messages, options);
   Expect(chat_mode.find("Private reasoning.") == std::string::npos,
          "Standard DeepSeek chat mode never replays reasoning history");
   Expect(chat_mode.find("<｜Assistant｜></think>Visible answer.") !=
@@ -165,13 +165,13 @@ void TestHistoricalThinkingPolicy() {
   options.preserve_thinking = false;
   options.tools_present = true;
   const std::string tool_loop =
-      gufo::models::deepseek_v4_flash::RenderChat(messages, options);
+      mbufo::models::deepseek_v4_flash::RenderChat(messages, options);
   Expect(tool_loop.find("Private reasoning.") != std::string::npos,
          "Tool conversations force reasoning preservation");
 }
 
 void TestEffortMappingAndToolResults() {
-  using gufo::models::deepseek_v4_flash::DeepSeekReasoningEffortName;
+  using mbufo::models::deepseek_v4_flash::DeepSeekReasoningEffortName;
   Expect(DeepSeekReasoningEffortName(ReasoningEffort::kMinimal) == "low",
          "minimal maps to DeepSeek low");
   Expect(DeepSeekReasoningEffortName(ReasoningEffort::kMedium) == "high",
@@ -186,7 +186,7 @@ void TestEffortMappingAndToolResults() {
       {.role = "tool", .content = "two", .reasoning_content = {}},
   };
   const std::string rendered =
-      gufo::models::deepseek_v4_flash::RenderChat(messages);
+      mbufo::models::deepseek_v4_flash::RenderChat(messages);
   Expect(rendered.find("<｜User｜><tool_result>one</tool_result>\n\n"
                        "<tool_result>two</tool_result>") != std::string::npos,
          "Consecutive tool results share one user turn");
@@ -221,7 +221,7 @@ void TestOfficialDsmlToolLoop() {
   ChatTemplateOptions options;
   options.enable_thinking = true;
   const std::string rendered =
-      gufo::models::deepseek_v4_flash::RenderChat(messages, tools, options);
+      mbufo::models::deepseek_v4_flash::RenderChat(messages, tools, options);
   Expect(rendered.find("<｜DSML｜tool_calls>") != std::string::npos,
          "DeepSeek uses the official DSML tool-calls token");
   Expect(rendered.find("<｜DSML｜invoke name=\"get_weather\">") !=
@@ -257,12 +257,12 @@ void TestParallelToolOrder() {
       {.role = "user", .content = "Compare them."},
       {.role = "tool", .content = "Result A", .tool_call_id = "call_A"},
   };
-  const auto reverse = gufo::models::deepseek_v4_flash::RenderChat(messages);
-  std::ifstream input(GUFO_CHAT_TEMPLATE_HF_GOLDENS);
+  const auto reverse = mbufo::models::deepseek_v4_flash::RenderChat(messages);
+  std::ifstream input(MBUFO_CHAT_TEMPLATE_HF_GOLDENS);
   Expect(input.good(), "Template fixture opens");
-  const auto fixture = gufo::json::parse(std::string{
+  const auto fixture = mbufo::json::parse(std::string{
       std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()});
-  Expect(Sha256(reverse) == gufo::testing::chat_goldens::GoldenCase(
+  Expect(Sha256(reverse) == mbufo::testing::chat_goldens::GoldenCase(
                                 fixture, "deepseek", "parallel_tools")
                                 .member_str("rendered_sha256"),
          "Parallel tool rendering matches the pinned official encoder");
@@ -271,13 +271,13 @@ void TestParallelToolOrder() {
                    "<tool_result>Result B</tool_result>") != std::string::npos,
       "IDs restore call order without moving interleaved user text");
   std::swap(messages[2], messages[4]);
-  Expect(gufo::models::deepseek_v4_flash::RenderChat(messages) == reverse,
+  Expect(mbufo::models::deepseek_v4_flash::RenderChat(messages) == reverse,
          "Parallel result arrival order does not change the prompt");
   messages[2].tool_call_id.clear();
   messages[4].tool_call_id.clear();
   std::swap(messages[2], messages[4]);
   const auto unidentified =
-      gufo::models::deepseek_v4_flash::RenderChat(messages);
+      mbufo::models::deepseek_v4_flash::RenderChat(messages);
   Expect(
       unidentified.find(
           "<tool_result>Result B</tool_result>\n\nCompare them.\n\n"
@@ -301,7 +301,7 @@ void TestHuggingFaceRenderedGoldens() {
                         const ChatTemplateOptions& options,
                         std::string_view expected) {
     const std::string rendered =
-        gufo::models::deepseek_v4_flash::RenderChat(messages, options);
+        mbufo::models::deepseek_v4_flash::RenderChat(messages, options);
     Expect(Sha256(rendered) == expected,
            "DeepSeek rendered bytes match the pinned Hugging Face golden");
   };
@@ -328,12 +328,12 @@ void TestHuggingFaceRenderedGoldens() {
 }
 
 void TestPinnedArtifactTemplateValidation() {
-  std::ifstream input(GUFO_DEEPSEEK_CHAT_TEMPLATE_REFERENCE, std::ios::binary);
+  std::ifstream input(MBUFO_DEEPSEEK_CHAT_TEMPLATE_REFERENCE, std::ios::binary);
   const std::string reference{std::istreambuf_iterator<char>(input),
                               std::istreambuf_iterator<char>()};
   Expect(!reference.empty(), "Pinned DeepSeek artifact template is readable");
   Expect(Sha256(reference) ==
-             gufo::models::deepseek_v4_flash::ArtifactTemplateSha256(),
+             mbufo::models::deepseek_v4_flash::ArtifactTemplateSha256(),
          "Versioned DeepSeek Jinja has the pinned artifact hash");
 
   GgufTemplateBuilder builder;
@@ -343,9 +343,9 @@ void TestPinnedArtifactTemplateValidation() {
   auto binary = builder.Build();
   std::string error;
   auto reader =
-      gufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &error);
+      mbufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &error);
   Expect(reader != nullptr, "DeepSeek template GGUF opens");
-  Expect(gufo::models::deepseek_v4_flash::ValidateGgufTemplate(*reader, &error),
+  Expect(mbufo::models::deepseek_v4_flash::ValidateGgufTemplate(*reader, &error),
          "Pinned DeepSeek artifact template is accepted");
 
   GgufTemplateBuilder lookalike;
@@ -354,10 +354,10 @@ void TestPinnedArtifactTemplateValidation() {
   lookalike.AddString("tokenizer.chat_template", reference + " ");
   binary = lookalike.Build();
   reader =
-      gufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &error);
+      mbufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &error);
   Expect(reader != nullptr, "DeepSeek look-alike GGUF opens");
   Expect(
-      !gufo::models::deepseek_v4_flash::ValidateGgufTemplate(*reader, &error),
+      !mbufo::models::deepseek_v4_flash::ValidateGgufTemplate(*reader, &error),
       "DeepSeek look-alike template is rejected by hash");
 }
 
@@ -367,12 +367,12 @@ int main() {
   {
     const std::vector<ChatMessage> messages{
         {.role = "user", .content = "Emit."}};
-    const std::vector<gufo::models::deepseek_v4_flash::ChatTool> tools{
+    const std::vector<mbufo::models::deepseek_v4_flash::ChatTool> tools{
         {.name = "emit",
          .definition_json =
              R"({"name":"emit","strict":true,"parameters":{"type":"object","additionalProperties":false},"vendor":2})"}};
     const auto rendered =
-        gufo::models::deepseek_v4_flash::RenderChat(messages, tools);
+        mbufo::models::deepseek_v4_flash::RenderChat(messages, tools);
     Expect(
         rendered.find(
             R"({"name": "emit", "strict": true, "parameters": {"type": "object", "additionalProperties": false}, "vendor": 2})") !=

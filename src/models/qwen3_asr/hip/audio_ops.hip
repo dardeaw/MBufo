@@ -9,7 +9,7 @@
 #include <cmath>
 #include <cstddef>
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 namespace {
 
 constexpr std::size_t kThreads = 256;
@@ -456,6 +456,6 @@ void LaunchAllFinite(const float* values, std::size_t count,
                      stream, values, count, finite);
 }
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
 #endif

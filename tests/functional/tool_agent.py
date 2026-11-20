@@ -464,9 +464,9 @@ def check_union_continuation(client, model, checks, chat_result):
         return result
 
     call("search", chat_result(client, {**common, "messages": [{"role": "user", "content":
-        'Call web_search once with query "gufo", max_results 3 and provider exa. '
+        'Call web_search once with query "mbufo", max_results 3 and provider exa. '
         "No explanation."}]}, True),
-         "web_search", {"query": "gufo", "max_results": 3, "provider": "exa"})
+         "web_search", {"query": "mbufo", "max_results": 3, "provider": "exa"})
 
     def continued(name, prompt, function, arguments, output):
         messages = [{"role": "user", "content": prompt}]
@@ -582,7 +582,7 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
             replay_end = log_offset(server_log)
             repeated = save(name + "_cached", chat_result(client, chat, True), arguments)
             check_unchanged_retry("schema_edges_uri_cached", repeated,
-                                  repeated["usage"]["gufo"]["prefill_tokens"],
+                                  repeated["usage"]["mbufo"]["prefill_tokens"],
                                   server_log, replay_start, replay_end)
             for label, update, finish in (
                     ("limit", {"max_completion_tokens": 2}, "length"),

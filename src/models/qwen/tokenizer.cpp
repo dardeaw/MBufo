@@ -24,7 +24,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 
-namespace gufo::tokenization {
+namespace mbufo::tokenization {
 
 namespace {
 
@@ -529,6 +529,9 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
     if (eos.has_value())
       tokenizer->eos_token_id_ = static_cast<TokenId>(*eos);
     tokenizer->endoftext_token_id_ = tokenizer->eos_token_id_;
+    // The end of a model turn is its own token (<turn|>); generation must stop there too (the GGUF only names <eos>).
+    if (const auto turn_end = special_tokens.find("<turn|>"); turn_end != special_tokens.end())
+      tokenizer->endoftext_token_id_ = turn_end->second;
     tokenizer->pad_token_id_ =
         reader.GetMetadataUint32("tokenizer.ggml.padding_token_id")
             .value_or(kInvalidTokenId);
@@ -1060,4 +1063,4 @@ bool QwenTokenizer::IsSpecialToken(TokenId id) const noexcept {
   return is_special_token_.contains(id);
 }
 
-}  // namespace gufo::tokenization
+}  // namespace mbufo::tokenization

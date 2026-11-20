@@ -6,7 +6,7 @@
 #include <unistd.h>
 #endif
 
-namespace gufo::platform {
+namespace mbufo::platform {
 
 std::size_t PageSizeBytes() {
 #if defined(_WIN32)
@@ -37,4 +37,4 @@ std::uint64_t AvailableMemoryBytes() {
 #endif
 }
 
-}  // namespace gufo::platform
+}  // namespace mbufo::platform

@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_CONTINUATION_CACHE_HPP_
-#define GUFO_SERVER_CONTINUATION_CACHE_HPP_
+#ifndef MBUFO_SERVER_CONTINUATION_CACHE_HPP_
+#define MBUFO_SERVER_CONTINUATION_CACHE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +9,7 @@
 #include <string_view>
 #include <vector>
 
-namespace gufo::server {
+namespace mbufo::server {
 
 using ContinuationToken = std::uint32_t;
 
@@ -304,6 +304,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_CONTINUATION_CACHE_HPP_
+#endif  // MBUFO_SERVER_CONTINUATION_CACHE_HPP_

@@ -1,8 +1,8 @@
 ---
 name: optimize-kernel
-description: Optimize Gufo inference on Strix Halo gfx1151 using focused profiles, independent quality checks, and matched end-to-end measurements.
+description: Optimize MBufo inference on Strix Halo gfx1151 using focused profiles, independent quality checks, and matched end-to-end measurements.
 metadata:
-  origin: gufo
+  origin: mbufo
 ---
 
 # Optimize gfx1151 kernels
@@ -179,7 +179,7 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
 
 ## Quality and reporting
 
-Use an independent operator formula or pinned official teacher; two Gufo
+Use an independent operator formula or pinned official teacher; two MBufo
 paths agreeing does not prove upstream parity. Compare matched token histories
 and find the first changed layer if logits drift. Never relax tolerances or
 replace goldens to accept a speedup. Test finite outputs and awkward tails

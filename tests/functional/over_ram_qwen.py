@@ -59,7 +59,7 @@ def chat(label, messages):
     result = json.load(urllib.request.urlopen(request, timeout=3600))
     retain_response(out, label, messages, result, time.time() - started)
     usage = result["usage"]
-    if args.expect_component and not usage["gufo"].get("component_cache"):
+    if args.expect_component and not usage["mbufo"].get("component_cache"):
         raise RuntimeError("Candidate did not use component cache")
     if label == "A1_cold" and args.ram_bytes != "auto" and usage["prompt_tokens"] * 65536 <= int(args.ram_bytes):
         raise RuntimeError("Qwen FP16 KV alone did not exceed the RAM cache budget")
@@ -90,7 +90,7 @@ def chat(label, messages):
         assert_publication_wait(out, label, segment, result)
     print(json.dumps({"label": label, "seconds": time.time() - started,
                       "prompt": usage["prompt_tokens"], "cached": usage.get("prompt_tokens_details", {}).get("cached_tokens", 0),
-                      "reuse": usage["gufo"].get("component_cache", {}).get("reuse")}),
+                      "reuse": usage["mbufo"].get("component_cache", {}).get("reuse")}),
           flush=True)
     return result["choices"][0]["message"]["content"]
 

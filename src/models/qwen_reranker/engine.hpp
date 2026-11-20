@@ -12,8 +12,8 @@
 // or SHARES (serve, via Wrap) a hip::QwenGpuModel and only adds the scoring
 // readout. Registry: model kinds self-register by name; drivers resolve
 // "qwen-reranker" through ModelRegistry::Create.
-#ifndef GUFO_MODELS_QWEN_RERANKER_ENGINE_HPP_
-#define GUFO_MODELS_QWEN_RERANKER_ENGINE_HPP_
+#ifndef MBUFO_MODELS_QWEN_RERANKER_ENGINE_HPP_
+#define MBUFO_MODELS_QWEN_RERANKER_ENGINE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -29,7 +29,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::models::qwen_reranker {
+namespace mbufo::models::qwen_reranker {
 
 /// Default retrieval instruction (Qwen3-Reranker chat template default).
 inline constexpr std::string_view kDefaultInstruction =
@@ -160,6 +160,6 @@ private:
   std::map<std::string, Factory> factories_;
 };
 
-}  // namespace gufo::models::qwen_reranker
+}  // namespace mbufo::models::qwen_reranker
 
-#endif  // GUFO_MODELS_QWEN_RERANKER_ENGINE_HPP_
+#endif  // MBUFO_MODELS_QWEN_RERANKER_ENGINE_HPP_

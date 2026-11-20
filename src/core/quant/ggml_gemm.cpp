@@ -6,7 +6,7 @@
 
 #include "src/core/quant/ggml_dequant.hpp"
 
-namespace gufo::quant {
+namespace mbufo::quant {
 namespace {
 
 float Bf16ToFloat(std::uint16_t h) noexcept {
@@ -126,4 +126,4 @@ float Dot(core::GgmlType type, const void* row, std::span<const float> x,
   }
 }
 
-}  // namespace gufo::quant
+}  // namespace mbufo::quant

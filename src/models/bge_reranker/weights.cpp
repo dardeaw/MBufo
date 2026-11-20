@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-namespace gufo::models::bge_reranker {
+namespace mbufo::models::bge_reranker {
 namespace {
 
 [[nodiscard]] bool IsStorageType(core::GgmlType type) noexcept {
@@ -108,4 +108,4 @@ std::optional<BgeRerankerHeadF32> LoadRerankHead(const core::GgufReader& reader,
   return head;
 }
 
-}  // namespace gufo::models::bge_reranker
+}  // namespace mbufo::models::bge_reranker

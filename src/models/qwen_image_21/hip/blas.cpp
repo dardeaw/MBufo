@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <tuple>
 
-namespace gufo::models::qwen_image_21::hip {
+namespace mbufo::models::qwen_image_21::hip {
 namespace {
 
 void Check(hipblasStatus_t status) {
@@ -152,4 +152,4 @@ bool Gemm::RunBatched(const void* weight, const void* input, void* output,
   return true;
 }
 
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace mbufo::models::qwen_image_21::hip

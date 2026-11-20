@@ -1,12 +1,12 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_HIP_AUDIO_OPS_HPP_
-#define GUFO_MODELS_QWEN3_ASR_HIP_AUDIO_OPS_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_HIP_AUDIO_OPS_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_HIP_AUDIO_OPS_HPP_
 
 #include <cstddef>
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 
 void LaunchChunkLogMel(const float* input, void* output_bfloat16,
                        std::size_t frames, std::size_t chunks,
@@ -56,7 +56,7 @@ void LaunchSegmentedSelfAttention(const float* query, const float* key,
 void LaunchAllFinite(const float* values, std::size_t count,
                      std::uint32_t* finite, hipStream_t stream);
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 #endif
 
-#endif  // GUFO_MODELS_QWEN3_ASR_HIP_AUDIO_OPS_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_HIP_AUDIO_OPS_HPP_

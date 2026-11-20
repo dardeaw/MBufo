@@ -12,7 +12,7 @@
 #include <fstream>
 #include <iostream>
 
-using namespace gufo::cache;
+using namespace mbufo::cache;
 namespace fs = std::filesystem;
 namespace {
 std::atomic<std::uint64_t> actual_manifest_bytes{}, actual_payload_bytes{};
@@ -57,7 +57,7 @@ ResourceLedger ledger{{1ULL << 32, 1ULL << 32, 0, 0}};
 struct Directory {
   fs::path path;
   Directory() {
-    char name[] = "/tmp/gufo-disk-test-XXXXXX";
+    char name[] = "/tmp/mbufo-disk-test-XXXXXX";
     path = mkdtemp(name);
   }
   ~Directory() { fs::remove_all(path); }

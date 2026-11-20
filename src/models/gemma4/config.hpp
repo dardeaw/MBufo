@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GEMMA4_CONFIG_HPP_
-#define GUFO_MODELS_GEMMA4_CONFIG_HPP_
+#ifndef MBUFO_MODELS_GEMMA4_CONFIG_HPP_
+#define MBUFO_MODELS_GEMMA4_CONFIG_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -8,7 +8,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 
 /// Architecture parameters of a `gemma4` GGUF artifact
 /// (Gemma 4 26B A4B MoE and 12B dense; dense variants leave the
@@ -38,16 +38,26 @@ struct Config {
   std::uint32_t num_experts{0};     ///< expert_count, 128 MoE; 0 = dense.
   std::uint32_t experts_used{0};    ///< expert_used_count, 8.
   std::uint32_t expert_ff{0};       ///< expert_feed_forward_length, 704.
-  std::uint32_t shared_ff{0};       ///< feed_forward_length, 2112 MoE shared / 15360 dense FFN.
+  std::uint32_t shared_ff{0};       ///< feed_forward_length (max over layers), 2112 MoE shared / 15360 dense FFN.
+  std::vector<std::uint32_t> ff_per_layer;  ///< per-layer dense FFN width (E2B: double-wide shared-KV layers).
+  std::uint32_t ple_dim{0};         ///< embedding_length_per_layer_input (Gemma 4 E2B/E4B per-layer embeddings), 0 = none.
 
   float final_logit_softcapping{0.0F};  ///< 30.0; 0 disables.
 
+  /// Dense FFN width of one layer.
+  [[nodiscard]] std::uint32_t FfDim(std::uint32_t layer) const noexcept {
+    return layer < ff_per_layer.size() ? ff_per_layer[layer] : shared_ff;
+  }
+  /// Layers that compute their own K/V (the last shared_kv_layers layers reuse an earlier layer's cache).
+  [[nodiscard]] bool OwnsKv(std::uint32_t layer) const noexcept {
+    return layer + shared_kv_layers < num_layers && KvHeads(layer) > 0;
+  }
   [[nodiscard]] bool LayerIsSwa(std::uint32_t layer) const noexcept {
     return layer < is_swa.size() && is_swa[layer];
   }
   /// Layers that own a KV cache (llama.cpp has_kv: head_count_kv > 0).
   [[nodiscard]] bool LayerHasKv(std::uint32_t layer) const noexcept {
-    return KvHeads(layer) > 0;
+    return OwnsKv(layer);
   }
   // Per-layer head dimensions are taken from the ACTUAL weight shapes
   // (attn_q rows / num_heads), not from the GGUF sliding_window_pattern,
@@ -74,6 +84,6 @@ struct Config {
       const core::GgufReader& gguf, std::string* error_msg = nullptr);
 };
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4
 
-#endif  // GUFO_MODELS_GEMMA4_CONFIG_HPP_
+#endif  // MBUFO_MODELS_GEMMA4_CONFIG_HPP_

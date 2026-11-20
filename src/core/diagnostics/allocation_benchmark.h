@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_DIAGNOSTICS_ALLOCATION_BENCHMARK_H_
-#define GUFO_CORE_DIAGNOSTICS_ALLOCATION_BENCHMARK_H_
+#ifndef MBUFO_CORE_DIAGNOSTICS_ALLOCATION_BENCHMARK_H_
+#define MBUFO_CORE_DIAGNOSTICS_ALLOCATION_BENCHMARK_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +10,7 @@
 #include "src/core/diagnostics/fingerprint.h"
 #include "src/core/diagnostics/system_inventory.h"
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 struct AllocationBenchmarkOptions {
   std::vector<std::size_t> working_set_bytes{64ULL * 1024ULL * 1024ULL};
@@ -89,6 +89,6 @@ void ComputeAllocationPhaseStatistics(AllocationPhaseResult* phase);
     const AllocationBenchmarkOptions& options, const SystemInventory& inventory,
     const MachineFingerprint& fingerprint);
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics
 
-#endif  // GUFO_CORE_DIAGNOSTICS_ALLOCATION_BENCHMARK_H_
+#endif  // MBUFO_CORE_DIAGNOSTICS_ALLOCATION_BENCHMARK_H_

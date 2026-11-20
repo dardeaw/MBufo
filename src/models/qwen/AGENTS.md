@@ -1,7 +1,7 @@
 # Qwen control tokens
 
 [`control_tokens.hpp`](control_tokens.hpp) owns shared Qwen framing spellings
-in `gufo::tokenization`. Inspect it when reviewing or changing their use.
+in `mbufo::tokenization`. Inspect it when reviewing or changing their use.
 Centralizing these constants does not change tokenization or EOS handling.
 
 ## Rules
@@ -31,6 +31,6 @@ Centralizing these constants does not change tokenization or EOS handling.
 
 ## Python
 
-`tools/gufo/control_tokens.py` mirrors this catalogue for the Python tools and
-tests, imported as `gufo.control_tokens`. Keep shared values identical across
+`tools/mbufo/control_tokens.py` mirrors this catalogue for the Python tools and
+tests, imported as `mbufo.control_tokens`. Keep shared values identical across
 the two catalogues.

@@ -17,7 +17,7 @@
 #include "src/cli/serve/model_admin_ui.hpp"
 #include "src/core/json.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 std::uint64_t NowSteadyMs() {
@@ -404,11 +404,11 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
   std::vector<std::filesystem::path> roots;
   if (const auto q = req.query_param("dir"); !q.empty()) {
     roots.emplace_back(q);
-  } else if (const char* env_dir = std::getenv("GUFO_MODELS_DIR");
+  } else if (const char* env_dir = std::getenv("MBUFO_MODELS_DIR");
              env_dir != nullptr && *env_dir != '\0') {
     roots.emplace_back(env_dir);
   } else {
-    roots.emplace_back("/mnt/nvme-data/gufo-models");
+    roots.emplace_back("models");
   }
 
   // Also include the ancestor directory of any currently loaded model if not
@@ -513,7 +513,7 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
   }
 
   auto find_sidecar = [&](const std::string& family, GgufRole role) -> std::string {
-    // In gufo serve llm, --mmproj vision is supported on Qwen3.8-Flash-Next
+    // In mbufo serve llm, --mmproj vision is supported on Qwen3.8-Flash-Next
     // and Qwen3.8-27B; other families (gemma4, muse-glimmer) reject --mmproj.
     if (role == GgufRole::kMmproj && family.rfind("qwen3.8-", 0) != 0) {
       return {};
@@ -803,4 +803,4 @@ HttpResponse ModelAdminService::HandleSetDefault(const HttpRequest& req) {
   return AdminOk(std::move(resp));
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

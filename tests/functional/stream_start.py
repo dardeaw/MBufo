@@ -117,7 +117,7 @@ def check_stream_start(client, model, checks, width, context):
     assert not waiter.is_alive() and queued, "queued stream did not complete"
     for result in results:
         assert result is not None and result["first_output_s"] is not None, results
-    queue_s = queued["usage"]["gufo"]["queue_ms"] / 1000
+    queue_s = queued["usage"]["mbufo"]["queue_ms"] / 1000
     checks["stream_start_queued"] = {**queued, "queue_s": queue_s}
     assert queue_s >= QUEUE_START_S - 0.5, f"stream was not queued past the bound: {queue_s}"
     assert queued["opened_s"] <= QUEUE_START_S + 2, queued

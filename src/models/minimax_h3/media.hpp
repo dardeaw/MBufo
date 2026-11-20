@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_MINIMAX_H3_MEDIA_HPP_
-#define GUFO_MODELS_MINIMAX_H3_MEDIA_HPP_
+#ifndef MBUFO_MODELS_MINIMAX_H3_MEDIA_HPP_
+#define MBUFO_MODELS_MINIMAX_H3_MEDIA_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +9,7 @@
 
 #include "src/models/minimax_h3/runtime.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 struct MediaMuxTelemetry {
   std::uint64_t video_bytes{0};
@@ -63,6 +63,6 @@ struct MediaVideoOptions {
                                   MediaProbe* probe,
                                   std::string* error = nullptr);
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3
 
-#endif  // GUFO_MODELS_MINIMAX_H3_MEDIA_HPP_
+#endif  // MBUFO_MODELS_MINIMAX_H3_MEDIA_HPP_

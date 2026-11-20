@@ -1,5 +1,5 @@
 {
-  "schema": "gufo.ds4-captured-operator-audit.v1",
+  "schema": "mbufo.ds4-captured-operator-audit.v1",
   "date": "2026-09-11",
   "baseline_revision": "abb23960a51094df0cbf3f31ccb5a9b10be75de8",
   "decision": "Retain baseline production arithmetic. All three precision prototypes fail qualification. Four post-prefill differential alerts remain open.",
@@ -104,8 +104,8 @@
         "hash_recipe": "sorted relative path + NUL + byte count + NUL + file bytes + NUL"
       }
     },
-    "independent_replay": "CPU double precision, same captured Gufo inputs and dequantized GGUF weights; explicit Q8 activation, F16 and FP8 conversion variants",
-    "official_precision_caveat": "The official network generally carries BF16 activations and casts these to FP32 inside its compressor/router. Local FP32 fidelity on Gufo inputs does not recreate the full official BF16/FP8 network."
+    "independent_replay": "CPU double precision, same captured MBufo inputs and dequantized GGUF weights; explicit Q8 activation, F16 and FP8 conversion variants",
+    "official_precision_caveat": "The official network generally carries BF16 activations and casts these to FP32 inside its compressor/router. Local FP32 fidelity on MBufo inputs does not recreate the full official BF16/FP8 network."
   },
   "operator_summaries": {
     "hc_projection_fp32": {

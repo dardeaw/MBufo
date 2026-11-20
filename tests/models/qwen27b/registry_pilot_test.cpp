@@ -23,8 +23,8 @@
 #include "src/models/qwen/engine_adapter.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
-namespace q27 = gufo::models::qwen;
-namespace e = gufo::core::engine;
+namespace q27 = mbufo::models::qwen;
+namespace e = mbufo::core::engine;
 
 namespace {
 
@@ -49,7 +49,7 @@ std::int32_t Argmax(std::span<const float> logits) {
 // Direct executor greedy run (the 主體 path): prefill + chained decode with
 // host argmax over the copied last-logits row.
 std::vector<std::int32_t> DirectGreedyRun(
-    gufo::hip::QwenGpuExecutor* executor,
+    mbufo::hip::QwenGpuExecutor* executor,
     const std::vector<std::uint32_t>& prompt, int max_tokens) {
   executor->Reset();
   (void)executor->ForwardPromptBatch(prompt, /*start_pos=*/0,
@@ -110,14 +110,14 @@ int main(int argc, char** argv) {
   std::string ref_text;
   {
     std::string load_error;
-    auto raw = gufo::core::GgufReader::OpenFile(model_path, &load_error);
+    auto raw = mbufo::core::GgufReader::OpenFile(model_path, &load_error);
     if (!raw) return Fail("open reader: " + load_error);
-    std::shared_ptr<const gufo::core::GgufReader> reader(std::move(raw));
-    auto model = gufo::hip::QwenGpuModel::CreateFromGguf(reader, &load_error);
+    std::shared_ptr<const mbufo::core::GgufReader> reader(std::move(raw));
+    auto model = mbufo::hip::QwenGpuModel::CreateFromGguf(reader, &load_error);
     if (!model) return Fail("direct model: " + load_error);
     Stage("direct session");
     auto executor =
-        gufo::hip::QwenGpuExecutor::Create(model, &load_error, kContext);
+        mbufo::hip::QwenGpuExecutor::Create(model, &load_error, kContext);
     if (!executor) return Fail("direct executor: " + load_error);
     const std::vector<std::uint32_t> prompt =
         executor->GetTokenizer().Encode(prompt_text);

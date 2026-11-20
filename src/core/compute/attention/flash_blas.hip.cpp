@@ -16,7 +16,7 @@
 
 #include "src/core/compute/attention/flash_blas.hpp"
 
-namespace gufo::core::compute::flash_blas {
+namespace mbufo::core::compute::flash_blas {
 namespace {
 
 // Wave32-native lane xor (same DPP transport as blocked_splitk).
@@ -284,6 +284,6 @@ bool FlashBlasPrefill(const float* q, const __half* k_cache,
   return true;
 }
 
-}  // namespace gufo::core::compute::flash_blas
+}  // namespace mbufo::core::compute::flash_blas
 
 #endif  // ENGINE_ENABLE_HIP

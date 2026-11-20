@@ -12,7 +12,7 @@
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/gemm_route.hpp"
 
-namespace gufo::models {
+namespace mbufo::models {
 
 QwenSsmCache::QwenSsmCache(std::uint32_t num_layers, std::size_t conv_channels,
                            std::uint32_t conv_kernel, std::uint32_t num_heads,
@@ -349,4 +349,4 @@ void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
              out);
 }
 
-}  // namespace gufo::models
+}  // namespace mbufo::models

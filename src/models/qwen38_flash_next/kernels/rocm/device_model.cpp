@@ -15,7 +15,7 @@
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace mbufo::models::qwen38_flash_next::rocm {
 namespace {
 
 /// The quantized GEMM tier reads whole 256-element k-iterations, so a row
@@ -133,18 +133,18 @@ struct Uploader {
       for (std::size_t r = 0; r < chunk; ++r) {
         const void* row_src = src + r * t.RowBytes();
         if (t.type == core::GgmlType::kQ4_0_ROCMFP4) {
-          gufo::quant::DequantizeQ4_0_ROCMFP4(row_src, frow, cols);
+          mbufo::quant::DequantizeQ4_0_ROCMFP4(row_src, frow, cols);
         } else if (t.type == core::GgmlType::kQ4_0_ROCMFP4_FAST) {
-          gufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, frow, cols);
+          mbufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, frow, cols);
         } else if (t.type == core::GgmlType::kQ6_K) {
-          gufo::quant::DequantizeQ6_K(row_src, frow, cols);
+          mbufo::quant::DequantizeQ6_K(row_src, frow, cols);
         } else {
           Fail("unexpected conversion source for " + std::string(t.name));
           return d;
         }
         frow += cols;
       }
-      gufo::quant::QuantizeQ8_0(fbuf.data(), staging.data() + r0 * q8_row,
+      mbufo::quant::QuantizeQ8_0(fbuf.data(), staging.data() + r0 * q8_row,
                                 chunk * cols);
     }
     allocations.push_back(ptr);
@@ -368,21 +368,21 @@ struct Uploader {
       float* out = staging.data() + r * cols;
       switch (t.type) {
         case core::GgmlType::kQ8_0:
-          gufo::quant::DequantizeQ8_0(row_src, out, cols);
+          mbufo::quant::DequantizeQ8_0(row_src, out, cols);
           break;
         case core::GgmlType::kQ4_0_ROCMFP4:
-          gufo::quant::DequantizeQ4_0_ROCMFP4(row_src, out, cols);
+          mbufo::quant::DequantizeQ4_0_ROCMFP4(row_src, out, cols);
           break;
         case core::GgmlType::kQ4_0_ROCMFP4_FAST:
-          gufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, out, cols);
+          mbufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, out, cols);
           break;
         case core::GgmlType::kQ6_K:
-          gufo::quant::DequantizeQ6_K(row_src, out, cols);
+          mbufo::quant::DequantizeQ6_K(row_src, out, cols);
           break;
         case core::GgmlType::kF16: {
           const auto* h = static_cast<const std::uint16_t*>(row_src);
           for (std::size_t i = 0; i < cols; ++i)
-            out[i] = gufo::quant::Fp16ToFloat(h[i]);
+            out[i] = mbufo::quant::Fp16ToFloat(h[i]);
           break;
         }
         case core::GgmlType::kBF16: {
@@ -464,15 +464,15 @@ struct Uploader {
         for (std::size_t r = 0; r < chunk; ++r) {
           const void* row_src = src + r * t->RowBytes();
           if (type == core::GgmlType::kQ4_0_ROCMFP4) {
-            gufo::quant::DequantizeQ4_0_ROCMFP4(row_src, frow, cols);
+            mbufo::quant::DequantizeQ4_0_ROCMFP4(row_src, frow, cols);
           } else if (type == core::GgmlType::kQ4_0_ROCMFP4_FAST) {
-            gufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, frow, cols);
+            mbufo::quant::DequantizeQ4_0_ROCMFP4_FAST(row_src, frow, cols);
           } else {
-            gufo::quant::DequantizeQ6_K(row_src, frow, cols);
+            mbufo::quant::DequantizeQ6_K(row_src, frow, cols);
           }
           frow += cols;
         }
-        gufo::quant::QuantizeQ8_0(fbuf.data(),
+        mbufo::quant::QuantizeQ8_0(fbuf.data(),
                                     staging.data() + offset + r0 * cols / 32 * 34,
                                     chunk * cols);
       }
@@ -733,11 +733,11 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   }
   // Decode reads each large dense matrix once per round, so its bytes set the
   // round's cost: a 4-bit (Q4_1) copy cuts them by 41% against Q8_0 (a 5-bit
-  // Q5_1 copy by 29%). GUFO_DECODE_Q4=0 selects the Q5_1 copy; GUFO_DECODE_Q5=0
+  // Q5_1 copy by 29%). MBUFO_DECODE_Q4=0 selects the Q5_1 copy; MBUFO_DECODE_Q5=0
   // disables the copies.
-  const char* q5_flag = std::getenv("GUFO_DECODE_Q5");
+  const char* q5_flag = std::getenv("MBUFO_DECODE_Q5");
   const bool q5_on = q5_flag == nullptr || q5_flag[0] != '0';
-  const char* q4_flag = std::getenv("GUFO_DECODE_Q4");
+  const char* q4_flag = std::getenv("MBUFO_DECODE_Q4");
   const bool q4_on = q5_on && (q4_flag == nullptr || q4_flag[0] != '0');
   if (q4_on || q5_on) {
     const std::size_t blk_bytes = q4_on ? 20 : 24;
@@ -784,4 +784,4 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   return m;
 }
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace mbufo::models::qwen38_flash_next::rocm

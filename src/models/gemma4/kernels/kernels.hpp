@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GEMMA4_KERNELS_KERNELS_HPP_
-#define GUFO_MODELS_GEMMA4_KERNELS_KERNELS_HPP_
+#ifndef MBUFO_MODELS_GEMMA4_KERNELS_KERNELS_HPP_
+#define MBUFO_MODELS_GEMMA4_KERNELS_KERNELS_HPP_
 
 #include <cstdint>
 #include <hip/hip_fp16.h>
@@ -8,7 +8,7 @@
 
 #include "src/models/gemma4/weights.hpp"
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 namespace kernels {
 
 /// Gemma 4 uses GELU-tanh (exact tanh approximation), not the quick-sigmoid
@@ -48,11 +48,22 @@ void RmsNorm(const float* x, const float* gamma, float* out,
              std::uint32_t n_rows, std::uint32_t dim, float eps,
              hipStream_t stream);
 
+/// out[i] = (a[i] + b[i]) * scale over `count` elements (in place on `a` or `out == a` allowed).
+void AddScaled(const float* a, const float* b, float* out, std::size_t count, float scale, hipStream_t stream);
+
+/// Per-layer-embedding gate: out[t][i] = gelu_tanh(g[t][i]) * ple[t * ple_stride + ple_offset + i] for t < n_rows, i < dim.
+void GeluMulStrided(const float* g, const float* ple, float* out, std::uint32_t n_rows, std::uint32_t dim,
+                    std::size_t ple_stride, std::size_t ple_offset, hipStream_t stream);
+
 /// Fused post-norm + residual (+ optional post_scale):
 /// residual_inout[t] = (residual_inout[t] + rms(x[t]) * gamma) * post_scale.
 void RmsNormAdd(const float* x, const float* gamma, float* residual_inout,
                 std::uint32_t n_rows, std::uint32_t dim, float eps,
                 float post_scale, hipStream_t stream);
+
+/// RmsNormAdd (with post_scale) immediately followed by RmsNorm(residual_inout, gamma2) -> normed; bit-identical to the pair.
+void RmsNormAddNorm(const float* x, const float* gamma, float* residual_inout, const float* gamma2, float* normed,
+                    std::uint32_t n_rows, std::uint32_t dim, float eps, float post_scale, hipStream_t stream);
 
 /// Copy a host buffer into device memory (plain hipMalloc + full copy).
 /// Returns nullptr on failure.
@@ -158,7 +169,7 @@ void AttentionBlocked(const float* q, const std::uint8_t* k_cache,
 /// (post-norm, post-RoPE) K/V rows into the shared blocked layout.
 /// `key_block_bytes` / `value_block_bytes` select each side's grid (34 =
 /// 8-bit codes with range 127, 18 = packed 4-bit nibbles with range 7 for
-/// the GUFO_KV_Q4/V4 grids). d must be 256 (SWA layers); other layers stay
+/// the MBUFO_KV_Q4/V4 grids). d must be 256 (SWA layers); other layers stay
 /// on StoreKv. `start_pos` is a device scalar.
 void StoreBlockedKv(const float* k_rows, const float* v_rows,
                     std::uint8_t* k_cache, std::uint8_t* v_cache,
@@ -364,6 +375,6 @@ void BuildRoutedTiles(const std::int32_t* routed_bounds,
                       hipStream_t stream);
 
 }  // namespace kernels
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4
 
-#endif  // GUFO_MODELS_GEMMA4_KERNELS_KERNELS_HPP_
+#endif  // MBUFO_MODELS_GEMMA4_KERNELS_KERNELS_HPP_

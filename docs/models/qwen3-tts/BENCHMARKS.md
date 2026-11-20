@@ -16,7 +16,7 @@ predictor T 0.8 / top-k 30 / top-p 0.9.
 | VoiceDesign | 1.48 s |
 | Base ICL | 1.84 s |
 
-Short seed-42 control, “Hello from Gufo.”: warm complete WAV latency is
+Short seed-42 control, “Hello from MBufo.”: warm complete WAV latency is
 **0.57 / 0.51 / 0.74 s** respectively. Base uses that same 1.36-second speech
 as its reference; fresh-process and resident replay produce identical WAVs.
 Base's first request takes **0.86 s** including lazy reference encoders,

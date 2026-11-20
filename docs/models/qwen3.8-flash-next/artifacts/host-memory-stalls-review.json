@@ -469,7 +469,7 @@
     "generated_tests": "passed"
   },
   "benchmark_refresh": {
-    "scope": "Complete Gufo HTTP sweep: all eight AR/mixed-MTP/repetitive-MTP depths through 128K, C1/2/4/6/8, cold-file loading and memory. Reference artifacts unchanged.",
+    "scope": "Complete MBufo HTTP sweep: all eight AR/mixed-MTP/repetitive-MTP depths through 128K, C1/2/4/6/8, cold-file loading and memory. Reference artifacts unchanged.",
     "single_user_qualified_rows": 24,
     "single_user_quality": "All completion hashes and prompt/cache counts match the prior qualified capture.",
     "concurrent_qualified_completions": 63,
@@ -557,18 +557,18 @@
     },
     "memory": {
       "16K prefix, pp4096 + tg128": {
-        "command": "gufo serve --port 60073 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+        "command": "mbufo serve --port 60073 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
         "gib": 90.53,
         "idle_gib": 2.38
       },
       "pp2048 + tg128": {
-        "command": "gufo serve --port 60073 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+        "command": "mbufo serve --port 60073 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
         "gib": 88.78,
         "idle_gib": 2.38
       }
     },
     "concurrent_tok_s": {
-      "multi-ar-gufo-ar": {
+      "multi-ar-mbufo-ar": {
         "c1": {
           "tg": 28.243876206340342,
           "completions": 1
@@ -590,7 +590,7 @@
           "completions": 8
         }
       },
-      "multi-mixed-gufo-mtp": {
+      "multi-mixed-mbufo-mtp": {
         "c1": {
           "tg": 35.743061162327486,
           "completions": 1
@@ -612,7 +612,7 @@
           "completions": 8
         }
       },
-      "multi-repetition-gufo-mtp": {
+      "multi-repetition-mbufo-mtp": {
         "c1": {
           "tg": 116.50112898377078,
           "completions": 1

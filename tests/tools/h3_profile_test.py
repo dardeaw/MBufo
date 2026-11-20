@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "tools" / "gufo" / "h3_profile.py"
+MODULE_PATH = ROOT / "tools" / "mbufo" / "h3_profile.py"
 SPEC = importlib.util.spec_from_file_location("h3_profile", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)

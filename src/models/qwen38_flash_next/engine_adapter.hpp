@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_ADAPTER_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_ADAPTER_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_ADAPTER_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_ADAPTER_HPP_
 
 // Flash-Next adapter: exposes the existing qwen38_flash_next::Model/Session
 // through the L0/L1 engine abstraction (EngineModel / SpeculativeSession).
@@ -70,11 +70,12 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/engine/attention_contract.hpp"
 #include "src/core/engine/engine_batch.hpp"
 #include "src/core/sampling.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 class FlashNextEngineSession final : public core::engine::SpeculativeSession,
                                      public core::engine::SnapshotCapable {
@@ -169,7 +170,7 @@ class FlashNextEngineSession final : public core::engine::SpeculativeSession,
   std::size_t default_drafts_;
 };
 
-class FlashNextEngineModel final : public core::engine::EngineModel {
+class FlashNextEngineModel final : public core::engine::EngineModel, public core::engine::MoeCapable, public core::engine::AttentionCapable {
  public:
   [[nodiscard]] static std::shared_ptr<FlashNextEngineModel> Load(
       const std::string& model_path, const ModelOptions& options,
@@ -191,6 +192,10 @@ class FlashNextEngineModel final : public core::engine::EngineModel {
   [[nodiscard]] std::uint32_t MaxContext() const noexcept override;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept override;
   [[nodiscard]] std::string ModelName() const override;
+  [[nodiscard]] core::engine::AttentionGeometry AttentionGeometryInfo() const override;
+  [[nodiscard]] core::engine::AttentionKernelInfo AttentionKernelsInfo() const override;
+  [[nodiscard]] core::engine::MoeGeometry MoeGeometryInfo() const override;
+  [[nodiscard]] core::engine::MoeKernelInfo MoeKernelsInfo() const override;
 
   // L0-external flash-next pass-throughs (unchanged engine semantics).
   [[nodiscard]] std::string Decode(
@@ -214,6 +219,10 @@ class FlashNextEngineModel final : public core::engine::EngineModel {
   ModelOptions options_;
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+/// The MoE contract declaration of a loaded model (also what mbufo serve checks when it loads one).
+[[nodiscard]] core::engine::MoeGeometry DescribeMoeGeometry(const Model& model);
+[[nodiscard]] core::engine::MoeKernelInfo DescribeMoeKernels();
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_ADAPTER_HPP_
+}  // namespace mbufo::models::qwen38_flash_next
+
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_ADAPTER_HPP_

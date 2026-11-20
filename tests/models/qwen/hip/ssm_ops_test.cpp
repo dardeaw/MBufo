@@ -36,8 +36,8 @@
 #include "tests/models/qwen/support/synthetic_weights.hpp"
 
 void TestConcurrentSsmRecurrence() {
-  using gufo::test::DeviceBuffer;
-  using Storage = gufo::hip::QwenRecurrentStateStorage;
+  using mbufo::test::DeviceBuffer;
+  using Storage = mbufo::hip::QwenRecurrentStateStorage;
   constexpr std::size_t count = 8, total_rows = 36, layers = 2;
   constexpr unsigned heads = 4, key_heads = 2, dim = 128, layer = 1;
   constexpr std::size_t inner = heads * dim;
@@ -45,9 +45,9 @@ void TestConcurrentSsmRecurrence() {
   constexpr std::size_t conv_per_sequence = layers * qkv * 4;
   constexpr std::size_t state_per_sequence = layers * heads * dim * dim;
   constexpr std::size_t replay_qkv =
-      layers * gufo::hip::kSsmReplayCapacity * qkv;
+      layers * mbufo::hip::kSsmReplayCapacity * qkv;
   constexpr std::size_t replay_control =
-      layers * gufo::hip::kSsmReplayCapacity * heads;
+      layers * mbufo::hip::kSsmReplayCapacity * heads;
   const auto values = [](std::size_t size, float phase) {
     std::vector<float> result(size);
     for (std::size_t i = 0; i < size; ++i)
@@ -65,7 +65,7 @@ void TestConcurrentSsmRecurrence() {
   const auto initial_conv = values(count * conv_per_sequence, 6);
   const auto initial_state = values(count * state_per_sequence, 7);
   std::vector<std::uint32_t> positions(total_rows), enabled(count);
-  std::array<gufo::hip::SsmSequenceState, count> sequences{};
+  std::array<mbufo::hip::SsmSequenceState, count> sequences{};
   std::size_t offset = 0;
   for (std::size_t i = 0; i < count; ++i) {
     sequences[i].row_offset = static_cast<std::uint32_t>(offset);
@@ -90,14 +90,14 @@ void TestConcurrentSsmRecurrence() {
   };
   for (const auto storage : {Storage::kFp32, Storage::kBf16}) {
     const std::size_t element_bytes =
-        gufo::hip::QwenRecurrentStateElementBytes(storage);
+        mbufo::hip::QwenRecurrentStateElementBytes(storage);
     std::vector<std::uint8_t> state_bytes(initial_state.size() * element_bytes);
     for (std::size_t i = 0; i < initial_state.size(); ++i) {
       if (storage == Storage::kFp32) {
         std::memcpy(state_bytes.data() + i * element_bytes, &initial_state[i],
                     element_bytes);
       } else {
-        const auto bits = gufo::test::FloatToBf16Bits(initial_state[i]);
+        const auto bits = mbufo::test::FloatToBf16Bits(initial_state[i]);
         std::memcpy(state_bytes.data() + i * element_bytes, &bits,
                     element_bytes);
       }
@@ -105,7 +105,7 @@ void TestConcurrentSsmRecurrence() {
     DeviceBuffer<std::uint8_t> recurrent(state_bytes);
     for (std::size_t i = 0; i < count; ++i) {
       auto& sequence = sequences[i];
-      sequence.state = gufo::hip::QwenRecurrentStateIo::InPlace(
+      sequence.state = mbufo::hip::QwenRecurrentStateIo::InPlace(
           conv_state.data() + i * conv_per_sequence,
           recurrent.data() + i * state_per_sequence * element_bytes);
       sequence.replay = {captured_qkv.data() + i * replay_qkv,
@@ -126,7 +126,7 @@ void TestConcurrentSsmRecurrence() {
         reset();
         for (const auto& sequence : std::span(sequences).first(width)) {
           const std::size_t row = sequence.row_offset;
-          gufo::hip::LaunchSSMConvRecurrenceRows(
+          mbufo::hip::LaunchSSMConvRecurrenceRows(
               input.data() + row * qkv, weights.data(), sequence.state,
               conv_output.data() + row * qkv, controls.data() + row * heads * 2,
               controls.data() + row * heads * 2 + heads, decay.data(),
@@ -141,7 +141,7 @@ void TestConcurrentSsmRecurrence() {
                              &captured_alpha, &captured_beta})
           expected.push_back(buffer->CopyToHost());
         reset();
-        gufo::hip::LaunchSSMConvRecurrenceBatch(
+        mbufo::hip::LaunchSSMConvRecurrenceBatch(
             input.data(), weights.data(), conv_output.data(), controls.data(),
             controls.data() + heads, decay.data(), dt.data(), norm.data(),
             gate.data(), write_output ? output.data() : nullptr,
@@ -160,7 +160,7 @@ void TestConcurrentSsmRecurrence() {
 }
 
 void TestRecurrentRollbackRows(bool large_state) {
-  using gufo::hip::QwenRecurrentStateStorage;
+  using mbufo::hip::QwenRecurrentStateStorage;
   for (const auto storage :
        {QwenRecurrentStateStorage::kFp32, QwenRecurrentStateStorage::kBf16}) {
     for (const auto [layers, interval] : {std::pair{4U, 4U},
@@ -169,7 +169,7 @@ void TestRecurrentRollbackRows(bool large_state) {
                                           {4U, 2U},
                                           {4U, 1U},
                                           {4U, 0U}}) {
-      auto config = gufo::models::qwen::make_small_qwen_config();
+      auto config = mbufo::models::qwen::make_small_qwen_config();
       if (large_state) {
         config.ssm_time_step_rank = 48;
         config.ssm_state_size = 128;
@@ -177,15 +177,15 @@ void TestRecurrentRollbackRows(bool large_state) {
       }
       config.num_layers = layers;
       config.full_attention_interval = interval;
-      auto policy = gufo::hip::QwenExecutionPolicy::Production();
+      auto policy = mbufo::hip::QwenExecutionPolicy::Production();
       policy.recurrent_state_storage = storage;
-      gufo::hip::QwenGpuArena arena(config, 16, policy);
+      mbufo::hip::QwenGpuArena arena(config, 16, policy);
       const std::size_t conv_row =
           config.SsmQkvSize() * config.ssm_conv_kernel * sizeof(float);
       const std::size_t delta_row =
           config.ssm_time_step_rank * config.ssm_state_size *
           config.SsmValueSize() *
-          gufo::hip::QwenRecurrentStateElementBytes(storage);
+          mbufo::hip::QwenRecurrentStateElementBytes(storage);
       std::vector<std::uint8_t> conv(config.SsmLayerCount() * conv_row),
           delta(config.SsmLayerCount() * delta_row);
       unsigned packed = 0;
@@ -281,10 +281,10 @@ void TestRecurrentRollbackRows(bool large_state) {
 // FP32 resident and generic shapes, BF16 storage, launches split within one
 // pass, and pinned/unpinned sequences sharing one batched launch.
 void TestRecurrentForkPingPong() {
-  using gufo::hip::QwenGpuArena;
-  using gufo::hip::QwenRecurrentStateIo;
-  using gufo::test::DeviceBuffer;
-  using Storage = gufo::hip::QwenRecurrentStateStorage;
+  using mbufo::hip::QwenGpuArena;
+  using mbufo::hip::QwenRecurrentStateIo;
+  using mbufo::test::DeviceBuffer;
+  using Storage = mbufo::hip::QwenRecurrentStateStorage;
   struct Shape {
     std::uint32_t state_size;
     std::uint32_t inner_size;
@@ -305,11 +305,11 @@ void TestRecurrentForkPingPong() {
   for (const auto& shape :
        {Shape{128, 256, 2, Storage::kFp32}, Shape{128, 256, 2, Storage::kBf16},
         Shape{32, 128, 4, Storage::kFp32}}) {
-    auto config = gufo::models::qwen::make_small_qwen_config();
+    auto config = mbufo::models::qwen::make_small_qwen_config();
     config.ssm_state_size = shape.state_size;
     config.ssm_inner_size = shape.inner_size;
     config.ssm_time_step_rank = shape.time_step_rank;
-    auto policy = gufo::hip::QwenExecutionPolicy::Production();
+    auto policy = mbufo::hip::QwenExecutionPolicy::Production();
     policy.recurrent_state_storage = shape.storage;
     const std::uint32_t heads = config.ssm_time_step_rank;
     const std::uint32_t key_heads = config.ssm_group_count;
@@ -320,7 +320,7 @@ void TestRecurrentForkPingPong() {
     const std::size_t layers = config.SsmLayerCount();
     const std::size_t conv_bytes = layers * qkv * 4 * sizeof(float);
     const std::size_t element_bytes =
-        gufo::hip::QwenRecurrentStateElementBytes(shape.storage);
+        mbufo::hip::QwenRecurrentStateElementBytes(shape.storage);
     const std::size_t delta_elements = layers * heads * key_dim * val_dim;
     const std::size_t delta_bytes = delta_elements * element_bytes;
     std::cout << "Recurrent fork ping-pong: key_dim=" << key_dim
@@ -345,7 +345,7 @@ void TestRecurrentForkPingPong() {
           std::memcpy(seed_bytes.data() + conv_bytes + i * element_bytes,
                       &delta[i], element_bytes);
         } else {
-          const auto bits = gufo::test::FloatToBf16Bits(delta[i]);
+          const auto bits = mbufo::test::FloatToBf16Bits(delta[i]);
           std::memcpy(seed_bytes.data() + conv_bytes + i * element_bytes, &bits,
                       element_bytes);
         }
@@ -375,7 +375,7 @@ void TestRecurrentForkPingPong() {
     const auto run = [&](QwenGpuArena& arena, QwenRecurrentStateIo state,
                          std::size_t first_row, std::uint32_t rows) {
       for (std::uint32_t layer = 0; layer < layers; ++layer) {
-        gufo::hip::LaunchSSMConvRecurrenceRows(
+        mbufo::hip::LaunchSSMConvRecurrenceRows(
             input.data() + first_row * qkv, weights.data(), state,
             conv_output.data() + first_row * qkv,
             alpha.data() + first_row * heads, beta.data() + first_row * heads,
@@ -484,7 +484,7 @@ void TestRecurrentForkPingPong() {
     pinned_arena.SaveState(7);
     diverged_arena.SaveState(7);
     run(diverged_arena, diverged_arena.BeginRecurrentWrite(), 0, 4);
-    const std::array<gufo::hip::SsmSequenceState, 3> sequences{{
+    const std::array<mbufo::hip::SsmSequenceState, 3> sequences{{
         {pinned_arena.BeginRecurrentWrite(), {}, 0, 3},
         {plain_arena.BeginRecurrentWrite(), {}, 3, 5},
         {diverged_arena.BeginRecurrentWrite(), {}, 8, 2},
@@ -494,7 +494,7 @@ void TestRecurrentForkPingPong() {
            "batched sequences did not get the expected buffer pairs");
     poison(sequences[0].state, pinned_arena.stream);
     for (std::uint32_t layer = 0; layer < layers; ++layer) {
-      gufo::hip::LaunchSSMConvRecurrenceBatch(
+      mbufo::hip::LaunchSSMConvRecurrenceBatch(
           input.data(), weights.data(), conv_output.data(), alpha.data(),
           beta.data(), decay.data(), dt.data(), norm.data(), gate.data(),
           output.data(), sequences, layer, qkv, key_heads, heads, key_dim,
@@ -525,7 +525,7 @@ void TestRecurrentForkPingPong() {
 }
 
 void TestBf16RecurrentMemoryAndSnapshot() {
-  gufo::core::ModelConfig production;
+  mbufo::core::ModelConfig production;
   production.model_name = "qwen3.8-27b";
   production.num_layers = 64;
   production.hidden_size = 5120;
@@ -545,15 +545,15 @@ void TestBf16RecurrentMemoryAndSnapshot() {
   production.rotary_dim = 64;
   production.rope_theta = 10000000.0F;
 
-  auto fp32_policy = gufo::hip::QwenExecutionPolicy::Production();
+  auto fp32_policy = mbufo::hip::QwenExecutionPolicy::Production();
   auto bf16_policy = fp32_policy;
   bf16_policy.recurrent_state_storage =
-      gufo::hip::QwenRecurrentStateStorage::kBf16;
+      mbufo::hip::QwenRecurrentStateStorage::kBf16;
 
   constexpr std::uint32_t context = 4096;
-  const auto fp32_usage = gufo::hip::QwenGpuArena::EstimateMemoryUsage(
+  const auto fp32_usage = mbufo::hip::QwenGpuArena::EstimateMemoryUsage(
       production, context, fp32_policy);
-  const auto bf16_usage = gufo::hip::QwenGpuArena::EstimateMemoryUsage(
+  const auto bf16_usage = mbufo::hip::QwenGpuArena::EstimateMemoryUsage(
       production, context, bf16_policy);
   const std::size_t recurrent_elements =
       static_cast<std::size_t>(production.SsmLayerCount()) *
@@ -584,14 +584,14 @@ void TestBf16RecurrentMemoryAndSnapshot() {
               << " saved=" << concurrency * expected_savings << "\n";
   }
 
-  const auto small = gufo::models::qwen::make_small_qwen_config();
+  const auto small = mbufo::models::qwen::make_small_qwen_config();
   constexpr std::uint32_t small_context = 32;
-  gufo::hip::QwenGpuArena fp32_arena(small, small_context, fp32_policy);
-  gufo::hip::QwenGpuArena bf16_arena(small, small_context, bf16_policy);
+  mbufo::hip::QwenGpuArena fp32_arena(small, small_context, fp32_policy);
+  mbufo::hip::QwenGpuArena bf16_arena(small, small_context, bf16_policy);
   auto fp32_snapshot = fp32_arena.SaveSnapshot(7);
   auto bf16_snapshot = bf16_arena.SaveSnapshot(7);
   if (bf16_snapshot->RecurrentStateStorage() !=
-      gufo::hip::QwenRecurrentStateStorage::kBf16) {
+      mbufo::hip::QwenRecurrentStateStorage::kBf16) {
     throw std::runtime_error(
         "snapshot did not record canonical BF16 recurrent storage");
   }
@@ -735,27 +735,27 @@ void TestBatchedSSMConvEquivalence() {
                       hipMemcpyHostToDevice));
 
   // Sequential
-  using gufo::hip::QwenRecurrentStateIo;
+  using mbufo::hip::QwenRecurrentStateIo;
   for (std::size_t t = 0; t < batch; ++t) {
-    gufo::hip::LaunchSSMConvRecurrence(
+    mbufo::hip::LaunchSSMConvRecurrence(
         d_qkv + t * qkv_dim, d_w,
         QwenRecurrentStateIo::InPlace(d_state_seq, d_delta_seq),
         d_conv_out_seq + t * qkv_dim, d_alpha + t * num_heads,
         d_beta + t * num_heads, d_ssm_a, d_ssm_dt, d_ssm_norm,
         d_gate + t * inner_size, d_out_seq + t * inner_size, 0, qkv_dim,
         num_key_heads, num_heads, key_dim, val_dim);
-    gufo::hip::LaunchSSMConvRecurrence(
+    mbufo::hip::LaunchSSMConvRecurrence(
         d_qkv + t * qkv_dim, d_w,
         QwenRecurrentStateIo::InPlace(d_state_bf16, d_delta_bf16),
         d_conv_out_bf16 + t * qkv_dim, d_alpha + t * num_heads,
         d_beta + t * num_heads, d_ssm_a, d_ssm_dt, d_ssm_norm,
         d_gate + t * inner_size, d_out_bf16 + t * inner_size, 0, qkv_dim,
         num_key_heads, num_heads, key_dim, val_dim, nullptr, {},
-        gufo::hip::QwenRecurrentStateStorage::kBf16);
+        mbufo::hip::QwenRecurrentStateStorage::kBf16);
   }
 
   // Batched
-  gufo::hip::LaunchBatchedSSMConvRecurrence(
+  mbufo::hip::LaunchBatchedSSMConvRecurrence(
       d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_batch, d_delta_batch),
       d_conv_out_batch, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
       d_out_batch, 0, batch, qkv_dim, num_key_heads, num_heads, key_dim,
@@ -807,7 +807,7 @@ void TestBatchedSSMConvEquivalence() {
                       hipMemcpyDeviceToHost));
   float bf16_state_max_diff = 0.0F;
   for (std::size_t i = 0; i < delta_size; ++i) {
-    const float value = gufo::test::Bf16BitsToFloat(delta_bf16[i]);
+    const float value = mbufo::test::Bf16BitsToFloat(delta_bf16[i]);
     if (!std::isfinite(value)) {
       std::cerr << "BF16 DeltaNet decode produced non-finite state\n";
       std::abort();
@@ -836,10 +836,10 @@ void TestBatchedSSMConvEquivalence() {
       throw std::runtime_error("SSM verification/replay changed stored bits");
     }
   };
-  using Storage = gufo::hip::QwenRecurrentStateStorage;
+  using Storage = mbufo::hip::QwenRecurrentStateStorage;
   for (const auto storage : {Storage::kFp32, Storage::kBf16}) {
     const std::size_t state_bytes =
-        delta_size * gufo::hip::QwenRecurrentStateElementBytes(storage);
+        delta_size * mbufo::hip::QwenRecurrentStateElementBytes(storage);
     const void* reference_state = storage == Storage::kFp32
                                       ? static_cast<void*>(d_delta_seq)
                                       : d_delta_bf16;
@@ -851,7 +851,7 @@ void TestBatchedSSMConvEquivalence() {
         HIP_CHECK(hipMemset(d_delta_batch, 0, state_bytes));
         for (std::size_t offset = 0; offset < batch;
              offset += rows_per_launch) {
-          gufo::hip::LaunchSSMConvRecurrenceRows(
+          mbufo::hip::LaunchSSMConvRecurrenceRows(
               d_qkv + offset * qkv_dim, d_w,
               QwenRecurrentStateIo::InPlace(d_state_batch, d_delta_batch),
               d_conv_out_batch, d_alpha + offset * num_heads,
@@ -959,7 +959,7 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
   std::vector<std::uint16_t> h_delta0_bf16(delta_size);
   for (std::size_t i = 0; i < h_delta0.size(); ++i) {
     h_delta0[i] = 0.01F * std::sin(0.013F * static_cast<float>(i % 577));
-    h_delta0_bf16[i] = gufo::test::FloatToBf16Bits(h_delta0[i]);
+    h_delta0_bf16[i] = mbufo::test::FloatToBf16Bits(h_delta0[i]);
   }
 
   float *d_qkv = nullptr, *d_w = nullptr;
@@ -1020,27 +1020,27 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
   upload(d_state_new, h_history);
   upload(d_state_bf16, h_history);
 
-  using gufo::hip::QwenRecurrentStateIo;
-  gufo::hip::LaunchBatchedSSMConvRecurrence(
+  using mbufo::hip::QwenRecurrentStateIo;
+  mbufo::hip::LaunchBatchedSSMConvRecurrence(
       d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_ref, d_delta_ref),
       d_conv_ref, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
       d_out_ref, 0, batch, qkv_dim, num_key_heads, num_heads, key_dim, val_dim);
 
-  if (!gufo::hip::IsDeltaNetRowSplitSupported(key_dim, val_dim)) {
+  if (!mbufo::hip::IsDeltaNetRowSplitSupported(key_dim, val_dim)) {
     std::cerr << "row-split recurrence rejected the production state shape\n";
     std::abort();
   }
-  gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
+  mbufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
       d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_new, d_delta_new),
       d_conv_new, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
       d_out_new, /*q8_out=*/nullptr, d_kq, d_ab, 0, batch, qkv_dim,
       num_key_heads, num_heads, key_dim, val_dim);
-  gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
+  mbufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
       d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_bf16, d_delta_bf16),
       d_conv_bf16, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
       d_out_bf16, /*q8_out=*/nullptr, d_kq, d_ab, 0, batch, qkv_dim,
       num_key_heads, num_heads, key_dim, val_dim, nullptr,
-      gufo::hip::QwenRecurrentStateStorage::kBf16);
+      mbufo::hip::QwenRecurrentStateStorage::kBf16);
 
   HIP_CHECK(hipDeviceSynchronize());
   CheckSSMConvolution(h_qkv, h_weights, h_history, d_conv_ref, d_state_ref,
@@ -1070,7 +1070,7 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
                       delta_bf16_bits.size() * sizeof(std::uint16_t),
                       hipMemcpyDeviceToHost));
   for (std::size_t i = 0; i < delta_bf16.size(); ++i) {
-    delta_bf16[i] = gufo::test::Bf16BitsToFloat(delta_bf16_bits[i]);
+    delta_bf16[i] = mbufo::test::Bf16BitsToFloat(delta_bf16_bits[i]);
   }
 
   const auto compare = [](const char* label, const std::vector<float>& want,
@@ -1134,16 +1134,16 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
   // cast, for both recurrent-state formats and both register-tile sizes.
   // Reuse the existing scratch and restart from the same nonzero state.
   for (const bool bf16_state : {false, true}) {
-    gufo::test::DeviceBuffer<std::uint16_t> expected(batch * inner_size);
-    gufo::test::DeviceBuffer<std::uint16_t> actual(batch * inner_size);
+    mbufo::test::DeviceBuffer<std::uint16_t> expected(batch * inner_size);
+    mbufo::test::DeviceBuffer<std::uint16_t> actual(batch * inner_size);
     float* output = bf16_state ? d_out_bf16 : d_out_new;
     float* conv_state = bf16_state ? d_state_bf16 : d_state_new;
     float* conv_output = bf16_state ? d_conv_bf16 : d_conv_new;
     void* state = bf16_state ? d_delta_bf16 : d_delta_new;
     const auto storage = bf16_state
-                             ? gufo::hip::QwenRecurrentStateStorage::kBf16
-                             : gufo::hip::QwenRecurrentStateStorage::kFp32;
-    gufo::hip::LaunchFloatToFp16(output, expected.data(), batch * inner_size,
+                             ? mbufo::hip::QwenRecurrentStateStorage::kBf16
+                             : mbufo::hip::QwenRecurrentStateStorage::kFp32;
+    mbufo::hip::LaunchFloatToFp16(output, expected.data(), batch * inner_size,
                                  nullptr);
     upload(conv_state, h_history);
     if (bf16_state) {
@@ -1153,7 +1153,7 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
     } else {
       upload(static_cast<float*>(state), h_delta0);
     }
-    gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
+    mbufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
         d_qkv, d_w, QwenRecurrentStateIo::InPlace(conv_state, state),
         conv_output, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
         output, nullptr, d_kq, d_ab, 0, batch, qkv_dim, num_key_heads,
@@ -1162,7 +1162,7 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
       throw std::runtime_error("fused SSM FP16 epilogue changed output bits");
     }
     std::vector<std::uint8_t> state_bits(
-        delta_size * gufo::hip::QwenRecurrentStateElementBytes(storage));
+        delta_size * mbufo::hip::QwenRecurrentStateElementBytes(storage));
     HIP_CHECK(hipMemcpy(state_bits.data(), state, state_bits.size(),
                         hipMemcpyDeviceToHost));
     const void* expected_state =
@@ -1181,9 +1181,9 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
   // read back. That has to be byte-for-byte identical to the FP32 path followed
   // by an FP32 quantize, including the per-block scales and the tail-tile
   // zeros.
-  if (gufo::hip::IsFusedSSMEpilogueQuantizeQ8_1Supported(val_dim, inner_size)) {
+  if (mbufo::hip::IsFusedSSMEpilogueQuantizeQ8_1Supported(val_dim, inner_size)) {
     const std::size_t q8_bytes =
-        gufo::hip::QuantizedActivationBytes(batch, inner_size) + 4096;
+        mbufo::hip::QuantizedActivationBytes(batch, inner_size) + 4096;
     void* d_q8_ref = nullptr;
     void* d_q8_got = nullptr;
     float* d_state_q8 = nullptr;
@@ -1200,14 +1200,14 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
     HIP_CHECK(hipMemset(d_q8_got, 0xA5, q8_bytes));
 
     // Reference: the FP32 epilogue that just ran, quantized separately.
-    gufo::hip::LaunchQuantizeActivationQ8_1FromFp32(d_out_new, d_q8_ref, batch,
+    mbufo::hip::LaunchQuantizeActivationQ8_1FromFp32(d_out_new, d_q8_ref, batch,
                                                     inner_size);
 
     // Candidate: the same recurrence from the same starting state, but with the
     // epilogue writing Q8_1.
     upload(d_state_q8, h_history);
     upload(d_delta_q8, h_delta0);
-    gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
+    mbufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
         d_qkv, d_w, QwenRecurrentStateIo::InPlace(d_state_q8, d_delta_q8),
         d_conv_q8, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
         d_out_q8, d_q8_got, d_kq, d_ab, 0, batch, qkv_dim, num_key_heads,
@@ -1260,9 +1260,9 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
 // matter: the new conv history takes its tail from the old one when fewer than
 // four tokens arrive.
 void TestBatchedRecurrenceDivergingState(std::size_t batch) {
-  using gufo::hip::QwenRecurrentStateIo;
-  using gufo::test::DeviceBuffer;
-  using Storage = gufo::hip::QwenRecurrentStateStorage;
+  using mbufo::hip::QwenRecurrentStateIo;
+  using mbufo::test::DeviceBuffer;
+  using Storage = mbufo::hip::QwenRecurrentStateStorage;
   constexpr std::uint32_t num_key_heads = 16;
   constexpr std::uint32_t num_heads = 48;
   constexpr std::uint32_t key_dim = 128;
@@ -1305,14 +1305,14 @@ void TestBatchedRecurrenceDivergingState(std::size_t batch) {
 
   for (const auto storage : {Storage::kFp32, Storage::kBf16}) {
     const std::size_t element_bytes =
-        gufo::hip::QwenRecurrentStateElementBytes(storage);
+        mbufo::hip::QwenRecurrentStateElementBytes(storage);
     std::vector<std::uint8_t> delta_seed(delta_size * element_bytes);
     for (std::size_t i = 0; i < delta_size; ++i) {
       if (storage == Storage::kFp32) {
         std::memcpy(delta_seed.data() + i * element_bytes, &delta[i],
                     element_bytes);
       } else {
-        const auto bits = gufo::test::FloatToBf16Bits(delta[i]);
+        const auto bits = mbufo::test::FloatToBf16Bits(delta[i]);
         std::memcpy(delta_seed.data() + i * element_bytes, &bits,
                     element_bytes);
       }
@@ -1344,14 +1344,14 @@ void TestBatchedRecurrenceDivergingState(std::size_t batch) {
              "diverging prefill wrote into the pinned buffers");
     };
     const auto run_plain = [&](QwenRecurrentStateIo state) {
-      gufo::hip::LaunchBatchedSSMConvRecurrence(
+      mbufo::hip::LaunchBatchedSSMConvRecurrence(
           qkv.data(), weights.data(), state, conv_output.data(), alpha.data(),
           beta.data(), decay.data(), dt.data(), norm.data(), gate.data(),
           output.data(), 0, batch, qkv_dim, num_key_heads, num_heads, key_dim,
           val_dim, nullptr, storage);
     };
     const auto run_row_split = [&](QwenRecurrentStateIo state) {
-      gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
+      mbufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
           qkv.data(), weights.data(), state, conv_output.data(), alpha.data(),
           beta.data(), decay.data(), dt.data(), norm.data(), gate.data(),
           output.data(), nullptr, kq_scales.data(), alpha_beta.data(), 0, batch,
@@ -1383,9 +1383,9 @@ void TestBatchedRecurrenceDivergingState(std::size_t batch) {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = gufo::test::GateHipDevice(
-      gufo::test::HipDeviceRequirement::kOptional, "Qwen SSM ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  const int device_status = mbufo::test::GateHipDevice(
+      mbufo::test::HipDeviceRequirement::kOptional, "Qwen SSM ops test");
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

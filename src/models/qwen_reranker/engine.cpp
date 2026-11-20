@@ -11,7 +11,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/rerank_score.hpp"
 
-namespace gufo::models::qwen_reranker {
+namespace mbufo::models::qwen_reranker {
 
 namespace {
 
@@ -303,4 +303,4 @@ std::unique_ptr<EngineModel> ModelRegistry::Create(
   return it->second(model_path, error_msg);
 }
 
-}  // namespace gufo::models::qwen_reranker
+}  // namespace mbufo::models::qwen_reranker

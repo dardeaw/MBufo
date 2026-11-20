@@ -1,10 +1,10 @@
-#ifndef GUFO_SERVER_OPENAI_CHAT_HPP_
-#define GUFO_SERVER_OPENAI_CHAT_HPP_
+#ifndef MBUFO_SERVER_OPENAI_CHAT_HPP_
+#define MBUFO_SERVER_OPENAI_CHAT_HPP_
 
 #include "src/cli/serve/http_server.hpp"
 #include "src/core/image.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 /// Handles the supported OpenAI Chat Completions subset. Streaming responses
 /// consume scheduler-published token pieces from HttpResponse::streaming_body;
@@ -60,6 +60,6 @@ HttpResponse CreateAnthropicMessage(const HttpRequest& request,
                                     const sampling::SamplingConfig& sampling,
                                     bool stream, std::string_view model = {});
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_OPENAI_CHAT_HPP_
+#endif  // MBUFO_SERVER_OPENAI_CHAT_HPP_

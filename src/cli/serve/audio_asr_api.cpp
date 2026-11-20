@@ -19,7 +19,7 @@
 #include "src/core/json.hpp"
 #include "src/core/utf8.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 constexpr std::string_view kTranscriptionsPath = "/v1/audio/transcriptions";
@@ -320,7 +320,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
     response.headers = {{"Content-Type", "text/event-stream"},
                         {"Cache-Control", "no-cache"},
                         {"X-Accel-Buffering", "no"},
-                        {"X-Gufo-Schema", std::string(kAudioAsrApiSchema)}};
+                        {"X-MBufo-Schema", std::string(kAudioAsrApiSchema)}};
     response.stream_log = std::make_shared<HttpResponse::StreamLog>();
     response.streaming_body =
         [&service, wav = file->body,
@@ -428,9 +428,9 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
     }
     response.body = body.dump();
   }
-  response.headers.emplace_back("X-Gufo-Schema",
+  response.headers.emplace_back("X-MBufo-Schema",
                                 std::string(kAudioAsrApiSchema));
-  response.headers.emplace_back("X-Gufo-ASR-Backend", service.backend_name());
+  response.headers.emplace_back("X-MBufo-ASR-Backend", service.backend_name());
   response.headers.emplace_back("Server-Timing", ServerTiming(result.timings));
   response.log_details =
       "model=" + service.model_id() +
@@ -462,4 +462,4 @@ HttpResponse HandleAudioAsrApiRequest(const HttpRequest& request,
                "method_not_allowed");
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

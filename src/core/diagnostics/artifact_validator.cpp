@@ -8,7 +8,7 @@
 #include "src/core/diagnostics/fingerprint.h"
 #include "src/core/json.hpp"
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 namespace {
 
@@ -232,4 +232,4 @@ std::string ValidationResult::ToHuman() const {
   return oss.str();
 }
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

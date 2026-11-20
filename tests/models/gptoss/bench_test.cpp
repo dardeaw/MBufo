@@ -13,7 +13,7 @@
 
 #include "src/models/gptoss/engine.hpp"
 
-namespace g = gufo::models::gptoss;
+namespace g = mbufo::models::gptoss;
 
 namespace {
 

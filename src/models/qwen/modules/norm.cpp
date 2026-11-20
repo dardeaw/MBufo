@@ -9,7 +9,7 @@
 #include "src/models/qwen/hip/ops/norm_residual.hpp"
 #endif
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 void NormForward(const CpuModuleContext&, const NormLayerView& view,
                  std::span<const float> x, std::span<float> out) noexcept {
@@ -27,10 +27,10 @@ void NormForward(const CpuModuleContext&, const NormLayerView& view,
 #if defined(ENGINE_ENABLE_HIP)
 void NormForward(const HipModuleContext& ctx, const NormLayerView& view,
                  std::span<const float> x, std::span<float> out) noexcept {
-  ::gufo::hip::LaunchRMSNorm(
+  ::mbufo::hip::LaunchRMSNorm(
       x.data(), static_cast<const float*>(view.weight.data), out.data(),
       x.size(), view.eps, static_cast<hipStream_t>(ctx.Stream()));
 }
 #endif
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

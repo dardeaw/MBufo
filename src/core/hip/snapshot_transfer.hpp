@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_HIP_SNAPSHOT_TRANSFER_HPP_
-#define GUFO_CORE_HIP_SNAPSHOT_TRANSFER_HPP_
+#ifndef MBUFO_CORE_HIP_SNAPSHOT_TRANSFER_HPP_
+#define MBUFO_CORE_HIP_SNAPSHOT_TRANSFER_HPP_
 
 #include <hip/hip_runtime.h>
 
@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 /// Copies a frozen session on a separate stream. Callers have completed that
 /// session's model operation before capture, and keep its state alive and
@@ -64,6 +64,6 @@ private:
   std::function<void(hipStream_t)> release_;
 };
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
-#endif  // GUFO_CORE_HIP_SNAPSHOT_TRANSFER_HPP_
+#endif  // MBUFO_CORE_HIP_SNAPSHOT_TRANSFER_HPP_

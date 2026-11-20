@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_DIAGNOSTICS_FINGERPRINT_H_
-#define GUFO_CORE_DIAGNOSTICS_FINGERPRINT_H_
+#ifndef MBUFO_CORE_DIAGNOSTICS_FINGERPRINT_H_
+#define MBUFO_CORE_DIAGNOSTICS_FINGERPRINT_H_
 
 #include <cstdint>
 #include <string>
@@ -7,7 +7,7 @@
 
 #include "src/core/diagnostics/system_inventory.h"
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 struct CanonicalFingerprint {
   std::string schema_version{"1.0.0"};
@@ -44,6 +44,6 @@ struct MachineFingerprint {
 
 [[nodiscard]] std::string ComputeSha256Hex(std::string_view data);
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics
 
-#endif  // GUFO_CORE_DIAGNOSTICS_FINGERPRINT_H_
+#endif  // MBUFO_CORE_DIAGNOSTICS_FINGERPRINT_H_

@@ -12,8 +12,8 @@
 
 namespace {
 
-using gufo::json::parse;
-using gufo::json::Value;
+using mbufo::json::parse;
+using mbufo::json::Value;
 
 void ExpectInvalid(std::string_view input) {
   try {

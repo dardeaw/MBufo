@@ -11,7 +11,7 @@
 
 #include "src/core/compute/gemm/gemm.hpp"
 
-using namespace gufo::core::compute::gemm;
+using namespace mbufo::core::compute::gemm;
 #define CK(x) do { hipError_t e__ = (x); if (e__ != hipSuccess) { std::fprintf(stderr, "HIP error %s line %d\n", hipGetErrorString(e__), __LINE__); std::exit(2); } } while (0)
 
 __global__ void RefGemv(const __half* W, const float* X, float* Y, int n, int m, int k) {
@@ -65,7 +65,7 @@ int main(int argc, char** argv) {
       double num = 0, den = 0; for (size_t i = 0; i < a.size(); ++i) { const double e = a[i] - r[i]; num += e * e; den += (double)r[i] * r[i]; }
       const double rel = std::sqrt(num / den);
       const double t_new = Time([&] { (void)QuantGemvMulti(dw, type, dx, y, n, s.m, s.k, 0); });
-      const double t_old = Time([&] { for (int t = 0; t < n; ++t) LaunchQ8KBlockGEMV(dw, static_cast<gufo::core::GgmlType>(type), dx + (size_t)t * s.k, yo + (size_t)t * s.m, s.m, s.k, 0); }, 5);
+      const double t_old = Time([&] { for (int t = 0; t < n; ++t) LaunchQ8KBlockGEMV(dw, static_cast<mbufo::core::GgmlType>(type), dx + (size_t)t * s.k, yo + (size_t)t * s.m, s.m, s.k, 0); }, 5);
       const bool ok = rel < 3e-3 && std::isfinite(rel);
       std::printf("  n=%2d  rel-L2 %.2e %s   new %7.3f ms (%5.1f GB/s)   per-token loop %7.3f ms   x%.1f\n", n, rel, ok ? "OK" : "FAIL", t_new, wq.size() / (t_new * 1e-3) / 1e9, t_old, t_old / t_new);
       bad += !ok;

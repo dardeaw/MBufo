@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Process-isolated official Qwen3-TTS oracle used by Gufo validation."""
+"""Process-isolated official Qwen3-TTS oracle used by MBufo validation."""
 
 from __future__ import annotations
 

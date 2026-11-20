@@ -1,4 +1,8 @@
 #include <array>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
 #include <iostream>
 #include <span>
 #include <string_view>
@@ -12,20 +16,20 @@
 #include "src/cli/transcribe/transcribe.hpp"
 #include "src/cli/video/video.hpp"
 
-#ifndef GUFO_RELEASE_VERSION
-#define GUFO_RELEASE_VERSION "development"
+#ifndef MBUFO_RELEASE_VERSION
+#define MBUFO_RELEASE_VERSION "development"
 #endif
-#ifndef GUFO_REVISION
-#define GUFO_REVISION "unknown"
+#ifndef MBUFO_REVISION
+#define MBUFO_REVISION "unknown"
 #endif
 
-constexpr std::string_view kGufoReleaseVersion = GUFO_RELEASE_VERSION;
-constexpr std::string_view kGufoRevision = GUFO_REVISION;
+constexpr std::string_view kMBufoReleaseVersion = MBUFO_RELEASE_VERSION;
+constexpr std::string_view kMBufoRevision = MBUFO_REVISION;
 
 namespace {
 
 void print_version() {
-  std::cout << "gufo version " << kGufoReleaseVersion << " (" << kGufoRevision
+  std::cout << "mbufo version " << kMBufoReleaseVersion << " (" << kMBufoRevision
             << ")\n";
 }
 
@@ -54,7 +58,7 @@ void print_help(std::string_view program_name) {
 int run(std::span<const char* const> args) {
   if (args.empty()) {
     std::cerr << "Error: missing command or option\n";
-    print_help("gufo");
+    print_help("mbufo");
     return 2;
   }
 
@@ -88,81 +92,81 @@ int run(std::span<const char* const> args) {
       if (options.size() > 2) {
         const std::array<const char*, 2> serve_help_flags = {options[2],
                                                              "--help"};
-        return gufo::cli::RunServe(serve_help_flags);
+        return mbufo::cli::RunServe(serve_help_flags);
       }
-      return gufo::cli::RunServe(help_flag);
+      return mbufo::cli::RunServe(help_flag);
     }
     if (sub == "prompt") {
-      return gufo::cli::RunPrompt(help_flag);
+      return mbufo::cli::RunPrompt(help_flag);
     }
     if (sub == "bench") {
-      return gufo::cli::RunBench(help_flag);
+      return mbufo::cli::RunBench(help_flag);
     }
     if (sub == "eval") {
-      return gufo::cli::RunEval(help_flag);
+      return mbufo::cli::RunEval(help_flag);
     }
     if (sub == "video") {
-      return gufo::cli::RunVideo(help_flag);
+      return mbufo::cli::RunVideo(help_flag);
     }
     if (sub == "transcribe") {
-      return gufo::cli::RunTranscribe(help_flag);
+      return mbufo::cli::RunTranscribe(help_flag);
     }
     if (sub == "chat") {
-      return gufo::cli::RunChat(help_flag);
+      return mbufo::cli::RunChat(help_flag);
     }
     if (sub == "probe") {
-      return gufo::cli::RunProbe(help_flag);
+      return mbufo::cli::RunProbe(help_flag);
     }
     if (sub == "diagnose") {
-      return gufo::cli::RunDiagnose(help_flag);
+      return mbufo::cli::RunDiagnose(help_flag);
     }
     std::cerr << "Error: unknown help topic '" << sub << "'\n";
     print_help(program_name);
     return 2;
   }
 
-  gufo::cli::PrintStartupBanner(kGufoReleaseVersion, options);
+  mbufo::cli::PrintStartupBanner(kMBufoReleaseVersion, options);
 
   if (first_arg == "probe") {
-    return gufo::cli::RunProbe(options.subspan(1));
+    return mbufo::cli::RunProbe(options.subspan(1));
   }
 
   if (first_arg == "diagnose") {
-    return gufo::cli::RunDiagnose(options);
+    return mbufo::cli::RunDiagnose(options);
   }
 
   if (first_arg == "bench") {
-    return gufo::cli::RunBench(options.subspan(1));
+    return mbufo::cli::RunBench(options.subspan(1));
   }
 
   if (first_arg == "eval") {
-    return gufo::cli::RunEval(options.subspan(1));
+    return mbufo::cli::RunEval(options.subspan(1));
   }
 
   if (first_arg == "prompt") {
-    return gufo::cli::RunPrompt(options.subspan(1));
+    return mbufo::cli::RunPrompt(options.subspan(1));
   }
 
   if (first_arg == "video") {
-    return gufo::cli::RunVideo(options.subspan(1));
+    return mbufo::cli::RunVideo(options.subspan(1));
   }
 
   if (first_arg == "transcribe") {
-    return gufo::cli::RunTranscribe(options.subspan(1));
+    return mbufo::cli::RunTranscribe(options.subspan(1));
   }
 
   if (first_arg == "chat") {
-    return gufo::cli::RunChat(options.subspan(1));
+    return mbufo::cli::RunChat(options.subspan(1));
   }
 
   if (first_arg == "serve") {
-    return gufo::cli::RunServe(options.subspan(1));
+    return mbufo::cli::RunServe(options.subspan(1));
   }
 
   // If invoked as legacy binary name or flag passed directly, route to serve
-  if (program_name.ends_with("gufo-server") ||
-      program_name.ends_with("/gufo-server")) {
-    return gufo::cli::RunServe(options);
+  if (program_name.ends_with("mbufo-server") ||
+      program_name.ends_with("/mbufo-server")) {
+    return mbufo::cli::RunServe(options);
   }
 
   std::cerr << "Error: unknown command '" << first_arg << "'\n";
@@ -172,7 +176,24 @@ int run(std::span<const char* const> args) {
 
 }  // namespace
 
+// Compatibility with the pre-rename name: a legacy GUFO_<X> variable (service units, scripts) is honored as MBUFO_<X> when
+// the new name is not set.
+extern char** environ;
+static void ImportLegacyEnvironment() {
+  std::vector<std::pair<std::string, std::string>> legacy;
+  for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
+    if (std::strncmp(*e, "GUFO_", 5) != 0) continue;
+    const char* eq = std::strchr(*e, '=');
+    if (eq == nullptr) continue;
+    legacy.emplace_back(std::string("MBUFO_") + std::string(*e + 5, static_cast<std::size_t>(eq - *e - 5)), std::string(eq + 1));
+  }
+  for (const auto& [name, value] : legacy) {
+    if (std::getenv(name.c_str()) == nullptr) ::setenv(name.c_str(), value.c_str(), 0);
+  }
+}
+
 int main(int argc, char* argv[]) {
+  ImportLegacyEnvironment();
   const std::span<const char* const> args(argv, static_cast<std::size_t>(argc));
   return run(args);
 }

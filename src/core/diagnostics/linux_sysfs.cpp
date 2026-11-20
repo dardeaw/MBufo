@@ -8,7 +8,7 @@
 #include <sstream>
 #include <string_view>
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 namespace {
 
@@ -218,4 +218,4 @@ std::vector<SysfsGpuDevice> LinuxSysfs::QueryDrmGpuDevices() const {
   return devices;
 }
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

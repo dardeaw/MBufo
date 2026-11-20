@@ -35,27 +35,27 @@
 
 namespace {
 
-using gufo::server::ChatRequest;
-using gufo::server::TextDecodeSelection;
-using gufo::server::TextDecodeStep;
-using gufo::server::TextExecutionPlan;
-using gufo::server::TextExecutionPlanKind;
-using gufo::server::TextGenerationError;
-using gufo::server::TextGenerationErrorCode;
-using gufo::server::TextGenerationScheduler;
-using gufo::server::TextModelRunner;
-using gufo::server::TextPrefillPolicy;
-using gufo::server::TextPrefillStep;
-using gufo::server::TextRequestMetadata;
-using gufo::server::TextRequestPhase;
-using gufo::server::TextRunnerAdvance;
-using gufo::server::TextRunnerCapabilities;
-using gufo::server::TextRunnerDescriptor;
-using gufo::server::TextRunnerPool;
-using gufo::server::TextRunnerResourceClaim;
-using gufo::server::TextRunnerState;
-using gufo::server::TextRunnerToken;
-using gufo::server::TextSchedulerPolicy;
+using mbufo::server::ChatRequest;
+using mbufo::server::TextDecodeSelection;
+using mbufo::server::TextDecodeStep;
+using mbufo::server::TextExecutionPlan;
+using mbufo::server::TextExecutionPlanKind;
+using mbufo::server::TextGenerationError;
+using mbufo::server::TextGenerationErrorCode;
+using mbufo::server::TextGenerationScheduler;
+using mbufo::server::TextModelRunner;
+using mbufo::server::TextPrefillPolicy;
+using mbufo::server::TextPrefillStep;
+using mbufo::server::TextRequestMetadata;
+using mbufo::server::TextRequestPhase;
+using mbufo::server::TextRunnerAdvance;
+using mbufo::server::TextRunnerCapabilities;
+using mbufo::server::TextRunnerDescriptor;
+using mbufo::server::TextRunnerPool;
+using mbufo::server::TextRunnerResourceClaim;
+using mbufo::server::TextRunnerState;
+using mbufo::server::TextRunnerToken;
+using mbufo::server::TextSchedulerPolicy;
 
 constexpr auto kTestTimeout = std::chrono::seconds{5};
 
@@ -67,7 +67,7 @@ void Expect(bool condition, std::string_view message) {
 }
 
 void TestPublicationWaitUsesRecentSubstantialPrefill() {
-  using gufo::server::detail::PublicationWaitEstimate;
+  using mbufo::server::detail::PublicationWaitEstimate;
   PublicationWaitEstimate estimate;
   Expect(!estimate.Limit(55000),
          "an uncalibrated model must not park admission");
@@ -317,16 +317,16 @@ public:
     return {static_cast<TextRunnerToken>(text.size())};
   }
 
-  [[nodiscard]] std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
+  [[nodiscard]] std::shared_ptr<const mbufo::sampling::ConstraintVocabulary>
   BuildConstraintVocabulary() const override {
     if (!control_->structured_output)
       return TextModelRunner::BuildConstraintVocabulary();
     if (control_->vocabulary_failure)
       throw std::runtime_error("vocabulary build failed");
     control_->vocabulary_builds.fetch_add(1, std::memory_order_relaxed);
-    return std::make_shared<gufo::sampling::ConstraintVocabulary>(
+    return std::make_shared<mbufo::sampling::ConstraintVocabulary>(
         256, [](std::uint32_t id) {
-          return gufo::sampling::ConstraintVocabulary::Piece{
+          return mbufo::sampling::ConstraintVocabulary::Piece{
               std::string(1, static_cast<char>(id)), false};
         });
   }
@@ -403,7 +403,7 @@ public:
   }
 
   [[nodiscard]] TextDecodeSelection SelectNext(
-      TextRunnerState& state, gufo::sampling::SamplerState&) const override {
+      TextRunnerState& state, mbufo::sampling::SamplerState&) const override {
     const auto& fake = RequireFakeState(state);
     if (!fake.frontier.has_value()) {
       throw std::logic_error("scheduler fake has no frontier");
@@ -429,13 +429,13 @@ public:
 
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
       TextRunnerState& state,
-      gufo::sampling::SamplerState& sampler) const override {
+      mbufo::sampling::SamplerState& sampler) const override {
     if (!control_->preview_first_token)
       return std::nullopt;
     return SelectNext(state, sampler);
   }
 
-  struct SnapshotState final : gufo::server::TextRunnerSnapshot {
+  struct SnapshotState final : mbufo::server::TextRunnerSnapshot {
     explicit SnapshotState(const FakeState& state)
         : label(state.label),
           position(state.position),
@@ -451,7 +451,7 @@ public:
   std::size_t SnapshotPayloadBytes(const TextRunnerState&) const override {
     return sizeof(SnapshotState);
   }
-  std::unique_ptr<gufo::server::TextRunnerSnapshot> Snapshot(
+  std::unique_ptr<mbufo::server::TextRunnerSnapshot> Snapshot(
       const TextRunnerState& state) const override {
     if (control_->snapshot_callback)
       control_->snapshot_callback();
@@ -459,7 +459,7 @@ public:
   }
   void RestoreOrFork(
       TextRunnerState& state,
-      const gufo::server::TextRunnerSnapshot& snapshot) const override {
+      const mbufo::server::TextRunnerSnapshot& snapshot) const override {
     auto& restored = RequireFakeState(state);
     const auto& saved = dynamic_cast<const SnapshotState&>(snapshot);
     restored.label = saved.label;
@@ -512,7 +512,7 @@ public:
 
   [[nodiscard]] TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
-      gufo::sampling::SamplerState& sampler) const override {
+      mbufo::sampling::SamplerState& sampler) const override {
     if (!control_->multi_token_decode) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
@@ -539,7 +539,7 @@ public:
   }
 
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
-      std::span<const gufo::server::TextRunnerDecode> decodes) const override {
+      std::span<const mbufo::server::TextRunnerDecode> decodes) const override {
     auto steps = TextModelRunner::DecodeBatch(decodes);
     const auto width = std::min(control_->actual_batch_width, decodes.size());
     for (auto& step : steps) {
@@ -777,7 +777,7 @@ void TestSharedPrefixWaitRequiresSnapshots() {
 }
 
 void TestParkedFollowersReserveVisibleSessions() {
-  namespace metrics = gufo::server::detail;
+  namespace metrics = mbufo::server::detail;
   auto control = SharedPrefixControl(true);
   control->block_prefill_label = 1;
   std::binary_semaphore entered(0), release(0);
@@ -927,7 +927,7 @@ void TestRunnerCanReuseExactIncrementalText() {
 // effective limits and sampling, the cache outcome and the raw output.
 void TestGenerationTraceRecordsPromptAndOutput() {
   namespace fs = std::filesystem;
-  using gufo::server::Trace;
+  using mbufo::server::Trace;
   auto control = std::make_shared<FakeControl>();
   control->incremental_text_is_exact = true;
   auto scheduler = MakeScheduler(control, 1);
@@ -937,10 +937,10 @@ void TestGenerationTraceRecordsPromptAndOutput() {
 
   const auto path =
       fs::temp_directory_path() /
-      ("gufo-scheduler-trace-" + std::to_string(::getpid()) + ".jsonl");
+      ("mbufo-scheduler-trace-" + std::to_string(::getpid()) + ".jsonl");
   fs::remove(path);
   Expect(!Trace::Open(path.string()).has_value(), "trace file opens");
-  gufo::sampling::SamplingConfig sampling;
+  mbufo::sampling::SamplingConfig sampling;
   sampling.temperature = 0.7F;
   sampling.top_k = 4;
   sampling.seed = 9;
@@ -964,11 +964,11 @@ void TestGenerationTraceRecordsPromptAndOutput() {
   Trace::Close();
   Expect(failed, "the injected runner failure reaches the consumer");
 
-  std::vector<gufo::json::Value> records;
+  std::vector<mbufo::json::Value> records;
   {
     std::ifstream input(path);
     for (std::string line; std::getline(input, line);) {
-      records.push_back(gufo::json::parse(line));
+      records.push_back(mbufo::json::parse(line));
     }
   }
   fs::remove(path);
@@ -1026,7 +1026,7 @@ void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
 }
 
 void TestRequestTotalsDoNotNeedAConsumer() {
-  namespace metrics = gufo::server::detail;
+  namespace metrics = mbufo::server::detail;
   const auto wait_terminal =
       [](const TextGenerationScheduler::Request& request) {
         const auto deadline =
@@ -1040,7 +1040,7 @@ void TestRequestTotalsDoNotNeedAConsumer() {
   {
     auto control = std::make_shared<FakeControl>();
     auto scheduler = MakeScheduler(control, 1);
-    gufo::server::RecordServerMetrics(
+    mbufo::server::RecordServerMetrics(
         scheduler->Submit({1, 10}, 1, 0.0F).Wait());
     const auto cached_before = metrics::TotalCachedPromptTokens().load();
     // Never waited on, like a stream whose first write fails.
@@ -1050,7 +1050,7 @@ void TestRequestTotalsDoNotNeedAConsumer() {
            "a finished request counts before anyone reads it");
     abandoned = {};
     const auto consumed = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F).Wait();
-    gufo::server::RecordServerMetrics(consumed);
+    mbufo::server::RecordServerMetrics(consumed);
     Expect(metrics::TotalCachedPromptTokens().load() - cached_before ==
                3 + consumed.cached_prompt_tokens,
            "reading the result does not count it again");
@@ -1164,7 +1164,7 @@ void TestBatchDeviceLossFailsSuccessfulPeers() {
 
 void TestModelOwnedBatchMetrics() {
   for (const std::size_t actual_width : {1U, 2U}) {
-    namespace metrics = gufo::server::detail;
+    namespace metrics = mbufo::server::detail;
     const auto prompt_before = metrics::TotalPromptTokens().load();
     const auto generated_before = metrics::TotalGenTokens().load();
     const auto rounds_before = metrics::TotalDraftRounds().load();
@@ -1188,7 +1188,7 @@ void TestModelOwnedBatchMetrics() {
       Expect(result.draft_rounds == 4,
              "each batched request reports its own verification rounds");
       Expect(result.token_metrics_recorded, "scheduled tokens counted live");
-      gufo::server::RecordServerMetrics(result);
+      mbufo::server::RecordServerMetrics(result);
     }
     Expect(metrics::TotalPromptTokens().load() - prompt_before == 2 &&
                metrics::TotalGenTokens().load() - generated_before == 24 &&
@@ -1770,7 +1770,7 @@ void TestFifoReplacementAdmissionWithOneSlot() {
 }
 
 void TestServerMetricsAreLive() {
-  namespace metrics = gufo::server::detail;
+  namespace metrics = mbufo::server::detail;
   const auto read = [](const auto& value) {
     return value.load(std::memory_order_relaxed);
   };
@@ -1803,8 +1803,8 @@ void TestServerMetricsAreLive() {
     Expect(active_result.token_metrics_recorded &&
                queued_result.token_metrics_recorded,
            "scheduler results identify live token accounting");
-    gufo::server::RecordServerMetrics(active_result);
-    gufo::server::RecordServerMetrics(queued_result);
+    mbufo::server::RecordServerMetrics(active_result);
+    mbufo::server::RecordServerMetrics(queued_result);
     Expect(read(metrics::TotalPromptTokens()) - prompt_before == 4,
            "HTTP completion does not count the prompt again");
     Expect(read(metrics::TotalGenTokens()) - generated_before == 4,
@@ -1816,7 +1816,7 @@ void TestServerMetricsAreLive() {
 }
 
 void TestMetricsDuringCacheAdmission() {
-  namespace metrics = gufo::server::detail;
+  namespace metrics = mbufo::server::detail;
   for (const bool cancel : {false, true}) {
     const auto processing_before = metrics::RequestsProcessing().load();
     const auto deferred_before = metrics::RequestsDeferred().load();
@@ -1863,7 +1863,7 @@ void TestMetricsDuringCacheAdmission() {
   }
   auto scheduler = MakeScheduler(std::make_shared<FakeControl>(), 1);
   TextRequestMetadata metadata;
-  metadata.prompt_context = std::make_shared<gufo::server::TextPromptContext>();
+  metadata.prompt_context = std::make_shared<mbufo::server::TextPromptContext>();
   bool failed = false;
   try {
     (void)scheduler->Submit({3}, 1, 0.0F, {}, false, metadata).Wait();
@@ -1879,7 +1879,7 @@ void TestMetricsDuringCacheAdmission() {
 }
 
 void TestSessionStatesFollowAdmittedRequests() {
-  namespace metrics = gufo::server::detail;
+  namespace metrics = mbufo::server::detail;
   const auto processing_before = metrics::RequestsProcessing().load();
   auto control = std::make_shared<FakeControl>();
   control->block_advance_label = 1;
@@ -2072,7 +2072,7 @@ void TestIdleDeviceProbe() {
   control->idle_probe_status = Status::kPending;
   TextSchedulerPolicy policy{.device_probe_interval =
                                  std::chrono::milliseconds(10)};
-  const auto before = gufo::server::detail::DeviceLostTotal().load();
+  const auto before = mbufo::server::detail::DeviceLostTotal().load();
   auto scheduler = MakeScheduler(control, 1, {}, policy);
   {
     std::unique_lock lock(control->mutex);
@@ -2082,7 +2082,7 @@ void TestIdleDeviceProbe() {
         "an idle scheduler submits/polls without generation or HTTP traffic");
   }
   Expect(!scheduler->device_lost(), "pending probe is inconclusive");
-  Expect(gufo::server::detail::DeviceLostTotal() == before,
+  Expect(mbufo::server::detail::DeviceLostTotal() == before,
          "pending probes do not count as losses");
   control->block_prefill_label = 1;
   auto request = scheduler->Submit({1}, 2, 0.0F);
@@ -2101,13 +2101,13 @@ void TestIdleDeviceProbe() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   Expect(scheduler->device_lost(), "idle probe loss is fatal and sticky");
   scheduler.reset();
-  Expect(gufo::server::detail::DeviceLostTotal() == before + 1,
+  Expect(mbufo::server::detail::DeviceLostTotal() == before + 1,
          "confirmed idle loss increments the counter once");
 }
 
 void TestStallMonitor() {
   const auto stall_timeout = std::chrono::milliseconds(500);
-  const auto before = gufo::server::detail::DeviceLostTotal().load();
+  const auto before = mbufo::server::detail::DeviceLostTotal().load();
   {
     auto control = std::make_shared<FakeControl>();
     control->block_prefill_label = 1;
@@ -2140,7 +2140,7 @@ void TestStallMonitor() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   Expect(scheduler->device_lost(),
          "a work unit that never returns is reported as a lost device");
-  Expect(gufo::server::detail::DeviceLostTotal() == before + 1,
+  Expect(mbufo::server::detail::DeviceLostTotal() == before + 1,
          "a stall increments the loss counter once");
   bool rejected = false;
   try {
@@ -2217,7 +2217,7 @@ void TestDeviceLossIsStickyAndReported() {
       lost = error.code() == TextGenerationErrorCode::kDeviceLost &&
              error.http_status() == 503 &&
              std::string_view(error.stable_code()) == "device_lost" &&
-             std::string_view(error.what()) == gufo::server::kDeviceLostMessage;
+             std::string_view(error.what()) == mbufo::server::kDeviceLostMessage;
     }
     Expect(lost, message);
   };
@@ -2255,7 +2255,7 @@ void TestDeviceLossIsStickyAndReported() {
 }
 
 void TestStopSequenceChunkBoundaries() {
-  using gufo::server::StopSequenceFilter;
+  using mbufo::server::StopSequenceFilter;
   const auto check = [](std::vector<std::string> stops, std::string text,
                         std::string expected, std::string matched) {
     // Include single-byte token pieces and every two-piece boundary.
@@ -2289,7 +2289,7 @@ void TestStopSequenceChunkBoundaries() {
 }
 
 void TestStopSequencesPreserveExecutedState() {
-  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  using Finish = mbufo::server::TextGenerationBackend::FinishReason;
   for (const bool multi : {false, true}) {
     for (const bool preview : {false, true}) {
       for (const bool first : {false, true}) {
@@ -2332,7 +2332,7 @@ void TestStopSequencesPreserveExecutedState() {
 }
 
 void TestStopPrefixFlushAndBatchIsolation() {
-  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  using Finish = mbufo::server::TextGenerationBackend::FinishReason;
   for (const bool multi : {false, true}) {
     auto control = std::make_shared<FakeControl>();
     control->incremental_text_is_exact = true;
@@ -2396,7 +2396,7 @@ void TestCancellationWithBufferedStopPrefix() {
     Expect(
         result.cancelled &&
             result.finish_reason ==
-                gufo::server::TextGenerationBackend::FinishReason::kCancelled &&
+                mbufo::server::TextGenerationBackend::FinishReason::kCancelled &&
             streamed.find("<ST") == std::string::npos,
         "cancellation does not flush a buffered stop prefix");
     const auto replacement = scheduler->Submit({2}, 3, 0.0F).Wait();
@@ -2649,8 +2649,8 @@ void TestStructuredOutputIsPreparedBeforeServing() {
                   "prepare_ms=") != std::string::npos &&
              log.find(" rss_delta_kib=") != std::string::npos,
          "preparation reports its time and memory");
-  const auto grammar = gufo::sampling::JsonConstraint::Compile(
-      gufo::json::parse(
+  const auto grammar = mbufo::sampling::JsonConstraint::Compile(
+      mbufo::json::parse(
           R"({"type":"object","properties":{},"additionalProperties":false})"),
       false);
   const auto binding = scheduler->runner().BindConstraint(grammar);
@@ -2718,11 +2718,11 @@ void TestProgressLoggingIsOptInAndBounded() {
 }
 
 void TestAdmissionLoggingIsDebugTierOnly() {
-  const auto run = [](gufo::server::LogLevel level) {
+  const auto run = [](mbufo::server::LogLevel level) {
     auto control = std::make_shared<FakeControl>();
     control->block_advance_label = 1;
-    const auto previous_level = gufo::server::Logger::Level();
-    gufo::server::Logger::SetLevel(level);
+    const auto previous_level = mbufo::server::Logger::Level();
+    mbufo::server::Logger::SetLevel(level);
     std::ostringstream output;
     auto* previous = std::clog.rdbuf(output.rdbuf());
     bool rejected = false;
@@ -2748,16 +2748,16 @@ void TestAdmissionLoggingIsDebugTierOnly() {
       (void)queued.Wait();
     }
     std::clog.rdbuf(previous);
-    gufo::server::Logger::SetLevel(previous_level);
+    mbufo::server::Logger::SetLevel(previous_level);
     Expect(rejected, "admission logging still rejects a full pending queue");
     return output.str();
   };
 
-  Expect(run(gufo::server::LogLevel::kInfo).find("event=admission") ==
+  Expect(run(mbufo::server::LogLevel::kInfo).find("event=admission") ==
              std::string::npos,
          "admission detail is silent at the default level");
 
-  const auto output = run(gufo::server::LogLevel::kDebug);
+  const auto output = run(mbufo::server::LogLevel::kDebug);
   Expect(output.find("[DEBUG] [scheduler] event=admitted") != std::string::npos,
          "debug tier records the admission decision");
   Expect(output.find(" client_id=queued-client queued=1") != std::string::npos,
@@ -2768,7 +2768,7 @@ void TestAdmissionLoggingIsDebugTierOnly() {
 }
 
 void TestPromptProgressPrecedesStreamedTokens() {
-  using gufo::server::TextGenerationBackend;
+  using mbufo::server::TextGenerationBackend;
   auto control = std::make_shared<FakeControl>();
   control->prefill_capacity = 2;
   auto scheduler = MakeScheduler(control, 1);
@@ -2863,7 +2863,7 @@ void TestStreamStartPrecedesPrefill() {
     std::binary_semaphore started(0);
     auto consume = std::async(std::launch::async, [&] {
       return queued.Wait({}, {}, [&] {
-        Expect(queued.phase() == gufo::server::TextRequestPhase::kQueued,
+        Expect(queued.phase() == mbufo::server::TextRequestPhase::kQueued,
                "a queued stream starts before admission");
         ++starts;
         started.release();
@@ -2939,11 +2939,11 @@ void TestIgnoreEosIsRequestScoped() {
   auto control = std::make_shared<FakeControl>();
   control->eos_after = 0;
   auto scheduler = MakeScheduler(control, 1);
-  gufo::sampling::SamplingConfig sampling;
+  mbufo::sampling::SamplingConfig sampling;
   const auto normal = scheduler->Submit({1}, 4, sampling).Wait();
   Expect(normal.tokens.empty() &&
              normal.finish_reason ==
-                 gufo::server::TextGenerationBackend::FinishReason::kStop,
+                 mbufo::server::TextGenerationBackend::FinishReason::kStop,
          "normal request stops at EOS");
   TextGenerationScheduler::RequestMetadata metadata;
   metadata.stop_at_eos = false;
@@ -2951,12 +2951,12 @@ void TestIgnoreEosIsRequestScoped() {
       scheduler->Submit({2}, 4, sampling, {}, false, metadata).Wait();
   Expect(ignored.tokens.size() == 4 &&
              ignored.finish_reason ==
-                 gufo::server::TextGenerationBackend::FinishReason::kLength,
+                 mbufo::server::TextGenerationBackend::FinishReason::kLength,
          "ignore-EOS request reaches its exact token limit");
   const auto restored = scheduler->Submit({3}, 4, sampling).Wait();
   Expect(restored.tokens.empty() &&
              restored.finish_reason ==
-                 gufo::server::TextGenerationBackend::FinishReason::kStop,
+                 mbufo::server::TextGenerationBackend::FinishReason::kStop,
          "reused runner restores EOS stopping for the next request");
 }
 
@@ -3011,7 +3011,7 @@ int main() {
         Expect(b.tokens.size() == (limit == 0 || limit > 253 ? 253 : limit),
                "concurrent requests have independent context budgets");
         Expect(a.finish_reason ==
-                   gufo::server::TextGenerationBackend::FinishReason::kLength,
+                   mbufo::server::TextGenerationBackend::FinishReason::kLength,
                "exhausted context is reported as length");
       };
       run(0, 254);
@@ -3022,7 +3022,7 @@ int main() {
       const auto stopped = scheduler->Submit({3}, 0, 0.0F).Wait();
       Expect(stopped.tokens.size() == 150 &&
                  stopped.finish_reason ==
-                     gufo::server::TextGenerationBackend::FinishReason::kStop,
+                     mbufo::server::TextGenerationBackend::FinishReason::kStop,
              "unlimited default passes 128 tokens and still respects EOS");
       for (const auto size : {256, 257}) {
         bool rejected = false;
@@ -3092,8 +3092,8 @@ int main() {
   TestIdleDeviceProbe();
   TestStallMonitor();
   Expect(
-      gufo::server::detail::RequestsProcessing().load() == 0 &&
-          gufo::server::detail::RequestsDeferred().load() == 0,
+      mbufo::server::detail::RequestsProcessing().load() == 0 &&
+          mbufo::server::detail::RequestsDeferred().load() == 0,
       "all success, failure, cancellation and shutdown paths balance gauges");
   std::cout << "All text generation scheduler tests passed\n";
   return 0;

@@ -171,7 +171,7 @@ bool Same(const Maps& a, const Maps& b, const char* what) {
 // Check the router independently of the assignment-map builder: softmax,
 // selection without replacement, lowest-index ties, and renormalization.
 void CheckRouter(int tokens, int experts, int used, int pattern) {
-  namespace q = gufo::models::qwen38_flash_next::rocm;
+  namespace q = mbufo::models::qwen38_flash_next::rocm;
   const int stride = experts + 1;
   const std::size_t count = static_cast<std::size_t>(tokens) * used;
   constexpr std::int32_t kIdGuard = -771;

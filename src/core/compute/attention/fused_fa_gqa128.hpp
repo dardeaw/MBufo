@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_FUSED_FA_GQA128_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_FUSED_FA_GQA128_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_FUSED_FA_GQA128_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_FUSED_FA_GQA128_HPP_
 
 // Fused GQA flash-attention prefill for the (16Q, 8KV, d=128) dense shape
 // (e.g. Qwen3-Embedding-0.6B): online softmax with KV tiling -- the Q tile
@@ -20,7 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::fused_fa_gqa128 {
+namespace mbufo::core::compute::fused_fa_gqa128 {
 
 /// Exact geometry this kernel serves. The launcher returns false otherwise
 /// and the caller keeps its existing fallback chain (never partially run).
@@ -41,6 +41,6 @@ namespace gufo::core::compute::fused_fa_gqa128 {
     std::uint32_t num_kv_heads, std::uint32_t head_dim,
     hipStream_t stream, bool skip_kv_write = false);
 
-}  // namespace gufo::core::compute::fused_fa_gqa128
+}  // namespace mbufo::core::compute::fused_fa_gqa128
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_FUSED_FA_GQA128_HPP_
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_FUSED_FA_GQA128_HPP_

@@ -12,7 +12,7 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "tools" / "gufo" / "h3_preset_quality.py"
+MODULE_PATH = ROOT / "tools" / "mbufo" / "h3_preset_quality.py"
 sys.path.insert(0, str(MODULE_PATH.parents[1]))
 SPEC = importlib.util.spec_from_file_location("h3_preset_quality", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -142,7 +142,7 @@ else:
     raise AssertionError("wrong encoded duration passed")
 
 exact_parameters = {
-    "schema": "gufo.minimax-h3-text-generation.v1",
+    "schema": "mbufo.minimax-h3-text-generation.v1",
     "backend": "rocm-hip-gfx1151",
     "precision": "bf16-f32",
     "model_repository": "MiniMaxAI/MiniMax-H3",
@@ -226,7 +226,7 @@ with tempfile.TemporaryDirectory() as directory:
     media.write_bytes(b"mp4")
     check(MODULE.sibling_parameters(media) is None, "optional parameters")
     parameters = {
-        "schema": "gufo.minimax-h3-text-generation.v1",
+        "schema": "mbufo.minimax-h3-text-generation.v1",
         "preset": "exact-512",
     }
     (Path(directory) / "parameters.json").write_text(
@@ -236,7 +236,7 @@ with tempfile.TemporaryDirectory() as directory:
     check(linked is not None, "parameter report linked")
     check(linked["document"] == parameters, "parameter document retained")
     legacy_profile = {
-        "schema": "gufo.minimax-h3-profile-run.v1",
+        "schema": "mbufo.minimax-h3-profile-run.v1",
         "binary_sha256": MODULE.LEGACY_SCALAR_BINARY_SHA256,
         "parameters": parameters,
         "telemetry": {},

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-check-docs.py — Documentation integrity, local link, and syntax validator for gufo
+check-docs.py — Documentation integrity, local link, and syntax validator for mbufo
 
 Validates:
 1. Presence of maintained user/developer documentation and license notices.

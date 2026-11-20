@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GLIMMER_DRAFT_BACKEND_HPP_
-#define GUFO_MODELS_GLIMMER_DRAFT_BACKEND_HPP_
+#ifndef MBUFO_MODELS_GLIMMER_DRAFT_BACKEND_HPP_
+#define MBUFO_MODELS_GLIMMER_DRAFT_BACKEND_HPP_
 
 // Glimmer DFlash draft backend: block-diffusion target-bound feature draft.
 //
@@ -54,7 +54,7 @@
 #include "src/models/glimmer/draft_engine.hpp"
 #include "src/models/glimmer/engine.hpp"
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 
 /// Most draft tokens one round proposes: the target verifies [anchor, drafts...] in one batch of at most 32 rows.
 inline constexpr std::uint32_t kMaxDraftTokens = 31;
@@ -164,6 +164,6 @@ class GlimmerDflashDraftBackend final : public speculative::IDraftBackend {
   bool has_tail_{false};
 };
 
-}  // namespace gufo::models::glimmer
+}  // namespace mbufo::models::glimmer
 
-#endif  // GUFO_MODELS_GLIMMER_DRAFT_BACKEND_HPP_
+#endif  // MBUFO_MODELS_GLIMMER_DRAFT_BACKEND_HPP_

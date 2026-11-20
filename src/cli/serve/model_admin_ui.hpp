@@ -2,9 +2,9 @@
 
 #include <string_view>
 
-namespace gufo::server {
+namespace mbufo::server {
 
-inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
+inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
@@ -771,7 +771,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       <div class="card-header" style="margin-bottom:8px;">
         <div class="card-title">
           <span>Unified Memory & VRAM Gate (Strix Halo UMA / HIP)</span>
-          <span id="mem-rss-badge" class="badge">gufo RSS: -- GiB</span>
+          <span id="mem-rss-badge" class="badge">mbufo RSS: -- GiB</span>
         </div>
         <div id="mem-numbers" style="font-family:var(--mono);font-size:12px;color:var(--muted);">
           Loading memory telemetry...
@@ -808,7 +808,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
             <span>Model Catalog</span>
             <span id="catalog-count" class="badge">0 GGUFs</span>
           </div>
-          <span style="font-size:11px;font-family:var(--mono);color:var(--muted);">/mnt/nvme-data/gufo-models</span>
+          <span style="font-size:11px;font-family:var(--mono);color:var(--muted);">$MBUFO_MODELS_DIR</span>
         </div>
         <div class="catalog-controls">
           <input type="text" id="cat-search" placeholder="Search model name, quant, capability (e.g. bge, rerank, vision, 27B)..." oninput="renderCatalog()" />
@@ -1050,7 +1050,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
           setConnStatus('starting', 'Starting (:8741)');
           const b = document.getElementById('loading-banner');
           b.style.display = 'flex';
-          document.getElementById('loading-title').textContent = 'Starting gufo service & loading primary model into GPU/UMA...';
+          document.getElementById('loading-title').textContent = 'Starting mbufo service & loading primary model into GPU/UMA...';
           document.getElementById('loading-sub').textContent = 'Admin API will activate automatically once startup model finishes loading';
           document.getElementById('loading-elapsed').textContent = 'BOOTING';
           return false;
@@ -1070,16 +1070,16 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
         stateModels = { models: [], memory: {}, loading: { active: false } };
         const b = document.getElementById('loading-banner');
         b.style.display = 'flex';
-        document.getElementById('loading-title').textContent = 'gufo.service (:8741) is currently stopped or unreachable';
-        document.getElementById('loading-sub').textContent = 'Another benchmark/process may have stopped gufo.service. Dashboard will reconnect automatically when :8741 restarts.';
+        document.getElementById('loading-title').textContent = 'mbufo.service (:8741) is currently stopped or unreachable';
+        document.getElementById('loading-sub').textContent = 'Another benchmark/process may have stopped mbufo.service. Dashboard will reconnect automatically when :8741 restarts.';
         document.getElementById('loading-elapsed').textContent = 'OFFLINE';
-        document.getElementById('mem-rss-badge').textContent = 'gufo RSS: OFFLINE';
+        document.getElementById('mem-rss-badge').textContent = 'mbufo RSS: OFFLINE';
         document.getElementById('mem-numbers').textContent = 'Service :8741 unreachable — cached telemetry cleared';
         document.getElementById('mem-bar').innerHTML = '';
         document.getElementById('mem-legend').innerHTML = '';
         document.getElementById('loaded-count').textContent = '0 loaded (offline)';
         document.getElementById('loaded-list').innerHTML =
-          `<div style="padding:24px;text-align:center;color:var(--red);border:1px dashed rgba(239,68,68,0.4);border-radius:8px;">gufo.service (:8741) is offline. Stale model cards cleared.</div>`;
+          `<div style="padding:24px;text-align:center;color:var(--red);border:1px dashed rgba(239,68,68,0.4);border-radius:8px;">mbufo.service (:8741) is offline. Stale model cards cleared.</div>`;
         return false;
       }
     }
@@ -1101,7 +1101,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       const [okStatus] = await Promise.all([fetchStatus(), fetchCatalog()]);
       if (manual) {
         if (okStatus) showToast('Dashboard state refreshed');
-        else showToast('Cannot reach :8741 — gufo.service is currently stopped', true);
+        else showToast('Cannot reach :8741 — mbufo.service is currently stopped', true);
       }
     }
 
@@ -1124,7 +1124,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       const availMib = mem.host_available_mib || mem.device_free_mib || 0;
       const rssMib = mem.process_rss_mib || 0;
 
-      document.getElementById('mem-rss-badge').textContent = 'gufo RSS: ' + fmtGiB(rssMib);
+      document.getElementById('mem-rss-badge').textContent = 'mbufo RSS: ' + fmtGiB(rssMib);
       document.getElementById('mem-numbers').textContent =
         'Available: ' + fmtGiB(availMib) + ' / Total Unified RAM: ' + fmtGiB(totalMib) +
         ' (Safety Reserve: ' + fmtGiB(mem.safety_margin_mib || 2048) + ')';
@@ -1402,7 +1402,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       (stateCatalog.draft_files || []).forEach(p => {
         const opt = document.createElement('option');
         opt.value = p;
-        opt.textContent = p.replace('/mnt/nvme-data/gufo-models/', '');
+        opt.textContent = p.replace(/^.*\/mbufo-models\//, '');
         if (m.suggested_draft === p) opt.selected = true;
         draftSel.appendChild(opt);
       });
@@ -1412,7 +1412,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
       (stateCatalog.mmproj_files || []).forEach(p => {
         const opt = document.createElement('option');
         opt.value = p;
-        opt.textContent = p.replace('/mnt/nvme-data/gufo-models/', '');
+        opt.textContent = p.replace(/^.*\/mbufo-models\//, '');
         if (m.suggested_mmproj === p) opt.selected = true;
         mmSel.appendChild(opt);
       });
@@ -1765,6 +1765,6 @@ inline constexpr std::string_view kModelAdminUiHtml = R"GUFO_UI(<!DOCTYPE html>
   </script>
 </body>
 </html>
-)GUFO_UI";
+)MBUFO_UI";
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

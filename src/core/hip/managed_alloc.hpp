@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_HIP_MANAGED_ALLOC_HPP_
-#define GUFO_CORE_HIP_MANAGED_ALLOC_HPP_
+#ifndef MBUFO_CORE_HIP_MANAGED_ALLOC_HPP_
+#define MBUFO_CORE_HIP_MANAGED_ALLOC_HPP_
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
@@ -9,7 +9,7 @@
 
 #include "src/core/hip/heap_placement.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 /// Managed memory is fine-grain by default, so the GPU keeps it coherent
 /// with the CPU during a kernel. Weights and state are filled with hipMemcpy
@@ -95,8 +95,8 @@ private:
   Placement placement_;
 };
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_CORE_HIP_MANAGED_ALLOC_HPP_
+#endif  // MBUFO_CORE_HIP_MANAGED_ALLOC_HPP_

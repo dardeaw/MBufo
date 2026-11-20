@@ -24,7 +24,7 @@
 #include "src/models/minimax_h3/video_vae.hpp"
 #include "src/models/minimax_h3/video_vae_ops.hip.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -85,7 +85,7 @@ bool ValidateTarget(int* device, std::string* error) {
   if (!std::string_view(properties.gcnArchName).starts_with("gfx1151") ||
       properties.integrated == 0) {
     SetError(error,
-             "MiniMax H3 VisualVAE supports only integrated gfx1151 Gufo "
+             "MiniMax H3 VisualVAE supports only integrated gfx1151 MBufo "
              "Halo; detected " +
                  std::string(properties.gcnArchName));
     return false;
@@ -1194,6 +1194,6 @@ int VideoVaeDecoder::tile_pixels() const noexcept {
   return impl_ == nullptr ? 0 : impl_->tile_size;
 }
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3
 
 #endif  // ENGINE_ENABLE_HIP

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_MOE_HPP_
-#define GUFO_MODELS_QWEN_HIP_MOE_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_MOE_HPP_
+#define MBUFO_MODELS_QWEN_HIP_MOE_HPP_
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -13,7 +13,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/state.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // Routed-MoE forward for qwen35moe layers (HIP): router SGEMM, shared
 // RouterTopK, RoutedCompact, device-built tiles, RoutedF16Gemm gate/up/down,
@@ -27,6 +27,6 @@ bool MoeForwardHip(const core::ModelConfig& config,
                    hipblasHandle_t blas, void* preq_scratch,
                    std::size_t preq_bytes, std::string* error_msg);
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
-#endif  // GUFO_MODELS_QWEN_HIP_MOE_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_MOE_HPP_

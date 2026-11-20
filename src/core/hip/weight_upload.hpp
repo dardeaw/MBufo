@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_HIP_WEIGHT_UPLOAD_HPP_
-#define GUFO_CORE_HIP_WEIGHT_UPLOAD_HPP_
+#ifndef MBUFO_CORE_HIP_WEIGHT_UPLOAD_HPP_
+#define MBUFO_CORE_HIP_WEIGHT_UPLOAD_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +9,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 /// Bounded disk-to-device pipeline. Copy queues a tensor without waiting for
 /// its upload; destinations must remain alive until Finish or destruction.
@@ -33,6 +33,6 @@ private:
   std::unique_ptr<State> state_;
 };
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif

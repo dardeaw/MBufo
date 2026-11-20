@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_GEMM_DISPATCHER_HPP_
-#define GUFO_CORE_COMPUTE_GEMM_DISPATCHER_HPP_
+#ifndef MBUFO_CORE_COMPUTE_GEMM_DISPATCHER_HPP_
+#define MBUFO_CORE_COMPUTE_GEMM_DISPATCHER_HPP_
 
 // Phase B-3 GEMM dispatcher (GGUF通用化.md v2 §4): a pure routing decision,
 // no kernels. Callers keep their legacy path for kLegacy, so wiring the
@@ -12,12 +12,12 @@
 //   * decode MoE K-quant -> kDecodeKQuant (lightweight fused slot kernel,
 //     moe_decode_kq.hip; n <= 8, SwiGLU, Q4_K/Q5_K gate-up, Q5_K/Q8_0 down)
 //
-// quant_code uses the GUFO_GEMM_* codes from gemm.hpp; this header is
+// quant_code uses the MBUFO_GEMM_* codes from gemm.hpp; this header is
 // included after those defines (see gemm.hpp).
 
 #include <cstddef>
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 
 // W8A8 varlen fixed shape: the Wave64 kernel family instantiation moved here
 // verbatim (see w8a8_wmma.hip). main = batch & ~15 runs the original kernel
@@ -38,10 +38,10 @@ enum class PrefillRoute { kLegacy, kW8A8Varlen, kHipBlasLt };
                                                      std::size_t /*batch*/,
                                                      std::size_t k,
                                                      int quant_code) {
-  if (quant_code == GUFO_GEMM_Q8_0 && W8A8VarlenCovers(m, k)) {
+  if (quant_code == MBUFO_GEMM_Q8_0 && W8A8VarlenCovers(m, k)) {
     return PrefillRoute::kW8A8Varlen;
   }
-  if (quant_code == GUFO_GEMM_F16 || quant_code == GUFO_GEMM_BF16) {
+  if (quant_code == MBUFO_GEMM_F16 || quant_code == MBUFO_GEMM_BF16) {
     return PrefillRoute::kHipBlasLt;
   }
   return PrefillRoute::kLegacy;
@@ -252,6 +252,6 @@ enum class MoeDecodeFusedRoute { kLegacy, kFusedMxfp4 };
   return MoeDecodeFusedRoute::kFusedMxfp4;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
-#endif  // GUFO_CORE_COMPUTE_GEMM_DISPATCHER_HPP_
+#endif  // MBUFO_CORE_COMPUTE_GEMM_DISPATCHER_HPP_

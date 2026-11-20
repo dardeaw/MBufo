@@ -7,7 +7,7 @@
 
 #include "src/models/qwen/hip/ops/norm_residual.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 template<std::size_t CachedDim = 0>
 __global__ void RMSNormKernel(const float* __restrict__ x,
@@ -116,5 +116,5 @@ void LaunchPerHeadRMSNorm(const float* x, const float* weight, float* out,
   PerHeadRMSNormKernel<<<num_heads, 256, 0, stream>>>(x, weight, out, num_heads,
                                                       head_dim, eps);
 }
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

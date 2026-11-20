@@ -35,7 +35,7 @@ DATASETS = {
         "dataset_url": "https://huggingface.co/datasets/Wanfq/gpqa",
         "license": "CC BY 4.0",
         "audit_note": (
-            "DS4 marks this row as modified; Gufo preserves the DS4 prompt and "
+            "DS4 marks this row as modified; MBufo preserves the DS4 prompt and "
             "key without further local repair."
         ),
     },
@@ -235,7 +235,7 @@ def build_document(repository: Path) -> dict[str, Any]:
         for case in rows[75:]
     ]
     return {
-        "schema": "gufo.eval-cases.v2",
+        "schema": "mbufo.eval-cases.v2",
         "benchmark": "Antirez DS4 capability subset",
         "source_repository": "https://github.com/antirez/ds4",
         "source_revision": DS4_REVISION,
@@ -304,7 +304,7 @@ def build_official_document(repository: Path) -> dict[str, Any]:
             "token_bytes_hex": [token.hex() for token in tokens],
         })
     return {
-        "schema": "gufo.ds4-official-continuations.v1",
+        "schema": "mbufo.ds4-official-continuations.v1",
         "source_repository": "https://github.com/antirez/ds4",
         "source_revision": revision,
         "checkpoint": "0731",

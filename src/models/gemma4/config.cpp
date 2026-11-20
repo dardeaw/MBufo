@@ -3,7 +3,7 @@
 #include <cmath>
 #include <string>
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 namespace {
 
 constexpr std::string_view kArchitecture = "gemma4";
@@ -65,6 +65,21 @@ struct Reader {
     return out;
   }
 
+  /// One value per layer from either a per-layer array or a scalar (Gemma 4 E-models store scalars).
+  std::vector<std::uint64_t> PerLayer(std::string_view key, std::size_t n) {
+    const auto* meta = gguf.FindMetadata(key);
+    if (meta != nullptr && (std::holds_alternative<std::vector<std::uint64_t>>(meta->value) ||
+                            std::holds_alternative<std::vector<std::int64_t>>(meta->value))) {
+      return U64Array(key);
+    }
+    const auto v = gguf.GetMetadataUint32(key);
+    if (!v.has_value()) {
+      Fail("missing or invalid GGUF integer or array " + std::string(key));
+      return {};
+    }
+    return std::vector<std::uint64_t>(n, *v);
+  }
+
   std::vector<bool> BoolArray(std::string_view key, bool required = true) {
     const auto* meta = gguf.FindMetadata(key);
     std::vector<bool> out;
@@ -92,15 +107,13 @@ std::uint32_t Config::KvProducingLayer(std::uint32_t layer) const {
     return num_layers;
   if (shared_kv_layers == 0)
     return layer;  // llama.cpp: n_layer_kv_from_start == num_layers, all own KV.
-  if (!LayerIsSwa(layer))
+  // llama.cpp (gemma4, iswa cache reuse): the first n_layer_kv_from_start = num_layers - shared_kv_layers layers own a cache;
+  // each later layer reads the cache of layer n_layer_kv_from_start - 2 (sliding-window layers) or - 1 (full-attention layers).
+  const std::uint32_t kv_from_start = num_layers > shared_kv_layers ? num_layers - shared_kv_layers : 0;
+  if (layer < kv_from_start)
     return layer;
-  // SWA layers read the KV cache written by the nearest preceding
-  // non-SWA layer (the full-attention producer).
-  for (std::uint32_t i = layer; i-- > 0;) {
-    if (!LayerIsSwa(i))
-      return i;
-  }
-  return layer;
+  const std::uint32_t back = LayerIsSwa(layer) ? 2u : 1u;
+  return kv_from_start >= back ? kv_from_start - back : layer;
 }
 
 std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
@@ -123,7 +136,7 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   c.rms_eps = r.F32(key("attention.layer_norm_rms_epsilon"), 1e-6F);
   c.num_heads = r.U32(key("attention.head_count"));
   {
-    const auto kv = r.U64Array(key("attention.head_count_kv"));
+    const auto kv = r.PerLayer(key("attention.head_count_kv"), c.num_layers);
     if (kv.size() != c.num_layers) {
       r.Fail("attention.head_count_kv must have one entry per layer");
     } else {
@@ -186,7 +199,18 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   c.num_experts = r.U32(key("expert_count"), false);
   c.experts_used = r.U32(key("expert_used_count"), false);
   c.expert_ff = r.U32(key("expert_feed_forward_length"), false);
-  c.shared_ff = r.U32(key("feed_forward_length"));
+  {
+    const auto ff = r.PerLayer(key("feed_forward_length"), c.num_layers);
+    if (ff.size() != c.num_layers) {
+      r.Fail("feed_forward_length must be a scalar or have one entry per layer");
+    } else {
+      for (auto v : ff) {
+        c.ff_per_layer.push_back(static_cast<std::uint32_t>(v));
+        if (v > c.shared_ff) c.shared_ff = static_cast<std::uint32_t>(v);
+      }
+    }
+  }
+  c.ple_dim = r.U32(key("embedding_length_per_layer_input"), false, 0);
   c.final_logit_softcapping =
       r.F32(key("final_logit_softcapping"), 0.0F);
 
@@ -209,4 +233,4 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   return c;
 }
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4

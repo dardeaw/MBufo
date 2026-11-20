@@ -1,5 +1,5 @@
-#ifndef GUFO_CACHE_ADAPTER_HPP_
-#define GUFO_CACHE_ADAPTER_HPP_
+#ifndef MBUFO_CACHE_ADAPTER_HPP_
+#define MBUFO_CACHE_ADAPTER_HPP_
 
 #include <cstddef>
 #include <memory>
@@ -11,7 +11,7 @@
 #include "src/cache/stream.hpp"
 #include "src/cache/types.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 
 class MutationGuard {
 public:
@@ -155,6 +155,6 @@ public:
   [[nodiscard]] virtual bool Invalidate(Slot&) noexcept = 0;
 };
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 
 #endif

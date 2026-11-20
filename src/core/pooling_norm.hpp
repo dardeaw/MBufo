@@ -11,8 +11,8 @@
 // device handle, and no retained state. The CPU reference below is what the
 // first serving leg uses; `src/core/compute/pooling/pooling_norm.hip` holds
 // the device twin behind ENGINE_ENABLE_HIP.
-#ifndef GUFO_CORE_POOLING_NORM_HPP_
-#define GUFO_CORE_POOLING_NORM_HPP_
+#ifndef MBUFO_CORE_POOLING_NORM_HPP_
+#define MBUFO_CORE_POOLING_NORM_HPP_
 
 #include <cmath>
 #include <cstddef>
@@ -20,7 +20,7 @@
 #include <optional>
 #include <span>
 
-namespace gufo::core::embedding {
+namespace mbufo::core::embedding {
 
 /// Sequence-to-vector reduction a model artifact declares.
 enum class PoolingStrategy : std::uint8_t {
@@ -113,6 +113,6 @@ void L2NormalizeDevice(float* vec, std::size_t dim, double* norm_out,
                        void* stream);
 #endif
 
-}  // namespace gufo::core::embedding
+}  // namespace mbufo::core::embedding
 
-#endif  // GUFO_CORE_POOLING_NORM_HPP_
+#endif  // MBUFO_CORE_POOLING_NORM_HPP_

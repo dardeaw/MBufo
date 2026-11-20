@@ -28,8 +28,8 @@
 //
 // Golden parity: tests/models/bge_m3/testdata/*.json (343 HF-generated
 // vectors) must match exactly; any NFKC-version drift shows up there first.
-#ifndef GUFO_MODELS_BGE_M3_TOKENIZER_HPP_
-#define GUFO_MODELS_BGE_M3_TOKENIZER_HPP_
+#ifndef MBUFO_MODELS_BGE_M3_TOKENIZER_HPP_
+#define MBUFO_MODELS_BGE_M3_TOKENIZER_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -41,7 +41,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 
 class SpmUnigramTokenizer {
  public:
@@ -93,6 +93,6 @@ class SpmUnigramTokenizer {
   std::uint32_t unk_id_{3};
 };
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3
 
-#endif  // GUFO_MODELS_BGE_M3_TOKENIZER_HPP_
+#endif  // MBUFO_MODELS_BGE_M3_TOKENIZER_HPP_

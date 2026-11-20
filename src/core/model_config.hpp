@@ -1,11 +1,11 @@
-#ifndef GUFO_CORE_MODEL_CONFIG_HPP_
-#define GUFO_CORE_MODEL_CONFIG_HPP_
+#ifndef MBUFO_CORE_MODEL_CONFIG_HPP_
+#define MBUFO_CORE_MODEL_CONFIG_HPP_
 
 #include <cstdint>
 #include <string>
 #include <string_view>
 
-namespace gufo::core {
+namespace mbufo::core {
 
 /// Unified architectural configuration parsed dynamically from GGUF metadata or
 /// JSON.
@@ -124,6 +124,6 @@ struct ModelConfig {
   }
 };
 
-}  // namespace gufo::core
+}  // namespace mbufo::core
 
-#endif  // GUFO_CORE_MODEL_CONFIG_HPP_
+#endif  // MBUFO_CORE_MODEL_CONFIG_HPP_

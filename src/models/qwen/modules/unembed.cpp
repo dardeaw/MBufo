@@ -2,7 +2,7 @@
 
 #include "src/models/qwen/forward.hpp"  // ForwardRMSNorm, TensorGEMV
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 void UnembedForward(const CpuLayerContext& ctx,
                     const QwenTensorRef& output_norm,
@@ -20,4 +20,4 @@ void UnembedForward(const CpuLayerContext& ctx,
   }
 }
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

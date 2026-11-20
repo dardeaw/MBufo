@@ -1,11 +1,11 @@
-#ifndef GUFO_CORE_UTF8_HPP_
-#define GUFO_CORE_UTF8_HPP_
+#ifndef MBUFO_CORE_UTF8_HPP_
+#define MBUFO_CORE_UTF8_HPP_
 
 #include <cstddef>
 #include <string>
 #include <string_view>
 
-namespace gufo::core {
+namespace mbufo::core {
 
 // Token pieces can split a Unicode scalar or contain malformed byte fallback
 // output. JSON events must contain complete UTF-8; incomplete valid prefixes
@@ -60,6 +60,6 @@ private:
   std::string pending_;
 };
 
-}  // namespace gufo::core
+}  // namespace mbufo::core
 
-#endif  // GUFO_CORE_UTF8_HPP_
+#endif  // MBUFO_CORE_UTF8_HPP_

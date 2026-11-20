@@ -18,8 +18,8 @@
 #include "src/testing/compare/logit_comparator.hpp"
 
 namespace {
-using Token = gufo::tokenization::TokenId;
-using Executor = gufo::hip::QwenGpuExecutor;
+using Token = mbufo::tokenization::TokenId;
+using Executor = mbufo::hip::QwenGpuExecutor;
 
 void Expect(bool condition, const std::string& message) {
   if (!condition)
@@ -68,13 +68,13 @@ std::string Fingerprint(std::span<const float> values) {
       !values.empty() &&
           std::ranges::all_of(values, [](float v) { return std::isfinite(v); }),
       "fingerprinted values must be finite and nonempty");
-  return gufo::crypto::Sha256Hex(
+  return mbufo::crypto::Sha256Hex(
       {reinterpret_cast<const std::uint8_t*>(values.data()),
        values.size_bytes()});
 }
 
 void CheckPrefillReplay(
-    const std::shared_ptr<const gufo::hip::QwenGpuModel>& model) {
+    const std::shared_ptr<const mbufo::hip::QwenGpuModel>& model) {
   std::string error;
   auto executor = Executor::Create(model, &error, 12288);
   Expect(executor != nullptr, error);
@@ -92,7 +92,7 @@ void CheckPrefillReplay(
     // Q8 uses the same projection precision at every chunk size. Q4's
     // separately qualified large-prefill route uses FP16 activations.
     if (check_chunks && model->GetWeights().layers.front().ffn_gate.type !=
-                            gufo::core::GgmlType::kQ8_0)
+                            mbufo::core::GgmlType::kQ8_0)
       continue;
     const std::uint32_t end = depth + length;
     std::vector<Token> tokens(end + 2);
@@ -101,7 +101,7 @@ void CheckPrefillReplay(
     const auto prompt = std::span(tokens).subspan(depth, length);
     executor->Reset();
     executor->SetPromptHiddenCapture(false);
-    std::unique_ptr<gufo::hip::QwenGpuSnapshot> prefix;
+    std::unique_ptr<mbufo::hip::QwenGpuSnapshot> prefix;
     if (depth != 0) {
       const auto prefill_depth = check_chunks ? depth - 1 : depth;
       (void)executor->ForwardPromptBatch(
@@ -131,7 +131,7 @@ void CheckPrefillReplay(
               << '\n';
 
     if (length >= 1024 && model->GetWeights().layers.front().ffn_gate.type !=
-                              gufo::core::GgmlType::kQ8_0) {
+                              mbufo::core::GgmlType::kQ8_0) {
       const auto cropped = executor->SaveSnapshot(end);
       if (prefix)
         executor->RestoreSnapshot(*prefix);
@@ -237,9 +237,9 @@ void CheckVerificationFeatures(Executor& executor,
 }
 
 void CheckMixedContextBatch(const Executor& owner, bool replay) {
-  for (const auto storage : {gufo::hip::QwenKvCacheStorage::kFp16,
-                             gufo::hip::QwenKvCacheStorage::kFp32}) {
-    auto policy = gufo::hip::QwenExecutionPolicy::Production();
+  for (const auto storage : {mbufo::hip::QwenKvCacheStorage::kFp16,
+                             mbufo::hip::QwenKvCacheStorage::kFp32}) {
+    auto policy = mbufo::hip::QwenExecutionPolicy::Production();
     policy.kv_cache_storage = storage;
     Executor short_session(owner.GetSharedModel(), 32, policy);
     Executor long_session(owner.GetSharedModel(), 64, policy);
@@ -269,7 +269,7 @@ void CheckMixedContextBatch(const Executor& owner, bool replay) {
         session.SaveState(prefix_sizes[row]);
     }
     for (std::uint32_t step = 0; step < continuation; ++step) {
-      std::array<gufo::hip::QwenGpuBatchItem, 3> items;
+      std::array<mbufo::hip::QwenGpuBatchItem, 3> items;
       for (std::size_t row = 0; row < sessions.size(); ++row) {
         const auto position = prefix_sizes[row] + step;
         items[row] = {sessions[row], tokens[row][position], position};
@@ -286,7 +286,7 @@ void CheckMixedContextBatch(const Executor& owner, bool replay) {
         const bool exact = ByteEqual(actual, expected[row][step]);
         if (!exact) {
           const auto comparison =
-              gufo::testing::CompareLogits(actual, expected[row][step]);
+              mbufo::testing::CompareLogits(actual, expected[row][step]);
           std::cerr << "mixed-context storage=" << static_cast<int>(storage)
                     << " replay=" << replay << " row=" << row
                     << " step=" << step
@@ -319,8 +319,8 @@ void CheckConcurrencyWidths(const Executor& owner) {
   constexpr std::size_t count = 8;
   constexpr std::array<std::uint32_t, 5> taps{6, 20, 34, 48, 62};
   std::array<std::unique_ptr<Executor>, count> sessions;
-  std::array<std::unique_ptr<gufo::hip::QwenGpuSnapshot>, count> snapshots;
-  std::array<gufo::hip::QwenGpuBatchItem, count> items;
+  std::array<std::unique_ptr<mbufo::hip::QwenGpuSnapshot>, count> snapshots;
+  std::array<mbufo::hip::QwenGpuBatchItem, count> items;
   std::array<std::vector<Token>, count> tokens;
   std::array<std::array<std::vector<float>, 9>, count> expected_logits;
   std::array<std::array<std::vector<float>, 9>, count> expected_features;
@@ -375,7 +375,7 @@ void CheckConcurrencyWidths(const Executor& owner) {
       if ((cohort_rows > 16 && width != count) ||
           (cohort_rows > 0 && cohort_rows <= 16 && width != 2))
         continue;
-      std::array<gufo::hip::QwenGpuVerificationItem, count> verification_items;
+      std::array<mbufo::hip::QwenGpuVerificationItem, count> verification_items;
       for (std::size_t row = 0; row < width; ++row) {
         const auto position = items[row].position;
         const std::size_t length =
@@ -445,7 +445,7 @@ void CheckConcurrencyWidths(const Executor& owner) {
   for (std::size_t stage = 0; stage < 4; ++stage) {
     const auto active = count >> stage;
     const auto offset = stage * 2;
-    std::vector<gufo::hip::QwenGpuVerificationItem> chunks;
+    std::vector<mbufo::hip::QwenGpuVerificationItem> chunks;
     for (std::size_t row = 0; row < active; ++row) {
       const auto position =
           items[row].position + static_cast<std::uint32_t>(offset);
@@ -481,7 +481,7 @@ void CheckConcurrencyWidths(const Executor& owner) {
                                  position + committed);
       const auto actual = Logits(session);
       if (!ByteEqual(actual, expected_logits[row][committed])) {
-        const auto difference = gufo::testing::CompareLogits(
+        const auto difference = mbufo::testing::CompareLogits(
             actual, expected_logits[row][committed]);
         std::cerr << "chunk replay stage=" << stage << " row=" << row
                   << " committed=" << committed
@@ -540,10 +540,10 @@ enum class CheckMode { kAll, kPrefill, kConcurrency };
 std::vector<Case> Capture(const char* path, bool check_replay,
                           CheckMode mode = CheckMode::kAll) {
   std::string error;
-  auto owner = gufo::core::GgufReader::OpenFile(path, &error);
+  auto owner = mbufo::core::GgufReader::OpenFile(path, &error);
   Expect(owner != nullptr, error);
   auto executor = Executor::CreateFromGguf(
-      std::shared_ptr<const gufo::core::GgufReader>(std::move(owner)), &error,
+      std::shared_ptr<const mbufo::core::GgufReader>(std::move(owner)), &error,
       128);
   Expect(executor != nullptr, error);
   Expect(executor->GetConfig().hidden_size == 5120 &&
@@ -622,7 +622,7 @@ std::vector<Case> Capture(const char* path, bool check_replay,
       for (std::size_t index = 0; index < suffix.size(); ++index) {
         const auto logits = executor->CopyVerificationLogits(index);
         const auto comparison =
-            gufo::testing::CompareLogits(logits, row.logits[index + 1]);
+            mbufo::testing::CompareLogits(logits, row.logits[index + 1]);
         std::cout << "verification case=" << cases.size() << " row=" << index
                   << " exact=" << ByteEqual(logits, row.logits[index + 1])
                   << " max_abs=" << comparison.max_abs_diff << '\n';
@@ -657,7 +657,7 @@ std::vector<Case> Capture(const char* path, bool check_replay,
                                      pos + 1 == prompt_size);
       }
       const auto comparison =
-          gufo::testing::CompareLogits(Logits(*executor), row.logits.front());
+          mbufo::testing::CompareLogits(Logits(*executor), row.logits.front());
       std::cout << "prefill case=" << cases.size()
                 << " top1_match=" << comparison.top1_match
                 << " rmse=" << comparison.root_mean_square_error
@@ -704,7 +704,7 @@ void CompareReference(const std::vector<Case>& candidate,
         kl += probability * ((p[t] - log_p) - (q[t] - log_q));
         tv += std::abs(probability - std::exp(q[t] - log_q)) * 0.5;
       }
-      const auto cmp = gufo::testing::CompareLogits(p, q);
+      const auto cmp = mbufo::testing::CompareLogits(p, q);
       total_kl += kl;
       total_tv += tv;
       top1 += cmp.top1_match;
@@ -721,7 +721,7 @@ void CompareReference(const std::vector<Case>& candidate,
     }
   }
   // These are measurements, not a claim that different quantizations must
-  // produce identical distributions or that Gufo BF16 is independent truth.
+  // produce identical distributions or that MBufo BF16 is independent truth.
   std::cout << "reference rows=" << rows << " top1=" << top1
             << " mean_kl=" << total_kl / rows << " mean_tv=" << total_tv / rows
             << " mean_nll_delta=" << total_nll_delta / labels << '\n';
@@ -730,9 +730,9 @@ void CompareReference(const std::vector<Case>& candidate,
 
 int main(int argc, const char* const* argv) {
   try {
-    const char* model = argc > 1 ? argv[1] : std::getenv("GUFO_QWEN27B_MODEL");
+    const char* model = argc > 1 ? argv[1] : std::getenv("MBUFO_QWEN27B_MODEL");
     if (model == nullptr) {
-      std::cout << "Set GUFO_QWEN27B_MODEL for the Qwen27B target check.\n";
+      std::cout << "Set MBUFO_QWEN27B_MODEL for the Qwen27B target check.\n";
       return 77;
     }
     if (argc == 3 && std::string_view(argv[2]) == "--prefill-only") {

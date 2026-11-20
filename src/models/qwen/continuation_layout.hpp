@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_CONTINUATION_LAYOUT_HPP_
-#define GUFO_MODELS_QWEN_CONTINUATION_LAYOUT_HPP_
+#ifndef MBUFO_MODELS_QWEN_CONTINUATION_LAYOUT_HPP_
+#define MBUFO_MODELS_QWEN_CONTINUATION_LAYOUT_HPP_
 
 #include <span>
 #include <vector>
@@ -8,7 +8,7 @@
 #include "src/core/model_config.hpp"
 #include "src/models/qwen/hip/execution_policy.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 enum class ContinuationPart {
   kMetadata,
@@ -61,5 +61,5 @@ private:
   std::vector<ContinuationComponent> components_;
 };
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 #endif

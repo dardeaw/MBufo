@@ -51,18 +51,18 @@ std::vector<std::uint8_t> BuildImage(std::string_view name_value,
   pod(static_cast<std::uint64_t>(2));  // tensor count
   pod(static_cast<std::uint64_t>(1));  // metadata count
   string("general.name");
-  pod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kString));
+  pod(static_cast<std::uint32_t>(mbufo::core::GgufValueType::kString));
   string(name_value);
 
   string(first_tensor_name);
   pod(static_cast<std::uint32_t>(1));
   pod(static_cast<std::uint64_t>(first_bytes / 2));
-  pod(static_cast<std::uint32_t>(gufo::core::GgmlType::kF16));
+  pod(static_cast<std::uint32_t>(mbufo::core::GgmlType::kF16));
   pod(static_cast<std::uint64_t>(0));
   string("second");
   pod(static_cast<std::uint32_t>(1));
   pod(static_cast<std::uint64_t>(second_bytes / 2));
-  pod(static_cast<std::uint32_t>(gufo::core::GgmlType::kF16));
+  pod(static_cast<std::uint32_t>(mbufo::core::GgmlType::kF16));
   pod(static_cast<std::uint64_t>(first_bytes));
 
   while (buffer.size() % 32 != 0) {
@@ -79,7 +79,7 @@ std::vector<std::uint8_t> BuildImage(std::string_view name_value,
 std::size_t PayloadBase(const std::vector<std::uint8_t>& image) {
   std::string error;
   const auto reader =
-      gufo::core::GgufReader::OpenMemory(image.data(), image.size(), &error);
+      mbufo::core::GgufReader::OpenMemory(image.data(), image.size(), &error);
   Expect(reader != nullptr, "open image: " + error);
   return static_cast<std::size_t>(
       static_cast<const std::uint8_t*>(reader->GetTensors()[0].data) -
@@ -89,9 +89,9 @@ std::size_t PayloadBase(const std::vector<std::uint8_t>& image) {
 std::string Identity(const std::vector<std::uint8_t>& image) {
   std::string error;
   const auto reader =
-      gufo::core::GgufReader::OpenMemory(image.data(), image.size(), &error);
+      mbufo::core::GgufReader::OpenMemory(image.data(), image.size(), &error);
   Expect(reader != nullptr, "open image: " + error);
-  return gufo::core::GgufIdentityHex(*reader);
+  return mbufo::core::GgufIdentityHex(*reader);
 }
 
 void TestDeterministic() {
@@ -142,7 +142,7 @@ void TestEveryPayloadByte() {
 }
 
 void TestFileDigestCache() {
-  char temp[] = "/tmp/gufo-identity-XXXXXX";
+  char temp[] = "/tmp/mbufo-identity-XXXXXX";
   Expect(mkdtemp(temp) != nullptr, "create cache test directory");
   const std::filesystem::path root(temp);
   const char* old_cache = std::getenv("XDG_CACHE_HOME");
@@ -159,14 +159,14 @@ void TestFileDigestCache() {
   write();
   auto read = [&] {
     std::string error;
-    auto reader = gufo::core::GgufReader::OpenFile(path.string(), &error);
+    auto reader = mbufo::core::GgufReader::OpenFile(path.string(), &error);
     Expect(reader != nullptr, "open file: " + error);
-    return gufo::core::GgufIdentityHex(*reader);
+    return mbufo::core::GgufIdentityHex(*reader);
   };
   const auto first = read();
   Expect(first == Identity(bytes), "file and memory full digests agree");
   Expect(read() == first, "cached digest agrees with initial scan");
-  const auto cache = root / "gufo" / "gguf-sha256-v1";
+  const auto cache = root / "mbufo" / "gguf-sha256-v1";
   Expect(std::distance(std::filesystem::directory_iterator(cache),
                        std::filesystem::directory_iterator{}) == 1,
          "one cached full digest exists");
@@ -195,28 +195,28 @@ void TestFileDigestCache() {
 void TestPipelinedFileHash() {
   const auto bytes = BuildImage("pipeline", "first", 40 * 1024 * 1024, 8194);
   const auto path = std::filesystem::temp_directory_path() /
-                    ("gufo-identity-pipeline-" + std::to_string(getpid()));
+                    ("mbufo-identity-pipeline-" + std::to_string(getpid()));
   {
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
   }
   std::string error;
-  const auto reader = gufo::core::GgufReader::OpenFile(path.string(), &error);
+  const auto reader = mbufo::core::GgufReader::OpenFile(path.string(), &error);
   Expect(reader != nullptr, "pipelined fixture opens");
-  Expect(gufo::core::GgufIdentityHex(*reader) == Identity(bytes),
+  Expect(mbufo::core::GgufIdentityHex(*reader) == Identity(bytes),
          "parallel disk reads hash all chunks and the unaligned tail in order");
   std::filesystem::remove(path);
 }
 
 void TestSha256() {
   const std::string text = "abc";
-  gufo::crypto::Sha256Hasher hash;
+  mbufo::crypto::Sha256Hasher hash;
   for (unsigned char byte : text)
     hash.Update({&byte, 1});
   Expect(hash.FinishHex() ==
              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
          "incremental SHA-256 matches independent standard vector");
-  Expect(gufo::crypto::Sha256Hex({}) ==
+  Expect(mbufo::crypto::Sha256Hex({}) ==
              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
          "empty SHA-256 matches standard vector");
 }

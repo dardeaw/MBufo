@@ -1,9 +1,9 @@
-#ifndef GUFO_CACHE_STREAM_HPP_
-#define GUFO_CACHE_STREAM_HPP_
+#ifndef MBUFO_CACHE_STREAM_HPP_
+#define MBUFO_CACHE_STREAM_HPP_
 
 #include "src/cache/completion.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 
 // The cache owns streams. Adapters may reject an incompatible stream type.
 // Transfers on one stream are FIFO; different streams have no implicit order.
@@ -20,6 +20,6 @@ public:
   [[nodiscard]] virtual TransferResult Synchronize() noexcept = 0;
 };
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 
 #endif

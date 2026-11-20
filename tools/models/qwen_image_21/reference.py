@@ -27,7 +27,7 @@ def main():
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--image", type=Path)
     parser.add_argument("--teacher-force", action="store_true",
-                        help="Replay each official block with Gufo's saved block inputs")
+                        help="Replay each official block with MBufo's saved block inputs")
     parser.add_argument("--skip-decode", action="store_true",
                         help="Compare denoising latents without running the VAE decoder")
     args = parser.parse_args()

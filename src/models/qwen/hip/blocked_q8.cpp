@@ -1,11 +1,13 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/qwen/hip/blocked_q8.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "src/core/compute/attention/blocked_kv.hpp"
+#include "src/core/compute/attention/blocked_splitk.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 bool ValidateQwenBlockedQ8Config(const core::ModelConfig& config,
                                  std::string* error) {
@@ -63,7 +65,9 @@ void ReadQwenBlockedAttention(const float* q, const std::uint8_t* blocked_k,
                               float* out, std::uint32_t n_tokens,
                               const std::uint32_t* d_pos, std::uint32_t heads,
                               std::uint32_t kv_heads, std::uint32_t head_dim,
-                              hipStream_t stream) {
+                              hipStream_t stream, std::uint32_t kv_len,
+                              float* splitk_partials,
+                              std::size_t splitk_partial_bytes) {
   namespace blocked = core::compute::blocked_kv;
   if (q == nullptr || blocked_k == nullptr || blocked_v == nullptr ||
       out == nullptr || d_pos == nullptr) {
@@ -84,10 +88,27 @@ void ReadQwenBlockedAttention(const float* q, const std::uint8_t* blocked_k,
   // Dense causal prefix, like the F16 decode kernels: query t at absolute
   // position *d_pos + t attends keys [0, *d_pos + t]. The scale defaults to
   // 1/sqrt(d), matching the F16 decode kernels (score_scale 0 selects it).
-  blocked::AttentionKv(q, blocked_k, blocked_v, nullptr, 0, out, nullptr, 1,
-                       n_tokens, d_pos, heads, kv_heads, head_dim, 1,
-                       kQwenBlockedQ8BlockBytes, kQwenBlockedQ8BlockBytes,
-                       blocked::KvCodec::kQ8, stream);
+  bool done = false;
+  if (kv_len != 0 && splitk_partials != nullptr && head_dim == 256 && heads <= 32 && kv_len >= n_tokens) {
+    // Row-chunk Split-K (core blocked_splitk): a row's split depends only on its own length, so the rows of a verify batch
+    // equal the same rows decoded one at a time, and `kv_len` (the host-visible length of the LAST row) only sizes the grid.
+    // Batches wider than the kernel's 8 rows run in groups. 1/sqrt(256) is exactly representable, so the score scale is the
+    // value the single-block scan derives.
+    done = true;
+    for (std::uint32_t g = 0; g < n_tokens && done; g += 8) {
+      const std::uint32_t cnt = std::min<std::uint32_t>(8, n_tokens - g);
+      done = core::compute::blocked_splitk::AttentionBlockedSplitKRowChunk<core::compute::blocked_splitk::KvCodecQ8, 256>(
+          q + static_cast<std::size_t>(g) * heads * head_dim, blocked_k, blocked_v,
+          out + static_cast<std::size_t>(g) * heads * head_dim, cnt, d_pos + g, kv_len - (n_tokens - (g + cnt)), heads,
+          kv_heads, head_dim, stream, 0.0625F, kQwenBlockedQ8BlockBytes, kQwenBlockedQ8BlockBytes, splitk_partials,
+          splitk_partial_bytes, kQwenSplitKChunkBase);
+    }
+  }
+  if (!done)
+    blocked::AttentionKv(q, blocked_k, blocked_v, nullptr, 0, out, nullptr, 1,
+                         n_tokens, d_pos, heads, kv_heads, head_dim, 1,
+                         kQwenBlockedQ8BlockBytes, kQwenBlockedQ8BlockBytes,
+                         blocked::KvCodec::kQ8, stream);
   if (gate != nullptr) {
     LaunchSigmoidGateMultiply(
         out, gate,
@@ -95,5 +116,5 @@ void ReadQwenBlockedAttention(const float* q, const std::uint8_t* blocked_k,
   }
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

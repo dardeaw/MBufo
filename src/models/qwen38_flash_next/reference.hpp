@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_REFERENCE_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_REFERENCE_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_REFERENCE_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_REFERENCE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@
 #include "src/models/qwen38_flash_next/ngram.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 /// Single-token, float32, scalar reference of the Qwen3.8-Flash-Next graph.
 /// It exists to pin the semantics of every operator the GPU runtime must
@@ -110,6 +110,6 @@ private:
   std::vector<float> ple_conv_history_;  ///< [PleConvHistory()][hc_dim]
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_REFERENCE_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_REFERENCE_HPP_

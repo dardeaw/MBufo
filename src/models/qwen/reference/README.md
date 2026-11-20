@@ -19,13 +19,13 @@ effort instruction and closes the generation prompt's thinking block.
 - Recognized Unsloth Qwen3.8 GGUF template SHA-256:
   `12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce`
 
-`chat_template.jinja` is reference data only. Gufo validates recognized
+`chat_template.jinja` is reference data only. MBufo validates recognized
 artifact hashes and executes the bounded C++ implementation.
 
 Full rendered-byte goldens cover tools before system instructions, the Unsloth
 artifact's leading developer-message extension, tool-loop reasoning retention,
 Unicode trimming around images and optional `Picture N:` numbering.
-The reference rejects late system/developer messages; Gufo hoists them into
+The reference rejects late system/developer messages; MBufo hoists them into
 the leading system turn in their original order. Tool/system cases also compare
 complete token sequences using the real GGUF tokenizer.
 

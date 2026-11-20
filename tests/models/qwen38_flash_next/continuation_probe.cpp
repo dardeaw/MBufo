@@ -10,8 +10,8 @@
 #include "src/core/hip/committed_backing.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 
-namespace cache = gufo::cache;
-namespace qfn = gufo::models::qwen38_flash_next;
+namespace cache = mbufo::cache;
+namespace qfn = mbufo::models::qwen38_flash_next;
 namespace {
 using Clock = std::chrono::steady_clock;
 void Require(bool ok, const std::string& error) {
@@ -96,8 +96,8 @@ int main(int argc, char** argv) {
                          &error);
     Require(bool(model), error);
     const auto session_mode = mode == "mtp"
-                                  ? gufo::core::SessionMode::kSpeculative
-                                  : gufo::core::SessionMode::kAutoregressive;
+                                  ? mbufo::core::SessionMode::kSpeculative
+                                  : mbufo::core::SessionMode::kAutoregressive;
     qfn::ContinuationAdapter adapter(model, session_mode, slot_context,
                                      {'p', 'r', 'o', 'b', 'e'});
     std::vector<Guard> guards(count);
@@ -112,9 +112,9 @@ int main(int argc, char** argv) {
     cache::ResourceLedger ledger(
         {capacity + metadata, capacity + metadata, 0, capacity});
     const auto commit_start = Clock::now();
-    gufo::hip::CommittedBackingPool backing(
+    mbufo::hip::CommittedBackingPool backing(
         ledger, {capacity + metadata, block_bytes, metadata});
-    gufo::hip::TransferPool streams(2);
+    mbufo::hip::TransferPool streams(2);
     std::cout << "capacity," << mode << ",context," << slot_context
               << ",sessions," << count << ",resident_bytes,"
               << model->ResidentBytes() << ",live_allocated_bytes," << allocated
@@ -138,13 +138,13 @@ int main(int argc, char** argv) {
     }
     auto& source = adapter.GetSession(*slots[0]);
     if (!round_trip) {
-      std::vector<gufo::sampling::SamplerState> samplers;
+      std::vector<mbufo::sampling::SamplerState> samplers;
       samplers.reserve(count);
       for (auto& slot : slots) {
         const auto tokens = adapter.GetSession(*slot).Tokens();
         samplers.emplace_back(
-            gufo::sampling::SamplingConfig{.temperature = 0.0F},
-            std::vector<gufo::sampling::TokenId>(tokens.begin(), tokens.end()));
+            mbufo::sampling::SamplingConfig{.temperature = 0.0F},
+            std::vector<mbufo::sampling::TokenId>(tokens.begin(), tokens.end()));
       }
       std::vector<qfn::Session::DecodeResult> results(count);
       std::vector<qfn::Session::DecodeRequest> requests;
@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
     if (!round_trip)
       return 0;
     const auto positions = adapter.Positions(*slots[0]);
-    std::vector<gufo::hip::BackingBlock> blocks;
+    std::vector<mbufo::hip::BackingBlock> blocks;
     std::vector<Piece> pieces;
     std::size_t cursor = block_bytes;
     std::size_t private_bytes = 0, row_bytes = 0;
@@ -270,10 +270,10 @@ int main(int argc, char** argv) {
               "restored device component differs");
     }
     const auto initial = source.Tokens();
-    const std::vector<gufo::sampling::TokenId> history(initial.begin(),
+    const std::vector<mbufo::sampling::TokenId> history(initial.begin(),
                                                        initial.end());
-    gufo::sampling::SamplerState first_sampler({.temperature = 0.0F}, history);
-    gufo::sampling::SamplerState second_sampler({.temperature = 0.0F}, history);
+    mbufo::sampling::SamplerState first_sampler({.temperature = 0.0F}, history);
+    mbufo::sampling::SamplerState second_sampler({.temperature = 0.0F}, history);
     qfn::Session::DecodeResult first_step, second_step;
     Require(source.DecodeStep(16, first_sampler, &first_step, &error, false),
             error);

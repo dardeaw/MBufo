@@ -5,7 +5,7 @@ These model-private kernels derive from llama.cpp commit
 originally under `ggml/src/ggml-cuda/`. The DS4 adapter also carries changes
 from `xangel82/DS4-GB10-GX10-DSpark-CUDA`, commit `910501e`.
 
-Gufo builds this directory with HIP for AMD `gfx1151`. Device headers use
+MBufo builds this directory with HIP for AMD `gfx1151`. Device headers use
 `.hip.hpp`; translation units use `.hip.cpp`. The adapter calls HIP/hipBLAS
 directly and uses `ds4_ggml_hip_*` symbols to remain separate from Qwen's
 matrix backend. There is no CUDA build or CUDA-to-HIP API alias layer.

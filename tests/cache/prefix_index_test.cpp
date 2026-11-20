@@ -26,8 +26,8 @@ void operator delete(void* pointer, std::size_t) noexcept {
   std::free(pointer);
 }
 
-using namespace gufo::cache;
-using namespace gufo::cache::testing;
+using namespace mbufo::cache;
+using namespace mbufo::cache::testing;
 namespace {
 using Tokens = std::vector<Token>;
 PrefixQuery Query(const Tokens& tokens, Rows stable = 0, Identity input = {},

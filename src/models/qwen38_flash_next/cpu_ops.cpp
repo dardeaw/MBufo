@@ -6,7 +6,7 @@
 
 #include "src/core/quant/ggml_dequant.hpp"
 
-namespace gufo::models::qwen38_flash_next::cpu {
+namespace mbufo::models::qwen38_flash_next::cpu {
 namespace {
 
 using core::GgmlType;
@@ -23,8 +23,8 @@ void DequantizeQ5_1(const std::uint8_t* src, float* dst, std::size_t k) {
   for (std::size_t b = 0; b < k / 32; ++b) {
     BlockQ5_1 blk;
     std::memcpy(&blk, src + b * sizeof(BlockQ5_1), sizeof(BlockQ5_1));
-    const float d = gufo::quant::Fp16ToFloat(blk.d);
-    const float m = gufo::quant::Fp16ToFloat(blk.m);
+    const float d = mbufo::quant::Fp16ToFloat(blk.d);
+    const float m = mbufo::quant::Fp16ToFloat(blk.m);
     float* y = dst + b * 32;
     for (int j = 0; j < 16; ++j) {
       const int xh0 = ((blk.qh >> j) & 1U) << 4;
@@ -49,7 +49,7 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
       for (std::size_t i = 0; i < k; ++i) {
         std::uint16_t h = 0;
         std::memcpy(&h, src + 2 * i, 2);
-        out[i] = gufo::quant::Fp16ToFloat(h);
+        out[i] = mbufo::quant::Fp16ToFloat(h);
       }
       break;
     case GgmlType::kBF16:
@@ -61,34 +61,34 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
       }
       break;
     case GgmlType::kQ8_0:
-      gufo::quant::DequantizeQ8_0(src, out, k);
+      mbufo::quant::DequantizeQ8_0(src, out, k);
       break;
     case GgmlType::kQ5_1:
       DequantizeQ5_1(src, out, k);
       break;
     case GgmlType::kIQ4_NL:
-      gufo::quant::DequantizeIQ4_NL(src, out, k);
+      mbufo::quant::DequantizeIQ4_NL(src, out, k);
       break;
     case GgmlType::kQ4_0_ROCMFP4:
-      gufo::quant::DequantizeQ4_0_ROCMFP4(src, out, k);
+      mbufo::quant::DequantizeQ4_0_ROCMFP4(src, out, k);
       break;
     case GgmlType::kQ4_0_ROCMFP4_FAST:
-      gufo::quant::DequantizeQ4_0_ROCMFP4_FAST(src, out, k);
+      mbufo::quant::DequantizeQ4_0_ROCMFP4_FAST(src, out, k);
       break;
     case GgmlType::kMXFP4:
-      gufo::quant::DequantizeMxfp4(src, out, k);
+      mbufo::quant::DequantizeMxfp4(src, out, k);
       break;
     case GgmlType::kQ3_0_ROCMFPX:
-      gufo::quant::DequantizeQ3_0_ROCMFPX(src, out, k);
+      mbufo::quant::DequantizeQ3_0_ROCMFPX(src, out, k);
       break;
     case GgmlType::kQ4_K:
-      gufo::quant::DequantizeQ4_K(src, out, k);
+      mbufo::quant::DequantizeQ4_K(src, out, k);
       break;
     case GgmlType::kQ5_K:
-      gufo::quant::DequantizeQ5_K(src, out, k);
+      mbufo::quant::DequantizeQ5_K(src, out, k);
       break;
     case GgmlType::kQ6_K:
-      gufo::quant::DequantizeQ6_K(src, out, k);
+      mbufo::quant::DequantizeQ6_K(src, out, k);
       break;
     default:
       std::memset(out, 0, k * sizeof(float));
@@ -185,4 +185,4 @@ void Rope(float* x, std::uint32_t heads, std::uint32_t head_dim,
   }
 }
 
-}  // namespace gufo::models::qwen38_flash_next::cpu
+}  // namespace mbufo::models::qwen38_flash_next::cpu

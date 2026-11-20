@@ -738,7 +738,7 @@
   ],
   "license": {
     "date": "2026-08-02",
-    "distribution": "operator-supplied; not distributed by gufo",
+    "distribution": "operator-supplied; not distributed by mbufo",
     "name": "MiniMax H3 Community License Agreement",
     "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
   },
@@ -751,7 +751,7 @@
   },
   "repository": "MiniMaxAI/MiniMax-H3",
   "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
-  "schema": "gufo.minimax-h3-source.v1",
+  "schema": "mbufo.minimax-h3-source.v1",
   "source_storage": "mixed BF16/F32 safetensors",
   "tensor_count": 3240,
   "tensors": [

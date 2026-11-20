@@ -16,7 +16,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 namespace {
 
 // Adapter snapshot frame: magic + version + valid_context + token ledger
@@ -569,10 +569,71 @@ std::uint32_t Qwen27BEngineModel::MaxContext() const noexcept {
   return max_context_;
 }
 
+core::engine::MoeGeometry DescribeQwenMoeGeometry(const hip::QwenGpuModel& model) {
+  const auto& w = model.GetWeights();
+  const auto& c = w.config;
+  core::engine::MoeGeometry g;
+  if (c.expert_count == 0) return g;  // dense Qwen (27B ...)
+  g.experts = c.expert_count;
+  g.top_k = c.expert_used_count;
+  g.hidden = c.hidden_size;
+  g.expert_ff = c.expert_ffn_size;
+  g.shared_ff = c.shared_expert_ffn_size;
+  for (const auto& l : w.layers) {
+    if (!l.is_moe) continue;
+    g.AddLayer(static_cast<int>(l.ffn_gate_exps.type), static_cast<int>(l.ffn_up_exps.type), static_cast<int>(l.ffn_down_exps.type));
+  }
+  return g;
+}
+
+core::engine::MoeKernelInfo DescribeQwenMoeKernels() {
+  core::engine::MoeKernelInfo k;
+  k.origin = core::engine::MoeKernelOrigin::kCoreRowDot;
+  k.gate_up_kernel = "core MoeDecodeGateUpKernel (thread geometry, RowDot<Q4_K/Q5_K/Q8_0>, SiLU, many-block tiles)";
+  k.down_kernel = "core MoeDecodeDownKernel (thread geometry, RowDot<Q5_K/Q8_0>; Q6_K down is load-converted to Q8_0)";
+  k.masks_inactive_slots = true;
+  k.graph_capture_safe = true;
+  return k;
+}
+
 std::size_t Qwen27BEngineModel::ResidentBytes() const noexcept {
   if (model_ == nullptr) return 0;
   return model_->GetResidentBytes();
 }
+
+
+core::engine::AttentionGeometry DescribeQwenAttentionGeometry(const hip::QwenGpuModel& model) {
+  const auto& c = model.GetConfig();
+  core::engine::AttentionGeometry g;
+  for (std::uint32_t il = 0; il < c.FullAttentionLayerCount(); ++il) {
+    core::engine::AttentionGroup a;
+    a.heads = c.num_attention_heads;
+    a.kv_heads = c.num_key_value_heads;
+    a.head_dim = c.head_dim;
+    g.AddLayer(a);
+  }
+  for (std::uint32_t il = 0; il < c.SsmLayerCount(); ++il) {
+    core::engine::AttentionGroup a;
+    a.kind = core::engine::AttentionKind::kLinearRecurrent;
+    a.heads = c.ssm_time_step_rank;
+    a.kv_heads = c.ssm_group_count;
+    a.head_dim = c.ssm_state_size;
+    a.kv_format = core::engine::AttentionKvFormat::kModelSpecific;
+    g.AddLayer(a);
+  }
+  return g;
+}
+
+core::engine::AttentionKernelInfo DescribeQwenAttentionKernels() {
+  core::engine::AttentionKernelInfo k;
+  k.decode = {core::engine::AttentionKernelOrigin::kCore, "core blocked-Q8 row-chunk split-K (groups of 8 rows); batched/MTP verify uses the same kernel", "",
+              "F16 KV uses the dispatcher's F16 kernels; the linear (SSM) layers are qwen's own recurrent kernels", true};
+  k.prefill = {core::engine::AttentionKernelOrigin::kCore, "core flash_wmma_large (d256) + fused FA GQA", "", "", false};
+  return k;
+}
+
+core::engine::AttentionGeometry Qwen27BEngineModel::AttentionGeometryInfo() const { return DescribeQwenAttentionGeometry(*model_); }
+core::engine::AttentionKernelInfo Qwen27BEngineModel::AttentionKernelsInfo() const { return DescribeQwenAttentionKernels(); }
 
 std::string Qwen27BEngineModel::ModelName() const { return model_path_; }
 
@@ -604,6 +665,43 @@ bool Qwen27BEngineModel::HasVision() const noexcept {
   return model_ != nullptr && model_->VisionEncoder() != nullptr;
 }
 
+// ---- qwen35moe registry engine (wraps the Qwen engine; adds the engine kind and the MoE contract) ----
+
+std::shared_ptr<QwenMoeEngineModel> QwenMoeEngineModel::Load(
+    const std::string& model_path, const Qwen27BModelOptions& options,
+    std::string* error_msg) {
+  auto inner = Qwen27BEngineModel::Load(model_path, options, error_msg);
+  if (!inner) return nullptr;
+  if (inner->inner()->GetConfig().expert_count == 0) {
+    if (error_msg != nullptr) {
+      *error_msg = "engine qwen35moe needs a routed-MoE Qwen model; '" + model_path + "' is dense (use engine qwen3.8-27b)";
+    }
+    return nullptr;
+  }
+  return std::shared_ptr<QwenMoeEngineModel>(new QwenMoeEngineModel(std::move(inner)));
+}
+
+std::unique_ptr<core::engine::EngineSession> QwenMoeEngineModel::CreateSession(std::string* error_msg) {
+  return inner_->CreateSession(error_msg);
+}
+std::vector<std::int32_t> QwenMoeEngineModel::Tokenize(std::string_view text, bool add_bos) const {
+  return inner_->Tokenize(text, add_bos);
+}
+std::uint32_t QwenMoeEngineModel::VocabSize() const noexcept { return inner_->VocabSize(); }
+std::uint32_t QwenMoeEngineModel::MaxContext() const noexcept { return inner_->MaxContext(); }
+std::size_t QwenMoeEngineModel::ResidentBytes() const noexcept { return inner_->ResidentBytes(); }
+
+core::engine::AttentionGeometry QwenMoeEngineModel::AttentionGeometryInfo() const { return DescribeQwenAttentionGeometry(*inner_->inner()); }
+core::engine::AttentionKernelInfo QwenMoeEngineModel::AttentionKernelsInfo() const { return DescribeQwenAttentionKernels(); }
+
+std::string QwenMoeEngineModel::ModelName() const { return inner_->ModelName(); }
+core::engine::MoeGeometry QwenMoeEngineModel::MoeGeometryInfo() const { return DescribeQwenMoeGeometry(*inner_->inner()); }
+core::engine::MoeKernelInfo QwenMoeEngineModel::MoeKernelsInfo() const { return DescribeQwenMoeKernels(); }
+std::string QwenMoeEngineModel::Decode(std::span<const std::int32_t> tokens) const { return inner_->Decode(tokens); }
+bool QwenMoeEngineModel::IsStopToken(std::int32_t token) const noexcept { return inner_->IsStopToken(token); }
+std::int32_t QwenMoeEngineModel::EosToken() const noexcept { return inner_->EosToken(); }
+bool QwenMoeEngineModel::HasVision() const noexcept { return inner_->HasVision(); }
+
 namespace {
 
 // One-line "qwen3.8-27b" registration: maps the generic load request onto
@@ -624,11 +722,34 @@ const core::engine::EngineRegistrar kRegisterQwen27BEngine(
       if (!request.kv_cache_quant.empty()) {
         options.kv_cache_quant = request.kv_cache_quant;
       }
-      return Qwen27BEngineModel::Load(request.model_path, options, error_msg);
+      auto model = Qwen27BEngineModel::Load(request.model_path, options, error_msg);
+      if (model != nullptr && model->inner()->GetConfig().expert_count != 0) {
+        if (error_msg != nullptr) {
+          *error_msg = "'" + request.model_path + "' is a routed-MoE Qwen model (use engine qwen35moe)";
+        }
+        return nullptr;
+      }
+      return model;
+    });
+
+// "qwen35moe": the routed-MoE Qwen models on the same runner, registered as an MoE engine (its model implements MoeCapable).
+const core::engine::EngineRegistrar kRegisterQwenMoeEngine(
+    core::engine::EngineBackendInfo{
+        "qwen35moe", "Qwen3.5/3.6 routed-MoE hybrid SSM/attention (f16/q8 KV)", true},
+    [](const core::engine::EngineLoadRequest& request,
+       std::string* error_msg) -> std::shared_ptr<core::engine::EngineModel> {
+      Qwen27BModelOptions options;
+      if (request.max_context != 0) {
+        options.max_context = request.max_context;
+      }
+      if (!request.kv_cache_quant.empty()) {
+        options.kv_cache_quant = request.kv_cache_quant;
+      }
+      return QwenMoeEngineModel::Load(request.model_path, options, error_msg);
     });
 
 }  // namespace
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 
 #endif  // defined(ENGINE_ENABLE_HIP)

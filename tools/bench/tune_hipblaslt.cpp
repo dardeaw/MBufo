@@ -221,12 +221,12 @@ int Run(std::span<const char* const> arguments) {
   }
 
   HipStream stream;
-  gufo::hip::HipblasLtGemm gemm({
+  mbufo::hip::HipblasLtGemm gemm({
       .plan_database_path = {},
       .tuning_workspace_bytes = options.workspace_bytes,
       .ignore_environment = true,
   });
-  const gufo::hip::HipblasLtTuningOptions tuning_options{
+  const mbufo::hip::HipblasLtTuningOptions tuning_options{
       .warmup = options.warmup,
       .repetitions = options.repetitions,
       .max_algorithms = options.max_algorithms,
@@ -241,7 +241,7 @@ int Run(std::span<const char* const> arguments) {
           CheckedBytes(batch_size, shape.k, sizeof(std::uint16_t)));
       DeviceBuffer output(CheckedBytes(batch_size, shape.m, sizeof(float)));
 
-      gufo::hip::HipblasLtTuningResult result;
+      mbufo::hip::HipblasLtTuningResult result;
       if (!gemm.TuneBf16(weights.Get(), input.Get(),
                          static_cast<float*>(output.Get()), batch_size, shape.m,
                          shape.k, tuning_options, &result, stream.Get())) {
@@ -270,7 +270,7 @@ int Run(std::span<const char* const> arguments) {
   }
   std::cout << "saved " << tuned_shapes << " plans to " << options.output_path
             << '\n';
-  std::cout << "runtime: GUFO_HIPBLASLT_PLAN_CACHE=" << options.output_path
+  std::cout << "runtime: MBUFO_HIPBLASLT_PLAN_CACHE=" << options.output_path
             << '\n';
   return 0;
 }

@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_FLASH_F16_DENSE_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_FLASH_F16_DENSE_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_FLASH_F16_DENSE_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_FLASH_F16_DENSE_HPP_
 
 // Dense bidirectional F16-WMMA flash attention (online softmax, no scores
 // materialization) for small-head MHA encoders.
@@ -24,7 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::flash_f16 {
+namespace mbufo::core::compute::flash_f16 {
 
 /// Forward pass. `scale` multiplies QK (typically 1/sqrt(head_dim)).
 /// Returns false (no launch) when head_dim != 64, n == 0, heads == 0, or any
@@ -35,6 +35,6 @@ namespace gufo::core::compute::flash_f16 {
                                     std::uint32_t head_dim, float scale,
                                     hipStream_t stream);
 
-}  // namespace gufo::core::compute::flash_f16
+}  // namespace mbufo::core::compute::flash_f16
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_FLASH_F16_DENSE_HPP_
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_FLASH_F16_DENSE_HPP_

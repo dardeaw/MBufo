@@ -22,7 +22,7 @@
 #include <hip/hip_runtime.h>
 #endif
 
-namespace gufo::cli {
+namespace mbufo::cli {
 
 namespace {
 
@@ -208,7 +208,7 @@ int RunDiagnose(std::span<const char* const> args) {
 
   if (!args.empty()) {
     const std::string_view first = args[0];
-    if (first == "gufo" || first.ends_with("/gufo")) {
+    if (first == "mbufo" || first.ends_with("/mbufo")) {
       start_idx = 1;
     }
   }
@@ -228,7 +228,7 @@ int RunDiagnose(std::span<const char* const> args) {
     } else if (arg == "--validate-artifact") {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --validate-artifact requires a path argument\n";
-        PrintDiagnoseHelp("gufo");
+        PrintDiagnoseHelp("mbufo");
         return 2;
       }
       validate_artifact_path = args[++i];
@@ -237,7 +237,7 @@ int RunDiagnose(std::span<const char* const> args) {
     } else if (arg == "--benchmark") {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --benchmark requires an argument\n";
-        PrintDiagnoseHelp("gufo");
+        PrintDiagnoseHelp("mbufo");
         return 2;
       }
       benchmark_name = args[++i];
@@ -246,7 +246,7 @@ int RunDiagnose(std::span<const char* const> args) {
     } else if (arg == "--backends") {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --backends requires an argument\n";
-        PrintDiagnoseHelp("gufo");
+        PrintDiagnoseHelp("mbufo");
         return 2;
       }
       backends_csv = args[++i];
@@ -255,7 +255,7 @@ int RunDiagnose(std::span<const char* const> args) {
     } else if (arg == "--warmup") {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --warmup requires an integer argument\n";
-        PrintDiagnoseHelp("gufo");
+        PrintDiagnoseHelp("mbufo");
         return 2;
       }
       warmup = static_cast<std::uint32_t>(std::stoul(args[++i]));
@@ -265,7 +265,7 @@ int RunDiagnose(std::span<const char* const> args) {
     } else if (arg == "--repetitions") {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --repetitions requires an integer argument\n";
-        PrintDiagnoseHelp("gufo");
+        PrintDiagnoseHelp("mbufo");
         return 2;
       }
       repetitions = static_cast<std::uint32_t>(std::stoul(args[++i]));
@@ -275,7 +275,7 @@ int RunDiagnose(std::span<const char* const> args) {
     } else if (arg == "--duration-ms") {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --duration-ms requires an integer argument\n";
-        PrintDiagnoseHelp("gufo");
+        PrintDiagnoseHelp("mbufo");
         return 2;
       }
       duration_ms = static_cast<std::uint32_t>(std::stoul(args[++i]));
@@ -286,7 +286,7 @@ int RunDiagnose(std::span<const char* const> args) {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --working-set-mib requires a comma-separated "
                      "size list\n";
-        PrintDiagnoseHelp("gufo");
+        PrintDiagnoseHelp("mbufo");
         return 2;
       }
       working_set_mib = args[++i];
@@ -295,19 +295,19 @@ int RunDiagnose(std::span<const char* const> args) {
     } else if (arg == "--output") {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --output requires a file path argument\n";
-        PrintDiagnoseHelp("gufo");
+        PrintDiagnoseHelp("mbufo");
         return 2;
       }
       output_file = args[++i];
     } else if (arg.starts_with("--output=")) {
       output_file = std::string(arg.substr(9));
     } else if (arg == "--help" || arg == "-h") {
-      PrintDiagnoseHelp("gufo");
+      PrintDiagnoseHelp("mbufo");
       return 0;
     } else if (arg == "--section") {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --section requires an argument\n";
-        PrintDiagnoseHelp("gufo");
+        PrintDiagnoseHelp("mbufo");
         return 2;
       }
       section = args[++i];
@@ -315,7 +315,7 @@ int RunDiagnose(std::span<const char* const> args) {
       section = std::string(arg.substr(10));
     } else {
       std::cerr << "Error: unknown diagnose option '" << arg << "'\n";
-      PrintDiagnoseHelp("gufo");
+      PrintDiagnoseHelp("mbufo");
       return 2;
     }
   }
@@ -418,12 +418,12 @@ int RunDiagnose(std::span<const char* const> args) {
 
 #if defined(ENGINE_ENABLE_HIP)
 static bool IsHipRequired() {
-  const char* val = std::getenv("GUFO_REQUIRE_HIP");
+  const char* val = std::getenv("MBUFO_REQUIRE_HIP");
   if (!val) {
-    val = std::getenv("GUFO_REQUIRE_GPU");
+    val = std::getenv("MBUFO_REQUIRE_GPU");
   }
   if (!val) {
-    val = std::getenv("GUFO_REQUIRE_GFX1151");
+    val = std::getenv("MBUFO_REQUIRE_GFX1151");
   }
   return val && std::string_view(val) != "0" &&
          std::string_view(val) != "false";
@@ -471,7 +471,7 @@ static void CheckGpu() {
 #endif
 
 int RunProbe(std::span<const char* const> args) {
-  ArgParser parser("gufo probe", "Probe GPU availability.");
+  ArgParser parser("mbufo probe", "Probe GPU availability.");
   std::string error;
   if (!parser.Parse(args, &error)) {
     std::cerr << "Error: " << error << '\n';
@@ -494,4 +494,4 @@ int RunProbe(std::span<const char* const> args) {
   return 0;
 }
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli

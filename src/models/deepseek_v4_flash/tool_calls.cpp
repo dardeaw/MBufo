@@ -12,7 +12,7 @@
 
 #include "src/core/json.hpp"
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 
 namespace {
 
@@ -219,4 +219,4 @@ void ScanDeepSeekToolCalls(
   }
 }
 
-}  // namespace gufo::models::deepseek_v4_flash
+}  // namespace mbufo::models::deepseek_v4_flash

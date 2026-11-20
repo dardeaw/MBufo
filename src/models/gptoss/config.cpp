@@ -3,7 +3,7 @@
 #include <cmath>
 #include <numbers>
 
-namespace gufo::models::gptoss {
+namespace mbufo::models::gptoss {
 namespace {
 
 struct Reader {
@@ -118,4 +118,4 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   return c;
 }
 
-}  // namespace gufo::models::gptoss
+}  // namespace mbufo::models::gptoss

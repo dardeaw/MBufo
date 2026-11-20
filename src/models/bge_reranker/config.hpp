@@ -6,8 +6,8 @@
 // a reranker GGUF declares NO pooling metadata -- relevance always reads
 // the CLS row by construction -- so extraction here never consults
 // `bert.pooling_type` and refuses nothing on its absence.
-#ifndef GUFO_MODELS_BGE_RERANKER_CONFIG_HPP_
-#define GUFO_MODELS_BGE_RERANKER_CONFIG_HPP_
+#ifndef MBUFO_MODELS_BGE_RERANKER_CONFIG_HPP_
+#define MBUFO_MODELS_BGE_RERANKER_CONFIG_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -15,7 +15,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::bge_reranker {
+namespace mbufo::models::bge_reranker {
 
 // Single-prefill leg window: full bidirectional attention is O(n^2)
 // transient. 2048 matches the encoder base and covers the retrieval-pair
@@ -57,6 +57,6 @@ struct BgeRerankerConfig {
 [[nodiscard]] std::optional<BgeRerankerConfig> ExtractBgeRerankerConfig(
     const core::GgufReader& reader, std::string* error_msg = nullptr);
 
-}  // namespace gufo::models::bge_reranker
+}  // namespace mbufo::models::bge_reranker
 
-#endif  // GUFO_MODELS_BGE_RERANKER_CONFIG_HPP_
+#endif  // MBUFO_MODELS_BGE_RERANKER_CONFIG_HPP_

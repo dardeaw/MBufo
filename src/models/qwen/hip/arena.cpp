@@ -16,7 +16,7 @@
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 constexpr std::uint32_t kMaxPromptBatch = 4096;
@@ -1382,5 +1382,5 @@ void QwenGpuArena::FreeAll() noexcept {
   stream = nullptr;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

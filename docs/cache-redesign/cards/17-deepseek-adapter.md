@@ -55,7 +55,7 @@ Material to consider during implementation. Before reusing code from a
 project, check its license and add it to `THIRD_PARTY_NOTICES.md` when
 required (see the README).
 
-- [ds4](https://github.com/antirez/ds4): the upstream of Gufo's DeepSeek port and its session state; already listed in `THIRD_PARTY_NOTICES.md`.
+- [ds4](https://github.com/antirez/ds4): the upstream of MBufo's DeepSeek port and its session state; already listed in `THIRD_PARTY_NOTICES.md`.
 - [vLLM hybrid KV cache manager](https://docs.vllm.ai/en/stable/design/hybrid_kv_cache_manager/): state groups whose block geometry differs, as compressed pools may.
 
 ## RFC

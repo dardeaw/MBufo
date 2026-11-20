@@ -1,5 +1,5 @@
-#ifndef GUFO_CLI_SAMPLING_OPTIONS_HPP_
-#define GUFO_CLI_SAMPLING_OPTIONS_HPP_
+#ifndef MBUFO_CLI_SAMPLING_OPTIONS_HPP_
+#define MBUFO_CLI_SAMPLING_OPTIONS_HPP_
 
 #include <stdexcept>
 #include <string_view>
@@ -8,7 +8,7 @@
 #include "src/core/sampling.hpp"
 #include "src/core/text_sampling_defaults.hpp"
 
-namespace gufo::cli {
+namespace mbufo::cli {
 
 inline sampling::SamplingOverrides SamplingOptionsSupplied(
     const ArgParser& parser) {
@@ -95,6 +95,6 @@ inline void RegisterSamplingOptions(ArgParser& parser,
       group, &config->presence_penalty);
 }
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli
 
-#endif  // GUFO_CLI_SAMPLING_OPTIONS_HPP_
+#endif  // MBUFO_CLI_SAMPLING_OPTIONS_HPP_

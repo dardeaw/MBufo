@@ -21,7 +21,7 @@
 #include "src/core/json.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 
-namespace gufo::models::qwen3_tts {
+namespace mbufo::models::qwen3_tts {
 namespace {
 
 constexpr char kPairSeparator = '\0';
@@ -575,4 +575,4 @@ bool Tokenizer::EncodeReferencePrompt(std::string_view text,
   return Encode(prompt, ids, error);
 }
 
-}  // namespace gufo::models::qwen3_tts
+}  // namespace mbufo::models::qwen3_tts

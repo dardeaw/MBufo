@@ -8,7 +8,7 @@
 
 #include "src/core/json.hpp"
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 namespace {
 
 const json::Value* FindPath(const json::Value& root,
@@ -186,4 +186,4 @@ bool IsSupportedModelConfig(const ModelConfig& config) {
          config.audio_end_token_id == 151670 && config.audio_token_id == 151676;
 }
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr

@@ -123,7 +123,7 @@
   },
   "performance": {
     "method": "Production Nix CLI builds; one measurement per ordered depth 0,4096, C1 MTP, greedy, pp2048/tg128. Prefill is warmed; generation starts from 16 tokens at d0 and 4096 at d4K and includes graph warm-up. No profiling, builds or other GPU work overlapped these controls. These do not replace the HTTP benchmark tables.",
-    "command": "gufo bench --model MODEL --mtp-model MTP --speculative mtp -p 2048 -n 128 -d 0,4096 -r 1 -v",
+    "command": "mbufo bench --model MODEL --mtp-model MTP --speculative mtp -p 2048 -n 128 -d 0,4096 -r 1 -v",
     "unit": "tok/s",
     "previous_fix": {
       "pp2048": 1616.98,
@@ -175,7 +175,7 @@
         "output_sha256": "a55b41fe193345c538a74a0ff05c7933075809d18915193a30cb3423122bad24"
       }
     ],
-    "production_candidate": "/nix/store/7fh25r65x60lmis75q9yh4j75s1d8350-gufo-0-unstable-eb91584-dirty",
+    "production_candidate": "/nix/store/7fh25r65x60lmis75q9yh4j75s1d8350-mbufo-0-unstable-eb91584-dirty",
     "retained": [
       "K/V-only known-prompt catch-up; skipped residuals are explicitly invalid and omitted from snapshots",
       "32-row invariant Q8 projection tiles for FC, K/V and HC",

@@ -1,5 +1,5 @@
-#ifndef GUFO_CLI_PROMPT_HPP_
-#define GUFO_CLI_PROMPT_HPP_
+#ifndef MBUFO_CLI_PROMPT_HPP_
+#define MBUFO_CLI_PROMPT_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -12,9 +12,9 @@
 #include "src/core/sampling.hpp"
 #include "src/core/text_sampling_defaults.hpp"
 
-namespace gufo::cli {
+namespace mbufo::cli {
 
-/// Options for `gufo prompt` and `gufo chat` execution.
+/// Options for `mbufo prompt` and `mbufo chat` execution.
 struct PromptOptions {
   std::string model_path;
   std::string vision_model_path;
@@ -44,13 +44,13 @@ struct PromptOptions {
   std::uint32_t min_draft_tokens = 1;
 };
 
-/// Prints help for `gufo prompt`.
+/// Prints help for `mbufo prompt`.
 void PrintPromptHelp(std::string_view program_name);
 
-/// Prints help for `gufo chat`.
+/// Prints help for `mbufo chat`.
 void PrintChatHelp(std::string_view program_name);
 
-/// Parses command line options for `gufo prompt`.
+/// Parses command line options for `mbufo prompt`.
 [[nodiscard]] std::optional<PromptOptions> ParsePromptOptions(
     std::span<const char* const> args, std::string* error_msg = nullptr);
 
@@ -60,6 +60,6 @@ void PrintChatHelp(std::string_view program_name);
 /// Executes the interactive multi-turn terminal chat workflow.
 [[nodiscard]] int RunChat(std::span<const char* const> args);
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli
 
-#endif  // GUFO_CLI_PROMPT_HPP_
+#endif  // MBUFO_CLI_PROMPT_HPP_

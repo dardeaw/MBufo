@@ -1,5 +1,5 @@
 {
-  "schema": "gufo-model-bench/1",
+  "schema": "mbufo-model-bench/1",
   "category": "llm",
   "model": {
     "id": "Qwen3.8-Flash-Next",
@@ -25,7 +25,7 @@
   "speculative": {
     "mode": "mtp",
     "label": "MTP",
-    "gufo_args": [
+    "mbufo_args": [
       "--speculative",
       "mtp",
       "--mtp-model",
@@ -198,7 +198,7 @@
       "mode": "ar"
     }
   },
-  "gufo": {
+  "mbufo": {
     "serve": [],
     "llm": [
       "--think",

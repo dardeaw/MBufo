@@ -15,12 +15,12 @@
 #include "src/core/json.hpp"
 #include "src/models/qwen3_asr/hip/transcription_runtime.hpp"
 
-namespace gufo::cli {
+namespace mbufo::cli {
 namespace {
 
 namespace qwen3_asr = models::qwen3_asr;
 namespace qwen3_asr_hip = models::qwen3_asr::hip;
-namespace json = gufo::json;
+namespace json = mbufo::json;
 
 constexpr std::uintmax_t kMaximumAudioBytes = 256U << 20U;
 volatile std::sig_atomic_t g_cancel_requested = 0;  // NOLINT
@@ -131,7 +131,7 @@ int RunTranscribe(std::span<const char* const> args) {
   std::vector<std::string> positionals;
 
   ArgParser parser(
-      "gufo transcribe [OPTIONS] [WAV]",
+      "mbufo transcribe [OPTIONS] [WAV]",
       "Transcribe a PCM or float WAV with native HIP Qwen3-ASR-1.7B.");
   parser.AddOption("-m", "--model", "DIR", "Qwen3-ASR-1.7B model directory",
                    "Model", &model);
@@ -162,11 +162,11 @@ int RunTranscribe(std::span<const char* const> args) {
   std::string error;
   if (!parser.Parse(args, &error)) {
     std::cerr << "Error: " << error << '\n';
-    PrintTranscribeHelp("gufo");
+    PrintTranscribeHelp("mbufo");
     return 2;
   }
   if (parser.IsHelpRequested()) {
-    PrintTranscribeHelp("gufo");
+    PrintTranscribeHelp("mbufo");
     return 0;
   }
   if (model.empty()) {
@@ -247,7 +247,7 @@ int RunTranscribe(std::span<const char* const> args) {
     return 0;
   }
   json::Value report = json::Value::object();
-  report["schema"] = "gufo.qwen3-asr.transcription.v1";
+  report["schema"] = "mbufo.qwen3-asr.transcription.v1";
   report["backend"] = "native-hip";
   report["language"] = result.language;
   report["text"] = result.text;
@@ -276,4 +276,4 @@ int RunTranscribe(std::span<const char* const> args) {
   return 0;
 }
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli

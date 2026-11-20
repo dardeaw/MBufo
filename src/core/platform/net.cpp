@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <system_error>
 
-namespace gufo::net {
+namespace mbufo::net {
 namespace {
 
 #if defined(_WIN32)
@@ -142,4 +142,4 @@ long long SocketRecvTimeoutMs(Socket socket) noexcept {
 #endif
 }
 
-}  // namespace gufo::net
+}  // namespace mbufo::net

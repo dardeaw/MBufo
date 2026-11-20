@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GLIMMER_KERNELS_KERNELS_HPP_
-#define GUFO_MODELS_GLIMMER_KERNELS_KERNELS_HPP_
+#ifndef MBUFO_MODELS_GLIMMER_KERNELS_KERNELS_HPP_
+#define MBUFO_MODELS_GLIMMER_KERNELS_KERNELS_HPP_
 
 // Llama dense-decoder kernels (gfx1151): embedding gather, RMSNorm,
 // standard NeoX RoPE, SiLU-gated MLP activation, dense F16 KV store,
@@ -14,7 +14,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::glimmer::kernels {
+namespace mbufo::models::glimmer::kernels {
 
 /// Embedding lookup from a device-mirrored table (Q8_0 / F32 / F16).
 /// `ids` are device token ids; one gathered row per id.
@@ -104,6 +104,6 @@ bool AttentionF16MQB(const float* q, const __half* k_cache,
                      std::uint32_t d, hipStream_t stream, float score_scale,
                      std::uint32_t window = 0);
 
-}  // namespace gufo::models::glimmer::kernels
+}  // namespace mbufo::models::glimmer::kernels
 
-#endif  // GUFO_MODELS_GLIMMER_KERNELS_KERNELS_HPP_
+#endif  // MBUFO_MODELS_GLIMMER_KERNELS_KERNELS_HPP_

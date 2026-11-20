@@ -13,7 +13,7 @@
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 constexpr std::size_t kPackChunkRows = 32;
@@ -255,5 +255,5 @@ std::shared_ptr<const QwenMtpGpuModel> QwenMtpGpuModel::Create(
       std::move(allocations), packed_bytes, pack_seconds));
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

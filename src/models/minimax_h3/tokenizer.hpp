@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_MINIMAX_H3_TOKENIZER_HPP_
-#define GUFO_MODELS_MINIMAX_H3_TOKENIZER_HPP_
+#ifndef MBUFO_MODELS_MINIMAX_H3_TOKENIZER_HPP_
+#define MBUFO_MODELS_MINIMAX_H3_TOKENIZER_HPP_
 
 #include <array>
 #include <cstdint>
@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 class Tokenizer {
 public:
@@ -71,6 +71,6 @@ private:
   std::array<std::int16_t, 324> byte_decoder_{};
 };
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3
 
-#endif  // GUFO_MODELS_MINIMAX_H3_TOKENIZER_HPP_
+#endif  // MBUFO_MODELS_MINIMAX_H3_TOKENIZER_HPP_

@@ -1,6 +1,6 @@
 {
- "schema": "gufo.kernel-resources.v1",
- "note": "Made from the release binary of gufo-runtime:latest (b722a61, Nix, ROCm 7.2.3, AMD clang 22). The kernels in this file use scratch by design. Make the file again only after you decide that a new allowance is correct: python3 tools/ci/check-kernel-resources.py result/bin/gufo --write-baseline tools/ci/kernel-resources.json --note TEXT",
+ "schema": "mbufo.kernel-resources.v1",
+ "note": "Made from the release binary of mbufo-runtime:latest (b722a61, Nix, ROCm 7.2.3, AMD clang 22). The kernels in this file use scratch by design. Make the file again only after you decide that a new allowance is correct: python3 tools/ci/check-kernel-resources.py result/bin/mbufo --write-baseline tools/ci/kernel-resources.json --note TEXT",
  "default_max_scratch": 0,
  "allow": {
   "_ZL18quantize_mmq_nvfp4PKfPKiPvlllllll": {
@@ -432,40 +432,40 @@
   "_ZL9mul_mat_qIL9ggml_type8ELi8ELb1ELb1ELb0EEvPKcPKiS4_S4_PfS5_15HIP_vector_typeIjLj3EEiiiiiS7_S7_iiiS7_S7_iiiS7_S2_lPKfS9_S5_P6__halff": {
    "max_scratch": 24
   },
-  "_ZN4gufo3hip18Q8KBlockGEMVKernelILj4EEEvPKvNS_4core8GgmlTypeEPKfPfmm": {
+  "_ZN4mbufo3hip18Q8KBlockGEMVKernelILj4EEEvPKvNS_4core8GgmlTypeEPKfPfmm": {
    "max_scratch": 8
   },
-  "_ZN4gufo3hip24Q8KBlockGEMVKernel_2RowsILj4ELNS_4core8GgmlTypeE0EEEvPKvS3_PKfPfmm": {
+  "_ZN4mbufo3hip24Q8KBlockGEMVKernel_2RowsILj4ELNS_4core8GgmlTypeE0EEEvPKvS3_PKfPfmm": {
    "max_scratch": 8
   },
-  "_ZN4gufo3hip25FusedQKVProjectionsKernelEPKvNS_4core8GgmlTypeES2_S4_S2_S4_PKfPfS7_S7_mmm": {
+  "_ZN4mbufo3hip25FusedQKVProjectionsKernelEPKvNS_4core8GgmlTypeES2_S4_S2_S4_PKfPfS7_S7_mmm": {
    "max_scratch": 8
   },
-  "_ZN4gufo3hip30FastFusedSwiGLUGEMVBlockKernelEPKvNS_4core8GgmlTypeES2_S4_PKfPfmm": {
+  "_ZN4mbufo3hip30FastFusedSwiGLUGEMVBlockKernelEPKvNS_4core8GgmlTypeES2_S4_PKfPfmm": {
    "max_scratch": 8
   },
-  "_ZN4gufo3hip30FusedSSMInputProjectionsKernelEPKvNS_4core8GgmlTypeES2_S4_S2_S4_S2_S4_PKfPfS7_S7_S7_mmmm": {
+  "_ZN4mbufo3hip30FusedSSMInputProjectionsKernelEPKvNS_4core8GgmlTypeES2_S4_S2_S4_S2_S4_PKfPfS7_S7_S7_mmmm": {
    "max_scratch": 8
   },
-  "_ZN4gufo3hip36Wave32FusedQKVProjectionsKernel_1RowILj4EEEvPKvNS_4core8GgmlTypeES3_S5_S3_S5_PKfPfS8_S8_mmm": {
+  "_ZN4mbufo3hip36Wave32FusedQKVProjectionsKernel_1RowILj4EEEvPKvNS_4core8GgmlTypeES3_S5_S3_S5_PKfPfS8_S8_mmm": {
    "max_scratch": 8
   },
-  "_ZN4gufo3hip37Wave32FusedQuantSwiGLUGEMVKernel_1RowILj4EEEvPKvNS_4core8GgmlTypeES3_S5_PKfPfmm": {
+  "_ZN4mbufo3hip37Wave32FusedQuantSwiGLUGEMVKernel_1RowILj4EEEvPKvNS_4core8GgmlTypeES3_S5_PKfPfmm": {
    "max_scratch": 8
   },
-  "_ZN4gufo3hip38Wave32FusedQuantSwiGLUGEMVKernel_2RowsILj4ELNS_4core8GgmlTypeE0ELS3_0EEEvPKvS3_S5_S3_PKfPfmm": {
+  "_ZN4mbufo3hip38Wave32FusedQuantSwiGLUGEMVKernel_2RowsILj4ELNS_4core8GgmlTypeE0ELS3_0EEEvPKvS3_S5_S3_PKfPfmm": {
    "max_scratch": 8
   },
-  "_ZN4gufo3hip41Wave32FusedSSMInputProjectionsKernel_1RowILj4EEEvPKvNS_4core8GgmlTypeES3_S5_S3_S5_S3_S5_PKfPfS8_S8_S8_mmmm": {
+  "_ZN4mbufo3hip41Wave32FusedSSMInputProjectionsKernel_1RowILj4EEEvPKvNS_4core8GgmlTypeES3_S5_S3_S5_S3_S5_PKfPfS8_S8_S8_mmmm": {
    "max_scratch": 8
   },
-  "_ZN4gufo6models9qwen3_asr3hip12_GLOBAL__N_120TextQkNormRoPEKernelILj128EEEvPfS5_S5_PKfS7_mjjjjffS5_S5_jj": {
+  "_ZN4mbufo6models9qwen3_asr3hip12_GLOBAL__N_120TextQkNormRoPEKernelILj128EEEvPfS5_S5_PKfS7_mjjjjffS5_S5_jj": {
    "max_scratch": 8
   },
-  "_ZN4gufo6models9qwen3_asr3hip12_GLOBAL__N_128SegmentedSelfAttentionKernelILb1EEEvPKfS6_S6_PfP12hip_bfloat16mmmm": {
+  "_ZN4mbufo6models9qwen3_asr3hip12_GLOBAL__N_128SegmentedSelfAttentionKernelILb1EEEvPKfS6_S6_PfP12hip_bfloat16mmmm": {
    "max_scratch": 272
   },
-  "_ZN4gufo6models9qwen3_tts3hip12_GLOBAL__N_124Bfloat16QkNormRoPEKernelILj128EEEvPfS5_S5_PKfS7_mjjjjffS5_S5_jj": {
+  "_ZN4mbufo6models9qwen3_tts3hip12_GLOBAL__N_124Bfloat16QkNormRoPEKernelILj128EEEvPfS5_S5_PKfS7_mjjjjffS5_S5_jj": {
    "max_scratch": 8
   },
   "_ZN7qfn_mmqL9mul_mat_qILNS_9ggml_typeE12ELi104ELb0ELb0ELb0EEEvPKcPKiS5_S5_PfS6_15HIP_vector_typeIjLj3EEiiiiiS8_S8_iiiS8_S8_iiiS8_S3_lPKfSA_S6_P6__halff": {

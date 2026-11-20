@@ -1,0 +1,255 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.1.8",
+      "memoryTotalBytes": 134309875712,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "fe5929d418cfe1f7e3aa4a09199012c1fa064859f1fc762a8cbcda970358f158",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-19",
+  "mode": "dflash2",
+  "model": {
+    "id": "Qwen3.8-27B",
+    "variant": "q4"
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.161 tokens/word, template overhead 12 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "acceptance": 39.71,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.72,
+      "accepted_per_step_sd": null,
+      "command": "mbufo serve --port 58165 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "345b3854407a0cfb26722b892de7b7b3148b753ea915a06a9431d6d37f917d05",
+          "draft_n": 204,
+          "draft_n_accepted": 81,
+          "predicted_n": 128,
+          "prompt_n": 2040
+        }
+      ],
+      "pp": 578.09,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 26.91,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "acceptance": 41.12,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.72,
+      "accepted_per_step_sd": null,
+      "command": "mbufo serve --port 58165 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "counts": [
+        {
+          "cache_n": 12249,
+          "completion_sha256": "e33fa406cee33d879f6d21ca8c2c48979e291b8ef0d9e38904f61de3d9ba98a4",
+          "draft_n": 197,
+          "draft_n_accepted": 81,
+          "predicted_n": 128,
+          "prompt_n": 2047
+        }
+      ],
+      "pp": 487.0,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 24.88,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "acceptance": 52.67,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.61,
+      "accepted_per_step_sd": null,
+      "command": "mbufo serve --port 58165 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "counts": [
+        {
+          "cache_n": 130932,
+          "completion_sha256": "ca7cb4d2572f29e16ace694f10a33553841a34f0de5ab28f5b7314626a28517a",
+          "draft_n": 150,
+          "draft_n_accepted": 79,
+          "predicted_n": 128,
+          "prompt_n": 2047
+        }
+      ],
+      "pp": 246.56,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 15.3,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "acceptance": 42.93,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.78,
+      "accepted_per_step_sd": null,
+      "command": "mbufo serve --port 58165 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "counts": [
+        {
+          "cache_n": 16324,
+          "completion_sha256": "901c29def907359a404f8a02f79a489fa0a44b8519f5aa129431dec0e01d7fbd",
+          "draft_n": 191,
+          "draft_n_accepted": 82,
+          "predicted_n": 128,
+          "prompt_n": 2047
+        }
+      ],
+      "pp": 471.44,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 24.8,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "acceptance": 37.76,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.37,
+      "accepted_per_step_sd": null,
+      "command": "mbufo serve --port 58165 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "counts": [
+        {
+          "cache_n": 32718,
+          "completion_sha256": "97fe54ed4e53a0316bd44eef7d4fda30176204159efbf12feddaa42dbbdcaf21",
+          "draft_n": 196,
+          "draft_n_accepted": 74,
+          "predicted_n": 128,
+          "prompt_n": 2029
+        }
+      ],
+      "pp": 413.41,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 19.77,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "acceptance": 44.68,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.91,
+      "accepted_per_step_sd": null,
+      "command": "mbufo serve --port 58165 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "counts": [
+        {
+          "cache_n": 4095,
+          "completion_sha256": "51e58b937a62cdd6aca23f640e41343795dce391d48bb9065e52b04a84ac8776",
+          "draft_n": 188,
+          "draft_n_accepted": 84,
+          "predicted_n": 128,
+          "prompt_n": 2043
+        }
+      ],
+      "pp": 526.95,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 27.99,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "acceptance": 44.13,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.61,
+      "accepted_per_step_sd": null,
+      "command": "mbufo serve --port 58165 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "counts": [
+        {
+          "cache_n": 65447,
+          "completion_sha256": "aa868443fb96bbdf398441bdafd755b91a7387950ce100de6eb6b7e1b6bdf2b1",
+          "draft_n": 179,
+          "draft_n_accepted": 79,
+          "predicted_n": 128,
+          "prompt_n": 2058
+        }
+      ],
+      "pp": 317.52,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.61,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "8192": {
+      "acceptance": 41.5,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.84,
+      "accepted_per_step_sd": null,
+      "command": "mbufo serve --port 58165 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dflash2 --dflash-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "counts": [
+        {
+          "cache_n": 8184,
+          "completion_sha256": "f0f5794cfda816c2895a38db473e36e7c8139cd308111fd3dd23523878d21f5c",
+          "draft_n": 200,
+          "draft_n_accepted": 83,
+          "predicted_n": 128,
+          "prompt_n": 2048
+        }
+      ],
+      "pp": 501.12,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 26.44,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "mbufo",
+      "serve",
+      "--port",
+      "58165",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--speculative",
+      "dflash2",
+      "--dflash-model",
+      "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "11813e51150b1b6f990f57a9fc1b62b8bce494d2"
+  },
+  "table": "single-dflash2-q4",
+  "target": "mbufo"
+}

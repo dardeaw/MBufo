@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 namespace {
 
 constexpr std::size_t kErrorCapacity = 512;
@@ -492,4 +492,4 @@ bool SessionSnapshot::CopyTo(
   return true;
 }
 
-}  // namespace gufo::models::deepseek_v4_flash
+}  // namespace mbufo::models::deepseek_v4_flash

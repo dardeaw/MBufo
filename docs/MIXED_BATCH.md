@@ -4,7 +4,7 @@
 用一個 `WmmaMixedAttention` 核代替逐 item 的 attention core，消除
 decode/prefill tick-tock（decode 空等整個 prefill chunk 跑完）。
 
-狀態：attention core 已驗證正確（`r151-mixed`，gate：`GUFO_MIXED_BATCH=1`）。
+狀態：attention core 已驗證正確（`r151-mixed`，gate：`MBUFO_MIXED_BATCH=1`）。
 Scheduler 接線（Phase 4）未做——production 預設 env 未設，行為零變化。
 
 ## 架構
@@ -51,7 +51,7 @@ ForwardBatch([{decode x1}, {chunk x4}])
 
 診斷環境變數（test binary only）：`MX_DUMP`（dump batch logits）、`MX_TEXT=1`
 （teacher-forcing 文本比對）。`[mixed] il=.. rows=.. blks=.. ok=..` 是 lib 內
-per-layer diag，只有 `GUFO_MIXED_BATCH=1` 才印。
+per-layer diag，只有 `MBUFO_MIXED_BATCH=1` 才印。
 
 ## Phase 4 設計（scheduler 接線，未開工）
 
@@ -153,7 +153,7 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
   `PrefillWithCoworkers` → backend `AdvanceBatchWithPrefillChunk` →
   engine `EvaluateBatchWithChunk`。每層可獨立降級，任何一步拒絕都走 legacy
   pair（tick-tock 一輪），行為與今天一致。
-- Gate：`GUFO_MIXED_BATCH=1`（scheduler + engine 共用；關掉整條鏈路靜默，
+- Gate：`MBUFO_MIXED_BATCH=1`（scheduler + engine 共用；關掉整條鏈路靜默，
   已驗 mixed 觸發 120 vs 0）。
 - Serve A/B（4 session，3 短 + 1 長隨機 prompt，3 輪）：
   開 5.3s vs 關 6.3s（每輪都贏，~16%），輸出全對（精確回覆、數學、摘要），
@@ -190,7 +190,7 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
 
 - 負載：10 短 + 6 長隨機文本（0 緩存，真 prefill），3 輪，開關各一遍。
   開（預設）：14/17/15s（均 15.3s），mixed 觸發數百次；
-  關（`GUFO_MIXED_BATCH=0`）：15/16/20s（均 17.0s），mixed 0 次。
+  關（`MBUFO_MIXED_BATCH=0`）：15/16/20s（均 17.0s），mixed 0 次。
   短回覆兩邊全部精確一致，長回覆正常結束，log 零錯誤。
 - 解讀：GPU 打到 99% 時，總牆鐘是 FLOP-bound（兩邊做同樣的功），
   mixed 省的是 layer pass 開銷和 decode 等待，約 10% 牆鐘 + 更好的尾延遲；
@@ -198,9 +198,9 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
 - 教訓：測速前務必驗 PID（曾有舊測試服務佔著端口，兩輪全打到同一個
   開著 mixed 的服務上，白測一輪；現在流程里每次重啟都對 PID 和啟動行）。
 
-## Production（2026-10-17，gufo.service :8741）
+## Production（2026-10-17，mbufo.service :8741）
 
 - 同今天 flags（sessions 4、MTP、Q8 KV、disk cache），只換 binary；
-  mixed 預設開（無需 env，`GUFO_MIXED_BATCH=0` 可關）。
+  mixed 預設開（無需 env，`MBUFO_MIXED_BATCH=0` 可關）。
 - 上線驗證：單發精確 + 4 路併發全精確 + journal 零錯誤。
-- 開機自啟：沿用既有 `gufo.service`（enabled），binary 路徑不變。
+- 開機自啟：沿用既有 `mbufo.service`（enabled），binary 路徑不變。

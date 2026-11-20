@@ -18,10 +18,10 @@
 
 #include "src/core/json.hpp"
 
-namespace gufo::models::qwen3_tts {
+namespace mbufo::models::qwen3_tts {
 namespace {
 
-namespace json = gufo::json;
+namespace json = mbufo::json;
 
 /// RAII mmap holder; moved into LoadResult::mappings.
 class MappedFile {
@@ -264,4 +264,4 @@ bool LooksLikeQwen3Tts(const std::string& model_dir) {
   return config.has_value() && IsSupportedModelConfig(*config);
 }
 
-}  // namespace gufo::models::qwen3_tts
+}  // namespace mbufo::models::qwen3_tts

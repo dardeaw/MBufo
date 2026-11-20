@@ -27,7 +27,7 @@ Contents:
 
 ## Context
 
-Gufo serves models locally on a Linux AMD Strix Halo machine. Conversations
+MBufo serves models locally on a Linux AMD Strix Halo machine. Conversations
 often grow over many turns: a coding agent reads files, calls tools and starts
 subagents; other users may continue unrelated conversations at the same time.
 Reprocessing the full history on every turn can dominate response time.
@@ -38,7 +38,7 @@ edit point, a parent agent, or a conversation resumed after a server restart.
 The intended workload includes up to eight concurrent requests and more logical
 conversations than execution slots.
 
-This RFC evaluates how to retain and reuse that work across all Gufo model
+This RFC evaluates how to retain and reuse that work across all MBufo model
 families. The priority order is response latency, RAM usage, then disk capacity
 and write volume. The implementation should arrive through independently
 testable PRs that deliver useful behavior while keeping reviews manageable.
@@ -559,7 +559,7 @@ payload size; a restart benefit cannot be claimed by ignoring index-build time.
 
 Old-format compatibility is not required. The store recognizes its format
 version and rebuilds incompatible legacy cache entries as requests arrive.
-Cleanup is confined to files recognized as Gufo-managed cache files in the
+Cleanup is confined to files recognized as MBufo-managed cache files in the
 configured directory; it does not recursively delete unrelated contents.
 Unknown future formats are not interpreted as the current format.
 
@@ -802,7 +802,7 @@ prompts and evicts oldest entries when capacity is needed.
 See [slot/checkpoint implementation](https://github.com/ggml-org/llama.cpp/blob/41abbfd59/tools/server/server-context.cpp)
 and [host prompt cache](https://github.com/ggml-org/llama.cpp/blob/41abbfd59/tools/server/server-task.cpp).
 
-Applied to Gufo, this would keep efficient same-slot continuation and cheap
+Applied to MBufo, this would keep efficient same-slot continuation and cheap
 recurrent rollback points while retaining whole state when a conversation
 leaves its slot. Automatic persistent shared storage would be additional work.
 
@@ -817,7 +817,7 @@ Disadvantages for the intended workload:
 
 - Moving conversations between slots still requires complete retained state
   and transfers; multiple displaced histories can consume substantial RAM.
-- Host-cache supersession needs care for Gufo's useful older branch points.
+- Host-cache supersession needs care for MBufo's useful older branch points.
 - Automatic restart persistence and cross-checkpoint disk sharing remain to
   be designed.
 
@@ -834,7 +834,7 @@ storage tiers. See [hybrid-model caching](https://pytorch.org/blog/hybrid-models
 [unified radix cache](https://www.lmsys.org/blog/2026-08-11-unified-radix-cache)
 and [HiCache design](https://docs.sglang.io/docs/advanced_features/hicache_design).
 
-A Gufo adaptation would make shared tree storage more directly responsible
+A MBufo adaptation would make shared tree storage more directly responsible
 for request KV, with coherent recurrent checkpoints and tier transfers attached
 to the tree. This is more ambitious than initially restoring shared retained
 chunks into today's contiguous slots.
@@ -848,13 +848,13 @@ Advantages:
 - The architecture provides useful precedents for tiered storage and
   independently reclaimable recurrent checkpoints.
 
-Disadvantages for Gufo:
+Disadvantages for MBufo:
 
 - Directly adopting paged/shared live state requires allocator and execution
   integration across model families, beyond retaining immutable checkpoints.
 - Multi-tier policies and component relationships add implementation and
   review complexity.
-- Published upstream throughput or latency results do not qualify Gufo's
+- Published upstream throughput or latency results do not qualify MBufo's
   kernels, unified-memory hardware or eight-request workloads.
 
 The recommended design adopts shared-prefix and component-validation ideas,
@@ -872,10 +872,10 @@ See [prefix caching, v0.22.1](https://docs.vllm.ai/en/v0.22.1/design/prefix_cach
 [cache configuration, v0.22.1](https://docs.vllm.ai/en/v0.22.1/api/vllm/config/cache/)
 and [hybrid manager design](https://docs.vllm.ai/en/stable/design/hybrid_kv_cache_manager/).
 
-Applied to Gufo, this would introduce block-managed live KV and corresponding
+Applied to MBufo, this would introduce block-managed live KV and corresponding
 attention access, plus a checkpoint policy for hybrid state. Persistence would
 need its own store or integration; block prefix caching alone does not define
-Gufo's restart semantics.
+MBufo's restart semantics.
 
 Advantages:
 
@@ -885,7 +885,7 @@ Advantages:
   request lifecycles.
 - Multiple required state groups are handled explicitly.
 
-Disadvantages for Gufo:
+Disadvantages for MBufo:
 
 - Requires significant integration with model allocators and attention kernels.
 - Recurrent state sizes and block alignment can constrain reuse granularity
@@ -913,7 +913,7 @@ improve the current cache is outside this RFC's implementation scope.
 ### Other approaches considered in the research
 
 **KV-only diffs.** Persist only new rows after each boundary. This omits required
-recurrent/private state for Gufo's hybrid models and cannot restore a coherent
+recurrent/private state for MBufo's hybrid models and cannot restore a coherent
 checkpoint. Adding exact private state and safe shared ownership turns it into
 the recommended hybrid representation.
 
@@ -929,16 +929,16 @@ well as retained storage. It remains a separately qualified extension rather
 than a prerequisite for building the new common package.
 
 **External stores such as LMCache, and local engines such as ds4.** They are
-additional integration references, rather than a sixth complete Gufo design.
+additional integration references, rather than a sixth complete MBufo design.
 An external store still needs coherent recurrent state, complete compatibility
 identity and safe ownership. Importing a backend does not remove those adapter
 requirements. See [LMCache hybrid-model support](https://docs.lmcache.ai/mp/hybrid_models.html)
 and [ds4](https://github.com/antirez/ds4). This RFC makes no unverified claim
-about their measured performance on Gufo.
+about their measured performance on MBufo.
 
 ### Comparison table
 
-The columns describe architectural adaptations to Gufo, not a benchmark ranking
+The columns describe architectural adaptations to MBufo, not a benchmark ranking
 of upstream products. Green means a good architectural fit for the row; yellow
 means conditional support, additional work or a tradeoff; red means the scoped
 approach leaves a material requirement unresolved. Colors express design
@@ -955,7 +955,7 @@ assessment, not implementation qualification. Short reasons accompany each.
 | Automatic restart retention with shared disk payload | 🟢 Specified manifest store | 🔴 Additional automatic disk design needed | 🟡 Storage backend and state support required | 🟡 Additional persistence integration required | 🔴 Persistence exists, but payload duplicated |
 | Bounded deep writes and restores | 🟢 Required in both directions | 🟡 Must add bounded persistence | 🟡 Depends on tier/backend integration | 🟡 Depends on storage integration | 🔴 Current whole-payload staging limit |
 | Exact recurrent boundary restoration | 🟢 Explicit component contract | 🟢 Exact saved checkpoints | 🟢 Required component boundary | 🟡 Model/mode capability verified | 🟢 Existing coherent snapshots |
-| Incremental delivery through Gufo PRs | 🟢 Package, backing, RAM, disk, adapters | 🟢 Smaller execution changes | 🟡 Wider allocator/execution changes | 🟡 Wider allocator/kernel changes | 🟢 Existing implementation |
+| Incremental delivery through MBufo PRs | 🟢 Package, backing, RAM, disk, adapters | 🟢 Smaller execution changes | 🟡 Wider allocator/execution changes | 🟡 Wider allocator/kernel changes | 🟢 Existing implementation |
 | Disk corruption isolation | 🟡 Shared dependency affects many entries | 🟡 Depends on added disk design | 🟡 Shared-tier dependency handling | 🟡 Shared-store dependency handling | 🟢 Independent complete files |
 | Evidence for admitted per-model concurrency workloads | 🟡 Qualification required | 🟡 Qualification required | 🟡 Qualification required | 🟡 Qualification required | 🟡 Capacity matrix and matched controls required |
 
@@ -1093,7 +1093,7 @@ complete, without changing the meaning of historical evidence.
 Cached state may contain information derived from prompts. Retain the current
 owner-only file permissions, avoid logging prompt contents, and respect any
 existing input isolation identity. Broader tenant isolation is a separately
-specified requirement if Gufo's deployment model changes.
+specified requirement if MBufo's deployment model changes.
 
 The initial directory-ownership restriction changes today's multi-process
 behavior. Document it clearly. It simplifies crash/GC correctness but does not
@@ -1621,7 +1621,7 @@ Upstream alternatives were checked against official documentation and the
 referenced llama.cpp source revision on October 8. Versioned vLLM links are
 pinned where available; the stable design and SGLang documentation are mutable
 references, so future implementation decisions must re-check their relevant
-contracts. Architectural inference about adapting them to Gufo is identified
+contracts. Architectural inference about adapting them to MBufo is identified
 as such in the alternatives, rather than presented as an upstream guarantee.
 
 The last supporting-document/script snapshot is
@@ -1932,13 +1932,13 @@ not a source of hard-coded production defaults.
 | Capture, 27B full copy | 14 ms at 0.36 GB, 235 ms at 10 GB (≈ 67 ms + 17 ms/GB, r² 0.51) | E2 W1 `live_checkpoint`, one agent, no concurrency | Its fixed state is 0.24 GB, so a fixed-state-only 27B capture is ~10–15 ms, matching the 1.8k-token captures |
 | RAM held by checkpoints | Flash-Next: physical well below accounted; 27B: physical ≈ accounted | E2 W1 logs: `retained_bytes` vs `host_available_mib` | Flash-Next accounted 7.1–8.9 GB while available memory fell only 4–6 GB including the live session; 27B accounted 16.5–22.3 GB for a 14–20 GB fall. Counting unique bytes matches what the hardware holds |
 | Disk write + fsync, raw | 0.58–0.60 GB/s at every size | [diskbench.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/diskbench.py) | — |
-| Disk write in gufo | 0.44 GB/s (serialize + checksum + write + fsync) | E2 `write_ms` against `file_bytes`, about 170 writes | Per-write medians 0.36 GB/s (27B) and 0.52 GB/s (Flash-Next). One unexplained outlier at concurrency 4: 1.67 GB in 782 s |
+| Disk write in mbufo | 0.44 GB/s (serialize + checksum + write + fsync) | E2 `write_ms` against `file_bytes`, about 170 writes | Per-write medians 0.36 GB/s (27B) and 0.52 GB/s (Flash-Next). One unexplained outlier at concurrency 4: 1.67 GB in 782 s |
 | Disk cold read | 1.1 GB/s; 1.4–1.5 GB/s when partly cached | diskbench.py; E2 disk restores | Real restores: 55.5k-token 27B file in 2.5 s |
 | Assembling a session from chunks in memory | 106 GB/s for 4 MiB pieces, 88 GB/s for 1 MiB, vs 103 GB/s for one copy | [chunkcopy.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/chunkcopy.hip), 8 GiB as many device copies | Per-layer pieces of a 2,048-token chunk are an estimated 1–4 MiB |
 | Chunk files instead of one file | +13% write time, +13% cold-read time (72 × 56 MiB vs 4 GiB) | diskbench.py | Compaction may reduce it; qualification required |
 | Prefill N tokens on D cached | Flash-Next 0.36 s + 0.79 ms/token + small depth term; 27B 0.52 s + 2.66 ms/token + 16.5 ns × N × (D + N/2) | [fit_prefill.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/fit_prefill.py), 150 requests each; median error 9.8% and 3.9% | Simulated prefill time matches measured within 3–8% (E7) |
 
-`cache_snapshot_ms` in `usage.gufo` is not used as a capture cost. It is
+`cache_snapshot_ms` in `usage.mbufo` is not used as a capture cost. It is
 measured from capture start to when the capture is joined
 (`src/cli/serve/text_model_runner.cpp:913`), so it includes overlapped wall
 time. Its medians (0.3–0.5 s per request on Flash-Next, about 1 s on 27B) are
@@ -2066,10 +2066,10 @@ matching performance controls for later cache implementations.
 
 The commands below use authenticated `gh`, GNU tar and `sha256sum`. They extract
 only the research scripts and results into a fresh temporary directory. Run
-them from a Gufo checkout; the application source is not modified.
+them from a MBufo checkout; the application source is not modified.
 
 ```sh
-export GUFO_REPO=$(git rev-parse --show-toplevel)
+export MBUFO_REPO=$(git rev-parse --show-toplevel)
 export CACHE_EXP_DIR=$(mktemp -d)
 
 gh auth status
@@ -2136,7 +2136,7 @@ how the simulator changed, but do not override the later reference results.
 
 ### Rerun measurements against an explicitly selected binary
 
-Actual measurements require Strix Halo, the model/sidecar files and a Gufo
+Actual measurements require Strix Halo, the model/sidecar files and a MBufo
 production binary. They start servers and reset their own experimental cache
 directories. Keep the experiment directory separate from a serving cache and
 stop conflicting model servers before invoking measurement drivers.
@@ -2144,8 +2144,8 @@ stop conflicting model servers before invoking measurement drivers.
 | Variable | Meaning |
 | --- | --- |
 | `CACHE_EXP_DIR` | External root containing `scripts/`, `results/` and experimental `cache/`. |
-| `GUFO_REPO` | Explicit source checkout used for corpora and functional drivers. |
-| `GUFO_BIN` | Explicit candidate or baseline production binary; default is `$CACHE_EXP_DIR/bin/gufo`. |
+| `MBUFO_REPO` | Explicit source checkout used for corpora and functional drivers. |
+| `MBUFO_BIN` | Explicit candidate or baseline production binary; default is `$CACHE_EXP_DIR/bin/mbufo`. |
 | `LLAMA_TOKENIZE` | Explicit compatible llama.cpp tokenizer executable. |
 | `FN_MODEL`, `FN_MTP`, `Q27_MODEL`, `Q27_DFLASH` | Actual model and speculative sidecar files. |
 | `PYTHON` | Interpreter used by shell drivers; default `python3`. |
@@ -2197,7 +2197,7 @@ and actual artifact fingerprints for matching controls.
 Research began on October 7 with Flash-Next and 27B as the measurement scope;
 DeepSeek was not measured in that round. The implementation scope subsequently
 expanded to all model families. Earlier suggestions that paging/component
-infrastructure was unnecessary merely because Gufo has few slots are superseded
+infrastructure was unnecessary merely because MBufo has few slots are superseded
 by this RFC's explicit C=8 capacity qualification and adapter architecture.
 
 Issue [#275](https://github.com/gufo-org/gufo/issues/275) motivated investigating

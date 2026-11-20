@@ -1,21 +1,21 @@
 # Qwen3.8 Flash-Next benchmarks
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target and
-shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.
-The complete October 18, 2026 Gufo sweeps use `fec4759d` and the validated
+shared-Q8_0 MTP sidecar; MBufo uses adaptive MTP. HTTP, greedy, thinking off.
+The complete October 18, 2026 MBufo sweeps use `fec4759d` and the validated
 host-memory and cache-stall fixes; the focused October 21 follow-up is separate.
 Reference results remain unchanged from September 22–23.
 llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
 
-Positive gain favors Gufo.
+Positive gain favors MBufo.
 [Quality and measurement details](QUALITY.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
 
-Gufo numerical regression checks pass; individual functional timing limits
+MBufo numerical regression checks pass; individual functional timing limits
 remain documented in [QUALITY.md](QUALITY.md). Historical llama.cpp MTP values are retained as requested:
 a separate check of that pin did not match its own AR output, so this review
 does not requalify those comparisons. [Review evidence](artifacts/decode-kernels-review.json).
 
-At 128K, Gufo reaches 1557.18 tok/s AR prefill and 1481.19 tok/s MTP prefill.
+At 128K, MBufo reaches 1557.18 tok/s AR prefill and 1481.19 tok/s MTP prefill.
 All 24 single-user rows match the previous qualified capture in completion
 hashes and prompt/cache counts.
 All 63 concurrent tg128 completions match the corresponding C1 AR control.
@@ -98,7 +98,7 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 Context capacities differ between engines; see the measurement details.
 
 <!-- bench:single-ar -->
-| Flash-Next Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| Flash-Next Q4 AR<br>Depth (tokens) | MBufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | MBufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | 1801.01 | 489.59 | +267.9% | 28.29 | 22.20 | +27.4% |
 | 4,096 | 1727.95 | 455.24 | +279.6% | 28.27 | 21.21 | +33.3% |
@@ -115,10 +115,10 @@ Context capacities differ between engines; see the measurement details.
 ## Single user, MTP
 
 pp is the highest measured rate per engine and depth across mixed/repetitive
-text, including Gufo predictor catch-up.
+text, including MBufo predictor catch-up.
 
 <!-- bench:single-mtp -->
-| Flash-Next Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
+| Flash-Next Q4 MTP<br>Depth (tokens) | MBufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | MBufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | MBufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | 1734.96 ± 0.85 | 468.76 | +270.1% | 35.79 | 31.73 | +12.8% | 116.93 ± 0.10 | 48.12 | +143.0% |
 | 4,096 | 1676.83 ± 1.73 | 423.79 | +295.7% | 37.64 | 34.48 | +9.2% | 116.41 ± 0.07 | 45.71 | +154.7% |
@@ -139,7 +139,7 @@ All sessions prefilled before timed decoding; throughput sums individual rates.
 llama.cpp re-evaluates its four-token checkpoint tail.
 
 <!-- bench:multi-ar -->
-| Flash-Next Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
+| Flash-Next Q4 AR<br>Users | MBufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
 | 1 | 28.24 | 22.34 | +26.4% |
 | 2 | 50.66 | 37.08 | +36.6% |
@@ -157,7 +157,7 @@ per user. All sessions prefilled before timed decoding; rates sum individual
 request decode rates. C1 cross-checks the single-user table.
 
 <!-- bench:multi-mtp -->
-| Flash-Next Q4 MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
+| Flash-Next Q4 MTP<br>Users | MBufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | MBufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 35.74 | 31.77 | +12.5% | 116.50 | 46.93 | +148.2% |
 | 2 | 61.30 | 42.79 | +43.3% | 165.50 | 52.57 | +214.8% |
@@ -173,7 +173,7 @@ request decode rates. C1 cross-checks the single-user table.
 C1, context capacity 262144, MTP. Cold target/sidecar files to HTTP readiness.
 
 <!-- bench:loading -->
-| Flash-Next Q4<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
+| Flash-Next Q4<br>Target | MBufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
 | Q4 | 16.42 | 117.83 | +617.6% |
 <!-- /bench -->
@@ -185,7 +185,7 @@ C1, context capacity 262144, MTP. Cold target/sidecar files to HTTP readiness.
 C1, context capacity 133121, AR. Peak memory reported by HIP.
 
 <!-- bench:memory -->
-| Flash-Next Q4 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
+| Flash-Next Q4 AR<br>Workload | MBufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
 | pp2048 + tg128 | 88.78 | 84.84 | -4.4% |
 | 16K prefix, pp4096 + tg128 | 90.53 | 85.31 | -5.8% |

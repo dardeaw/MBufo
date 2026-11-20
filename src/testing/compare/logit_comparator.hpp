@@ -1,11 +1,11 @@
-#ifndef GUFO_TESTING_COMPARE_LOGIT_COMPARATOR_HPP_
-#define GUFO_TESTING_COMPARE_LOGIT_COMPARATOR_HPP_
+#ifndef MBUFO_TESTING_COMPARE_LOGIT_COMPARATOR_HPP_
+#define MBUFO_TESTING_COMPARE_LOGIT_COMPARATOR_HPP_
 
 #include <cstddef>
 #include <span>
 #include <string>
 
-namespace gufo::testing {
+namespace mbufo::testing {
 
 struct LogitCompareResult {
   bool match{true};
@@ -28,6 +28,6 @@ LogitCompareResult CompareLogits(std::span<const float> reference,
                                  std::span<const float> candidate,
                                  float atol = 1e-3F, float rtol = 1e-3F);
 
-}  // namespace gufo::testing
+}  // namespace mbufo::testing
 
-#endif  // GUFO_TESTING_COMPARE_LOGIT_COMPARATOR_HPP_
+#endif  // MBUFO_TESTING_COMPARE_LOGIT_COMPARATOR_HPP_

@@ -1,10 +1,10 @@
-#ifndef GUFO_MODELS_QWEN_IMAGE_21_HIP_BF16_HPP_
-#define GUFO_MODELS_QWEN_IMAGE_21_HIP_BF16_HPP_
+#ifndef MBUFO_MODELS_QWEN_IMAGE_21_HIP_BF16_HPP_
+#define MBUFO_MODELS_QWEN_IMAGE_21_HIP_BF16_HPP_
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 
-namespace gufo::models::qwen_image_21::hip {
+namespace mbufo::models::qwen_image_21::hip {
 
 // Match hip_bfloat16's round-to-nearest-even conversion, including infinities
 // and NaN payloads, without divergent branches in a matrix epilogue.
@@ -25,6 +25,6 @@ __device__ __forceinline__ hip_bfloat16 SiluBf16(hip_bfloat16 input) {
   return Bf16(value / (1.0F + __expf(-value)));
 }
 
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace mbufo::models::qwen_image_21::hip
 
 #endif

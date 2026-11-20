@@ -18,8 +18,8 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
-namespace q = gufo::models::qwen38_flash_next;
-namespace sampling = gufo::sampling;
+namespace q = mbufo::models::qwen38_flash_next;
+namespace sampling = mbufo::sampling;
 namespace {
 
 void Check(hipError_t code) {

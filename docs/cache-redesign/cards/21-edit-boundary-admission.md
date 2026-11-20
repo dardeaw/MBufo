@@ -49,7 +49,7 @@ same history. MTP proposes 1506 drafts and accepts 871 across the new replay.
 Constrained-RAM pressure and matched request timings remain under qualification;
 this correctness result does not establish a latency pass.
 
-Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,
+Evidence: `/home/mixer/mbufo-qualification/pr543-review-2026-10-11`,
 `grid-red.log`, `grid-protection-red.log`, `grid-protection-green.log`,
 `grid-pr-final.log`, `grid-format-after-control.log`, `grid-functional-summary.json`.
 Production binary SHA-256:

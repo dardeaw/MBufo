@@ -2,7 +2,7 @@
 
 #include <sstream>
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 namespace {
 
@@ -53,7 +53,7 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
       platform_item.remediation_hint = "None";
     } else {
       platform_item.verdict = CompatibilityVerdict::kUnsupported;
-      platform_item.remediation_hint = "gufo only supports Linux x86-64";
+      platform_item.remediation_hint = "mbufo only supports Linux x86-64";
       overall = CompatibilityVerdict::kUnsupported;
     }
     report.items.push_back(std::move(platform_item));
@@ -72,7 +72,7 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
     } else {
       gpu_item.verdict = CompatibilityVerdict::kUnsupported;
       gpu_item.remediation_hint =
-          "gufo requires AMD Strix Halo gfx1151 GPU (Radeon 8060S / "
+          "mbufo requires AMD Strix Halo gfx1151 GPU (Radeon 8060S / "
           "8050S). Detected: " +
           inventory.gpu.architecture;
       overall = CompatibilityVerdict::kUnsupported;
@@ -153,4 +153,4 @@ std::string CompatibilityReport::ToHuman() const {
   return oss.str();
 }
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

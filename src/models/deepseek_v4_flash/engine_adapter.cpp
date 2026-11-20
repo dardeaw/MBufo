@@ -3,6 +3,8 @@
 
 #include "src/models/deepseek_v4_flash/engine_adapter.hpp"
 
+#include "src/core/gguf_reader.hpp"
+
 #include <algorithm>
 #include <exception>
 #include <filesystem>
@@ -10,7 +12,7 @@
 
 #include "src/core/session_mode.hpp"
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 namespace {
 
 void SetError(std::string* error_msg, const char* msg) {
@@ -163,8 +165,14 @@ std::shared_ptr<DeepSeekEngineModel> DeepSeekEngineModel::Load(const std::string
   if (!inner) return nullptr;
   std::error_code ec;
   const auto bytes = std::filesystem::file_size(model_path, ec);  // memory-mapped GGUF: the file is the residency
-  return std::shared_ptr<DeepSeekEngineModel>(
+  auto engine = std::shared_ptr<DeepSeekEngineModel>(
       new DeepSeekEngineModel(std::move(inner), ec ? 0 : static_cast<std::size_t>(bytes)));
+  // The ds4 runtime hides its config; the contract declaration is read from the same GGUF it loaded.
+  if (auto reader = core::GgufReader::OpenFile(model_path)) {
+    engine->moe_geometry_ = DescribeMoeGeometry(*reader);
+    engine->attention_geometry_ = DescribeAttentionGeometry(*reader);
+  }
+  return engine;
 }
 
 std::unique_ptr<core::engine::EngineSession> DeepSeekEngineModel::CreateSession(std::string* error_msg) {
@@ -189,7 +197,71 @@ std::uint32_t DeepSeekEngineModel::VocabSize() const noexcept {
   return v > 0 ? static_cast<std::uint32_t>(v) : 0U;
 }
 std::uint32_t DeepSeekEngineModel::MaxContext() const noexcept { return model_->MaxContext(); }
+core::engine::MoeGeometry DeepSeekEngineModel::MoeGeometryInfo() const { return moe_geometry_; }
+core::engine::MoeKernelInfo DeepSeekEngineModel::MoeKernelsInfo() const { return DescribeMoeKernels(); }
+
+core::engine::MoeGeometry DescribeMoeGeometry(const core::GgufReader& reader) {
+  core::engine::MoeGeometry g;
+  auto u32 = [&](const char* key) { return reader.GetMetadataUint32(key).value_or(0); };
+  const std::uint32_t layers = u32("deepseek4.block_count");
+  const std::uint32_t experts = u32("deepseek4.expert_count");
+  if (experts == 0) return g;
+  for (std::uint32_t i = 0; i < layers; ++i) {
+    const std::string base = "blk." + std::to_string(i) + ".";
+    const auto* gate = reader.FindTensor(base + "ffn_gate_exps.weight");
+    const auto* up = reader.FindTensor(base + "ffn_up_exps.weight");
+    const auto* down = reader.FindTensor(base + "ffn_down_exps.weight");
+    if (gate == nullptr || up == nullptr || down == nullptr) continue;
+    g.AddLayer(static_cast<int>(gate->type), static_cast<int>(up->type), static_cast<int>(down->type));
+  }
+  g.experts = experts;
+  g.top_k = u32("deepseek4.expert_used_count");
+  g.hidden = u32("deepseek4.embedding_length");
+  g.expert_ff = u32("deepseek4.expert_feed_forward_length");
+  g.shared_ff = g.expert_ff * u32("deepseek4.expert_shared_count");
+  return g;
+}
+
+core::engine::MoeKernelInfo DescribeMoeKernels() {
+  core::engine::MoeKernelInfo k;
+  k.origin = core::engine::MoeKernelOrigin::kModelPrivate;
+  k.gate_up_kernel = "ds4 moe_gate_up_mid_decode_lut_qwarp32 (IQ2_XXS gate/up x Q8_K int dot, LUT)";
+  k.down_kernel = "ds4 moe_down_sum6_qwarp32 (Q2_K down x Q8_K int dot, fused 6-expert sum)";
+  k.private_reason =
+      "models/deepseek_v4_flash/UPSTREAM.md: ds4 numerics stay bit-identical to antirez/ds4 (IQ2_XXS/Q2_K LUT kernels on Q8_K activations, "
+      "sorted-tile and hotlist WMMA batch paths), so its kernels are not shared with the Qwen-derived core";
+  k.masks_inactive_slots = true;
+  k.graph_capture_safe = true;
+  return k;
+}
+
 std::size_t DeepSeekEngineModel::ResidentBytes() const noexcept { return resident_bytes_; }
+
+core::engine::AttentionGeometry DescribeAttentionGeometry(const core::GgufReader& reader) {
+  auto u32 = [&](const char* key) { return reader.GetMetadataUint32(key).value_or(0); };
+  core::engine::AttentionGeometry g;
+  core::engine::AttentionGroup a;
+  a.kind = core::engine::AttentionKind::kMla;
+  a.heads = u32("deepseek4.attention.head_count");
+  a.kv_heads = u32("deepseek4.attention.head_count_kv");
+  a.head_dim = u32("deepseek4.attention.key_length");
+  a.kv_format = core::engine::AttentionKvFormat::kModelSpecific;
+  for (std::uint32_t i = 0; i < u32("deepseek4.block_count"); ++i) g.AddLayer(a);
+  return g;
+}
+
+core::engine::AttentionKernelInfo DescribeAttentionKernels() {
+  core::engine::AttentionKernelInfo k;
+  k.decode = {core::engine::AttentionKernelOrigin::kModelPrivate, "ds4 MLA decode attention (compressed KV + indexer)",
+              "multi-head latent attention with a compressed KV cache; the core softmax-GQA kernels cannot serve it", "", false};
+  k.prefill = {core::engine::AttentionKernelOrigin::kModelPrivate, "ds4 MLA prefill attention",
+               "multi-head latent attention with a compressed KV cache; the core softmax-GQA kernels cannot serve it", "", false};
+  return k;
+}
+
+core::engine::AttentionGeometry DeepSeekEngineModel::AttentionGeometryInfo() const { return attention_geometry_; }
+core::engine::AttentionKernelInfo DeepSeekEngineModel::AttentionKernelsInfo() const { return DescribeAttentionKernels(); }
+
 std::string DeepSeekEngineModel::ModelName() const { return model_->ModelName(); }
 std::string DeepSeekEngineModel::DecodeToken(std::int32_t token) const { return model_->DecodeToken(token); }
 bool DeepSeekEngineModel::IsStopToken(std::int32_t token) const { return model_->IsStopToken(token); }
@@ -200,7 +272,7 @@ namespace {
 // apply (DeepSeek's compressed KV is part of the model) and is ignored; no DSpark support model can come from a
 // registry request.
 const core::engine::EngineRegistrar kRegisterDeepSeekEngine(
-    core::engine::EngineBackendInfo{"deepseek_v4_flash", "DeepSeek V4 Flash MoE text (private kernels)"},
+    core::engine::EngineBackendInfo{"deepseek_v4_flash", "DeepSeek V4 Flash MoE text (private kernels)", true},
     [](const core::engine::EngineLoadRequest& request,
        std::string* error_msg) -> std::shared_ptr<core::engine::EngineModel> {
       ModelOptions options;
@@ -210,4 +282,4 @@ const core::engine::EngineRegistrar kRegisterDeepSeekEngine(
 
 }  // namespace
 
-}  // namespace gufo::models::deepseek_v4_flash
+}  // namespace mbufo::models::deepseek_v4_flash

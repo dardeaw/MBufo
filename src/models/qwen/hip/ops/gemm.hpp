@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_OPS_GEMM_HPP_
-#define GUFO_MODELS_QWEN_HIP_OPS_GEMM_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_OPS_GEMM_HPP_
+#define MBUFO_MODELS_QWEN_HIP_OPS_GEMM_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -14,7 +14,7 @@
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 struct HipblasLtDispatchInfo {
   int algorithm_id{-1};
@@ -324,8 +324,8 @@ void LaunchHipblasGEMMBF16(hipblasHandle_t handle, const void* A_bf16,
                            std::size_t batch_size, std::size_t M, std::size_t K,
                            hipStream_t stream = nullptr);
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_OPS_GEMM_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_OPS_GEMM_HPP_

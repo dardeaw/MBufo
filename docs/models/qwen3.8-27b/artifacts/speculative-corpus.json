@@ -1,5 +1,5 @@
 {
-  "schema": "gufo.speculative-corpus.v1",
+  "schema": "mbufo.speculative-corpus.v1",
   "prompts": [
     {
       "id": "expository_pangram",

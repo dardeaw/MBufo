@@ -6,8 +6,8 @@
   "hardware": "AMD Strix Halo gfx1151",
   "flake_lock_sha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
   "builds": {
-    "baseline": "/nix/store/bybc1nba9b06ks96rcvy1lmfg7rxzyv8-gufo-0-unstable-ba97a2b",
-    "candidate": "/nix/store/clm388l4zvw03zjbyqcqzm18iinmrd1g-gufo-0-unstable-ba97a2b-dirty"
+    "baseline": "/nix/store/bybc1nba9b06ks96rcvy1lmfg7rxzyv8-mbufo-0-unstable-ba97a2b",
+    "candidate": "/nix/store/clm388l4zvw03zjbyqcqzm18iinmrd1g-mbufo-0-unstable-ba97a2b-dirty"
   },
   "model": {
     "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
@@ -16,7 +16,7 @@
     "mtp": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
   },
   "method": {
-    "command": "gufo bench --model TARGET --speculative off -p 2048 -n 128 -d 0,32768 -r 1",
+    "command": "mbufo bench --model TARGET --speculative off -p 2048 -n 128 -d 0,32768 -r 1",
     "mtp_arguments": "--speculative mtp --mtp-model MTP",
     "prompt": "CLI benchmark's deterministic repeated-text pattern; not the HTTP mixed/repetitive prompts.",
     "sampling": "Greedy benchmark defaults.",

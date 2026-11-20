@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_QUANT_OPS_HPP_
-#define GUFO_MODELS_QWEN_HIP_QUANT_OPS_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_QUANT_OPS_HPP_
+#define MBUFO_MODELS_QWEN_HIP_QUANT_OPS_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -12,7 +12,7 @@
 
 #include <cmath>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // Shared quantized block layouts + quant row-dot helpers for the decode and
 // prefill GPU paths, matching the CPU oracles in ggml_dequant.cpp.
@@ -906,8 +906,8 @@ __device__ inline float QuantWarpBlockDot(
   return sumf;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_QUANT_OPS_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_QUANT_OPS_HPP_

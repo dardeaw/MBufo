@@ -68,24 +68,24 @@ extern "C" hipError_t __wrap_hipMemcpyAsync(void* destination,
 
 int main(int argc, const char* const* argv) {
   const char* base_path =
-      argc > 1 ? argv[1] : std::getenv("GUFO_QWEN27B_MODEL");
+      argc > 1 ? argv[1] : std::getenv("MBUFO_QWEN27B_MODEL");
   const char* draft_path =
-      argc > 2 ? argv[2] : std::getenv("GUFO_QWEN27B_DFLASH_MODEL");
+      argc > 2 ? argv[2] : std::getenv("MBUFO_QWEN27B_DFLASH_MODEL");
   if (base_path == nullptr || draft_path == nullptr) {
     std::cerr << "pass target and DFlash2 GGUF paths\n";
     return 77;
   }
   try {
     std::string error;
-    auto owner = gufo::core::GgufReader::OpenFile(base_path, &error);
+    auto owner = mbufo::core::GgufReader::OpenFile(base_path, &error);
     Check(owner != nullptr, error.c_str());
-    std::shared_ptr<const gufo::core::GgufReader> reader(std::move(owner));
-    auto target = gufo::hip::QwenGpuModel::CreateFromGguf(reader, &error);
+    std::shared_ptr<const mbufo::core::GgufReader> reader(std::move(owner));
+    auto target = mbufo::hip::QwenGpuModel::CreateFromGguf(reader, &error);
     Check(target != nullptr, error.c_str());
-    auto backend = gufo::hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
+    auto backend = mbufo::hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
         draft_path, target, {.max_context = 32}, &error);
     Check(backend != nullptr, error.c_str());
-    const std::vector<gufo::tokenization::TokenId> tokens{1, 2, 3, 4};
+    const std::vector<mbufo::tokenization::TokenId> tokens{1, 2, 3, 4};
     const auto width = target->GetConfig().hidden_size *
                        backend->TargetHiddenLayerIds().size();
     std::vector<float> original(tokens.size() * width);
@@ -104,7 +104,7 @@ int main(int argc, const char* const* argv) {
     bool all_preserved = true;
     for (bool pinned : {false, true}) {
       std::vector<float> pageable(original);
-      gufo::hip::HostAllocations allocation;
+      mbufo::hip::HostAllocations allocation;
       struct DrainBeforeRelease {
         ~DrainBeforeRelease() {
           if (fault.stream)

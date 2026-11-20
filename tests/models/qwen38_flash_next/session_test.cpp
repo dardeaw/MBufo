@@ -18,8 +18,8 @@
 #include "tests/models/qwen27b/sampling_cases.hpp"
 #include "tests/models/qwen38_flash_next/mtp_replay.hpp"
 
-namespace qfn = gufo::models::qwen38_flash_next;
-namespace sampling = gufo::sampling;
+namespace qfn = mbufo::models::qwen38_flash_next;
+namespace sampling = mbufo::sampling;
 
 void Require(bool condition, const std::string& message) {
   if (!condition)
@@ -38,7 +38,7 @@ void CheckSnapshotDuringGraphCapture(const std::shared_ptr<qfn::Model>& model,
                                      bool warm_storage,
                                      bool protect_rows = false) {
   std::string error;
-  const auto mode = gufo::core::SessionMode::kAutoregressive;
+  const auto mode = mbufo::core::SessionMode::kAutoregressive;
   auto decoding = model->CreateSession(mode, 128, &error);
   auto reference = model->CreateSession(mode, 128, &error);
   auto frozen = model->CreateSession(mode, 128, &error);
@@ -110,8 +110,8 @@ void CheckSnapshotDuringGraphCapture(const std::shared_ptr<qfn::Model>& model,
 void CheckFailureRecovery(const std::shared_ptr<qfn::Model>& model) {
   std::string error;
   auto session = model->CreateSession(
-      model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                      : gufo::core::SessionMode::kAutoregressive,
+      model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                      : mbufo::core::SessionMode::kAutoregressive,
       4096, &error);
   Require(session != nullptr, error);
   const auto initial_bytes = session->AllocatedBytes();
@@ -119,7 +119,7 @@ void CheckFailureRecovery(const std::shared_ptr<qfn::Model>& model) {
   const auto checkpoint_bytes =
       std::size_t{c.num_layers - c.num_layers / c.full_attention_interval} *
       c.ssm_num_v_heads * c.ssm_head_dim * c.ssm_head_dim * sizeof(float);
-  Require(model->SessionBytes(gufo::core::SessionMode::kSpeculative, 4096) >
+  Require(model->SessionBytes(mbufo::core::SessionMode::kSpeculative, 4096) >
               initial_bytes + checkpoint_bytes,
           "unused deep rollback state was allocated eagerly");
   const auto pattern =
@@ -135,7 +135,7 @@ void CheckFailureRecovery(const std::shared_ptr<qfn::Model>& model) {
   Require(snapshot->SizeBytes() < 200ULL * 1024 * 1024,
           "short prompt snapshot retains a full prefill hidden buffer");
 
-  auto peer = model->CreateSession(gufo::core::SessionMode::kAutoregressive, 64,
+  auto peer = model->CreateSession(mbufo::core::SessionMode::kAutoregressive, 64,
                                    &error);
   Require(peer && peer->Sync(pattern, &error), error);
   const std::vector<float> peer_expected(peer->Logits().begin(),
@@ -180,8 +180,8 @@ void CheckRollbackReuse(const std::shared_ptr<qfn::Model>& model) {
   const auto prompt = model->Tokenize("Continue: red, blue, red, blue,");
   const auto context = static_cast<std::uint32_t>(prompt.size() + 4);
   auto session = model->CreateSession(
-      model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                      : gufo::core::SessionMode::kAutoregressive,
+      model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                      : mbufo::core::SessionMode::kAutoregressive,
       context, &error);
   Require(session != nullptr, error);
   const auto empty_bytes = session->AllocatedBytes();
@@ -194,7 +194,7 @@ void CheckRollbackReuse(const std::shared_ptr<qfn::Model>& model) {
   const auto warm_bytes = session->AllocatedBytes();
   Require(warm_bytes > empty_bytes &&
               warm_bytes <= model->SessionBytes(
-                                gufo::core::SessionMode::kSpeculative, context),
+                                mbufo::core::SessionMode::kSpeculative, context),
           "rollback allocation exceeded its configured bound");
   session->ResetDraftPolicy();
   const auto warm = session->SaveSnapshot(&error);
@@ -227,7 +227,7 @@ void CheckRollbackReuse(const std::shared_ptr<qfn::Model>& model) {
 }
 
 void CheckImageSnapshotAttachment(const std::shared_ptr<qfn::Model>& model) {
-  namespace vision = gufo::models::qwen::vision;
+  namespace vision = mbufo::models::qwen::vision;
   if (!model->VisionEncoder()) {
     std::cout
         << "image snapshot attachment: matching vision sidecar unavailable\n";
@@ -239,13 +239,13 @@ void CheckImageSnapshotAttachment(const std::shared_ptr<qfn::Model>& model) {
     prompt->tokens = {vision::kImageToken, vision::kImageToken,
                       vision::kImageToken, vision::kImageToken, 42};
     prompt->rope.images.push_back(grid);
-    gufo::core::Image pixels;
+    mbufo::core::Image pixels;
     pixels.width = pixels.height = 64;
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = blue ? 2 : 0; i < pixels.pixels.size(); i += 3)
       pixels.pixels[i] = 255;
     prompt->images.push_back(
-        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
+        {std::make_shared<const mbufo::core::Image>(std::move(pixels)), grid});
     prompt->images.back().prefix_identity.fill(blue ? 2 : 1);
     prompt->cache_identity.assign(32, blue ? 2 : 1);
     return prompt;
@@ -255,16 +255,16 @@ void CheckImageSnapshotAttachment(const std::shared_ptr<qfn::Model>& model) {
                                          red->tokens.end());
   std::string error;
   auto origin = model->CreateSession(
-      model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                      : gufo::core::SessionMode::kAutoregressive,
+      model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                      : mbufo::core::SessionMode::kAutoregressive,
       64, &error);
   auto restored = model->CreateSession(
-      model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                      : gufo::core::SessionMode::kAutoregressive,
+      model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                      : mbufo::core::SessionMode::kAutoregressive,
       64, &error);
   auto text = model->CreateSession(
-      model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                      : gufo::core::SessionMode::kAutoregressive,
+      model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                      : mbufo::core::SessionMode::kAutoregressive,
       64, &error);
   Require(origin && restored && text, error);
   origin->ConfigureVision(red);
@@ -311,12 +311,12 @@ void CheckPrefillChunks(const std::shared_ptr<qfn::Model>& model) {
     for (std::size_t i = 0; i < tokens.size(); ++i)
       tokens[i] = pattern[i % pattern.size()];
     auto bulk = model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         6145, &error);
     auto split = model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         6145, &error);
     Require(bulk && split, error);
     Require(bulk->Sync(tokens, &error) &&
@@ -379,8 +379,8 @@ void CheckPrefetchHints(const std::shared_ptr<qfn::Model>& model) {
     other[i] = pattern[(i + 1025) % pattern.size()];
   }
   Require(other[0] != tokens[1024], "diverging hint shares its first token");
-  const auto mode = model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                                    : gufo::core::SessionMode::kAutoregressive;
+  const auto mode = model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                                    : mbufo::core::SessionMode::kAutoregressive;
   auto bulk = model->CreateSession(mode, 6145, &error);
   Require(bulk && bulk->Sync(tokens, &error), error);
   const std::span all(tokens);
@@ -415,7 +415,7 @@ void CheckPrefetchHints(const std::shared_ptr<qfn::Model>& model) {
 }
 
 void CheckMtpCacheReplay(const std::shared_ptr<qfn::Model>& model) {
-  namespace qt = gufo::tokenization;
+  namespace qt = mbufo::tokenization;
   std::string error;
   for (const auto seed : {1U, 2U}) {
     std::string system = "Case " + std::to_string(seed) + ". ";
@@ -444,7 +444,7 @@ void CheckMtpCacheReplay(const std::shared_ptr<qfn::Model>& model) {
     // suffix. Rebuilding the same prompt must not depend on whether a
     // previous turn already supplied its first 320 tokens.
     for (const auto boundary : {320U, 348U}) {
-      auto session = model->CreateSession(gufo::core::SessionMode::kSpeculative,
+      auto session = model->CreateSession(mbufo::core::SessionMode::kSpeculative,
                                           6145, &error);
       Require(session &&
                   session->Sync(std::span(prompt).first(boundary), &error) &&
@@ -492,7 +492,7 @@ void CheckMtpCacheReplay(const std::shared_ptr<qfn::Model>& model) {
 void CheckDraftPolicySnapshots(const std::shared_ptr<qfn::Model>& model) {
   if (!model->HasMtp())
     return;
-  namespace qt = gufo::tokenization;
+  namespace qt = mbufo::tokenization;
   std::string error;
   struct Case {
     const char* name;
@@ -527,7 +527,7 @@ void CheckDraftPolicySnapshots(const std::shared_ptr<qfn::Model>& model) {
           &error);
       Require(encoded.has_value(), error);
       const std::vector<std::int32_t> prompt(encoded->begin(), encoded->end());
-      auto live = model->CreateSession(gufo::core::SessionMode::kSpeculative,
+      auto live = model->CreateSession(mbufo::core::SessionMode::kSpeculative,
                                        4096, &error);
       Require(live && live->Sync(prompt, &error), error);
       sampling::SamplerState sampler(
@@ -535,25 +535,25 @@ void CheckDraftPolicySnapshots(const std::shared_ptr<qfn::Model>& model) {
           std::vector<sampling::TokenId>(prompt.begin(), prompt.end()));
       // Train the actual controller before saving. Comparing two restored
       // sessions would miss a restore that resets their learned state equally.
-      const auto trained = gufo::test::DecodeMtpReplay(*live, sampler, 128);
+      const auto trained = mbufo::test::DecodeMtpReplay(*live, sampler, 128);
       Require(trained.drafted > 0, "policy snapshot did not exercise MTP");
       const auto snapshot = live->SaveSnapshot(&error);
       Require(snapshot != nullptr, error);
       std::vector<std::uint8_t> bytes(snapshot->SizeBytes());
       Require(snapshot->CopyTo(bytes), "serialize learned MTP policy");
       auto saved_sampler = sampler;
-      const auto expected = gufo::test::DecodeMtpReplay(*live, sampler, 64);
+      const auto expected = mbufo::test::DecodeMtpReplay(*live, sampler, 64);
       const std::vector<float> expected_logits(live->Logits().begin(),
                                                live->Logits().end());
       for (const bool serialized : {false, true}) {
         auto restored = model->CreateSession(
-            gufo::core::SessionMode::kSpeculative, 4096, &error);
+            mbufo::core::SessionMode::kSpeculative, 4096, &error);
         Require(restored != nullptr, error);
         Require(serialized ? restored->RestoreSnapshot(bytes, &error)
                            : restored->RestoreSnapshot(*snapshot, &error),
                 error);
         auto replay_sampler = saved_sampler;
-        Require(gufo::test::DecodeMtpReplay(*restored, replay_sampler, 64) ==
+        Require(mbufo::test::DecodeMtpReplay(*restored, replay_sampler, 64) ==
                     expected,
                 "restored MTP policy differs from uninterrupted generation");
         RequireExact(expected_logits, restored->Logits(),
@@ -570,8 +570,8 @@ void CheckDraftPolicySnapshots(const std::shared_ptr<qfn::Model>& model) {
 void CheckBatchFailureIsolation(const std::shared_ptr<qfn::Model>& model) {
   std::string error;
   const auto prompt = model->Tokenize("Repeat red, blue, red, blue,");
-  for (const auto mode : {gufo::core::SessionMode::kAutoregressive,
-                          gufo::core::SessionMode::kSpeculative}) {
+  for (const auto mode : {mbufo::core::SessionMode::kAutoregressive,
+                          mbufo::core::SessionMode::kSpeculative}) {
     auto first = model->CreateSession(mode, 256, &error);
     auto second = model->CreateSession(mode, 256, &error);
     Require(first && second && first->Sync(prompt, &error), error);
@@ -635,7 +635,7 @@ void CheckBatchFailureIsolation(const std::shared_ptr<qfn::Model>& model) {
             "invalid decode peer changed sampling replay");
     RequireExact(speculative_logits, second->Logits(),
                  "invalid decode peer changed logits");
-    if (mode == gufo::core::SessionMode::kSpeculative) {
+    if (mode == mbufo::core::SessionMode::kSpeculative) {
       Require(first->RestoreSnapshot(*snapshot, &error) &&
                   second->RestoreSnapshot(*snapshot, &error),
               error);
@@ -668,15 +668,15 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
   std::size_t sampled_small_head = 0;
   std::vector<std::unique_ptr<qfn::Session>> serial, batched;
   std::vector<sampling::SamplerState> serial_samplers, batch_samplers;
-  const auto cases = gufo::test::QwenSamplingCases();
+  const auto cases = mbufo::test::QwenSamplingCases();
   for (std::size_t i = 0; i < 8; ++i) {
     serial.push_back(model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         6145, &error));
     batched.push_back(model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         6145, &error));
     Require(serial.back() && batched.back(), error);
     // Thai members start on the full head (their prompts bring new tokens
@@ -846,7 +846,7 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
 }
 
 void CheckLookupBatch(const std::shared_ptr<qfn::Model>& model) {
-  namespace qt = gufo::tokenization;
+  namespace qt = mbufo::tokenization;
   std::string error;
   std::vector<std::unique_ptr<qfn::Session>> serial, batched;
   std::vector<sampling::SamplerState> samplers, twins;
@@ -862,10 +862,10 @@ void CheckLookupBatch(const std::shared_ptr<qfn::Model>& model) {
         model->tokenizer(), messages, {.enable_thinking = false}, &error);
     Require(encoded.has_value(), error);
     const std::vector<std::int32_t> prompt(encoded->begin(), encoded->end());
-    serial.push_back(model->CreateSession(gufo::core::SessionMode::kSpeculative,
+    serial.push_back(model->CreateSession(mbufo::core::SessionMode::kSpeculative,
                                           2048, &error));
     batched.push_back(model->CreateSession(
-        gufo::core::SessionMode::kSpeculative, 2048, &error));
+        mbufo::core::SessionMode::kSpeculative, 2048, &error));
     Require(
         serial.back() && batched.back() && serial.back()->Sync(prompt, &error),
         error);
@@ -1024,7 +1024,7 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
           "the draft-vocabulary lifecycle needs a one-session model");
   std::string error;
   const auto create = [&] {
-    auto session = model->CreateSession(gufo::core::SessionMode::kSpeculative,
+    auto session = model->CreateSession(mbufo::core::SessionMode::kSpeculative,
                                         6145, &error);
     Require(session != nullptr, error);
     return session;
@@ -1162,8 +1162,8 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
         .temperature = temperature, .seed = 73, .presence_penalty = 1.5F};
     sampling::SamplerState a(config, history(t->Tokens()));
     auto b = a;
-    const auto expected = gufo::test::DecodeMtpReplay(*fresh, a, 32);
-    const auto actual = gufo::test::DecodeMtpReplay(*t, b, 32);
+    const auto expected = mbufo::test::DecodeMtpReplay(*fresh, a, 32);
+    const auto actual = mbufo::test::DecodeMtpReplay(*t, b, 32);
     Require(expected == actual && actual.drafted > 0,
             "penalized replay differs after a populated draft table");
     if (temperature == 0.0F) {
@@ -1264,14 +1264,14 @@ void CheckDraftVocabLifecycle(const std::shared_ptr<qfn::Model>& model) {
 // is unchanged: plain greedy keeps the full head alone, and uses the small
 // head in a jointly planned batch.
 void CheckSampledDraftHead(const std::shared_ptr<qfn::Model>& model) {
-  namespace qt = gufo::tokenization;
+  namespace qt = mbufo::tokenization;
   if (!model->HasMtp())
     return;
   Require(model->DecodeConcurrency() == 2,
           "the sampled draft-head check needs a two-session model");
   std::string error;
   const auto create = [&] {
-    auto session = model->CreateSession(gufo::core::SessionMode::kSpeculative,
+    auto session = model->CreateSession(mbufo::core::SessionMode::kSpeculative,
                                         6145, &error);
     Require(session != nullptr, error);
     return session;
@@ -1285,7 +1285,7 @@ void CheckSampledDraftHead(const std::shared_ptr<qfn::Model>& model) {
   };
   auto json = std::make_shared<sampling::TokenConstraint>();
   json->grammar = sampling::JsonConstraint::Compile(
-      gufo::json::parse(R"({"type":"object","properties":{"summary":)"
+      mbufo::json::parse(R"({"type":"object","properties":{"summary":)"
                         R"({"type":"string"}},"required":["summary"],)"
                         R"("additionalProperties":false})"),
       true);
@@ -1557,8 +1557,8 @@ void CheckSampledDraftHead(const std::shared_ptr<qfn::Model>& model) {
 void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
                          std::uint32_t prompt_tokens = 4096,
                          bool with_image = false) {
-  using gufo::core::SessionMode;
-  namespace vision = gufo::models::qwen::vision;
+  using mbufo::core::SessionMode;
+  namespace vision = mbufo::models::qwen::vision;
   std::string error;
   auto ar = model->CreateSession(SessionMode::kAutoregressive,
                                  prompt_tokens + 16, &error);
@@ -1587,13 +1587,13 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
     std::fill_n(prompt.begin(), 4, vision::kImageToken);
     image->tokens.assign(prompt.begin(), prompt.end());
     image->rope.images.push_back(grid);
-    gufo::core::Image pixels;
+    mbufo::core::Image pixels;
     pixels.width = pixels.height = 64;
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = 0; i < pixels.pixels.size(); ++i)
       pixels.pixels[i] = static_cast<std::uint8_t>((i * 37 + i / 64) % 256);
     image->images.push_back(
-        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
+        {std::make_shared<const mbufo::core::Image>(std::move(pixels)), grid});
     image->images.back().prefix_identity.fill(3);
     image->cache_identity.assign(32, 3);
     ar->ConfigureVision(image);
@@ -1651,7 +1651,7 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
 }
 
 void CheckServingEos(const std::shared_ptr<qfn::Model>& model) {
-  namespace server = gufo::server;
+  namespace server = mbufo::server;
   using Backend = server::InferenceBackend;
   Backend backend;
   std::string error;
@@ -1663,7 +1663,7 @@ void CheckServingEos(const std::shared_ptr<qfn::Model>& model) {
   // Actual token IDs, EOS recognition, GPU execution and checkpoints stay real.
   auto constraint = std::make_shared<sampling::TokenConstraint>();
   constraint->grammar = sampling::JsonConstraint::Compile(
-      gufo::json::parse(
+      mbufo::json::parse(
           R"({"type":"object","properties":{},"additionalProperties":false})"),
       true);
   constraint->vocabulary = std::make_shared<sampling::ConstraintVocabulary>(
@@ -1742,7 +1742,7 @@ void CheckServingEos(const std::shared_ptr<qfn::Model>& model) {
 }
 
 void CheckServingSampling(const std::shared_ptr<qfn::Model>& model) {
-  namespace server = gufo::server;
+  namespace server = mbufo::server;
   using Backend = server::InferenceBackend;
   Backend ar, mtp;
   std::string error;
@@ -1751,12 +1751,12 @@ void CheckServingSampling(const std::shared_ptr<qfn::Model>& model) {
   options.backend = server::TextSpeculativeBackend::kMtp;
   Require(mtp.load(model, &error, 6145, 2, {}, {}, options), error);
   struct Reference {
-    gufo::test::SamplingCase test;
+    mbufo::test::SamplingCase test;
     std::string prompt;
     Backend::Result ar, mtp;
   };
   std::vector<Reference> references;
-  for (const auto& test : gufo::test::QwenSamplingCases()) {
+  for (const auto& test : mbufo::test::QwenSamplingCases()) {
     const std::string prompt = "Sampling " + std::string(test.name) +
                                ": Continue red, blue, blue, red,";
     auto ordinary = ar.complete(prompt, 8, test.config);
@@ -1764,8 +1764,8 @@ void CheckServingSampling(const std::shared_ptr<qfn::Model>& model) {
     // Exercise the serving handoff against the model session directly.
     // Replaying HTTP alone would not detect a consistently dropped residual.
     auto direct = model->CreateSession(
-        model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                        : gufo::core::SessionMode::kAutoregressive,
+        model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                        : mbufo::core::SessionMode::kAutoregressive,
         6145, &error);
     const auto encoded = model->Tokenize(prompt);
     Require(direct && direct->Sync(encoded, &error), error);
@@ -2028,11 +2028,11 @@ int main(int argc, char** argv) {
                                                    prefix.end());
       for (std::size_t c = 0; c < configs.size(); ++c) {
         const bool sampled = configs[c].uses_random_sampling();
-        auto ar = model->CreateSession(gufo::core::SessionMode::kAutoregressive,
+        auto ar = model->CreateSession(mbufo::core::SessionMode::kAutoregressive,
                                        6145, &error);
         auto mtp = model->CreateSession(
-            model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                            : gufo::core::SessionMode::kAutoregressive,
+            model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                            : mbufo::core::SessionMode::kAutoregressive,
             6145, &error);
         Require(ar && mtp, error);
         Require(ar->Sync(prefix, &error), error);
@@ -2163,8 +2163,8 @@ int main(int argc, char** argv) {
       for (const bool speculative : {false, true}) {
         const bool sampled = configs[saved.config].uses_random_sampling();
         auto session = model->CreateSession(
-            model->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                            : gufo::core::SessionMode::kAutoregressive,
+            model->HasMtp() ? mbufo::core::SessionMode::kSpeculative
+                            : mbufo::core::SessionMode::kAutoregressive,
             6145, &error);
         Require(session && session->Sync(prefix, &error), error);
         RequireExact(saved.prefill_logits, session->Logits(),

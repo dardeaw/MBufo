@@ -9,8 +9,8 @@
 //   encoder-only artifacts never generate.
 // Registry: model kinds self-register by name; serve and drivers resolve
 // "bge-m3" (the XLM-R encoder kind) through ModelRegistry::Create.
-#ifndef GUFO_MODELS_BGE_M3_ENGINE_HPP_
-#define GUFO_MODELS_BGE_M3_ENGINE_HPP_
+#ifndef MBUFO_MODELS_BGE_M3_ENGINE_HPP_
+#define MBUFO_MODELS_BGE_M3_ENGINE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -29,7 +29,7 @@
 #include "src/models/bge_m3/tokenizer.hpp"
 #include "src/models/bge_m3/weights.hpp"
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 
 #ifdef ENGINE_ENABLE_HIP
 /// Raw CLS hidden row for rerank heads (hip/session.hip): the same
@@ -201,6 +201,6 @@ class ModelRegistry {
     std::string* error_msg = nullptr);
 #endif
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3
 
-#endif  // GUFO_MODELS_BGE_M3_ENGINE_HPP_
+#endif  // MBUFO_MODELS_BGE_M3_ENGINE_HPP_

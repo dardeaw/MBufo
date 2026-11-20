@@ -12,7 +12,7 @@
 
 #include "src/core/quant/ggml_dequant.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 namespace {
 
 constexpr std::size_t kPage = 4096;
@@ -129,11 +129,11 @@ std::unique_ptr<NgramTable> NgramTable::Open(
 
 void NgramTable::DecodeRow(const std::uint8_t* src, float* dst) const {
   if (type_ == core::GgmlType::kIQ4_NL) {
-    gufo::quant::DequantizeIQ4_NL(src, dst, row_dim_);
+    mbufo::quant::DequantizeIQ4_NL(src, dst, row_dim_);
   } else if (type_ == core::GgmlType::kQ3_0_ROCMFPX) {
-    gufo::quant::DequantizeQ3_0_ROCMFPX(src, dst, row_dim_);
+    mbufo::quant::DequantizeQ3_0_ROCMFPX(src, dst, row_dim_);
   } else if (type_ == core::GgmlType::kQ8_0) {
-    gufo::quant::DequantizeQ8_0(src, dst, row_dim_);
+    mbufo::quant::DequantizeQ8_0(src, dst, row_dim_);
   } else {
     for (std::uint32_t i = 0; i < row_dim_; ++i) {
       std::uint16_t bits = 0;
@@ -374,4 +374,4 @@ bool NgramTable::WaitRead() {
   return !failed_;
 }
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next

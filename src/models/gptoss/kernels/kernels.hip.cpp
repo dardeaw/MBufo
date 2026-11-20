@@ -10,7 +10,7 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
-namespace gufo::models::gptoss::kernels {
+namespace mbufo::models::gptoss::kernels {
 namespace {
 
 __device__ __forceinline__ float DequantQ8(const std::uint8_t* blk,
@@ -425,4 +425,4 @@ void MoeCompactSplitBiasAct(const float* gateup,
                      gate_b, up_b, act, rows, ff);
 }
 
-}  // namespace gufo::models::gptoss::kernels
+}  // namespace mbufo::models::gptoss::kernels

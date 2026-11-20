@@ -3,6 +3,6 @@
 if (ENGINE_ENABLE_HIP)
   add_executable(llama_registry_pilot_test EXCLUDE_FROM_ALL
     registry_pilot_test.cpp)
-  target_link_libraries(llama_registry_pilot_test PRIVATE gufo_llama gufo_core
+  target_link_libraries(llama_registry_pilot_test PRIVATE mbufo_llama mbufo_core
     hip::host)
 endif()

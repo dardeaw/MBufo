@@ -18,8 +18,8 @@
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/qwen38_flash_next/engine_adapter.hpp"
 
-namespace qfn = gufo::models::qwen38_flash_next;
-namespace e = gufo::core::engine;
+namespace qfn = mbufo::models::qwen38_flash_next;
+namespace e = mbufo::core::engine;
 
 namespace {
 
@@ -68,7 +68,7 @@ std::vector<std::int32_t> L0GreedyRun(e::EngineSession* session,
 std::vector<std::int32_t> NativeStepRun(qfn::Session* session,
                                         const std::vector<std::int32_t>& prompt,
                                         int max_tokens,
-                                        gufo::sampling::SamplerState& sampler,
+                                        mbufo::sampling::SamplerState& sampler,
                                         std::vector<std::uint32_t>* commits,
                                         std::string* error) {
   if (!session->Sync(prompt, error)) return {};
@@ -161,7 +161,7 @@ int main(int argc, char** argv) {
   if (!native_plain) return Fail("native plain load: " + error);
   if (native_plain->HasMtp()) return Fail("plain load unexpectedly has MTP");
   auto ref_session = native_plain->CreateSession(
-      gufo::core::SessionMode::kAutoregressive, 2048, &error);
+      mbufo::core::SessionMode::kAutoregressive, 2048, &error);
   if (!ref_session) return Fail("native plain session: " + error);
   const std::vector<std::int32_t> prompt = native_plain->Tokenize(prompt_text);
   if (prompt.empty()) return Fail("native Tokenize is empty");
@@ -189,9 +189,9 @@ int main(int argc, char** argv) {
     if (!native_mtp) return Fail("native MTP load: " + error);
     if (!native_mtp->HasMtp()) return Fail("MTP load reports HasMtp()==false");
     auto mtp_session = native_mtp->CreateSession(
-        gufo::core::SessionMode::kSpeculative, 2048, &error);
+        mbufo::core::SessionMode::kSpeculative, 2048, &error);
     if (!mtp_session) return Fail("native MTP session: " + error);
-    gufo::sampling::SamplerState sampler;
+    mbufo::sampling::SamplerState sampler;
     std::vector<std::uint32_t> commits;
     mtp_ids = NativeStepRun(mtp_session.get(), prompt, max_tokens, sampler,
                             &commits, &error);
@@ -223,8 +223,8 @@ int main(int argc, char** argv) {
     return Fail("qwen38-flash-next backend is not registered");
   }
   const auto adapter_mode = direct->HasMtp()
-                                ? gufo::core::SessionMode::kSpeculative
-                                : gufo::core::SessionMode::kAutoregressive;
+                                ? mbufo::core::SessionMode::kSpeculative
+                                : mbufo::core::SessionMode::kAutoregressive;
   auto direct_session = direct->CreateSession(adapter_mode, 2048, &error);
   if (!direct_session) return Fail("adapter direct session: " + error);
   const auto direct_prompt = direct->Tokenize(prompt_text, false);

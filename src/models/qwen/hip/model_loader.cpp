@@ -20,7 +20,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
@@ -215,7 +215,7 @@ namespace {
     return false;
   }
   host_f32.resize(num_elements);
-  gufo::quant::DequantizeQ6_K(tensor.data, host_f32.data(), num_elements);
+  mbufo::quant::DequantizeQ6_K(tensor.data, host_f32.data(), num_elements);
   const std::size_t num_blocks = num_elements / 32;
   std::vector<std::uint8_t> q80(num_blocks * 34);
   for (std::size_t b = 0; b < num_blocks; ++b) {
@@ -426,5 +426,5 @@ std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::CreateFromGguf(
   return Create(std::move(model), error_msg, max_context, policy);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

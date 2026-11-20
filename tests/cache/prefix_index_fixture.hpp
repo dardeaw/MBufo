@@ -1,5 +1,5 @@
-#ifndef GUFO_TESTS_CACHE_PREFIX_INDEX_FIXTURE_HPP_
-#define GUFO_TESTS_CACHE_PREFIX_INDEX_FIXTURE_HPP_
+#ifndef MBUFO_TESTS_CACHE_PREFIX_INDEX_FIXTURE_HPP_
+#define MBUFO_TESTS_CACHE_PREFIX_INDEX_FIXTURE_HPP_
 
 #include <array>
 #include <memory>
@@ -8,7 +8,7 @@
 
 #include "src/cache/prefix_index.hpp"
 
-namespace gufo::cache::testing {
+namespace mbufo::cache::testing {
 inline constexpr ResourceLimits kIndexLimits{1ULL << 32, 1ULL << 32, 1ULL << 32,
                                              1ULL << 32};
 inline constexpr std::array<ComponentDescriptor, 3> kIndexComponents{{
@@ -54,5 +54,5 @@ inline LiveFrontier IndexLive(std::vector<Token> tokens, SlotId slot = {1},
           {{{1}, count}, {{2}, count / 2}, {{3}, count}},
           true};
 }
-}  // namespace gufo::cache::testing
+}  // namespace mbufo::cache::testing
 #endif

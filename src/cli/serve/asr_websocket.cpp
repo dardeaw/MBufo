@@ -8,7 +8,7 @@
 #include "src/core/json.hpp"
 #include "src/models/qwen3_asr/audio.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 void Members(const json::Value& object,
              std::initializer_list<std::string_view> allowed) {
@@ -258,4 +258,4 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
   });
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GLIMMER_ENGINE_HPP_
-#define GUFO_MODELS_GLIMMER_ENGINE_HPP_
+#ifndef MBUFO_MODELS_GLIMMER_ENGINE_HPP_
+#define MBUFO_MODELS_GLIMMER_ENGINE_HPP_
 
 #include <cstdint>
 #include <functional>
@@ -14,11 +14,11 @@
 #include "src/models/glimmer/weights.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::speculative {
+namespace mbufo::speculative {
 class IDraftBackend;
-}  // namespace gufo::speculative
+}  // namespace mbufo::speculative
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 
 struct ModelOptions {
   std::uint32_t max_context = 32768;
@@ -221,6 +221,6 @@ class Session final {
   friend class Model;
 };
 
-}  // namespace gufo::models::glimmer
+}  // namespace mbufo::models::glimmer
 
-#endif  // GUFO_MODELS_GLIMMER_ENGINE_HPP_
+#endif  // MBUFO_MODELS_GLIMMER_ENGINE_HPP_

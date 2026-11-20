@@ -12,7 +12,7 @@
 
 #include "src/core/compute/gemm/gemm.hpp"
 
-using namespace gufo::core::compute::gemm;
+using namespace mbufo::core::compute::gemm;
 
 #define CK(x) do { hipError_t err__ = (x); if (err__ != hipSuccess) { std::fprintf(stderr, "HIP error %s at %d\n", hipGetErrorString(err__), __LINE__); return 2; } } while (0)
 

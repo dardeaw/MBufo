@@ -5,7 +5,7 @@
 #include <limits>
 #include <sstream>
 
-namespace gufo::testing {
+namespace mbufo::testing {
 
 LogitCompareResult CompareLogits(std::span<const float> reference,
                                  std::span<const float> candidate, float atol,
@@ -100,4 +100,4 @@ LogitCompareResult CompareLogits(std::span<const float> reference,
   return res;
 }
 
-}  // namespace gufo::testing
+}  // namespace mbufo::testing

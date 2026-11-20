@@ -26,7 +26,7 @@
 #include "src/models/glimmer/draft_backend.hpp"
 #include "src/models/glimmer/kernels/kernels.hpp"
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 namespace {
 
 // Prefill chunk (tokens per Forward). Each chunk re-dequantizes every weight matrix to F16, so bigger chunks amortize
@@ -43,11 +43,11 @@ inline std::uint32_t MaxChunkTokens() {
 /// Batched-verify row cap: [anchor + drafts] rows scored in one forward.
 constexpr std::uint32_t kMaxVerify = 32;
 
-/// Unified-batch opt-out valve (default on): GUFO_GLIMMER_UNIFIED_BATCH=0
+/// Unified-batch opt-out valve (default on): MBUFO_GLIMMER_UNIFIED_BATCH=0
 /// keeps the legacy per-session attention cores everywhere (Forward and
 /// DecodeBatch). Read per call so tests can switch modes mid-process.
 [[nodiscard]] bool UnifiedBatchEnabled() {
-  const char* e = std::getenv("GUFO_GLIMMER_UNIFIED_BATCH");
+  const char* e = std::getenv("MBUFO_GLIMMER_UNIFIED_BATCH");
   return e == nullptr || e[0] != '0';
 }
 
@@ -1210,7 +1210,7 @@ bool Session::DecodeBatch(std::span<BatchItem> items,
                           c.rms_eps, stream);
   }
   // Caller-owned arena (§4.2): sized for this width, regrown on demand.
-  // Opt-out valve (default on): GUFO_GLIMMER_UNIFIED_BATCH=0 keeps the
+  // Opt-out valve (default on): MBUFO_GLIMMER_UNIFIED_BATCH=0 keeps the
   // legacy per-session attention cores everywhere (Forward and DecodeBatch).
   const bool use_unified = UnifiedBatchEnabled();
   if (use_unified) {
@@ -1807,4 +1807,4 @@ std::int32_t Session::SampleGreedy() {
   return tok;
 }
 
-}  // namespace gufo::models::glimmer
+}  // namespace mbufo::models::glimmer

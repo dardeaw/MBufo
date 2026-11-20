@@ -34,18 +34,18 @@
 
 namespace {
 
-using gufo::core::ModelConfig;
-using gufo::models::ForwardSSM;
-using gufo::models::QwenLayerWeights;
-using gufo::models::QwenScratchArena;
-using gufo::models::QwenSsmCache;
-using gufo::models::QwenSsmParameters;
-using gufo::models::qwen::build_synthetic_qwen_weights;
-using gufo::models::qwen::CpuLayerContext;
-using gufo::models::qwen::make_small_qwen_config;
-using gufo::models::qwen::MakeSsmView;
-using gufo::models::qwen::SsmForward;
-using gufo::models::qwen::SsmLayerView;
+using mbufo::core::ModelConfig;
+using mbufo::models::ForwardSSM;
+using mbufo::models::QwenLayerWeights;
+using mbufo::models::QwenScratchArena;
+using mbufo::models::QwenSsmCache;
+using mbufo::models::QwenSsmParameters;
+using mbufo::models::qwen::build_synthetic_qwen_weights;
+using mbufo::models::qwen::CpuLayerContext;
+using mbufo::models::qwen::make_small_qwen_config;
+using mbufo::models::qwen::MakeSsmView;
+using mbufo::models::qwen::SsmForward;
+using mbufo::models::qwen::SsmLayerView;
 
 static_assert(std::is_same_v<SsmLayerView, QwenSsmParameters>);
 
@@ -82,7 +82,7 @@ void TestSsmModuleMatchesProduction() {
   auto sw = build_synthetic_qwen_weights(config);
   const auto& weights = sw.weights;
 
-  std::mt19937 rng = gufo::test::make_seeded_rng(0x5EEDu);
+  std::mt19937 rng = mbufo::test::make_seeded_rng(0x5EEDu);
   const std::size_t hidden = config.hidden_size;
 
   // In this config (full_attention_interval==4) layers 0..2 are SSM layers.
@@ -91,7 +91,7 @@ void TestSsmModuleMatchesProduction() {
   Check(!layer.is_full_attention, "synthetic layer 0 must be an SSM layer");
 
   std::vector<float> x =
-      gufo::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
+      mbufo::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
 
   // Module output.
   std::vector<float> out;
@@ -106,7 +106,7 @@ void TestSsmModuleMatchesProduction() {
   ForwardSSM(x, layer, config, cache_ref, layer_idx, arena_ref.ssm_qkv,
              arena_ref.ssm_gate, arena_ref.ssm_out_buf, ref);
 
-  auto res = gufo::test::compare_module_logits(ref, out);
+  auto res = mbufo::test::compare_module_logits(ref, out);
   Check(res.match, "typed SSM module must match compatibility wrapper");
   Check(res.finite, "typed SSM module output must be finite");
   Check(res.max_abs_diff < 1e-5F,
@@ -126,14 +126,14 @@ void TestSsmModuleDeterministicAcrossReset() {
   auto sw = build_synthetic_qwen_weights(config);
   const auto& weights = sw.weights;
 
-  std::mt19937 rng = gufo::test::make_seeded_rng(123u);
+  std::mt19937 rng = mbufo::test::make_seeded_rng(123u);
   const std::size_t hidden = config.hidden_size;
   const std::uint32_t layer_idx = 0;
   const auto& layer = weights.layers[layer_idx];
   Check(!layer.is_full_attention, "synthetic layer 0 must be an SSM layer");
 
   std::vector<float> x =
-      gufo::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
+      mbufo::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
 
   std::vector<float> a, b;
   RunSsmModule(config, layer, layer_idx, x, a);
@@ -227,7 +227,7 @@ void TestMalformedSsmParametersRejectBeforeStateMutation() {
                              "truncated SSM tensor must zero-fill output");
 
   QwenSsmParameters unsupported = valid;
-  unsupported.qkv.type = gufo::core::GgmlType::kQ4_0;
+  unsupported.qkv.type = mbufo::core::GgmlType::kQ4_0;
   CheckRejectedSsmParameters(config, unsupported,
                              "unsupported SSM projection format must reject");
 
@@ -268,9 +268,9 @@ void TestSsmCacheEvolutionIsDeterministicAcrossReset() {
   auto sw = build_synthetic_qwen_weights(config);
   const auto& layer = sw.weights.layers[0];
   Check(!layer.is_full_attention, "synthetic layer 0 must be an SSM layer");
-  std::mt19937 rng = gufo::test::make_seeded_rng(0xCA5EU);
+  std::mt19937 rng = mbufo::test::make_seeded_rng(0xCA5EU);
   const std::vector<float> input =
-      gufo::test::make_random_tensor(config.hidden_size, rng, -1.0F, 1.0F);
+      mbufo::test::make_random_tensor(config.hidden_size, rng, -1.0F, 1.0F);
 
   QwenScratchArena arena_a(config);
   QwenSsmCache cache_a = MakeCache(config);
@@ -324,7 +324,7 @@ void TestSsmModuleSensitivity() {
   const ModelConfig config = make_small_qwen_config();
   auto sw = build_synthetic_qwen_weights(config);
   const auto& weights = sw.weights;
-  std::mt19937 rng = gufo::test::make_seeded_rng(0xA11u);
+  std::mt19937 rng = mbufo::test::make_seeded_rng(0xA11u);
   const std::size_t hidden = config.hidden_size;
   const std::uint32_t layer_idx = 0;
   const auto& layer = weights.layers[layer_idx];
@@ -332,7 +332,7 @@ void TestSsmModuleSensitivity() {
   Check(!layer.ssm_norm.empty(), "synthetic SSM norm must be present");
 
   std::vector<float> x =
-      gufo::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
+      mbufo::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
   std::vector<float> out_base;
   RunSsmModule(config, layer, layer_idx, x, out_base);
 
@@ -356,7 +356,7 @@ void TestSsmModuleSensitivity() {
   }
   QwenLayerWeights layer_mod = layer;
   layer_mod.ssm_norm.data = norm_new.data();
-  layer_mod.ssm_norm.type = gufo::core::GgmlType::kF32;
+  layer_mod.ssm_norm.type = mbufo::core::GgmlType::kF32;
   layer_mod.ssm_norm.num_elements = norm_new.size();
   std::vector<float> out_norm;
   RunSsmModule(config, layer_mod, layer_idx, x, out_norm);

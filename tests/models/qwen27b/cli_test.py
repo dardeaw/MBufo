@@ -162,7 +162,7 @@ def check_http(binary, model, draft, policies, selection="both"):
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
         # The installed compatibility executable accepts server flags directly.
-        alias = Path(binary).with_name("gufo-server")
+        alias = Path(binary).with_name("mbufo-server")
         server_command = ([str(alias)] if policy == "fixed" and alias.is_file()
                           else [binary, "serve"])
         with tempfile.TemporaryFile(mode="w+") as log:
@@ -361,9 +361,9 @@ def main():
         check_options(binary)
     if args.scope == "options":
         return 0
-    artifacts = [os.environ.get("GUFO_QWEN27B_" + name + "_MODEL", "")
+    artifacts = [os.environ.get("MBUFO_QWEN27B_" + name + "_MODEL", "")
                  for name in ("MTP", "DFLASH")]
-    model = os.environ.get("GUFO_QWEN27B_MODEL", "")
+    model = os.environ.get("MBUFO_QWEN27B_MODEL", "")
     required = [model]
     if args.backend != "ar" or args.scope == "all":
         required.append(artifacts[1])

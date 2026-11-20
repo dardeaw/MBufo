@@ -17,7 +17,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace gufo::core {
+namespace mbufo::core {
 namespace {
 
 void ValidateDimensions(std::uint32_t width, std::uint32_t height) {
@@ -570,4 +570,4 @@ std::vector<std::uint8_t> ReadImageUrl(std::string_view url,
   return bytes;
 }
 
-}  // namespace gufo::core
+}  // namespace mbufo::core

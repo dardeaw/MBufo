@@ -15,8 +15,8 @@
 
 namespace {
 
-namespace qwen3_asr = gufo::models::qwen3_asr;
-namespace qwen3_asr_hip = gufo::models::qwen3_asr::hip;
+namespace qwen3_asr = mbufo::models::qwen3_asr;
+namespace qwen3_asr_hip = mbufo::models::qwen3_asr::hip;
 
 [[noreturn]] void Fail(const std::string& message) {
   std::cerr << "FAIL qwen3_asr_transcription_hip_test: " << message << '\n';
@@ -154,12 +154,12 @@ int main() {
     return output.generated_ids;
   };
   auto first = std::async(std::launch::async, concurrent, "");
-  auto second = std::async(std::launch::async, concurrent, "Names: Gufo.");
+  auto second = std::async(std::launch::async, concurrent, "Names: MBufo.");
   const auto first_ids = first.get();
   const auto second_ids = second.get();
   Check(
       first_ids == result.generated_ids &&
-          second_ids == concurrent("Names: Gufo."),
+          second_ids == concurrent("Names: MBufo."),
       "concurrent frontend/chunk scheduling preserves independent transcripts");
   std::cout << "PASS qwen3_asr_transcription_hip_test"
             << " total_ms=" << result.timings.total_ms

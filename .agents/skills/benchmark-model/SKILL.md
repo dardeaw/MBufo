@@ -1,8 +1,8 @@
 ---
 name: benchmark-model
-description: Measure every retained number in a Gufo model's BENCHMARKS.md on Strix Halo gfx1151 over HTTP, run the same workload against the reference project's OpenAI-compatible server (llama.cpp, audio.cpp, ...), and report the gain per cell.
+description: Measure every retained number in a MBufo model's BENCHMARKS.md on Strix Halo gfx1151 over HTTP, run the same workload against the reference project's OpenAI-compatible server (llama.cpp, audio.cpp, ...), and report the gain per cell.
 metadata:
-  origin: gufo
+  origin: mbufo
 ---
 
 # Benchmark a model
@@ -38,8 +38,8 @@ runtime libraries. Skip loading if neither method is available.
 ## Measurement model
 
 Use **HTTP on both sides** by default so the prompt, timed scope
-and transport are identical: Gufo through `gufo serve`, the reference through
-its own OpenAI-compatible server. `gufo bench` and the standalone CLIs are
+and transport are identical: MBufo through `mbufo serve`, the reference through
+its own OpenAI-compatible server. `mbufo bench` and the standalone CLIs are
 kernel-iteration tools unless the user authorizes a native reference benchmark.
 For DeepSeek, the user permits `ds4-bench` single-session AR/DSpark comparisons.
 Match prompt tokens, prefill interval, decode accounting and cache frontier first;
@@ -55,10 +55,10 @@ one JSON per table (and per mode for concurrency tables) into
 `<!-- bench:<table> -->` markers in `BENCHMARKS.md`:
 
 ```sh
-nix build   # production Gufo binary at result/bin/gufo
+nix build   # production MBufo binary at result/bin/mbufo
 FILES="--gguf q4=/path/to/target-q4.gguf --draft q4=/path/to/draft-q4.gguf"
 nix develop -c python3 tools/bench/model-bench.py --model <model> tables            # ids and existing artifacts
-nix develop -c python3 tools/bench/model-bench.py --model <model> $FILES run --target gufo --table single-ar-q4,single-dflash2-q4
+nix develop -c python3 tools/bench/model-bench.py --model <model> $FILES run --target mbufo --table single-ar-q4,single-dflash2-q4
 nix develop -c nix shell .#llama-cpp-reference -c python3 tools/bench/model-bench.py --model <model> $FILES run --target reference --table single-ar-q4,single-dflash2-q4
 nix develop -c python3 tools/bench/model-bench.py --model <model> render           # or render --check
 ```
@@ -85,7 +85,7 @@ fails is reported, left as it was, and listed in the artifact notes; the
 other depths are still stored. A partial
 re-run under changed flags updates only the rows it measured; every row
 records the exact server command it ran under. Server logs go to the
-ignored `artifacts/model-bench/`. `render` keeps hand-entered Gufo cells that
+ignored `artifacts/model-bench/`. `render` keeps hand-entered MBufo cells that
 no artifact covers and prints which rows those are; when a table was skipped
 in a refresh, blank those cells to `TODO` by hand rather than leave an old
 number next to a fresh reference. Reference cells always come from
@@ -102,19 +102,19 @@ delete the tables the model does not have, and render. The template mirrors
 the Qwen3.8-Flash-Next card, including which prose belongs next to each
 table.
 
-`bench.json` (`schema: gufo-model-bench/1`) holds: `category`; `model.id`;
+`bench.json` (`schema: mbufo-model-bench/1`) holds: `category`; `model.id`;
 `files` (the file roles the CLI must supply, with a description each);
 `variants` (id, label, required roles; single-variant models use `default`
-and unsuffixed table ids); `sampling`; `speculative` (mode, label, Gufo
+and unsuffixed table ids); `sampling`; `speculative` (mode, label, MBufo
 arguments with `{role}` placeholders, and which reference mode it is compared
 against); `tables` keyed by table id with that table's workload, and
-`gufo.serve` / `reference.server` + `args` for the two servers. Readiness is
-`GET /ready` on Gufo and `GET /health` on llama-server.
+`mbufo.serve` / `reference.server` + `args` for the two servers. Readiness is
+`GET /ready` on MBufo and `GET /health` on llama-server.
 
 Select reference runtimes explicitly: `nix shell .#llama-cpp-reference` for
 Qwen AR/DFlash2, `.#llama-cpp-mtp-reference` for Flash-Next MTP, or
 `.#ds4-reference` for DeepSeek AR/DSpark. Combine the two llama packages when
-refreshing both modes. None is part of Gufo, the default dev shell or hosted
+refreshing both modes. None is part of MBufo, the default dev shell or hosted
 checks. Preserve the pinned recipes under `.devops/nix`; do not use ad-hoc builds.
 Antirez readiness is `/v1/models`. Its HTTP payload lacks stage timings;
 `tools/ds4/server_metrics.py` reads the pinned server's existing prompt-done
@@ -123,19 +123,19 @@ cohort durations. Do not substitute client wall time or infer client IDs from
 interleaved log lines. Qualify prepared-prefix reuse before publishing C>1.
 
 Request-level timing comes from the response, not the client clock, whenever
-the server provides it: Gufo and llama-server both return llama.cpp-compatible
+the server provides it: MBufo and llama-server both return llama.cpp-compatible
 `timings` (`prompt_n` = newly processed tokens, `cache_n` = reused tokens,
-`prompt_ms`, `predicted_n`, `predicted_ms`); Gufo adds `usage.gufo` stage
+`prompt_ms`, `predicted_n`, `predicted_ms`); MBufo adds `usage.mbufo` stage
 metrics. Servers without timings get client-measured whole-request wall time,
 and the table says so.
 
 ## Rules for every category
 
-1. Production binary: `nix build`, `./result/bin/gufo`. The driver records
+1. Production binary: `nix build`, `./result/bin/mbufo`. The driver records
    the Git revision, machine fingerprint, reference tool version, measurement
    date and every server command line (file paths reduced to basenames) in
    each artifact. You record by hand, in `artifacts/model-identities.json`
-   or the card's prose: the Gufo binary SHA-256 prefix, the model files'
+   or the card's prose: the MBufo binary SHA-256 prefix, the model files'
    repository/revision/quantization/hashes, and the reference backend
    (ROCm/Vulkan). Hosts, prompts, generated text and private paths never
    enter Git.
@@ -162,7 +162,7 @@ and the table says so.
    hashes do not replace independent model qualification; the full
    `QUALITY.md` suites are for changed kernels or models. Greedy speculative output must match AR token
    IDs in the model checks. HTTP runs retain completion hashes: concurrency
-   compares them against the Gufo AR C1 reference, while matching single-user
+   compares them against the MBufo AR C1 reference, while matching single-user
    AR/speculative depth rows allow the same text-consistency check. These hashes
    do not prove original-model accuracy. A mismatch or device fault is not a result.
    Qualify the reference's speculative path against its own AR on the matched
@@ -205,15 +205,15 @@ immediately before **Memory occupation**. Put commands and detailed methodology 
 
 ## Comparison columns
 
-Every headline table carries the reference project next to Gufo:
+Every headline table carries the reference project next to MBufo:
 
 ```
-| ... | Gufo <metric> | <ref> <metric> | Gain | ... |
+| ... | MBufo <metric> | <ref> <metric> | Gain | ... |
 ```
 
-- `Gain` is a percentage, positive when Gufo is better:
-  - throughput (tok/s, audio s per wall s): `(Gufo / ref − 1) × 100`
-  - latency, RTF, wall time, memory: `(ref / Gufo − 1) × 100`
+- `Gain` is a percentage, positive when MBufo is better:
+  - throughput (tok/s, audio s per wall s): `(MBufo / ref − 1) × 100`
+  - latency, RTF, wall time, memory: `(ref / MBufo − 1) × 100`
 - No difference column: both raw values are visible, and the extra column
   makes wide tables unreadable. When a cell is `mean ± sd`, Gain uses means.
 - Name the reference in the header (`llama.cpp pp`, `audio.cpp RTF`).
@@ -233,7 +233,7 @@ Every headline table carries the reference project next to Gufo:
 - One table per quantization and per mode; never pack `pp / tg` pairs or two
   quantizations into one cell.
 
-The driver package is `tools/gufo/model_bench/` (`cli.py`, `llm.py`,
+The driver package is `tools/mbufo/model_bench/` (`cli.py`, `llm.py`,
 `render.py`, `charts.py`); `tools/bench/model-bench.py` is a shim.
 
 Rendered tables sit between `<!-- bench:<table-id> -->` and
@@ -252,7 +252,7 @@ can decide whether a deep sweep fits. When a reference row
 still dies, check `free` and the kernel log before recording `N/A` — a run
 that finishes only by evicting and re-reading its mapped weights is not a
 speed measurement either.
-Gufo: `gufo serve llm --think off --max-pending-per-client 8`, greedy, seed
+MBufo: `mbufo serve llm --think off --max-pending-per-client 8`, greedy, seed
 1; the driver sets `--sessions 1` for single-user tables and `--sessions C`
 (llama.cpp `-np C -c 4096·C`) for concurrency tables, and attaches `--mmproj`
 only for the image-encoder table. The sweep parameters are identical across
@@ -279,7 +279,7 @@ place loading immediately before memory in the rendered card:
    then the measured request continues that conversation with a new user
    turn of about 2048 tokens that ends with a request for a long continuation
    (so greedy decoding does not stop at EOS before 128 output tokens) and 128
-   output tokens; Gufo reuses its prompt snapshot and llama-server its prompt
+   output tokens; MBufo reuses its prompt snapshot and llama-server its prompt
    cache (`cache_prompt=true`). Neither server
    exposes a tokenizer endpoint, so the driver calibrates the synthetic text
    (`prefix.generator`, seeded) against each server's reported
@@ -289,7 +289,7 @@ place loading immediately before memory in the rendered card:
    be the deepest depth + 2048 + 128 plus a calibration margin (512 in the
    shipped configurations). d0 starts fresh; deeper points reuse a prefix.
    Check actual cache/prefill counts before accepting a measurement.
-   `Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain`.
+   `Depth | MBufo pp | llama.cpp pp | Gain | MBufo tg | llama.cpp tg | Gain`.
 2. **Single user, speculative** (`single-<spec>`,
    DFlash2 / DSpark / MTP as the model supports).
    Same depth grid. Retain accepted draft tokens per step in the
@@ -315,7 +315,7 @@ place loading immediately before memory in the rendered card:
    from the pinned ggml-org/llama.cpp#28243 branch — and the card must say the
    speculative reference comes from that branch. Without such a build,
    record the error once and mark its speculative cells `N/A`.
-   `Model / depth | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive`.
+   `Model / depth | MBufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | MBufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | MBufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive`.
    Retain proposed/accepted draft counts in artifacts, never in card columns
    or figures. Do not replace a missing speculative reference with another AR
    sweep; mark its cells `N/A` and explain the missing support.
@@ -343,12 +343,12 @@ place loading immediately before memory in the rendered card:
    request reuses the entire prompt (at most four final tokens may be reevaluated)
    and generates all 128 tokens. Retain preparation evidence separately.
    Antirez DS4 uses a zero-output preparation request because generating a
-   token advances its live cache past the prompt. Gufo DS4 first builds a C1
+   token advances its live cache past the prompt. MBufo DS4 first builds a C1
    prompt checkpoint, then prepares the concurrent sessions from it to keep
    prefill arithmetic consistent. Record both choices in the artifacts.
    llama.cpp's recurrent checkpoint is four tokens before the prompt frontier;
    other models may only need the final token for logits. This avoids mixing
-   Gufo's active decode clock with llama.cpp's elapsed
+   MBufo's active decode clock with llama.cpp's elapsed
    generation clock while peers perform long prefills. Do not silently reuse
    old cold-cohort results under this method. Check prepared C1 output/drafts
    against fresh single-user d0 and verify decode overlap in server timings.
@@ -357,35 +357,35 @@ place loading immediately before memory in the rendered card:
    speculative workloads into one table and figure per quantization; no extra
    AR performance columns or sweeps. Keep useful controller statistics in JSON.
 
-   Save Gufo C1 AR completion hashes once per workload in
-   `<table>-gufo-ar.json`: the mixed reference can come from the dedicated AR
+   Save MBufo C1 AR completion hashes once per workload in
+   `<table>-mbufo-ar.json`: the mixed reference can come from the dedicated AR
    C1 measurement; repetitive needs only one AR quality request. Refresh these
    references when prompts, arithmetic, weights, tokenizer or settings change.
    To generate a missing reference, use a temporary `--config` containing that
    workload's `multi-*` table with `modes: ["ar"]`, `concurrency: [1]`,
    `prefill_first: false` and `cache_prompt: false`; keep its prompt recipe.
-   Run that table on Gufo and retain only its C1 completion hashes and provenance.
+   Run that table on MBufo and retain only its C1 completion hashes and provenance.
    `--mode ar` alone filters configured modes; it does not add an AR run to a
    speculative-only table.
    Keep a fresh AR hash control independent of the prepared cache path.
-   Gufo speculative output must match its AR reference before publishing.
+   MBufo speculative output must match its AR reference before publishing.
    Cross-engine agreement belongs in `QUALITY.md`, not as an accuracy score.
 5. **Loading time** (`loading`). Cold model files to HTTP readiness (`/ready`
-   on Gufo, `/health` on llama-server), at the same C1 context capacity and
-   speculative mode. `Model / target | Gufo ready (s) | llama.cpp ready (s) | Gain`.
+   on MBufo, `/health` on llama-server), at the same C1 context capacity and
+   speculative mode. `Model / target | MBufo ready (s) | llama.cpp ready (s) | Gain`.
 6. **Memory** (`memory`). Peak device-global HIP memory in use
-   (`hipMemGetInfo` total − free, the counter Gufo's loader logs as
+   (`hipMemGetInfo` total − free, the counter MBufo's loader logs as
    `gpu_device_used_mib`, sampled every 250 ms by the driver through the
-   `libamdhip64` the Gufo binary links) while pp2048+tg128 and a 16K-prefix
+   `libamdhip64` the MBufo binary links) while pp2048+tg128 and a 16K-prefix
    pp4096+tg128 run, both servers autoregressive at the same context
    capacity, no projector loaded. The idle value before the server starts is
    stored per row. llama-server preallocates its KV cache, so its footprint
    does not grow with the prefix; say so under the table.
-   `Workload | Gufo GiB | llama.cpp GiB | Gain`.
-Concurrency performance artifacts are `gufo-serving-bench` corpus reports:
-`multi-ar[-<quant>]-gufo-ar.json` and `multi-ar[-<quant>]-reference.json` for AR;
-`<table>-gufo-<spec>.json` and `<table>-reference-<spec>.json` for speculative runs.
-Speculative tables also retain `<table>-gufo-ar.json` as a C1 quality reference;
+   `Workload | MBufo GiB | llama.cpp GiB | Gain`.
+Concurrency performance artifacts are `mbufo-serving-bench` corpus reports:
+`multi-ar[-<quant>]-mbufo-ar.json` and `multi-ar[-<quant>]-reference.json` for AR;
+`<table>-mbufo-<spec>.json` and `<table>-reference-<spec>.json` for speculative runs.
+Speculative tables also retain `<table>-mbufo-ar.json` as a C1 quality reference;
    the other tables use the compact `model-bench-table` schema with one entry per
 row and the actual `cache_n`/`prompt_n` counts.
 
@@ -399,14 +399,14 @@ compared against the official reference transcript.
    a short clip.
 2. **Single request.** The documented fixed recording (15.05 s English), one
    warmup, three timed requests, median. Rows: request time, RTF (request /
-   input duration, lower is better), audio seconds per wall second; Gufo-only
-   rows for audio-encoder time and text prefill+generation from `usage.gufo`.
-   Columns: `Metric | Gufo | audio.cpp | Gain`.
+   input duration, lower is better), audio seconds per wall second; MBufo-only
+   rows for audio-encoder time and text prefill+generation from `usage.mbufo`.
+   Columns: `Metric | MBufo | audio.cpp | Gain`.
 3. **Concurrent HTTP.** C = 1,2,4,6,8, same recording: per-request latency
    median / p95 and aggregate audio seconds per wall second, both servers.
 4. **Long-form.** One recording over ten minutes: wall time, RTF, transcript
    diff between the two implementations and against the reference.
-5. **Profile** (Gufo only). Dispatches, GPU work, GPU-busy share, projection
+5. **Profile** (MBufo only). Dispatches, GPU work, GPU-busy share, projection
    share from `tools/prof/prof.py --stages qwen-asr`, run separately.
 
 ## TTS (text and reference audio to speech)
@@ -420,15 +420,15 @@ are `N/A`.
    latency for a short sentence.
 2. **Single request.** The documented 37-word paragraph, 64 codec frames
    (5.12 s), one warmup, three timed, median. Per variant:
-   `Variant | Gufo WAV | audio.cpp WAV | Gain | Gufo RTF | audio.cpp RTF | Gain | First PCM | Complete PCM`.
-   RTF = request time / generated audio duration. Gufo streamed and buffered
+   `Variant | MBufo WAV | audio.cpp WAV | Gain | MBufo RTF | audio.cpp RTF | Gain | First PCM | Complete PCM`.
+   RTF = request time / generated audio duration. MBufo streamed and buffered
    PCM must be identical; seeded runs must repeat exactly. First-audio latency
    is measured on the streaming endpoint of each server when it has one.
-3. **Transports** (Gufo only). PCM HTTP, SSE, WebSocket first-audio and
+3. **Transports** (MBufo only). PCM HTTP, SSE, WebSocket first-audio and
    complete times; byte-identical PCM across transports.
 4. **Concurrency.** C = 1,2,4,6,8 completion times on both servers;
    execution is serialized, report the queue effect honestly.
-5. **Profile** (Gufo only). Dispatches, GPU work, GPU busy, projection share
+5. **Profile** (MBufo only). Dispatches, GPU work, GPU busy, projection share
    per variant from `tools/prof/prof.py --stages qwen-tts`.
 
 Natural-EOS duration and intelligibility belong to `QUALITY.md`.
@@ -446,10 +446,10 @@ steps, scheduler and guidance.
 2. **Generation and edit, C1.** 1024×1024, the default 40 steps, seed 42.
    Rows: generation; edit with one reference image (edit only where the
    reference supports it). Columns:
-   `Mode | Steps | Prompt (s) | Denoising (s) | VAE (s) | Gufo total | <ref> total | Gain`;
-   stage columns are Gufo `usage.gufo` values. Add 512×512 / 20 steps as a
+   `Mode | Steps | Prompt (s) | Denoising (s) | VAE (s) | MBufo total | <ref> total | Gain`;
+   stage columns are MBufo `usage.mbufo` values. Add 512×512 / 20 steps as a
    second control when the reference is slow.
-3. **GPU split** (Gufo only). Native projections, fused feed-forward, fused
+3. **GPU split** (MBufo only). Native projections, fused feed-forward, fused
    attention, convolution and idle share from a separate request-only profile.
 4. **Concurrency.** Requests are queued; report C2 completion times and state
    that no batching is implemented.
@@ -469,9 +469,9 @@ explicit approval and `--allow-full-generation`.
 2. **Presets.** Per preset (`exact 512x512`, `exact-1344x768`, `fast`,
    `aggressive`): single-request wall, `first_preview_ms`, peak resident
    memory, delivery-quality note. Columns:
-   `Preset | Gufo wall | <ref> wall | Gain | Gufo peak GiB | <ref> peak GiB | Gain`.
-3. **Phase split** (Gufo only). Prompt encoding, AdaLN precompute, denoising,
-   VisualVAE, AudioVAE, mux, from `tools/gufo/h3_profile.py`.
+   `Preset | MBufo wall | <ref> wall | Gain | MBufo peak GiB | <ref> peak GiB | Gain`.
+3. **Phase split** (MBufo only). Prompt encoding, AdaLN precompute, denoising,
+   VisualVAE, AudioVAE, mux, from `tools/mbufo/h3_profile.py`.
 4. **Component inventory.** Tensor bytes per component; never summed as if
    resident together.
 5. **Queue.** One worker; report C2 queue latency and say there is no
@@ -479,10 +479,10 @@ explicit approval and `--allow-full-generation`.
 
 ## Finish
 
-Render the tables, check that every Gufo/reference pair used the same
+Render the tables, check that every MBufo/reference pair used the same
 workload identity, and keep only concise interpretation notes beside them. Put dates, method,
 server flags, artifact provenance and reproduction commands in `QUALITY.md`.
 Remove statements the new numbers contradict. Explain any remaining `TODO`
 measurements and `N/A` comparisons separately. Update `EXPERIMENTS.md` only when a measurement changes a
-retained decision. Summarize per table: Gufo, reference, best and worst gain,
+retained decision. Summarize per table: MBufo, reference, best and worst gain,
 and every cell where completion hashes or transcripts did not match.

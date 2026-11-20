@@ -11,5 +11,5 @@ The compiled formatter is pinned to
 - Recognized antirez GGUF `tokenizer.chat_template` SHA-256:
   `872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27`
 
-The Python encoder and embedded Jinja are reference data; Gufo implements the
+The Python encoder and embedded Jinja are reference data; MBufo implements the
 official history, effort, tool-loop, and generation-prefix semantics in C++.

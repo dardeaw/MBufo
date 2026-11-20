@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_DIAGNOSTICS_LINUX_SYSFS_H_
-#define GUFO_CORE_DIAGNOSTICS_LINUX_SYSFS_H_
+#ifndef MBUFO_CORE_DIAGNOSTICS_LINUX_SYSFS_H_
+#define MBUFO_CORE_DIAGNOSTICS_LINUX_SYSFS_H_
 
 #include <cstdint>
 #include <filesystem>
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 struct HostUnameInfo {
   std::string sysname;
@@ -63,6 +63,6 @@ private:
   std::filesystem::path proc_root_;
 };
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics
 
-#endif  // GUFO_CORE_DIAGNOSTICS_LINUX_SYSFS_H_
+#endif  // MBUFO_CORE_DIAGNOSTICS_LINUX_SYSFS_H_

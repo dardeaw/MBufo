@@ -36,7 +36,7 @@
 
 #include "src/core/crypto/sha256.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 TextRunnerDescriptor DescriptorForInput(
@@ -1656,4 +1656,4 @@ std::size_t ContinuationDiskStore::staging_capacity_bytes() const noexcept {
   return impl_->options.staging_capacity_bytes;
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

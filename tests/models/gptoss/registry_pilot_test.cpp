@@ -17,8 +17,8 @@
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/gptoss/engine_adapter.hpp"
 
-namespace g = gufo::models::gptoss;
-namespace e = gufo::core::engine;
+namespace g = mbufo::models::gptoss;
+namespace e = mbufo::core::engine;
 
 namespace {
 

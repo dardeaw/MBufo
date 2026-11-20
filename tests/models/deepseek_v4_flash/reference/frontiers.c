@@ -1,4 +1,4 @@
-/* Test-only adapter over the pinned upstream public API; no Gufo math. */
+/* Test-only adapter over the pinned upstream public API; no MBufo math. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>

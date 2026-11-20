@@ -7,7 +7,7 @@
 #include "src/models/qwen3_asr/config.hpp"
 #include "src/models/qwen3_asr/hip/transcription_runtime.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 struct AsrService::Impl {
   explicit Impl(AsrServiceOptions supplied) : options(std::move(supplied)) {
@@ -96,4 +96,4 @@ bool AsrService::Transcribe(
   return impl_->options.runner(request, is_cancelled, result, error);
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

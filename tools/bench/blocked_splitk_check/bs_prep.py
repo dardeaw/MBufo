@@ -5,7 +5,7 @@
       -I<repo> -x hip bs_test.cpp <repo>/src/core/compute/attention/blocked_splitk.hip.cpp -o bs_test
   ./bs_test <outdir> [timing]    # 26 cases; add any 2nd argument for per-case timings
 
-The legacy kernel is selected with GUFO_BLOCKED_SPLITK_LEGACY=1 (the test toggles it).
+The legacy kernel is selected with MBUFO_BLOCKED_SPLITK_LEGACY=1 (the test toggles it).
 """
 import os, sys
 import numpy as np

@@ -27,7 +27,7 @@ def check(condition, message):
 
 def make_args(backend):
     return SimpleNamespace(
-        binary="./result/bin/gufo",
+        binary="./result/bin/mbufo",
         model="/models/target.gguf",
         draft_model="/models/draft.gguf",
         backend=backend,
@@ -122,7 +122,7 @@ check(
 with tempfile.TemporaryDirectory() as temporary:
     directory = Path(temporary)
     args = make_args("dflash2")
-    args.binary = str(directory / "gufo")
+    args.binary = str(directory / "mbufo")
     args.model = str(directory / "target.gguf")
     args.draft_model = str(directory / "draft.gguf")
     for path in (args.binary, args.model, args.draft_model):

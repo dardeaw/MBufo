@@ -253,7 +253,7 @@ def short(name: str) -> str:
         elif character == "(" and depth == 0:
             name = name[:index]
             break
-    for prefix in ("void ", "gufo::hip::", "gufo::"):
+    for prefix in ("void ", "mbufo::hip::", "mbufo::"):
         name = name.replace(prefix, "")
     return name
 

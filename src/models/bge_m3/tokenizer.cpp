@@ -9,7 +9,7 @@
 #include <limits>
 #include <utility>
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 namespace {
 
 // HF-Precompiled whitespace table for XLM-R (bge_norm_tables.json):
@@ -483,4 +483,4 @@ std::optional<std::vector<std::uint32_t>> SpmUnigramTokenizer::Encode(
   return ids;
 }
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3

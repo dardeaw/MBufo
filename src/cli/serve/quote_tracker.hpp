@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_QUOTE_TRACKER_HPP_
-#define GUFO_SERVER_QUOTE_TRACKER_HPP_
+#ifndef MBUFO_SERVER_QUOTE_TRACKER_HPP_
+#define MBUFO_SERVER_QUOTE_TRACKER_HPP_
 
 #include <algorithm>
 #include <cstddef>
@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-namespace gufo::server {
+namespace mbufo::server {
 
 inline constexpr std::string_view kThinkStart = "<think>";
 inline constexpr std::string_view kThinkEnd = "</think>";
@@ -176,6 +176,6 @@ private:
   bool closing_fence_{false};
 };
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_QUOTE_TRACKER_HPP_
+#endif  // MBUFO_SERVER_QUOTE_TRACKER_HPP_

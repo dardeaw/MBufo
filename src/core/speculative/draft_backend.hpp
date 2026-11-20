@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_SPECULATIVE_DRAFT_BACKEND_HPP_
-#define GUFO_CORE_SPECULATIVE_DRAFT_BACKEND_HPP_
+#ifndef MBUFO_CORE_SPECULATIVE_DRAFT_BACKEND_HPP_
+#define MBUFO_CORE_SPECULATIVE_DRAFT_BACKEND_HPP_
 
 #include <algorithm>
 #include <cstddef>
@@ -13,11 +13,11 @@
 
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::sampling {
+namespace mbufo::sampling {
 class SamplerState;
 }
 
-namespace gufo::speculative {
+namespace mbufo::speculative {
 
 /// Represents a speculative draft proposal block
 struct DraftProposal {
@@ -258,6 +258,6 @@ private:
   std::vector<tokenization::TokenId> candidate_pool_;
 };
 
-}  // namespace gufo::speculative
+}  // namespace mbufo::speculative
 
-#endif  // GUFO_CORE_SPECULATIVE_DRAFT_BACKEND_HPP_
+#endif  // MBUFO_CORE_SPECULATIVE_DRAFT_BACKEND_HPP_

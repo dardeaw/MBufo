@@ -33,7 +33,7 @@ def main():
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1] != "serve" or "llm" not in command:
-        parser.error("pass a production gufo serve llm command after --")
+        parser.error("pass a production mbufo serve llm command after --")
     for flag in ("--host", "--port", "--api-key", "--cache-disk",
                  "--cache-disk-bytes", "--cache-disk-staging-bytes"):
         if option(command, flag) is not None:
@@ -58,7 +58,7 @@ def main():
         parser.error("use a context of at least 8192 tokens")
     environment = os.environ.copy()
     environment["XDG_CACHE_HOME"] = str(output / "xdg-cache")
-    identities = output / "xdg-cache" / "gufo" / "gguf-sha256-v1"
+    identities = output / "xdg-cache" / "mbufo" / "gguf-sha256-v1"
     report = {**provenance(), "command": command,
               "binary": str(Path(command[0]).resolve()),
               "test_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -140,13 +140,13 @@ def main():
         assert not message.get("reasoning_content") and not message.get("tool_calls"), result
         usage = result["usage"]
         total, cached = usage["prompt_tokens"], usage["cached_tokens"]
-        assert cached + usage["gufo"]["prefill_tokens"] == total, result
+        assert cached + usage["mbufo"]["prefill_tokens"] == total, result
         assert total >= 2048, "fixture must reach the disk checkpoint interval"
         if warm:
             assert cached >= total - 8, result
         else:
             assert cached == 0, result
-        assert usage["gufo"]["cache_disk_hit"] == disk, result
+        assert usage["mbufo"]["cache_disk_hit"] == disk, result
         if mode != "off":
             assert usage.get("draft_tokens", 0) > 0, f"{mode} was not exercised"
         return result

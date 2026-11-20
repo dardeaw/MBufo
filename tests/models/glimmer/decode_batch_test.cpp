@@ -15,7 +15,7 @@
 
 #include "src/models/glimmer/engine.hpp"
 
-namespace g = gufo::models::glimmer;
+namespace g = mbufo::models::glimmer;
 
 namespace {
 
@@ -227,9 +227,9 @@ int main(int argc, char** argv) {
   auto short_greedy = [&](bool legacy, std::vector<std::int32_t>* seq_out,
                           std::string* error) -> bool {
     if (legacy)
-      setenv("GUFO_GLIMMER_UNIFIED_BATCH", "0", 1);
+      setenv("MBUFO_GLIMMER_UNIFIED_BATCH", "0", 1);
     else
-      unsetenv("GUFO_GLIMMER_UNIFIED_BATCH");
+      unsetenv("MBUFO_GLIMMER_UNIFIED_BATCH");
     auto s = model->CreateSession(error);
     if (!s)
       return false;
@@ -255,7 +255,7 @@ int main(int argc, char** argv) {
       return Fail("short uni: " + error);
     if (!short_greedy(true, &leg, &error))
       return Fail("short leg: " + error);
-    unsetenv("GUFO_GLIMMER_UNIFIED_BATCH");
+    unsetenv("MBUFO_GLIMMER_UNIFIED_BATCH");
     std::fprintf(stderr, "[%s] short greedy ids:", options.kv_cache_quant.c_str());
     for (const auto t : uni)
       std::fprintf(stderr, " %d", (int)t);
@@ -284,9 +284,9 @@ int main(int argc, char** argv) {
     std::vector<std::int32_t> uni, leg;
     for (int mode = 0; mode < 2; ++mode) {
       if (mode == 0)
-        unsetenv("GUFO_GLIMMER_UNIFIED_BATCH");
+        unsetenv("MBUFO_GLIMMER_UNIFIED_BATCH");
       else
-        setenv("GUFO_GLIMMER_UNIFIED_BATCH", "0", 1);
+        setenv("MBUFO_GLIMMER_UNIFIED_BATCH", "0", 1);
       auto s_dec = model->CreateSession(&error);
       auto s_ch = model->CreateSession(&error);
       if (!s_dec || !s_ch)
@@ -312,7 +312,7 @@ int main(int argc, char** argv) {
           return Fail("eval cont: " + error);
       }
     }
-    unsetenv("GUFO_GLIMMER_UNIFIED_BATCH");
+    unsetenv("MBUFO_GLIMMER_UNIFIED_BATCH");
     const bool same = (uni == leg);
     std::fprintf(stderr, "[%s] cross-mode mixed+cont %s\n",
                  options.kv_cache_quant.c_str(),

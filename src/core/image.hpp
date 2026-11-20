@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_IMAGE_HPP_
-#define GUFO_CORE_IMAGE_HPP_
+#ifndef MBUFO_CORE_IMAGE_HPP_
+#define MBUFO_CORE_IMAGE_HPP_
 
 #include <chrono>
 #include <cstddef>
@@ -10,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-namespace gufo::core {
+namespace mbufo::core {
 
 inline constexpr std::size_t kMaxEncodedImageBytes = 20 * 1024 * 1024;
 inline constexpr std::size_t kMaxImagePixels = 32 * 1024 * 1024;
@@ -45,5 +45,5 @@ struct ImageReadBudget {
                                                      ImageReadBudget& budget);
 [[nodiscard]] std::vector<std::uint8_t> ReadImageUrl(std::string_view url);
 
-}  // namespace gufo::core
+}  // namespace mbufo::core
 #endif

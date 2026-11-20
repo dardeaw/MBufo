@@ -14,7 +14,7 @@
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 
 namespace {
-namespace image = gufo::models::qwen_image_21::hip;
+namespace image = mbufo::models::qwen_image_21::hip;
 
 template<typename T>
 struct Device {

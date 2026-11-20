@@ -1,5 +1,5 @@
-#ifndef GUFO_CACHE_DISK_HPP_
-#define GUFO_CACHE_DISK_HPP_
+#ifndef MBUFO_CACHE_DISK_HPP_
+#define MBUFO_CACHE_DISK_HPP_
 
 #include <array>
 #include <filesystem>
@@ -13,7 +13,7 @@
 
 #include "src/cache/checkpoint.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 inline constexpr std::uint32_t kDiskFormatVersion = 2;
 inline constexpr std::size_t kMaxManifestBytes = std::size_t{16} * 1024 * 1024;
 class DiskCapacityExhausted : public ResourceExhausted {};
@@ -184,7 +184,7 @@ private:
   DiskManifest manifest_;
   const void* store_{};
 };
-#ifdef GUFO_CACHE_TESTING
+#ifdef MBUFO_CACHE_TESTING
 enum class DiskPublicationStep {
   kPayloadWritten,
   kPayloadSynced,
@@ -261,7 +261,7 @@ public:
   // delivered by WaitForReclamation(); destruction joins the worker.
   void ReclaimOrphans();
   void WaitForReclamation();
-#ifdef GUFO_CACHE_TESTING
+#ifdef MBUFO_CACHE_TESTING
   void SetCrashHook(std::function<void(DiskPublicationStep)>);
 #endif
 
@@ -269,5 +269,5 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 #endif

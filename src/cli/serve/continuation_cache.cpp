@@ -12,7 +12,7 @@
 
 #include "src/cli/serve/logging.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 namespace {
 
@@ -1218,4 +1218,4 @@ void ContinuationCache::Invalidate(std::size_t index,
   impl_->condition.notify_one();
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

@@ -1,6 +1,6 @@
 {
   "artifactType": "servingBenchmark",
-  "benchmarkSchema": "gufo.serving-benchmark.v1",
+  "benchmarkSchema": "mbufo.serving-benchmark.v1",
   "canonical": {
     "cppStandard": "C++20",
     "cpuArchitecture": "x86_64",
@@ -47,7 +47,7 @@
     "modelId": "bench",
     "source": "report",
     "suiteSha256": "b88da26d719c0fa810935f91ea03109e4019c4da6ae35fa339776446dfc049e7",
-    "workloadId": "qwen3.8-27b-multi-ar-q8-gufo-ar"
+    "workloadId": "qwen3.8-27b-multi-ar-q8-mbufo-ar"
   },
   "results": {
     "c1": {

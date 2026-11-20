@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_CONFIG_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_CONFIG_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_CONFIG_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_CONFIG_HPP_
 
 #include <array>
 #include <cstddef>
@@ -11,7 +11,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 /// Architecture parameters of a `qwen4exp` GGUF artifact. Every value is read
 /// from the file; the fixed limits below only bound what this runtime was
@@ -154,6 +154,6 @@ struct Config {
       std::string* error_msg = nullptr);
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_CONFIG_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_CONFIG_HPP_

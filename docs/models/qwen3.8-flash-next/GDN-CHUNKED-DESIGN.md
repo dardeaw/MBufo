@@ -13,7 +13,7 @@ Replace `GdnRowSplitKernel` with a chunked form for prefill batches only:
   FP32 and serial over tokens with no matrix-core work.
 - Decode, verification and speculative batches keep the serial kernel: a
   triangular solve cannot be amortized at one to eight rows.
-- Gate: `WidePrefill(n_tokens)` and `GUFO_GDN_CHUNK` above 0.
+- Gate: `WidePrefill(n_tokens)` and `MBUFO_GDN_CHUNK` above 0.
 
 ## Recurrence (the contract)
 
@@ -89,10 +89,10 @@ boundaries.
 
 | Variable | Meaning |
 | --- | --- |
-| `GUFO_GDN_CHUNK` | 0 (default, off), 8, 16 or 32 tokens per chunk |
-| `GUFO_GDN_F16` | 0 (default) keeps float32 operands, 1 selects the float16 matrix-core operands that cost 4.4e-4 |
+| `MBUFO_GDN_CHUNK` | 0 (default, off), 8, 16 or 32 tokens per chunk |
+| `MBUFO_GDN_F16` | 0 (default) keeps float32 operands, 1 selects the float16 matrix-core operands that cost 4.4e-4 |
 
-`GUFO_GDN_F16=1` is the only mode that can reach matrix cores; the float32 mode
+`MBUFO_GDN_F16=1` is the only mode that can reach matrix cores; the float32 mode
 has the same FLOPs as the serial rule (3 d^2 per token) and would only add the
 solve, so it exists to isolate the reformulation from the precision change
 during validation.

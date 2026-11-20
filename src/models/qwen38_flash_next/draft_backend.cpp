@@ -20,7 +20,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 std::unique_ptr<FlashNextMtpDraftBackend> FlashNextMtpDraftBackend::Create(
     Session& session, std::string* error_msg) {
@@ -148,4 +148,4 @@ const bool kFlashNextMtpDraftRegistered = RegisterFlashNextMtpDraftBackend();
 
 }  // namespace
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next

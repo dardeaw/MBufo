@@ -1,11 +1,11 @@
 # MBufo
 
-专为 AMD Strix Halo（`gfx1151`）架构深度打造的 [gufo](https://github.com/gufo-org/gufo) 分支，定位为**高并发、极致公平性与多模型的生产级推理引擎**。
+专为 AMD Strix Halo（`gfx1151`）架构深度打造的 [mbufo](https://github.com/gufo-org/gufo) 分支，定位为**高并发、极致公平性与多模型的生产级推理引擎**。
 
 > [English Version](README.md) · [繁體中文版](README.zh-Hant.md)
 <img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/562fcc09-a6dd-46eb-b143-6d702f5aa08c" />
 
-上游 gufo 专精于单流极限吞吐；MBufo 则聚焦于服务端实际服务的核心挑战：单台 Strix Halo 节点在面临十六路以上高并发请求时如何保持满载，且每路请求如何承载长达 256K 的极限上下文。MBufo 以三大核心支柱解答：**负载下的公平调度（§1）**、**极致节省显存与算力的低精度计算（§2）**，以及**单端口整合全家族的 GGUF 兼容支持（§3）**。底层引擎、算子内核与核心架构源自上游，在此诚挚致谢 gufo-org 及广大社区贡献者。
+上游 mbufo 专精于单流极限吞吐；MBufo 则聚焦于服务端实际服务的核心挑战：单台 Strix Halo 节点在面临十六路以上高并发请求时如何保持满载，且每路请求如何承载长达 256K 的极限上下文。MBufo 以三大核心支柱解答：**负载下的公平调度（§1）**、**极致节省显存与算力的低精度计算（§2）**，以及**单端口整合全家族的 GGUF 兼容支持（§3）**。底层引擎、算子内核与核心架构源自上游，在此诚挚致谢 gufo-org 及广大社区贡献者。
 
 **目录：** [核心特性](#mbufo-核心特性) ·
 [§1 高并发架构](#1-高并发架构) ·
@@ -26,7 +26,7 @@
 | --- | --- | --- |
 | **极速响应** | **短请求 TTFT 0.7 秒** | 具备防饥饿公平调度机制，短请求即便遭遇 25 万 token 超长 Prefill 并发，首字延迟仍稳定压在 0.7 秒内，保证输出位元精确无失真。 |
 | **极致省容** | **KV 缓存显存减半** | Blocked-Q8 缓存架构让单一 262,144 (256K) token 请求的 KV 占用从 6.44 GB 骤降至 3.42 GB（4-bit 模式更可低至 1.81 GB）。 |
-| **全能托管** | **13 个 GGUF 模型家族** | 单一 HTTP 端口统筹服务，涵盖 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 与 Reranker，支持动态热加载与无重启卸载。 |
+| **全能托管** | **19 个 GGUF 模型家族** | 单一 HTTP 端口统筹服务，涵盖 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 与 Reranker，支持动态热加载与无重启卸载。 |
 
 ---
 
@@ -48,7 +48,7 @@ MBufo 将 Prefill Chunk 与 Decode 步骤合并至同一个 `ForwardBatch` 与�
 - **硬件高利用率**：16 路满载运行时 GPU 利用率维持在 99%，输出完全位元精确、零错误。
 - **批次上限扩展**：支持高达 32 Sessions / 1024 Rows 批次规模。
 
-> 混合批处理仅重排任务执行时机，不变更任何模型运算语义。默认已开启；亦可通过环境变量 `GUFO_MIXED_BATCH=0` 切换回传统调度模式。设计细节与验证矩阵请参阅 [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md)。
+> 混合批处理仅重排任务执行时机，不变更任何模型运算语义。默认已开启；亦可通过环境变量 `MBUFO_MIXED_BATCH=0` 切换回传统调度模式。设计细节与验证矩阵请参阅 [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md)。
 
 ### DecodeBatch 与 Split-K Decode 算子
 
@@ -77,7 +77,7 @@ MBufo 将 Prefill Chunk 与 Decode 步骤合并至同一个 `ForwardBatch` 与�
 | 引擎 | 总 TPS | 每 Session TPS | Fairness A / B |
 | --- | --- | --- | --- |
 | A (Halogen) | 85 / 82 / 75 / 88 | 85 / 41 / 25 / 22 | 322 / 1140 |
-| B (gufo 上游) | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
+| B (mbufo 上游) | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
 | **C (MBufo)** | **66 / 83 / 110 / 129** | **66 / 42 / 38 / 33** | **19 / 187** |
 
 MBufo 在多路负载下展现出最优秀的线性扩展能力（总吞吐平稳攀升至 129 TPS，单路速率平缓），且具备最佳的公平性指标。
@@ -118,7 +118,7 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 | --- | --- | --- | --- | --- |
 | `f16` | 默认基准 | 2048 B | 6.44 GB | 基准数值，无 KV 量化。 |
 | `q8` | **推荐模式** | 1088 B | 3.42 GB | Blocked 8-bit，平衡性最佳。 |
-| `q8` + `GUFO_KV_V4=1` | 手动开启 (K8V4) | 832 B | 2.62 GB | Value 压缩为 4-bit，Key 维持 8-bit。 |
+| `q8` + `MBUFO_KV_V4=1` | 手动开启 (K8V4) | 832 B | 2.62 GB | Value 压缩为 4-bit，Key 维持 8-bit。 |
 | `q8` + 两者开启 | 手动开启 (K4V4) | 576 B | 1.81 GB | Key / Value 均压缩为 4-bit，极致节省显存。 |
 
 - **推荐使用 `q8`**：Blocked-Q8 在编解码层面表现优异，精度极高，显存直接减半。
@@ -156,23 +156,29 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 
 ### 支持的模型家族
 
-通过内置多模型路由器，单一 HTTP 端口即可统筹调度下列全部 13 个家族：
+通过内置多模型路由器，单一 HTTP 端口即可统筹调度下列全部 19 个家族：
 
 | 模型 | 参数量 | HTTP 服务 | 验证测试 | 投机草稿支持 | 特性与架构亮点 |
 | --- | --- | --- | --- | --- | --- |
 | **Qwen3.8 Flash-Next**（主力） | 30B-A3B MoE | 支持 | Pilot | MTP | ROCmFP4-FAST / UD-Q4_K_XL、Blocked-Q8 KV |
 | **Qwen3.8 27B** | 27B Dense | 支持 | Pilot | DFlash2 (含 Q8) | 支持 Dense 与 MoE 路径，推荐 UD-Q4_K_XL |
 | **Gemma 4 26B-A4B** | 26B-A4B | 支持 | 完整测试 | MTP (F16 镜像) | 具备原生 Tool 支持，SWA 共用 Q8 |
+| **Gemma 4 E4B / E2B** | 4B / 2B 有效參數（逐層嵌入） | 支援 | 已驗證 | — | Q4_0 QAT；PLE（Q6_K gather）、共用 KV 層、WMMA 大 head prefill |
 | **Gemma-4-12B** | 12B Dense | Bench | — | — | 支持 K-quant 预转换与 WMMA Q8 Prefill |
 | **Qwen3.5-35B-A3B** | 35B-A3B MoE | Engine | — | — | 支持 qwen35moe 架构路径 |
 | **Qwen3.6-35B-A3B** | 35B-A3B MoE | Engine | — | — | Q6_K→Q8_0 加载、Split-K MoE 解码 |
 | **GPT-OSS 20B / 120B** | 20B / 117B MoE | 支持 | Pilot | — | 原生 MXFP4 矩阵核心、120B 支持零拷贝流式上传 |
 | **Muse Glimmer 30B** | 30B | 支持 | Prompt | DFlash (~89%) | ATEM 工具调用、W8A8 / Q8_0 支持 |
 | **Llama-3.1-8B** | 8B Dense | 支持 | Adapter | — | 标准 Dense GQA 支持 |
+| **DeepSeek V4 Flash** | MoE（IQ2/Q2/Q8 混合 GGUF） | 支援 | 品質限制已記載 | DSpark | MLA decode、ds4 一致 kernel、約 81 GiB 常駐 |
 | **Qwen3-Embedding-0.6B** | 0.6B | 支持 (`/v1/embeddings`) | — | — | 缓存池化 Single-Prefill 执行器 |
 | **bge-m3** | 0.6B XLM-R | 支持 (`/v1/embeddings`) | Encoder | — | CLS 池化、Q4_K_M 加载器、hipBLASLt 调优 |
 | **bge-reranker-v2-m3** | Cross-Encoder | 支持 (`/v1/reranking`) | ScoreBatch | — | BERT 分派、多序列 Padding 批次加速 |
 | **Qwen3-Reranker** | Cross-Encoder | 支持 (`/v1/reranking`) | Scoring | — | Qwen 分派、共用 Rerank 评分头 |
+| **Qwen3-ASR 1.7B** | 1.7B | 支援（語音轉文字） | — | — | BF16 safetensors、決定性 greedy 解碼 |
+| **Qwen3-TTS 12Hz 1.7B** | 1.7B | 支援（語音合成） | — | — | BF16 safetensors、F32 波形解碼器 |
+| **Qwen-Image-2.1** | Diffusion transformer | 支援（圖像生成／編輯） | — | — | BF16 safetensors、Qwen3-VL 提示編碼器、RGBA VAE |
+| **MiniMax H3** | 50 區塊 BF16 transformer | 支援（影片，純文字 FL2VA） | — | — | HIP transformer、VisualVAE / AudioVAE、MP4 合成 |
 
 ### 生产级异构多模型并驻（Multi-Model Co-Residency）与 `/admin` 控制台
 
@@ -183,10 +189,10 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 - **内置 `/admin` Web UI 管理控制台**：浏览器直接打开 `http://<host>:<port>/admin` 即可使用：
   - **顶部固定式 Unified Memory & VRAM Gate**：实时显示 Strix Halo UMA 各模型常驻占用、System/KV 缓冲池与安全保留区；鼠标悬停在目录模型上时，以单行实时预览“可直接并驻”或“需触发 LRU 置换”的内存差额。
   - **已加载模型与实时 Slot 监控**：实时查看每颗模型的每个 Session Slot 状态（`BUSY` / `IDLE`、KV 缓存 Token 数、闲置时间），一键切换 Primary 默认模型或无损卸载。
-  - **本地 GGUF 模型目录自动扫描（`/admin/catalog`）**：自动递归扫描 `GUFO_MODELS_DIR`（或模型所在母目录），自动合并多分割文件（shards）并自动配对同目录下的 `mmproj` 视觉权重与 `MTP`/`DFlash2` 草稿模型。
+  - **本地 GGUF 模型目录自动扫描（`/admin/catalog`）**：自动递归扫描 `MBUFO_MODELS_DIR`（或模型所在母目录），自动合并多分割文件（shards）并自动配对同目录下的 `mmproj` 视觉权重与 `MTP`/`DFlash2` 草稿模型。
   - **内置多模型流式 Playground**：直接在网页上选择任一并驻模型发送 OpenAI / Anthropic 流式请求，实时测量 TTFT 与 Decode tok/s。
-- **零模型待机启动（Zero-Model Standby）**：支持不带 `--model` 直接执行 `gufo serve llm --multi-model -p 8741`（仅占用约 86 MiB RSS），启动后直接从 `/admin` 网页点选加载所需模型。
-- **安全内存闸门与无损排空**：`/admin/load` 自动保留安全边界（`GUFO_MULTI_SAFETY_MIB`，默认 `2048` MiB）。空间不足时可自动对闲置的非默认模型执行 **LRU 置换卸载**（若设 `"allow_evict": false` 则返回 `409 insufficient_memory` 拒绝加载以保护现有并驻模型）；卸载模型时会等待进行中的请求生成完毕才释放内存。
+- **零模型待机启动（Zero-Model Standby）**：支持不带 `--model` 直接执行 `mbufo serve llm --multi-model -p 8741`（仅占用约 86 MiB RSS），启动后直接从 `/admin` 网页点选加载所需模型。
+- **安全内存闸门与无损排空**：`/admin/load` 自动保留安全边界（`MBUFO_MULTI_SAFETY_MIB`，默认 `2048` MiB）。空间不足时可自动对闲置的非默认模型执行 **LRU 置换卸载**（若设 `"allow_evict": false` 则返回 `409 insufficient_memory` 拒绝加载以保护现有并驻模型）；卸载模型时会等待进行中的请求生成完毕才释放内存。
 
 #### 端点一览
 
@@ -210,12 +216,12 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 ### 1. 启动主推理服务（以 Qwen3.8 Flash-Next 为例）
 
 ```sh
-./build/release/gufo serve llm \
+./build/release/mbufo serve llm \
   --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
   --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
   --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
   --speculative mtp --think off \
-  --served-model-name gufo-qwen3.8-flash-next \
+  --served-model-name mbufo-qwen3.8-flash-next \
   --sessions 2 -c 262144 --kv-quant q8 -p 8741
 ```
 
@@ -223,16 +229,16 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 
 ```sh
 # 方式 A：带默认主力模型启动，并开启多模型并驻与 /admin 控制台
-./build/release/gufo serve llm --multi-model \
+./build/release/mbufo serve llm --multi-model \
   --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
   --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
   --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
   --speculative mtp --think off \
-  --served-model-name gufo-qwen3.8-flash-next \
+  --served-model-name mbufo-qwen3.8-flash-next \
   --sessions 2 -c 262144 --kv-quant q8 -i 0.0.0.0 -p 8741
 
 # 方式 B：零模型待机启动（不预载模型，直接由 http://localhost:8741/admin 网页菜单加载）
-GUFO_MODELS_DIR=/mnt/nvme-data/gufo-models ./build/release/gufo serve llm --multi-model -i 0.0.0.0 -p 8741
+MBUFO_MODELS_DIR=/path/to/models ./build/release/mbufo serve llm --multi-model -i 0.0.0.0 -p 8741
 ```
 
 启动后直接用浏览器打开 **`http://localhost:8741/admin`** 即可通过图形化界面管理多模型并驻。
@@ -257,7 +263,7 @@ curl http://localhost:8741/admin/load \
 # 同一端口 (:8741) 同时对两颗并驻模型发送推理请求
 curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "gufo-qwen3.8-flash-next", "messages": [{"role": "user", "content": "请用一句话自我介绍。"}]}'
+  -d '{"model": "mbufo-qwen3.8-flash-next", "messages": [{"role": "user", "content": "请用一句话自我介绍。"}]}'
 
 curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -333,7 +339,7 @@ MBufo 持续追随并以标准 Git Merge 方式整合上游 `main` 分支，保�
 ```sh
 cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 cmake --build --preset release --parallel 4
-./build/release/gufo diagnose
+./build/release/mbufo diagnose
 ```
 
 ### 环境依赖需求
@@ -373,6 +379,6 @@ cmake --build --preset release --parallel 4
 
 ## 授权与致谢
 
-上游 gufo 采用 MIT 授权条款；第三方依赖库授权声明详见 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 `licenses/`。模型权重文件依其各原始发布者之许可协议规范。
+上游 mbufo 采用 MIT 授权条款；第三方依赖库授权声明详见 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 `licenses/`。模型权重文件依其各原始发布者之许可协议规范。
 
-MBufo 作为 [gufo](https://github.com/gufo-org/gufo)（gufo-org 及社区贡献者）的优化衍生版本，在此感谢开源社区奠定的深厚基础。
+MBufo 作为 [mbufo](https://github.com/gufo-org/gufo)（gufo-org 及社区贡献者）的优化衍生版本，在此感谢开源社区奠定的深厚基础。

@@ -1,10 +1,10 @@
-#ifndef GUFO_MODELS_QWEN_HIP_EXECUTION_POLICY_HPP_
-#define GUFO_MODELS_QWEN_HIP_EXECUTION_POLICY_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_EXECUTION_POLICY_HPP_
+#define MBUFO_MODELS_QWEN_HIP_EXECUTION_POLICY_HPP_
 
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 enum class QwenKvCacheStorage : std::uint8_t {
   kFp32,
@@ -187,6 +187,6 @@ constexpr QwenGraphRejection& operator|=(QwenGraphRejection& lhs,
   return rejected;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
-#endif  // GUFO_MODELS_QWEN_HIP_EXECUTION_POLICY_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_EXECUTION_POLICY_HPP_

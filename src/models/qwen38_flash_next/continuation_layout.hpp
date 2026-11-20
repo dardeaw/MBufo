@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_LAYOUT_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_LAYOUT_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_LAYOUT_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_LAYOUT_HPP_
 
 #include <cstdint>
 #include <span>
@@ -8,7 +8,7 @@
 #include "src/cache/types.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 // State inventory shared by the adapter and its model-local capacity checks.
 // IDs refer to this representation, never to an allocation or serving slot.
@@ -51,7 +51,7 @@ class ContinuationLayout {
 public:
   // `kv_key_4bit` / `kv_value_4bit` select the 18-byte packed grids on top of
   // the blocked codec; keys and values must be sized independently because the
-  // value grid can be narrower than the key grid (GUFO_KV_V4).
+  // value grid can be narrower than the key grid (MBUFO_KV_V4).
   ContinuationLayout(const Config&, bool mtp, std::uint32_t context,
                      std::uint32_t kept_rows, bool kv_int8 = false,
                      bool kv_key_4bit = false, bool kv_value_4bit = false);
@@ -82,5 +82,5 @@ private:
   std::vector<ContinuationComponent> components_;
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 #endif

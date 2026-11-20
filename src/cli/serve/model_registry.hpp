@@ -2,8 +2,8 @@
 // dynamic load/eject through the admin API. When exactly one model is
 // registered the request path is byte-for-byte the single-model behavior; the
 // registry only changes *which* backend instance a request is dispatched to.
-#ifndef GUFO_SERVER_MODEL_REGISTRY_HPP_
-#define GUFO_SERVER_MODEL_REGISTRY_HPP_
+#ifndef MBUFO_SERVER_MODEL_REGISTRY_HPP_
+#define MBUFO_SERVER_MODEL_REGISTRY_HPP_
 
 #include <atomic>
 #include <cstdint>
@@ -16,7 +16,7 @@
 
 #include "src/cli/serve/text_generation_backend.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 /// Thread-safe map of model name -> loaded text backend. The HTTP layer holds
 /// a shared_ptr for the whole request, so an ejected model stays alive until
@@ -98,6 +98,6 @@ private:
   std::unordered_map<std::string, std::weak_ptr<Entry>> by_name_;
 };
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_MODEL_REGISTRY_HPP_
+#endif  // MBUFO_SERVER_MODEL_REGISTRY_HPP_

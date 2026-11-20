@@ -20,7 +20,7 @@
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 constexpr std::array<std::uint8_t, 8> kDFlashGpuPersistentMagic = {
@@ -1228,5 +1228,5 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
   return tokens;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

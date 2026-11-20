@@ -7,7 +7,7 @@
 
 #include <hipblaslt/hipblaslt-ext.hpp>
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 namespace {
 
 void AssignError(std::string* error, const char* message) {
@@ -227,6 +227,6 @@ bool HipBlasLtRunner::Run(Plan& p, const void* weights, const void* input,
   return true;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // defined(ENGINE_ENABLE_HIP)

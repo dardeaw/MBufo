@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_TOKENIZER_HPP_
-#define GUFO_MODELS_QWEN3_ASR_TOKENIZER_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_TOKENIZER_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_TOKENIZER_HPP_
 
 #include <cstdint>
 #include <filesystem>
@@ -11,7 +11,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 
 namespace tokenization {
 class BpeTokenizer;
@@ -45,6 +45,6 @@ private:
   mutable bool merges_loaded_{false};
 };
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr
 
-#endif  // GUFO_MODELS_QWEN3_ASR_TOKENIZER_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_TOKENIZER_HPP_

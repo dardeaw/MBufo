@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GPTOSS_WEIGHTS_HPP_
-#define GUFO_MODELS_GPTOSS_WEIGHTS_HPP_
+#ifndef MBUFO_MODELS_GPTOSS_WEIGHTS_HPP_
+#define MBUFO_MODELS_GPTOSS_WEIGHTS_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -9,7 +9,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/gptoss/config.hpp"
 
-namespace gufo::models::gptoss {
+namespace mbufo::models::gptoss {
 
 // Non-owning view of one GGUF tensor (same convention as gemma4: cols =
 // ne[0] contiguous reduction, rows = ne[1], experts = ne[2]). Converted
@@ -116,6 +116,6 @@ struct ModelWeights {
   std::vector<std::vector<std::uint8_t>> arenas_;
 };
 
-}  // namespace gufo::models::gptoss
+}  // namespace mbufo::models::gptoss
 
-#endif  // GUFO_MODELS_GPTOSS_WEIGHTS_HPP_
+#endif  // MBUFO_MODELS_GPTOSS_WEIGHTS_HPP_

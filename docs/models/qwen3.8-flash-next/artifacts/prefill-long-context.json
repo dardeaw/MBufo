@@ -28,12 +28,12 @@
     "Pad wide SSM half activations by 32 elements inside existing F32 scratch.",
     "Use the bounded selector scratch quotient directly instead of rounding query count down to a power of two."
   ],
-  "fork_reference": "mikealanni/gufo f450218743bcaf77e3e1f8fab78f4cd4e4aafae3 (MIT); GDN row reuse and SSM padding",
+  "fork_reference": "mikealanni/mbufo f450218743bcaf77e3e1f8fab78f4cd4e4aafae3 (MIT); GDN row reuse and SSM padding",
   "standard_http": {
     "single-ar": {
       "nominal": "pp2048/tg128 d0, prose",
       "baseline": {
-        "command": "baseline-gufo serve --port 33305 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
+        "command": "baseline-mbufo serve --port 33305 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
         "counts": [
           {
             "cache_n": 0,
@@ -52,7 +52,7 @@
         "workload": "prose"
       },
       "candidate": {
-        "command": "candidate-gufo serve --port 44573 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
+        "command": "candidate-mbufo serve --port 44573 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
         "counts": [
           {
             "cache_n": 0,
@@ -80,7 +80,7 @@
         "acceptance_sd": null,
         "accepted_per_step": 0.66,
         "accepted_per_step_sd": null,
-        "command": "baseline-gufo serve --port 34267 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+        "command": "baseline-mbufo serve --port 34267 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
         "counts": [
           {
             "cache_n": 0,
@@ -103,7 +103,7 @@
         "acceptance_sd": null,
         "accepted_per_step": 0.66,
         "accepted_per_step_sd": null,
-        "command": "candidate-gufo serve --port 57217 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+        "command": "candidate-mbufo serve --port 57217 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
         "counts": [
           {
             "cache_n": 0,
@@ -1879,7 +1879,7 @@
     },
     "canonical_mtp_http": {
       "method": "tools/bench/model-bench.py, single-mtp, one measured sample per point/workload, original main baseline then final candidate. Same ordered depth calibration, greedy/thinking off, capacity133760, pp2048/tg128. PP column is max of mixed and repetitive; tables not refreshed.",
-      "command": "tools/bench/model-bench.py --model qwen3.8-flash-next --gufo BINARY --gguf MODEL --mtp MTP --artifacts-dir PRIVATE_DIR --log-dir PRIVATE_LOG_DIR run --target gufo --table single-mtp --depths 0,4096,8192,12288,16384,32768 --repetitions 1 --fresh",
+      "command": "tools/bench/model-bench.py --model qwen3.8-flash-next --mbufo BINARY --gguf MODEL --mtp MTP --artifacts-dir PRIVATE_DIR --log-dir PRIVATE_LOG_DIR run --target mbufo --table single-mtp --depths 0,4096,8192,12288,16384,32768 --repetitions 1 --fresh",
       "published_comparison": {
         "revision": "def2ed1e",
         "date": "2026-10-07",
@@ -2245,13 +2245,13 @@
       },
       "conclusion": "The focused controls do not reproduce the reported12–18% regression. They do not reproduce or rule out the reporter's unmatched long-horizon agent workload."
     },
-    "raw_evidence": "Private /tmp/gufo-flash-sampled on editing and remote hosts; no full-logit dumps added to repository."
+    "raw_evidence": "Private /tmp/mbufo-flash-sampled on editing and remote hosts; no full-logit dumps added to repository."
   },
   "unused_activation_and_routing_work": {
     "date": "2026-10-08",
     "baseline": "Previous private increment, including mapped PLE, packed selection and grouped MTP Q8 projections.",
-    "baseline_binary": "/nix/store/2j4i790lk6s1yj6an8jkkmdaarz16biq-gufo-0-unstable-50900eb-dirty/bin/gufo",
-    "candidate_binary": "/nix/store/k2dqvgsjm5ri0pl6bysd2zp48a38gjly-gufo-0-unstable-50900eb-dirty/bin/gufo",
+    "baseline_binary": "/nix/store/2j4i790lk6s1yj6an8jkkmdaarz16biq-mbufo-0-unstable-50900eb-dirty/bin/mbufo",
+    "candidate_binary": "/nix/store/k2dqvgsjm5ri0pl6bysd2zp48a38gjly-mbufo-0-unstable-50900eb-dirty/bin/mbufo",
     "baseline_binary_sha256": "c43277e28e695c09d195d92156f19db88685e0cfd3798161b9e61f715ef3f69b",
     "candidate_binary_sha256": "04e67b082b3c6e4db3e710c92b544aa6d4a27e450172cc3f1d02d32cdd69a325",
     "changes": [
@@ -2406,7 +2406,7 @@
               "completion_tokens_per_second": 50.69278695312645,
               "draft_tokens": 6,
               "draft_tokens_accepted": 6,
-              "gufo": {
+              "mbufo": {
                 "cache_hit": false,
                 "cache_miss_reason": "disabled",
                 "cache_common_prefix_tokens": 0,
@@ -2474,7 +2474,7 @@
               "completion_tokens_per_second": 50.73125296302224,
               "draft_tokens": 6,
               "draft_tokens_accepted": 6,
-              "gufo": {
+              "mbufo": {
                 "cache_hit": false,
                 "cache_miss_reason": "disabled",
                 "cache_common_prefix_tokens": 0,
@@ -2546,7 +2546,7 @@
               "completion_tokens_per_second": 38.92230740295543,
               "draft_tokens": 117,
               "draft_tokens_accepted": 75,
-              "gufo": {
+              "mbufo": {
                 "cache_hit": false,
                 "cache_miss_reason": "disabled",
                 "cache_common_prefix_tokens": 0,
@@ -2614,7 +2614,7 @@
               "completion_tokens_per_second": 39.06442359621258,
               "draft_tokens": 117,
               "draft_tokens_accepted": 75,
-              "gufo": {
+              "mbufo": {
                 "cache_hit": false,
                 "cache_miss_reason": "disabled",
                 "cache_common_prefix_tokens": 0,
@@ -2835,7 +2835,7 @@
       "Unchanged target arithmetic is qualified against main, not a new unquantized-model parity claim.",
       "Earlier first-decode latency variability remains separately recorded as inconclusive."
     ],
-    "raw_evidence_remote": "/tmp/gufo-flash-extra and /tmp/gufo-flash-sampled/extra-sampled-{baseline,candidate}"
+    "raw_evidence_remote": "/tmp/mbufo-flash-extra and /tmp/mbufo-flash-sampled/extra-sampled-{baseline,candidate}"
   },
   "expert_selection_and_partial_prefill": {
     "date": "2026-10-08",
@@ -2846,7 +2846,7 @@
       "Skip wholly padded 16-token SSM matrix subtiles inside the original launch, retaining every live WMMA operation."
     ],
     "final_variant": "partial_ssm",
-    "final_binary": "/nix/store/d9swjgql77b89h4vkb37zy275xsxgkiw-gufo-0-unstable-50900eb-dirty/bin/gufo",
+    "final_binary": "/nix/store/d9swjgql77b89h4vkb37zy275xsxgkiw-mbufo-0-unstable-50900eb-dirty/bin/mbufo",
     "final_binary_sha256": "e462fc4fdca5718aece434fedd2391f5734c5609e0d3fbd294ca0baf769a9a99",
     "preceding_binary_sha256": "04e67b082b3c6e4db3e710c92b544aa6d4a27e450172cc3f1d02d32cdd69a325",
     "variant_store_prefixes": {
@@ -2860,7 +2860,7 @@
     "canonical_method": "tools/bench/model-bench.py; pp2048/tg128, ordered depths [0,32768], C1/capacity133760, greedy/thinking off/penalties off. Actual counts and completion hashes retained. Profiling separate.",
     "canonical": {
       "preceding": {
-        "single-ar-gufo": {
+        "single-ar-mbufo": {
           "0": {
             "pp": 1680.88,
             "tg": 25.99,
@@ -2894,7 +2894,7 @@
             ]
           }
         },
-        "single-mtp-gufo": {
+        "single-mtp-mbufo": {
           "0": {
             "pp": 1621.47,
             "tg": 31.34,
@@ -2928,7 +2928,7 @@
             ]
           }
         },
-        "single-mtp-repetition-gufo": {
+        "single-mtp-repetition-mbufo": {
           "0": {
             "pp": 1632.76,
             "tg": 60.39,
@@ -2964,7 +2964,7 @@
         }
       },
       "expert_select": {
-        "single-ar-gufo": {
+        "single-ar-mbufo": {
           "0": {
             "pp": 1691.67,
             "tg": 25.97,
@@ -2998,7 +2998,7 @@
             ]
           }
         },
-        "single-mtp-gufo": {
+        "single-mtp-mbufo": {
           "0": {
             "pp": 1636.16,
             "tg": 31.35,
@@ -3032,7 +3032,7 @@
             ]
           }
         },
-        "single-mtp-repetition-gufo": {
+        "single-mtp-repetition-mbufo": {
           "0": {
             "pp": 1619.44,
             "tg": 60.33,
@@ -3068,7 +3068,7 @@
         }
       },
       "direct_mtp_norm_ar": {
-        "single-ar-gufo": {
+        "single-ar-mbufo": {
           "0": {
             "pp": 1693.56,
             "tg": 25.89,
@@ -3104,7 +3104,7 @@
         }
       },
       "partial_ssm": {
-        "single-ar-gufo": {
+        "single-ar-mbufo": {
           "0": {
             "pp": 1697.86,
             "tg": 25.86,
@@ -3138,7 +3138,7 @@
             ]
           }
         },
-        "single-mtp-gufo": {
+        "single-mtp-mbufo": {
           "0": {
             "pp": 1650.29,
             "tg": 31.35,
@@ -3172,7 +3172,7 @@
             ]
           }
         },
-        "single-mtp-repetition-gufo": {
+        "single-mtp-repetition-mbufo": {
           "0": {
             "pp": 1647.19,
             "tg": 60.37,
@@ -3208,7 +3208,7 @@
         }
       },
       "rejected_boundary": {
-        "single-ar-gufo": {
+        "single-ar-mbufo": {
           "0": {
             "pp": 1694.58,
             "tg": 25.95,
@@ -3242,7 +3242,7 @@
             ]
           }
         },
-        "single-mtp-gufo": {
+        "single-mtp-mbufo": {
           "0": {
             "pp": 1641.45,
             "tg": 31.37,
@@ -3276,7 +3276,7 @@
             ]
           }
         },
-        "single-mtp-repetition-gufo": {
+        "single-mtp-repetition-mbufo": {
           "0": {
             "pp": 1650.4,
             "tg": 60.38,
@@ -3312,7 +3312,7 @@
         }
       },
       "rejected_four_phase": {
-        "single-ar-gufo": {
+        "single-ar-mbufo": {
           "0": {
             "pp": 1698.31,
             "tg": 25.97,
@@ -3346,7 +3346,7 @@
             ]
           }
         },
-        "single-mtp-gufo": {
+        "single-mtp-mbufo": {
           "0": {
             "pp": 1651.11,
             "tg": 31.37,
@@ -3380,7 +3380,7 @@
             ]
           }
         },
-        "single-mtp-repetition-gufo": {
+        "single-mtp-repetition-mbufo": {
           "0": {
             "pp": 1642.87,
             "tg": 60.41,
@@ -3426,7 +3426,7 @@
         0
       ],
       "rejected_four_phase": {
-        "single-ar-gufo": {
+        "single-ar-mbufo": {
           "0": {
             "pp": 1690.95,
             "tg": 25.96,
@@ -3446,7 +3446,7 @@
         }
       },
       "partial_ssm": {
-        "single-ar-gufo": {
+        "single-ar-mbufo": {
           "0": {
             "pp": 1692.07,
             "tg": 25.98,
@@ -4343,7 +4343,7 @@
       "The earlier first-decode latency investigation remains inconclusive as documented above.",
       "Neither sustained1700tok/s nor flat d0–d128K performance is established."
     ],
-    "raw_evidence_remote": "/tmp/gufo-flash-barriers; original sampled responses under /tmp/gufo-flash-sampled. Logs, requests, responses, builds, tests, microbenchmarks and rocpd traces retained; no logits dumps added to Git.",
+    "raw_evidence_remote": "/tmp/mbufo-flash-barriers; original sampled responses under /tmp/mbufo-flash-sampled. Logs, requests, responses, builds, tests, microbenchmarks and rocpd traces retained; no logits dumps added to Git.",
     "profile": {
       "method": "rocprofv3, CLI MTP pp2048; final warmed prefill only. All totals retained; profiling is not the unprofiled performance gate.",
       "variants": {
@@ -4890,7 +4890,7 @@
         "test_correction": "Require a real disk hit, at least the stable template frontier, complete prompt accounting and exact generated tokens. Disk min-step spacing can omit the adjacent full-prompt snapshot; RAM retry still requires zero prefill."
       }
     },
-    "remote_evidence": "/tmp/gufo-flash-sweep/{vision-serving.log,vision-disk-qualified.log,image-http-summary.json,image-http-main,image-http-candidate,encoder-1024}"
+    "remote_evidence": "/tmp/mbufo-flash-sweep/{vision-serving.log,vision-disk-qualified.log,image-http-summary.json,image-http-main,image-http-candidate,encoder-1024}"
   },
   "performance_sweep": {
     "single_user_requests": 24,
@@ -5264,7 +5264,7 @@
         "main": "7af0d478fb0e663c55a9eb2fe0476a65ce614d09faeca4fa4648ad27b8ece657",
         "candidate": "e462fc4fdca5718aece434fedd2391f5734c5609e0d3fbd294ca0baf769a9a99"
       },
-      "raw_evidence": "/tmp/gufo-flash-sweep/c2-{main,candidate}"
+      "raw_evidence": "/tmp/mbufo-flash-sweep/c2-{main,candidate}"
     },
     "comparison_scope": "Previous published card versus one refreshed production HTTP sweep. Earlier rows span revisions; the historical C2 repetitive slowdown was checked separately against current main. No unfavorable sample was replaced.",
     "measured_on": [
@@ -5274,17 +5274,17 @@
     "sampling": "greedy, thinking off, seed 1, penalties disabled",
     "binary_sha256": "e462fc4fdca5718aece434fedd2391f5734c5609e0d3fbd294ca0baf769a9a99",
     "artifacts": [
-      "memory-gufo.json",
-      "multi-ar-gufo-ar.json",
-      "multi-mixed-gufo-ar.json",
-      "multi-mixed-gufo-mtp.json",
-      "multi-repetition-gufo-ar.json",
-      "multi-repetition-gufo-mtp.json",
-      "single-ar-gufo.json",
-      "single-mtp-gufo.json",
-      "single-mtp-repetition-gufo.json"
+      "memory-mbufo.json",
+      "multi-ar-mbufo-ar.json",
+      "multi-mixed-mbufo-ar.json",
+      "multi-mixed-mbufo-mtp.json",
+      "multi-repetition-mbufo-ar.json",
+      "multi-repetition-mbufo-mtp.json",
+      "single-ar-mbufo.json",
+      "single-mtp-mbufo.json",
+      "single-mtp-repetition-mbufo.json"
     ],
-    "raw_evidence": "/tmp/gufo-flash-sweep/{logs,bench.log,finish-sweep.log}"
+    "raw_evidence": "/tmp/mbufo-flash-sweep/{logs,bench.log,finish-sweep.log}"
   },
   "final_production_source_validation": {
     "production_sources_match_built_nix_source": true,

@@ -75,7 +75,7 @@
       "width": 512
     }
   ],
-  "schema": "gufo.minimax-h3-quality-contract.v1",
+  "schema": "mbufo.minimax-h3-quality-contract.v1",
   "source_manifest_sha256": "00a83367b87017f1f3d5547a963b20567a46d7aea44f0aac495c816147720d89",
   "thresholds": {
     "audio_vae": {

@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_SPECULATIVE_DRAFT_REGISTRY_HPP_
-#define GUFO_CORE_SPECULATIVE_DRAFT_REGISTRY_HPP_
+#ifndef MBUFO_CORE_SPECULATIVE_DRAFT_REGISTRY_HPP_
+#define MBUFO_CORE_SPECULATIVE_DRAFT_REGISTRY_HPP_
 
 // Unified speculative-draft backend registry.
 //
@@ -25,10 +25,10 @@
 // gemma4 adapters operate on their live session KV. No new KV layout is
 // introduced here.
 //
-// Namespace note: the task brief suggested gufo::core::speculative, but the
+// Namespace note: the task brief suggested mbufo::core::speculative, but the
 // pre-existing speculative headers (draft_backend.hpp,
 // speculative_verifier.hpp, prompt_lookup.hpp) all live in
-// gufo::speculative. This header follows the established convention.
+// mbufo::speculative. This header follows the established convention.
 
 #include <functional>
 #include <memory>
@@ -41,7 +41,7 @@
 
 #include "src/core/speculative/draft_backend.hpp"
 
-namespace gufo::speculative {
+namespace mbufo::speculative {
 
 /// Creation context for a registered draft backend factory.
 ///
@@ -179,6 +179,6 @@ class DraftBackendRegistrar {
   }
 };
 
-}  // namespace gufo::speculative
+}  // namespace mbufo::speculative
 
-#endif  // GUFO_CORE_SPECULATIVE_DRAFT_REGISTRY_HPP_
+#endif  // MBUFO_CORE_SPECULATIVE_DRAFT_REGISTRY_HPP_

@@ -16,10 +16,10 @@ void Expect(bool condition, const char* message) {
 }  // namespace
 
 int main() {
-  using gufo::hip::ChooseWeightPlacement;
-  using gufo::hip::HeapFitsAboveReserve;
-  using gufo::hip::kDispatchReserve;
-  using gufo::hip::Placement;
+  using mbufo::hip::ChooseWeightPlacement;
+  using mbufo::hip::HeapFitsAboveReserve;
+  using mbufo::hip::kDispatchReserve;
+  using mbufo::hip::Placement;
   constexpr std::uint64_t kGiB = 1ull << 30;
 
   Expect(kDispatchReserve == 4 * kGiB, "dispatch reserve is 4 GiB");

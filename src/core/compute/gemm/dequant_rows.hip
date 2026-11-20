@@ -18,10 +18,10 @@
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/quant/quant_traits.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 namespace {
 
-namespace q = ::gufo::core::quant;
+namespace q = ::mbufo::core::quant;
 
 // kScaled multiplies the decoded element by `scale` (embedding scaling, e.g. Gemma's sqrt(hidden)); the
 // unscaled instance does no extra multiply so its output stays bit-identical to the plain decode.
@@ -180,6 +180,6 @@ bool DequantRowsF16Tiled(const void* w, int type, __half* out, std::size_t rows,
   return known && launched;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // ENGINE_ENABLE_HIP

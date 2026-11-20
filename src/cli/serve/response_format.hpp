@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_RESPONSE_FORMAT_HPP_
-#define GUFO_SERVER_RESPONSE_FORMAT_HPP_
+#ifndef MBUFO_SERVER_RESPONSE_FORMAT_HPP_
+#define MBUFO_SERVER_RESPONSE_FORMAT_HPP_
 
 #include <algorithm>
 #include <cctype>
@@ -8,7 +8,7 @@
 
 #include "src/core/json_constraint.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 // Chat Completions wire contract:
 // https://developers.openai.com/api/docs/guides/structured-outputs
@@ -69,6 +69,6 @@ inline std::shared_ptr<const sampling::JsonConstraint> ParseResponseFormat(
   return sampling::JsonConstraint::Compile(*schema, strict && strict->as_bool(),
                                            true);
 }
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
 #endif

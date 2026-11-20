@@ -14,7 +14,7 @@
 
 #include "src/core/platform/publish.hpp"
 
-namespace gufo::hip::detail {
+namespace mbufo::hip::detail {
 namespace {
 
 struct DatabasePublication {
@@ -340,4 +340,4 @@ const HipblasLtPlanRecord* FindHipblasLtPlanRecord(
   return found == database.records.end() ? nullptr : &*found;
 }
 
-}  // namespace gufo::hip::detail
+}  // namespace mbufo::hip::detail

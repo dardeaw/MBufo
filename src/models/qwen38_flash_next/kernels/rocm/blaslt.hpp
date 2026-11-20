@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_BLASLT_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_BLASLT_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_BLASLT_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_BLASLT_HPP_
 
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt.h>
@@ -11,7 +11,7 @@
 #include <memory>
 #include <string>
 
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace mbufo::models::qwen38_flash_next::rocm {
 
 /// Dense 16-bit projections with F32 accumulation and output. Plans depend
 /// only on tensor geometry and the pinned HIP library, never runtime timing.
@@ -55,6 +55,6 @@ private:
   std::map<std::array<int, 4>, std::unique_ptr<Plan>> plans_;
 };
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace mbufo::models::qwen38_flash_next::rocm
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_BLASLT_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_BLASLT_HPP_

@@ -82,7 +82,7 @@ turnover 1–1.5 budgets pass equally.
 
 ## Results
 
-Evidence: `/home/mixer/gufo-qualification/pr543-pressure-2026-10-12` (drivers,
+Evidence: `/home/mixer/mbufo-qualification/pr543-pressure-2026-10-12` (drivers,
 binaries, patches, simulator, every run). Both revisions ran the same
 `cache-bridge` then `cache-pressure` history with two sessions, context 32768
 and `--cache-ram-bytes 2147483648`, fresh `def3763e` controls first.

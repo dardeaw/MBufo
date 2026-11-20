@@ -16,7 +16,7 @@ the next turn of the same conversation does not recompute the prefix it shares
 with the previous one. This is what the rest of this document is about: the
 `ContinuationCache`, and the optional on-disk tier behind `--cache-disk`.
 
-The second is where the important subtlety lives. What Gufo retains is **not**
+The second is where the important subtlety lives. What MBufo retains is **not**
 literally K/V tensors. It is an opaque snapshot owned by the model runner. For
 Qwen3.8-27B that payload happens to be attention KV. For Qwen3.8-Flash-Next it
 also contains GDN recurrent state, the indexer, position and sampling state.
@@ -549,7 +549,7 @@ Anything that changes the token prefix. In practice:
   checkpoints after it. Appending a new one does not.
 - **Reasoning the client cannot replay** — thinking is on by default for Qwen
   and `reasoning_content` is not part of the OpenAI schema, so an ordinary
-  client omits it when sending the conversation back. Gufo retains each turn's
+  client omits it when sending the conversation back. MBufo retains each turn's
   boundary before the assistant opening, so the next turn can reuse the prior
   history and process the rewritten assistant plus new input. That boundary
   must be saved on warm hits too; retaining only the old resume point caused
@@ -584,7 +584,7 @@ result can still populate the cache. `null` keeps the default, `true`.
 | `event=disk_cache action=skipped reason=staging_capacity` | a checkpoint exceeded `--cache-disk-staging-bytes` and was never written |
 | `event=disk_cache action=skipped reason=min_step` | a checkpoint was less than 2048 tokens past a stored prefix; RAM still retains it |
 
-Per-request outcomes appear in the completion log and in `usage.gufo`:
+Per-request outcomes appear in the completion log and in `usage.mbufo`:
 `cache_hit`, `cache_miss_reason`, `cache_common_prefix_tokens`,
 `cache_checkpoint_tokens`, `cache_restore_bytes`, `cache_restore_ms`,
 `shared_prefix_wait_ms` (time spent waiting for a concurrent request, part of
@@ -597,7 +597,7 @@ when one does but no restorable boundary covers it;
 `cache_common_prefix_tokens` is then the longest agreement and
 `cache_checkpoint_tokens` the deepest compatible boundary.
 
-Flash-Next also reports `usage.gufo.component_cache.captured_checkpoint_ids`.
+Flash-Next also reports `usage.mbufo.component_cache.captured_checkpoint_ids`.
 Match these request-local IDs to `checkpoint_id` in publication/refusal logs:
 an earlier request's asynchronous write may finish after the current response.
 IDs belong to one server lifetime; correlate each restart separately.
@@ -651,24 +651,24 @@ at reduced precision with `--kv-quant`. Two layouts exist:
   `QuantizeKvRowsKernel`. Each 32-element key block is 34 bytes: 32 one-byte
   symmetric INT8 codes over `max|block| / 127` followed by one `f16` scale.
   Value blocks are 34 bytes by default and 18 bytes (16 packed nibble bytes
-  plus the `f16` scale) when `GUFO_KV_V4` selects 4-bit values; see below.
+  plus the `f16` scale) when `MBUFO_KV_V4` selects 4-bit values; see below.
   The indexer keys and pooled block keys stay `f32`/`f16` and are not affected.
 
 Decode reads the blocked layout directly in the fused attention kernel. Prefill
 does the same. A transient `f16` staging route (`EnsureKvStaging` plus
 `WmmaCausalAttention`) exists for the tensor-core path and is gated behind
-`GUFO_KV_WMMA=1`; it is off by default because it produced attention output
+`MBUFO_KV_WMMA=1`; it is off by default because it produced attention output
 that disagreed with `f16` (KL 0.239 against 0.0166 for an exact emulation of the
 same quantization) whenever the prefill batch was wider than one token. See the
 0.18.1 changelog entry.
 
 `q8` uses the 34-byte blocked layout and decodes with native INT8 instructions.
 
-### Narrow value precision (`GUFO_KV_V4`)
+### Narrow value precision (`MBUFO_KV_V4`)
 
 Keys are far more sensitive than values; value errors average out across the
 residual stream while a key error moves every score. That asymmetry is what
-makes a narrower value grid worth measuring. With `GUFO_KV_V4` set (and
+makes a narrower value grid worth measuring. With `MBUFO_KV_V4` set (and
 `--kv-quant q8`), value blocks store signed 4-bit codes on a `max|block| / 7`
 grid: 16 packed bytes, element `2b` in the low nibble and `2b + 1` in the high
 nibble of byte `b`, followed by the same `f16` scale at offset 16. A value row
@@ -689,8 +689,8 @@ produces one record per call.
 
 | variable | writes |
 | --- | --- |
-| `GUFO_KV_DUMP=<file>` | the blocked K/V rows a `PrepareAttentionKv` call produced: `u32 n_tokens, kv_heads, d, k_row_bytes, v_row_bytes, start_pos`, then `k_row_bytes * n_tokens` of K followed by `v_row_bytes * n_tokens` of V (the two row sizes differ under `GUFO_KV_V4`) |
-| `GUFO_KV_STAGE=<file>` | the dequantized `f16` staging rows of an `EnsureKvStaging` call: `u32 need, kv_row, base`, then the K and V halves |
+| `MBUFO_KV_DUMP=<file>` | the blocked K/V rows a `PrepareAttentionKv` call produced: `u32 n_tokens, kv_heads, d, k_row_bytes, v_row_bytes, start_pos`, then `k_row_bytes * n_tokens` of K followed by `v_row_bytes * n_tokens` of V (the two row sizes differ under `MBUFO_KV_V4`) |
+| `MBUFO_KV_STAGE=<file>` | the dequantized `f16` staging rows of an `EnsureKvStaging` call: `u32 need, kv_row, base`, then the K and V halves |
 
 The reference side of the comparison comes from the probe binary:
 

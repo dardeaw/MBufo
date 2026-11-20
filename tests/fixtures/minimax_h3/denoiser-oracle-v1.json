@@ -1,5 +1,5 @@
 {
-  "schema": "gufo.minimax-h3-denoiser-golden.v1",
+  "schema": "mbufo.minimax-h3-denoiser-golden.v1",
   "model_revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
   "reference_revision": "8974cc055ea9c02fcd14cc27dfda3e1027c05153",
   "geometry": {

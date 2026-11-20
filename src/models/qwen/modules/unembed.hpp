@@ -1,12 +1,12 @@
-#ifndef GUFO_MODELS_QWEN_MODULES_UNEMBED_HPP_
-#define GUFO_MODELS_QWEN_MODULES_UNEMBED_HPP_
+#ifndef MBUFO_MODELS_QWEN_MODULES_UNEMBED_HPP_
+#define MBUFO_MODELS_QWEN_MODULES_UNEMBED_HPP_
 
 #include <span>
 
 #include "src/models/qwen/modules/module_ctx.hpp"
 #include "src/models/qwen/state.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 /// Final output: RMSNorm the hidden state then project through the LM head
 /// onto logits. `output_weight` may share storage with the token embeddings
@@ -17,6 +17,6 @@ void UnembedForward(const CpuLayerContext& ctx,
                     std::span<const float> hidden,
                     std::span<float> logits_out) noexcept;
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 
-#endif  // GUFO_MODELS_QWEN_MODULES_UNEMBED_HPP_
+#endif  // MBUFO_MODELS_QWEN_MODULES_UNEMBED_HPP_

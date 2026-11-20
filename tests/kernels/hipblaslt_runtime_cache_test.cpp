@@ -48,7 +48,7 @@ int main() {
   const auto test_id =
       std::chrono::steady_clock::now().time_since_epoch().count();
   const auto directory = std::filesystem::temp_directory_path() /
-                         ("gufo-hipblaslt-runtime-" + std::to_string(test_id));
+                         ("mbufo-hipblaslt-runtime-" + std::to_string(test_id));
   std::filesystem::create_directories(directory);
   const auto database_path = directory / "plans.bin";
   const auto changed_path = directory / "changed.bin";
@@ -69,8 +69,8 @@ int main() {
                       host_x.size() * sizeof(std::uint16_t),
                       hipMemcpyHostToDevice));
 
-  gufo::hip::HipblasLtDispatchInfo original_info;
-  gufo::hip::HipblasLtGemm original({
+  mbufo::hip::HipblasLtDispatchInfo original_info;
+  mbufo::hip::HipblasLtGemm original({
       .plan_database_path = {},
       .tuning_workspace_bytes = 0,
       .ignore_environment = true,
@@ -83,7 +83,7 @@ int main() {
                       hipMemcpyDeviceToHost));
   Verify(host_y, 3.0F * static_cast<float>(k));
 
-  gufo::hip::HipblasLtDispatchInfo original_second_info;
+  mbufo::hip::HipblasLtDispatchInfo original_second_info;
   Expect(original.RunBf16(device_a, device_x, device_y, batch_size, second_m, k,
                           nullptr, &original_second_info),
          "resolve second hipBLASLt plan");
@@ -101,8 +101,8 @@ int main() {
   Expect(original.SavePlans(database_path.string(), &error),
          "save resolved plan: " + error);
 
-  gufo::hip::HipblasLtDispatchInfo persisted_info;
-  gufo::hip::HipblasLtGemm persisted({
+  mbufo::hip::HipblasLtDispatchInfo persisted_info;
+  mbufo::hip::HipblasLtGemm persisted({
       .plan_database_path = database_path.string(),
       .tuning_workspace_bytes = 0,
       .ignore_environment = true,
@@ -120,7 +120,7 @@ int main() {
                       hipMemcpyDeviceToHost));
   Verify(host_y, 3.0F * static_cast<float>(k));
 
-  gufo::hip::HipblasLtDispatchInfo persisted_second_info;
+  mbufo::hip::HipblasLtDispatchInfo persisted_second_info;
   Expect(persisted.RunBf16(device_a, device_x, device_y, batch_size, second_m,
                            k, nullptr, &persisted_second_info),
          "run second reconstructed plan");
@@ -140,9 +140,9 @@ int main() {
          3.0F * static_cast<float>(k));
 
   auto changed_database =
-      gufo::hip::detail::InspectHipblasLtPlanDatabase(database_path);
+      mbufo::hip::detail::InspectHipblasLtPlanDatabase(database_path);
   Expect(changed_database.status ==
-                 gufo::hip::detail::HipblasLtPlanDatabaseLoadStatus::kLoaded &&
+                 mbufo::hip::detail::HipblasLtPlanDatabaseLoadStatus::kLoaded &&
              changed_database.database.records.size() == 2,
          "inspect saved runtime database");
   const auto changed_record = std::ranges::find_if(
@@ -153,12 +153,12 @@ int main() {
   Expect(changed_record != changed_database.database.records.end(),
          "find primary persisted plan");
   ++changed_record->algorithm_id;
-  Expect(gufo::hip::detail::SaveHipblasLtPlanDatabase(
+  Expect(mbufo::hip::detail::SaveHipblasLtPlanDatabase(
              changed_path, changed_database.database, &error),
          "save changed algorithm identity: " + error);
 
-  gufo::hip::HipblasLtDispatchInfo changed_info;
-  gufo::hip::HipblasLtGemm changed({
+  mbufo::hip::HipblasLtDispatchInfo changed_info;
+  mbufo::hip::HipblasLtGemm changed({
       .plan_database_path = changed_path.string(),
       .tuning_workspace_bytes = 0,
       .ignore_environment = true,

@@ -19,7 +19,7 @@
 #include "src/models/glimmer/draft_model.hpp"
 #include "src/models/glimmer/kernels/kernels.hpp"
 
-namespace gufo::models::glimmer::draft {
+namespace mbufo::models::glimmer::draft {
 namespace {
 
 /// Draft prefill chunk width (priming loops in these blocks).
@@ -37,6 +37,20 @@ void DraftGemm(const DraftTensorRef& w, const float* x, float* y,
       std::fprintf(stderr, "[glimmer draft] GemvDecode failed (%ux%u, n=%u, status %d)\n", m, k, n_tokens,
                    static_cast<int>(st));
       std::abort();
+    }
+    return;
+  }
+  if (w.type == 14) {  // packed Q6_K: multi-token WMMA kernel, groups of <= 32 tokens (each group reads the matrix once)
+    constexpr std::uint32_t kMaxGroup = static_cast<std::uint32_t>(core::compute::gemm::kQuantGemvMultiMaxTokens);
+    const std::uint32_t groups = (n_tokens + kMaxGroup - 1) / kMaxGroup;
+    const std::uint32_t per = (n_tokens + groups - 1) / groups;
+    for (std::uint32_t done = 0; done < n_tokens; done += per) {
+      const std::uint32_t cnt = std::min(per, n_tokens - done);
+      if (!core::compute::gemm::QuantGemvMulti(w.device, w.type, x + static_cast<std::size_t>(done) * k,
+                                               y + static_cast<std::size_t>(done) * m, cnt, m, k, stream)) {
+        std::fprintf(stderr, "[glimmer draft] QuantGemvMulti(Q6_K) refused (%ux%u, n=%u)\n", m, k, cnt);
+        std::abort();
+      }
     }
     return;
   }
@@ -1210,4 +1224,4 @@ std::int32_t DraftSession::SampleGreedy() {
   return tok;
 }
 
-}  // namespace gufo::models::glimmer::draft
+}  // namespace mbufo::models::glimmer::draft

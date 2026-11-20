@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GLIMMER_DRAFT_MODEL_HPP_
-#define GUFO_MODELS_GLIMMER_DRAFT_MODEL_HPP_
+#ifndef MBUFO_MODELS_GLIMMER_DRAFT_MODEL_HPP_
+#define MBUFO_MODELS_GLIMMER_DRAFT_MODEL_HPP_
 
 // DFlash draft artifact description: `dflash` GGUF (EAGLE-style feature
 // draft, e.g. 5 layers x hidden 6656, QK-norm, no attention gate, no
@@ -17,7 +17,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::glimmer::draft {
+namespace mbufo::models::glimmer::draft {
 
 struct DraftConfig {
   std::uint32_t num_layers{0};
@@ -45,13 +45,14 @@ struct DraftConfig {
 };
 
 struct DraftTensorRef {
-  // Device-resident weights. Q4_K matrices stay PACKED (type 12; read through the shared K-quant GEMV, ~0.56 byte/weight);
-  // other matrices (Q6_K, Q8_0, ...) are dequantized once to F16 (type 1) and vectors (norms) to F32 (type 0). The block
+  // Device-resident weights. Q4_K matrices stay PACKED (type 12; read through the shared K-quant GEMV, ~0.56 byte/weight), Q6_K too (type 14,
+  // through the multi-token WMMA kernel, ~0.82 byte/weight);
+  // other matrices (Q8_0, ...) are dequantized once to F16 (type 1) and vectors (norms) to F32 (type 0). The block
   // forward of the draft is weight-bandwidth bound, so the old all-F32 mirror (10 GB) made every proposal cost ~100 ms.
   // Matrices follow the GGUF [K, M] convention (reduction dim contiguous): GEMM callers pass
   // m = rows(out-dim), k = cols(in-dim) with the matching config sizes.
   const void* device{nullptr};
-  int type{0};  ///< GgmlType code of the device bytes: 0 = F32, 1 = F16, 12 = Q4_K (packed)
+  int type{0};  ///< GgmlType code of the device bytes: 0 = F32, 1 = F16, 12 = Q4_K (packed), 14 = Q6_K (packed)
   std::uint64_t cols{0};  ///< file dims[0] (reduction dim)
   std::uint64_t rows{0};  ///< file dims[1] (output dim)
   [[nodiscard]] bool empty() const noexcept { return device == nullptr; }
@@ -86,6 +87,6 @@ struct DraftModelWeights {
       std::string* error_msg = nullptr);
 };
 
-}  // namespace gufo::models::glimmer::draft
+}  // namespace mbufo::models::glimmer::draft
 
-#endif  // GUFO_MODELS_GLIMMER_DRAFT_MODEL_HPP_
+#endif  // MBUFO_MODELS_GLIMMER_DRAFT_MODEL_HPP_

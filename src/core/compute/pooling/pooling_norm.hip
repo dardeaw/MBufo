@@ -10,7 +10,7 @@
 
 #include "src/core/pooling_norm.hpp"
 
-namespace gufo::core::embedding {
+namespace mbufo::core::embedding {
 namespace {
 
 // One thread per output dim, grid-strided; `strategy` is the numeric value
@@ -97,6 +97,6 @@ void L2NormalizeDevice(float* vec, std::size_t dim, double* norm_out,
                      norm_out);
 }
 
-}  // namespace gufo::core::embedding
+}  // namespace mbufo::core::embedding
 
 #endif  // defined(ENGINE_ENABLE_HIP)

@@ -751,8 +751,8 @@ static bool rocm_graph_alloc_raw_cap(
          * are present. Managed memory preserves a demand-paged fallback for this
          * long-lived cache class.
          */
-        gufo::server::Logger::LogFormatted(
-            gufo::server::LogLevel::kInfo, "ds4",
+        mbufo::server::Logger::LogFormatted(
+            mbufo::server::LogLevel::kInfo, "ds4",
             "ROCm using managed KV cache for ctx=%u "
             "(maximum KV %.2f GiB, context estimate %.2f GiB); "
             "this may degrade performance but is needed for very large "
@@ -1247,9 +1247,9 @@ static bool rocm_graph_encode_decode_layer(
   }
 
     bool ok = true;
-    const bool decode_stage_profile = getenv("GUFO_DEEPSEEK_ROCM_DECODE_STAGE_PROFILE") != NULL;
+    const bool decode_stage_profile = getenv("MBUFO_DEEPSEEK_ROCM_DECODE_STAGE_PROFILE") != NULL;
     double decode_stage_t0 = decode_stage_profile ? ds4_now_seconds() : 0.0;
-#define GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE(name) do { \
+#define MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE(name) do { \
         if (ok && decode_stage_profile) { \
             ok = rocm_graph_layer_stage_profile_boundary("decode", (name), il, pos, 1, &decode_stage_t0); \
         } \
@@ -1265,8 +1265,8 @@ static bool rocm_graph_encode_decode_layer(
                DS4_N_EMBD, DS4_N_HC, DS4_N_HC_SINKHORN_ITER, DS4_HC_EPS,
                DS4_RMS_EPS) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_hc_pre");
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_norm");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_hc_pre");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_norm");
     if (ok) ok = ds4_gpu_matmul_q8_0_tensor(g->qr, model->map, model->size,
                                               layer->attn_q_a->abs_offset,
                                               DS4_N_EMBD, q_rank,
@@ -1295,7 +1295,7 @@ static bool rocm_graph_encode_decode_layer(
                                             compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0,
                                             false, freq_base, freq_scale, ext_factor, attn_factor,
                                             DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW) != 0;
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("q_path");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("q_path");
 
     if (ok)
       ok = ds4_gpu_rope_tail_tensor(
@@ -1307,14 +1307,14 @@ static bool rocm_graph_encode_decode_layer(
      * starts after that, where FP8 KV quantization and raw-cache storage can
      * share one pass without changing the trigonometric path. */
     if (ok) ok = rocm_graph_decode_kv_store(g->kv, raw_cache, raw_cap, raw_row);
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("kv_path");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("kv_path");
 
     uint32_t n_comp = 0;
     ds4_gpu_tensor *comp_cache = NULL;
     ds4_gpu_tensor *comp_selected = NULL;
     uint32_t n_selected = 0;
     double decode_index_stage_t0 = 0.0;
-    const bool decode_index_stage_profile = getenv("GUFO_DEEPSEEK_ROCM_INDEXER_STAGE_PROFILE") != NULL;
+    const bool decode_index_stage_profile = getenv("MBUFO_DEEPSEEK_ROCM_INDEXER_STAGE_PROFILE") != NULL;
     if (ok && compressed) {
         const uint32_t ratio = ds4_layer_compress_ratio(il);
         const uint32_t coff = ratio == 4 ? 2u : 1u;
@@ -1596,7 +1596,7 @@ static bool rocm_graph_encode_decode_layer(
         n_comp = g->layer_n_comp[il];
         comp_cache = g->layer_attn_comp_cache[il];
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("compressor_indexer");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("compressor_indexer");
 
     if (ok) {
         const uint32_t raw_start = rocm_graph_raw_start_for_span(g, pos, n_raw);
@@ -1645,7 +1645,7 @@ static bool rocm_graph_encode_decode_layer(
                                                          DS4_N_HEAD, DS4_N_HEAD_DIM) != 0;
         }
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attention");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attention");
     if (ok) ok = ds4_gpu_rope_tail_tensor(g->heads,
                                             1, DS4_N_HEAD, DS4_N_HEAD_DIM,
                                             DS4_N_ROT, pos,
@@ -1670,9 +1670,9 @@ static bool rocm_graph_encode_decode_layer(
                  DS4_N_HC) != 0;
       }
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_output");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_output");
 
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_hc_post");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_hc_post");
     if (ok) ok = ds4_gpu_rms_norm_plain_tensor(g->flat_hc, g->after_attn_hc, (uint32_t)hc_dim, DS4_RMS_EPS) != 0;
     if (ok) ok = rocm_graph_matmul_plain_tensor(g->hc_mix, model, layer->hc_ffn_fn,
                                                  hc_dim, mix_hc, g->flat_hc, 1);
@@ -1684,8 +1684,8 @@ static bool rocm_graph_encode_decode_layer(
                layer->ffn_norm->abs_offset, DS4_N_EMBD, DS4_N_HC,
                DS4_N_HC_SINKHORN_ITER, DS4_HC_EPS, DS4_RMS_EPS) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("ffn_hc_pre");
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("ffn_norm");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("ffn_hc_pre");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("ffn_norm");
     const uint64_t gate_row_bytes = ds4_routed_expert_row_bytes(layer->ffn_gate_exps);
     const uint64_t gate_expert_bytes = expert_mid_dim * gate_row_bytes;
     const uint64_t down_row_bytes = ds4_routed_expert_row_bytes(layer->ffn_down_exps);
@@ -1706,7 +1706,7 @@ static bool rocm_graph_encode_decode_layer(
                                                 layer->ffn_exp_probs_b != NULL,
                                                 layer->ffn_gate_tid2eid != NULL,
                                                 g->router_logits) != 0;
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("router");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("router");
     if (ok)
       ok = ds4_gpu_routed_moe_one_tensor(
                g->routed_out, g->routed_gate, g->routed_up, g->routed_mid,
@@ -1718,7 +1718,7 @@ static bool rocm_graph_encode_decode_layer(
                (uint32_t)down_in_dim, (uint32_t)routed_out_dim,
                g->router_selected, g->router_weights, DS4_N_EXPERT,
                DS4_N_EXPERT_USED, DS4_SWIGLU_CLAMP_EXP, g->ffn_norm) != 0;
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("routed_moe");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("routed_moe");
     if (ok) {
       ok = ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
                g->shared_gate, g->shared_up, g->shared_mid, model->map,
@@ -1726,7 +1726,7 @@ static bool rocm_graph_encode_decode_layer(
                layer->ffn_up_shexp->abs_offset, DS4_N_EMBD, shared_dim,
                g->ffn_norm, DS4_SWIGLU_CLAMP_EXP, 1u) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("shared_gate_up");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("shared_gate_up");
     if (ok) {
       ok = ds4_gpu_shared_down_hc_expand_q8_0_tensor(
                g->after_ffn_hc, g->shared_out, model->map, model->size,
@@ -1734,10 +1734,10 @@ static bool rocm_graph_encode_decode_layer(
                g->shared_mid, g->routed_out, g->after_attn_hc, g->hc_split,
                DS4_N_EMBD, DS4_N_HC) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("shared_down");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("shared_down");
 
-    GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("ffn_hc_post");
-#undef GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE
+    MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("ffn_hc_post");
+#undef MBUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE
     return ok;
 }
 
@@ -2501,19 +2501,19 @@ static bool rocm_graph_encode_layer_attention_batch(
   const bool compressed = ratio != 0;
   const bool zero_prefix = pos0 == 0;
   const bool index_stage_profile =
-      getenv("GUFO_DEEPSEEK_ROCM_INDEXER_STAGE_PROFILE") != NULL;
+      getenv("MBUFO_DEEPSEEK_ROCM_INDEXER_STAGE_PROFILE") != NULL;
   const bool layer_stage_profile =
-      getenv("GUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE") != NULL;
+      getenv("MBUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE") != NULL;
   const bool q_stage_profile =
-      getenv("GUFO_DEEPSEEK_ROCM_Q_STAGE_PROFILE") != NULL;
+      getenv("MBUFO_DEEPSEEK_ROCM_Q_STAGE_PROFILE") != NULL;
   double layer_stage_t0 = layer_stage_profile ? ds4_now_seconds() : 0.0;
   double q_stage_t0 = q_stage_profile ? ds4_now_seconds() : 0.0;
-#define GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE(name) do { \
+#define MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE(name) do { \
         if (ok && layer_stage_profile) { \
             ok = rocm_graph_layer_stage_profile_boundary("attn", (name), il, pos0, n_tokens, &layer_stage_t0); \
         } \
     } while (0)
-#define GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE(name) do { \
+#define MBUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE(name) do { \
         if (ok && q_stage_profile) { \
             ok = rocm_graph_q_stage_profile_boundary((name), il, pos0, n_tokens, &q_stage_t0); \
         } \
@@ -2570,7 +2570,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                    layer->hc_attn_base->abs_offset, DS4_N_EMBD, DS4_N_HC,
                    DS4_N_HC_SINKHORN_ITER, DS4_HC_EPS) != 0;
       }
-      GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("hc_pre");
+      MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("hc_pre");
       if (ok)
         ok = ds4_gpu_rms_norm_weight_rows_tensor(
                  g->batch_attn_norm, g->batch_attn_cur, model->map, model->size,
@@ -2584,14 +2584,14 @@ static bool rocm_graph_encode_layer_attention_batch(
         (void)ds4_gpu_publish_f16_input_tensor(g->batch_attn_norm,
                                                 (uint64_t)n_tokens * DS4_N_EMBD);
       }
-    GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("norm");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("norm");
     if (project_q_a_kv) {
-    GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("pre_q");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("pre_q");
     if (ok)
       ok = rocm_graph_matmul_q8_0_named_tensor(
           "attn_q_a", il, pos0, g->batch_qr, model, layer->attn_q_a, DS4_N_EMBD,
           q_rank, g->batch_attn_norm, n_tokens);
-    GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("q_a");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("q_a");
     {
       if (ok)
         ok = rocm_graph_matmul_q8_0_named_tensor(
@@ -2605,7 +2605,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                 g->batch_kv_raw, layer->attn_kv_a_norm->abs_offset,
                 DS4_N_HEAD_DIM, n_tokens, DS4_RMS_EPS) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("q_a_norm");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("q_a_norm");
     }
     if (ok && project_qb) {
         ok = rocm_graph_matmul_q8_0_named_tensor("attn_q_b",
@@ -2619,7 +2619,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                  g->batch_qr_norm,
                                                  n_tokens);
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("q_b");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("q_b");
     }
     if (front_only) {
         ds4_gpu_tensor_free(after_attn_hc_view);
@@ -2643,15 +2643,15 @@ static bool rocm_graph_encode_layer_attention_batch(
     if (ok && !q_norm_rope_fused)
       ok = ds4_gpu_head_rms_norm_tensor(g->batch_q, n_tokens, DS4_N_HEAD,
                                         DS4_N_HEAD_DIM, DS4_RMS_EPS) != 0;
-    GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("head_norm");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("head_norm");
     if (ok && !q_norm_rope_fused)
       ok = ds4_gpu_rope_tail_tensor(
                g->batch_q, n_tokens, DS4_N_HEAD, DS4_N_HEAD_DIM, DS4_N_ROT,
                pos0, compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0, false,
                freq_base, freq_scale, ext_factor, attn_factor,
                DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW) != 0;
-    GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("rope");
-    GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("q_path");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("rope");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("q_path");
 
     if (ok)
       ok = ds4_gpu_rope_tail_tensor(
@@ -2662,7 +2662,7 @@ static bool rocm_graph_encode_layer_attention_batch(
     if (ok)
       ok = ds4_gpu_dsv4_fp8_kv_quantize_tensor(g->batch_kv, n_tokens,
                                                DS4_N_HEAD_DIM, DS4_N_ROT) != 0;
-    GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("kv_path");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("kv_path");
     /*
      * Static graph order is q, kv, cpy_k(raw SWA), then attention. For a
      * zero-prefix batch it is safe to store the whole batch at once: attention
@@ -2977,7 +2977,7 @@ static bool rocm_graph_encode_layer_attention_batch(
             }
             n_comp = g->layer_n_comp[il];
         }
-        GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("compressor");
+        MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("compressor");
 
         if (ok && ratio == 4) {
             const uint32_t index_width = coff * DS4_N_INDEXER_HEAD_DIM;
@@ -3244,7 +3244,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                 }
             }
         }
-        if (ratio == 4) GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("indexer_setup");
+        if (ratio == 4) MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("indexer_setup");
 
         // A verifier block may cross the first sparse-indexer boundary. Rows
         // before it still use scalar's dense compressed attention order.
@@ -3531,7 +3531,7 @@ static bool rocm_graph_encode_layer_attention_batch(
             }
         }
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("attention");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("attention");
 
     if (ok && !project_output) {
         ok = ds4_gpu_rope_tail_tensor(
@@ -3540,7 +3540,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                  compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0, true,
                  freq_base, freq_scale, ext_factor, attn_factor,
                  DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW) != 0;
-        GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("inv_rope");
+        MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("inv_rope");
         ds4_gpu_tensor_free(after_attn_hc_view);
         ds4_gpu_tensor_free(attn_cur_view);
         ds4_gpu_tensor_free(hc_split_view);
@@ -3641,7 +3641,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                freq_base, freq_scale, ext_factor, attn_factor,
                DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("inv_rope");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("inv_rope");
     if (ok && !output_hc_fused && !inv_rope_fused) {
       ok = ds4_gpu_attention_output_q8_batch_tensor(
                g->batch_attn_out, g->batch_attn_low, g->batch_group_tmp,
@@ -3650,7 +3650,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                layer->attn_output_b->abs_offset, group_dim, rank, n_groups,
                DS4_N_EMBD, g->batch_heads, n_tokens) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("output_proj");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("output_proj");
     if (ok && !output_hc_fused) {
         ok = ds4_gpu_hc_expand_split_tensor(after_attn_hc_view,
                                                   g->batch_attn_out,
@@ -3659,15 +3659,15 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                   DS4_N_EMBD,
                                                   DS4_N_HC) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("hc_post");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("hc_post");
     ds4_gpu_tensor_free(after_attn_hc_view);
     ds4_gpu_tensor_free(attn_cur_view);
     ds4_gpu_tensor_free(hc_split_view);
     ds4_gpu_tensor_free(hc_mix_view);
     free(index_counts);
     free(comp_counts);
-#undef GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE
-#undef GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE
+#undef MBUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE
+#undef MBUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE
     return ok;
 }
 
@@ -3707,9 +3707,9 @@ static bool rocm_graph_encode_sessions_attention_batch(
     const uint32_t group_dim = DS4_N_HEAD_DIM * group_heads;
     const uint32_t rank = DS4_N_LORA_O;
     const bool stage_profile =
-        getenv("GUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE") != NULL;
+        getenv("MBUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE") != NULL;
     double stage_t0 = stage_profile ? ds4_now_seconds() : 0.0;
-#define GUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN(name) do { \
+#define MBUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN(name) do { \
         if (ok && stage_profile) { \
             ok = rocm_graph_layer_stage_profile_boundary( \
                 "session_attn", (name), il, items[0].position, n_tokens, \
@@ -3777,7 +3777,7 @@ static bool rocm_graph_encode_sessions_attention_batch(
                  DS4_HC_EPS,
                  DS4_RMS_EPS) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN("hc_pre");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN("hc_pre");
 
     if (ok) {
         ok = rocm_graph_matmul_q8_0_named_tensor(
@@ -3841,7 +3841,7 @@ static bool rocm_graph_encode_sessions_attention_batch(
                  DS4_N_HEAD_DIM,
                  DS4_RMS_EPS) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN("qkv");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN("qkv");
 
     /*
      * The compressor projections use the same ordered per-row reduction as
@@ -3913,7 +3913,7 @@ static bool rocm_graph_encode_sessions_attention_batch(
         ds4_gpu_tensor_free(qr_norm);
         ds4_gpu_tensor_free(attn_norm);
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN("stateful_core");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN("stateful_core");
 
     if (ok) {
         ok = ds4_gpu_attention_output_q8_batch_tensor(
@@ -3941,13 +3941,13 @@ static bool rocm_graph_encode_sessions_attention_batch(
                  DS4_N_EMBD,
                  DS4_N_HC) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN("output");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN("output");
 
     ds4_gpu_tensor_free(after_attn_hc_view);
     ds4_gpu_tensor_free(attn_cur_view);
     ds4_gpu_tensor_free(hc_split_view);
     ds4_gpu_tensor_free(hc_mix_view);
-#undef GUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN
+#undef MBUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN
     return ok;
 }
 
@@ -3996,9 +3996,9 @@ static bool rocm_graph_encode_layer_ffn_batch(
       ds4_routed_expert_row_bytes(layer->ffn_down_exps);
   const uint64_t down_expert_bytes = routed_out_dim * down_row_bytes;
   const bool layer_stage_profile =
-      getenv("GUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE") != NULL;
+      getenv("MBUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE") != NULL;
   double layer_stage_t0 = layer_stage_profile ? ds4_now_seconds() : 0.0;
-#define GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE(name) do { \
+#define MBUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE(name) do { \
         if (ok && layer_stage_profile) { \
             ok = rocm_graph_layer_stage_profile_boundary("ffn", (name), il, pos0, n_tokens, &layer_stage_t0); \
         } \
@@ -4055,13 +4055,13 @@ static bool rocm_graph_encode_layer_ffn_batch(
                  DS4_HC_EPS,
                  DS4_RMS_EPS) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("hc_pre");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("hc_pre");
     if (ok && hc_pre_fused)
       ok = ds4_gpu_rms_norm_weight_rows_tensor(
                g->batch_ffn_norm, g->batch_ffn_cur, model->map, model->size,
                layer->ffn_norm->abs_offset, DS4_N_EMBD, n_tokens,
                DS4_RMS_EPS) != 0;
-    GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("norm");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("norm");
     if (ok && group_count != 0u) {
       const uint64_t logits_row_bytes = (uint64_t)DS4_N_EXPERT * sizeof(float);
       const uint64_t selected_row_bytes =
@@ -4143,7 +4143,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
                 DS4_EXPERT_WEIGHT_SCALE, n_tokens) != 0;
       }
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("router");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("router");
 
     /* Ask the routed MoE to leave its per-expert F16 rows unsummed so the
      * hyper-connection expansion below can fold the 6-way sum in, saving one
@@ -4164,7 +4164,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
                g->batch_router_weights, DS4_N_EXPERT, DS4_N_EXPERT_USED,
                DS4_SWIGLU_CLAMP_EXP, g->batch_ffn_norm, n_tokens) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("routed_moe");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("routed_moe");
     if (ok && n_tokens <= 136u && (n_tokens <= 16u || group_count != 0u)) {
       ok = ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
                g->batch_shared_gate, g->batch_shared_up, g->batch_shared_mid,
@@ -4182,7 +4182,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
             "shared_up", il, pos0, g->batch_shared_up, model,
             layer->ffn_up_shexp, DS4_N_EMBD, shared_dim, g->batch_ffn_norm,
             n_tokens);
-      GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("shared_gate_up");
+      MBUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("shared_gate_up");
       if (ok)
         ok = ds4_gpu_swiglu_tensor(g->batch_shared_mid, g->batch_shared_gate,
                                    g->batch_shared_up,
@@ -4199,7 +4199,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
                                                       DS4_N_EMBD,
                                                       g->batch_shared_mid,
                                                       n_tokens);
-    GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("shared_down");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("shared_down");
 
     const bool routed_sum_deferred = ds4_gpu_routed_sum_deferred() != 0;
     ds4_gpu_set_routed_defer_sum(0);
@@ -4226,12 +4226,12 @@ static bool rocm_graph_encode_layer_ffn_batch(
                                                   DS4_N_EMBD,
                                                   DS4_N_HC) != 0;
     }
-    GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("hc_post");
+    MBUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("hc_post");
     ds4_gpu_tensor_free(next_hc_view);
     ds4_gpu_tensor_free(ffn_cur_view);
     ds4_gpu_tensor_free(hc_split_view);
     ds4_gpu_tensor_free(hc_mix_view);
-#undef GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE
+#undef MBUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE
     return ok;
 }
 
@@ -4263,7 +4263,7 @@ static bool rocm_graph_eval_token_raw_swa(
         int                    token,
         uint32_t               pos,
         float                 *logits) {
-    const bool profile = getenv("GUFO_DEEPSEEK_ROCM_GRAPH_TOKEN_PROFILE") != NULL;
+    const bool profile = getenv("MBUFO_DEEPSEEK_ROCM_GRAPH_TOKEN_PROFILE") != NULL;
     const double t0 = profile ? ds4_now_seconds() : 0.0;
 
     bool ok = ds4_gpu_begin_commands() != 0;
@@ -4352,7 +4352,7 @@ static bool rocm_graph_prefill_layer_major(
     if (!ok) return false;
 
     const bool profile =
-        getenv("GUFO_DEEPSEEK_ROCM_GRAPH_PREFILL_PROFILE") != NULL;
+        getenv("MBUFO_DEEPSEEK_ROCM_GRAPH_PREFILL_PROFILE") != NULL;
     const double t0 = profile ? ds4_now_seconds() : 0.0;
 
     ok = rocm_graph_upload_prompt_embeddings_hc(g->batch_cur_hc,
@@ -4477,7 +4477,7 @@ static bool rocm_graph_prefill_chunked_range(
     if (start != 0 && chunk_cap > g->raw_cap) chunk_cap = g->raw_cap;
     if (chunk_cap == 0) return false;
 
-    const bool profile = getenv("GUFO_DEEPSEEK_ROCM_GRAPH_PREFILL_PROFILE") != NULL;
+    const bool profile = getenv("MBUFO_DEEPSEEK_ROCM_GRAPH_PREFILL_PROFILE") != NULL;
     const double t0 = profile ? ds4_now_seconds() : 0.0;
     const uint32_t end = start + n_tokens;
 
@@ -4748,8 +4748,8 @@ static bool rocm_graph_dspark_attach(ds4_gpu_graph *g,
         rocm_graph_dspark_free(g);
         return false;
     }
-    gufo::server::Logger::LogFormatted(
-        gufo::server::LogLevel::kInfo, "ds4",
+    mbufo::server::Logger::LogFormatted(
+        mbufo::server::LogLevel::kInfo, "ds4",
         "DSpark drafting attached stages=%u block=%u ring=%u rows "
         "features=%.1f MiB",
         dspark->n_stages,
@@ -6968,8 +6968,8 @@ ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,
       workspace->next_batch_workspace = engine->batch_workspace;
       engine->batch_workspace = workspace;
       batch_workspace = workspace;
-      gufo::server::Logger::LogFormatted(
-          gufo::server::LogLevel::kInfo, "ds4",
+      mbufo::server::Logger::LogFormatted(
+          mbufo::server::LogLevel::kInfo, "ds4",
           "sessions share one %u-row batch workspace", graph->prefill_cap);
     }
     graph->batch_workspace_owner = batch_workspace;

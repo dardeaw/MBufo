@@ -34,7 +34,7 @@ void TestQ8KBlockGEMVEquivalence() {
   constexpr std::size_t K = 512;  // K % 256 == 0 required by the kernel
   constexpr std::size_t num_blocks = K / QK;
 
-  using Q8KBlockTest = gufo::quant::block_q8_K;
+  using Q8KBlockTest = mbufo::quant::block_q8_K;
   static_assert(sizeof(Q8KBlockTest) == 292, "Q8_K block must be 292 bytes");
 
   // Deterministic pseudo-random generator (same values on every run).
@@ -75,7 +75,7 @@ void TestQ8KBlockGEMVEquivalence() {
   HIP_CHECK(
       hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchQ8KBlockGEMV(d_A, gufo::core::GgmlType::kQ8_K, d_x, d_y, M,
+  mbufo::hip::LaunchQ8KBlockGEMV(d_A, mbufo::core::GgmlType::kQ8_K, d_x, d_y, M,
                                 K, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -96,7 +96,7 @@ void TestQ8KBlockGEMVEquivalence() {
   // x).
   std::vector<float> y_dequant_ref(M, 0.0F);
   for (std::size_t m = 0; m < M; ++m) {
-    y_dequant_ref[m] = gufo::quant::DotProductQ8_K(
+    y_dequant_ref[m] = mbufo::quant::DotProductQ8_K(
         &h_A[m * num_blocks], std::span<const float>(h_x.data(), K), K);
   }
 
@@ -128,7 +128,7 @@ void TestQ8KSmallBatchFp32GEMMEquivalence() {
   constexpr std::size_t kBlocksPerRow = kColumns / kBlockSize;
   constexpr std::size_t kMaximumBatch = 8;
 
-  using Q8KBlockTest = gufo::quant::block_q8_K;
+  using Q8KBlockTest = mbufo::quant::block_q8_K;
   std::uint32_t seed = 98431U;
   auto random = [&seed]() -> std::uint32_t {
     seed = seed * 1664525U + 1013904223U;
@@ -171,13 +171,13 @@ void TestQ8KSmallBatchFp32GEMMEquivalence() {
        {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5},
         std::size_t{6}, std::size_t{7}, std::size_t{8}}) {
     for (std::size_t token = 0; token < batch; ++token) {
-      gufo::hip::LaunchQ8KBlockGEMV(device_weights, gufo::core::GgmlType::kQ8_K,
+      mbufo::hip::LaunchQ8KBlockGEMV(device_weights, mbufo::core::GgmlType::kQ8_K,
                                     device_inputs + (token * kColumns),
                                     device_reference + (token * kRows), kRows,
                                     kColumns, nullptr);
     }
-    gufo::hip::LaunchBatchedQuantGEMMFp32(
-        gufo::core::GgmlType::kQ8_K, device_weights, device_inputs,
+    mbufo::hip::LaunchBatchedQuantGEMMFp32(
+        mbufo::core::GgmlType::kQ8_K, device_weights, device_inputs,
         device_batched, batch, kRows, kColumns, nullptr);
     HIP_CHECK(hipDeviceSynchronize());
 
@@ -217,7 +217,7 @@ void TestQ8_0SmallBatchFp32GEMMEquivalence(std::size_t kRows,
   const std::size_t kBlocksPerRow = kColumns / kBlockSize;
   constexpr std::size_t kMaximumBatch = 8;
 
-  using Q8_0BlockTest = gufo::quant::block_q8_0;
+  using Q8_0BlockTest = mbufo::quant::block_q8_0;
   std::uint32_t seed = 31789U;
   auto random = [&seed]() -> std::uint32_t {
     seed = seed * 1664525U + 1013904223U;
@@ -282,13 +282,13 @@ void TestQ8_0SmallBatchFp32GEMMEquivalence(std::size_t kRows,
        {std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{4},
         std::size_t{5}, std::size_t{6}, std::size_t{7}, std::size_t{8}}) {
     for (std::size_t token = 0; token < batch; ++token) {
-      gufo::hip::LaunchQ8KBlockGEMV(device_weights, gufo::core::GgmlType::kQ8_0,
+      mbufo::hip::LaunchQ8KBlockGEMV(device_weights, mbufo::core::GgmlType::kQ8_0,
                                     device_inputs + (token * kColumns),
                                     device_reference + (token * kRows), kRows,
                                     kColumns, nullptr);
     }
-    gufo::hip::LaunchBatchedQuantGEMMFp32(
-        gufo::core::GgmlType::kQ8_0, device_weights, device_inputs,
+    mbufo::hip::LaunchBatchedQuantGEMMFp32(
+        mbufo::core::GgmlType::kQ8_0, device_weights, device_inputs,
         device_batched, batch, kRows, kColumns, nullptr);
     HIP_CHECK(hipDeviceSynchronize());
 
@@ -322,7 +322,7 @@ void TestQ8_0BlockGEMVEquivalence() {
   constexpr std::size_t K = 512;  // K % 32 == 0 required by the kernel
   constexpr std::size_t num_blocks = K / QK;
 
-  using Q8_0BlockTest = gufo::quant::block_q8_0;
+  using Q8_0BlockTest = mbufo::quant::block_q8_0;
   static_assert(sizeof(Q8_0BlockTest) == 34, "Q8_0 block must be 34 bytes");
 
   // Deterministic pseudo-random generator (same values on every run).
@@ -380,7 +380,7 @@ void TestQ8_0BlockGEMVEquivalence() {
   HIP_CHECK(
       hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchQ8KBlockGEMV(d_A, gufo::core::GgmlType::kQ8_0, d_x, d_y, M,
+  mbufo::hip::LaunchQ8KBlockGEMV(d_A, mbufo::core::GgmlType::kQ8_0, d_x, d_y, M,
                                 K, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -401,7 +401,7 @@ void TestQ8_0BlockGEMVEquivalence() {
   // x).
   std::vector<float> y_dequant_ref(M, 0.0F);
   for (std::size_t m = 0; m < M; ++m) {
-    y_dequant_ref[m] = gufo::quant::DotProductQ8_0(
+    y_dequant_ref[m] = mbufo::quant::DotProductQ8_0(
         &h_A[m * num_blocks], std::span<const float>(h_x.data(), K), K);
   }
 
@@ -430,9 +430,9 @@ void TestQ8_0BlockGEMVEquivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = gufo::test::GateHipDevice(
-      gufo::test::HipDeviceRequirement::kOptional, "Qwen Q8 GEMV ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  const int device_status = mbufo::test::GateHipDevice(
+      mbufo::test::HipDeviceRequirement::kOptional, "Qwen Q8 GEMV ops test");
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

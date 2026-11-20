@@ -9,7 +9,7 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
-namespace gufo::models::glimmer::kernels {
+namespace mbufo::models::glimmer::kernels {
 namespace {
 
 // Q8_0 block (GGUF grid): f16 scale first, then 32 int8 codes. (This is
@@ -508,4 +508,4 @@ void ScaleInplace(float* x, float s, std::size_t count, hipStream_t stream) {
                      dim3(bs), 0, stream, x, s, count);
 }
 
-}  // namespace gufo::models::glimmer::kernels
+}  // namespace mbufo::models::glimmer::kernels

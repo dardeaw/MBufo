@@ -65,14 +65,14 @@ void TestBatchedRoPEEquivalence() {
 
   // Sequential
   for (std::size_t t = 0; t < batch; ++t) {
-    gufo::hip::LaunchRoPE(d_q_seq + t * (num_heads * head_dim),
+    mbufo::hip::LaunchRoPE(d_q_seq + t * (num_heads * head_dim),
                           d_k_seq + t * (num_kv_heads * head_dim), num_heads,
                           num_kv_heads, head_dim, rotary_dim,
                           static_cast<std::uint32_t>(t), rope_theta);
   }
 
   // Batched
-  gufo::hip::LaunchBatchedRoPE(d_q_batch, d_k_batch, batch, num_heads,
+  mbufo::hip::LaunchBatchedRoPE(d_q_batch, d_k_batch, batch, num_heads,
                                num_kv_heads, head_dim, rotary_dim, 0,
                                rope_theta);
 
@@ -102,8 +102,8 @@ void TestBatchedRoPEEquivalence() {
   }
   std::cout << "RoPE Seq vs Batch max Q diff: " << max_q_diff
             << " K diff: " << max_k_diff << "\n";
-  gufo::test::Expect(max_q_diff < 1e-4F, "batched RoPE Q result mismatch");
-  gufo::test::Expect(max_k_diff < 1e-4F, "batched RoPE K result mismatch");
+  mbufo::test::Expect(max_q_diff < 1e-4F, "batched RoPE Q result mismatch");
+  mbufo::test::Expect(max_k_diff < 1e-4F, "batched RoPE K result mismatch");
 
   HIP_CHECK(hipFree(d_q_seq));
   HIP_CHECK(hipFree(d_k_seq));
@@ -137,12 +137,12 @@ void TestBatchedPerHeadRMSNormEquivalence() {
                       hipMemcpyHostToDevice));
 
   for (std::size_t t = 0; t < batch; ++t) {
-    gufo::hip::LaunchPerHeadRMSNorm(d_x_seq + t * (num_heads * head_dim), d_w,
+    mbufo::hip::LaunchPerHeadRMSNorm(d_x_seq + t * (num_heads * head_dim), d_w,
                                     d_x_seq + t * (num_heads * head_dim),
                                     num_heads, head_dim, eps);
   }
 
-  gufo::hip::LaunchBatchedPerHeadRMSNorm(d_x_batch, d_w, d_x_batch, batch,
+  mbufo::hip::LaunchBatchedPerHeadRMSNorm(d_x_batch, d_w, d_x_batch, batch,
                                          num_heads, head_dim, eps);
 
   HIP_CHECK(hipDeviceSynchronize());
@@ -160,7 +160,7 @@ void TestBatchedPerHeadRMSNormEquivalence() {
       max_diff = d;
   }
   std::cout << "PerHeadRMSNorm Seq vs Batch max diff: " << max_diff << "\n";
-  gufo::test::Expect(max_diff < 1e-4F,
+  mbufo::test::Expect(max_diff < 1e-4F,
                      "batched per-head RMSNorm result mismatch");
 
   HIP_CHECK(hipFree(d_x_seq));
@@ -173,9 +173,9 @@ void TestBatchedPerHeadRMSNormEquivalence() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen attention component ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

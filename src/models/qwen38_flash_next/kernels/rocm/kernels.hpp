@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_KERNELS_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_KERNELS_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_KERNELS_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_KERNELS_HPP_
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -16,7 +16,7 @@
 /// tier. Activations are row-major float32 [tokens][dim] unless noted; every
 /// launch is asynchronous on `stream`. Weights referenced here are device
 /// pointers in their GGUF encoding.
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace mbufo::models::qwen38_flash_next::rocm {
 
 /// Stable per-prefix rollback addresses. Growing the depth does not move
 /// existing buffers or invalidate graphs captured for a smaller batch.
@@ -418,18 +418,18 @@ void UnpackQGate(const float* qg, std::uint32_t qg_stride, float* q,
 /// Blocked-KV layout, codecs and launchers now live in the shared core layer
 /// (see src/core/compute/attention/blocked_kv.hpp). The aliases below keep
 /// existing callers source-compatible; behavior is bitwise identical.
-using gufo::core::compute::blocked_kv::AttentionKv;
-using gufo::core::compute::blocked_kv::DequantizeKvRows;
-using gufo::core::compute::blocked_kv::kKvKey4BitBlockBytes;
-using gufo::core::compute::blocked_kv::kKvKeyBlockBytes;
-using gufo::core::compute::blocked_kv::kKvValue4BitBlockBytes;
-using gufo::core::compute::blocked_kv::KvBlocked;
-using gufo::core::compute::blocked_kv::KvBlockedRowBytes;
-using gufo::core::compute::blocked_kv::KvCodec;
-using gufo::core::compute::blocked_kv::KvCodecOf;
-using gufo::core::compute::blocked_kv::KvFormat;
-using gufo::core::compute::blocked_kv::PrepareAttentionKv;
-using gufo::core::compute::blocked_kv::QuantizeKvRows;
+using mbufo::core::compute::blocked_kv::AttentionKv;
+using mbufo::core::compute::blocked_kv::DequantizeKvRows;
+using mbufo::core::compute::blocked_kv::kKvKey4BitBlockBytes;
+using mbufo::core::compute::blocked_kv::kKvKeyBlockBytes;
+using mbufo::core::compute::blocked_kv::kKvValue4BitBlockBytes;
+using mbufo::core::compute::blocked_kv::KvBlocked;
+using mbufo::core::compute::blocked_kv::KvBlockedRowBytes;
+using mbufo::core::compute::blocked_kv::KvCodec;
+using mbufo::core::compute::blocked_kv::KvCodecOf;
+using mbufo::core::compute::blocked_kv::KvFormat;
+using mbufo::core::compute::blocked_kv::PrepareAttentionKv;
+using mbufo::core::compute::blocked_kv::QuantizeKvRows;
 
 /// Unpacks a stacked Q/gate/K/V projection, normalizes and rotates Q/K,
 /// and writes the F16 caches. Returns false for heads wider than 256.
@@ -687,6 +687,6 @@ void MtpTopCandidates(const float* logits, std::uint32_t* ids,
                       std::uint32_t* scratch_ids, float* scores,
                       std::uint32_t vocab, hipStream_t stream);
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace mbufo::models::qwen38_flash_next::rocm
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_KERNELS_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_KERNELS_HPP_

@@ -5,8 +5,8 @@
 #include <map>
 #include <stdexcept>
 
-namespace qfn = gufo::models::qwen38_flash_next;
-namespace cache = gufo::cache;
+namespace qfn = mbufo::models::qwen38_flash_next;
+namespace cache = mbufo::cache;
 
 namespace {
 void Require(bool condition, const char* message) {

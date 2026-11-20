@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_STATE_HPP_
-#define GUFO_MODELS_QWEN_STATE_HPP_
+#ifndef MBUFO_MODELS_QWEN_STATE_HPP_
+#define MBUFO_MODELS_QWEN_STATE_HPP_
 
 #include <cassert>
 #include <cstddef>
@@ -17,7 +17,7 @@
 #include "src/core/model_config.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 
-namespace gufo::models {
+namespace mbufo::models {
 
 /// Non-owning reference to a mapped tensor. Consumers validate the exact
 /// formats supported for each tensor role.
@@ -34,7 +34,7 @@ struct QwenTensorRef {
   }
 
   [[nodiscard]] std::size_t EncodedSizeBytes() const noexcept {
-    return gufo::quant::EncodedSizeBytes(type, num_elements);
+    return mbufo::quant::EncodedSizeBytes(type, num_elements);
   }
 
   [[nodiscard]] bool FitsAvailableStorage() const noexcept {
@@ -54,7 +54,7 @@ struct QwenTensorRef {
       return f;
     }
     if (type == core::GgmlType::kF16) {
-      return gufo::quant::Fp16ToFloat(
+      return mbufo::quant::Fp16ToFloat(
           static_cast<const std::uint16_t*>(data)[index]);
     }
     if (type == core::GgmlType::kQ8_K) {
@@ -62,7 +62,7 @@ struct QwenTensorRef {
       const std::size_t block_idx = index / kBlockSize;
       const std::size_t pos = index % kBlockSize;
       const auto* block =
-          reinterpret_cast<const gufo::quant::block_q8_K*>(data) + block_idx;
+          reinterpret_cast<const mbufo::quant::block_q8_K*>(data) + block_idx;
       return block->d * static_cast<float>(block->qs[pos]);
     }
     if (type == core::GgmlType::kQ8_0) {
@@ -71,8 +71,8 @@ struct QwenTensorRef {
       const std::size_t block_idx = index / kBlockSize;
       const std::size_t pos = index % kBlockSize;
       const auto* block =
-          reinterpret_cast<const gufo::quant::block_q8_0*>(data) + block_idx;
-      return gufo::quant::Fp16ToFloat(block->d) *
+          reinterpret_cast<const mbufo::quant::block_q8_0*>(data) + block_idx;
+      return mbufo::quant::Fp16ToFloat(block->d) *
              static_cast<float>(block->qs[pos]);
     }
     if (type == core::GgmlType::kQ3_K || type == core::GgmlType::kQ4_K ||
@@ -84,25 +84,25 @@ struct QwenTensorRef {
       const std::size_t block_idx = index / kBlockSize;
       const std::size_t pos = index % kBlockSize;
       const std::size_t block_bytes =
-          type == core::GgmlType::kQ3_K   ? sizeof(gufo::quant::block_q3_K)
-          : type == core::GgmlType::kQ4_K ? sizeof(gufo::quant::block_q4_K)
-          : type == core::GgmlType::kQ5_K ? sizeof(gufo::quant::block_q5_K)
-                                          : sizeof(gufo::quant::block_q6_K);
+          type == core::GgmlType::kQ3_K   ? sizeof(mbufo::quant::block_q3_K)
+          : type == core::GgmlType::kQ4_K ? sizeof(mbufo::quant::block_q4_K)
+          : type == core::GgmlType::kQ5_K ? sizeof(mbufo::quant::block_q5_K)
+                                          : sizeof(mbufo::quant::block_q6_K);
       const auto* block_ptr =
           static_cast<const std::uint8_t*>(data) + block_idx * block_bytes;
       float block_buf[kBlockSize];
       switch (type) {
         case core::GgmlType::kQ3_K:
-          gufo::quant::DequantizeQ3_K(block_ptr, block_buf, kBlockSize);
+          mbufo::quant::DequantizeQ3_K(block_ptr, block_buf, kBlockSize);
           break;
         case core::GgmlType::kQ4_K:
-          gufo::quant::DequantizeQ4_K(block_ptr, block_buf, kBlockSize);
+          mbufo::quant::DequantizeQ4_K(block_ptr, block_buf, kBlockSize);
           break;
         case core::GgmlType::kQ5_K:
-          gufo::quant::DequantizeQ5_K(block_ptr, block_buf, kBlockSize);
+          mbufo::quant::DequantizeQ5_K(block_ptr, block_buf, kBlockSize);
           break;
         case core::GgmlType::kQ6_K:
-          gufo::quant::DequantizeQ6_K(block_ptr, block_buf, kBlockSize);
+          mbufo::quant::DequantizeQ6_K(block_ptr, block_buf, kBlockSize);
           break;
         default:
           break;
@@ -242,6 +242,6 @@ struct QwenScratchArena {
   std::span<float> logits;
 };
 
-}  // namespace gufo::models
+}  // namespace mbufo::models
 
-#endif  // GUFO_MODELS_QWEN_STATE_HPP_
+#endif  // MBUFO_MODELS_QWEN_STATE_HPP_

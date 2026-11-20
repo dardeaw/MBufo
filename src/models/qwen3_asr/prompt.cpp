@@ -12,7 +12,7 @@
 
 #include "src/models/qwen3_asr/tokenizer.hpp"
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 namespace {
 
 constexpr std::uint32_t kImStart = 151644;
@@ -111,4 +111,4 @@ Transcription ParseTranscription(
   };
 }
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr

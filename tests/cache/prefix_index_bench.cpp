@@ -3,8 +3,8 @@
 
 #include "tests/cache/prefix_index_fixture.hpp"
 
-using namespace gufo::cache;
-using namespace gufo::cache::testing;
+using namespace mbufo::cache;
+using namespace mbufo::cache::testing;
 int main() {
   ResourceLedger ledger{kIndexLimits};
   {

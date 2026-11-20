@@ -3,7 +3,7 @@
 Use the Nix development environment for these tools. Production inference and
 speed measurements use `nix build` binaries under `result/bin` or the
 `release` CMake preset with the same toolchain. Tools are not part of the
-production install. `gpu-test` enables `GUFO_BUILD_TOOLS` for the compiled
+production install. `gpu-test` enables `MBUFO_BUILD_TOOLS` for the compiled
 benchmark/tuning executables; Python tools run from this source tree.
 
 | Directory | Purpose |
@@ -18,10 +18,10 @@ benchmark/tuning executables; Python tools run from this source tree.
 | `audio/` | Audio reference and quality tools |
 | `ci/` | Repository, dependency, and documentation checks |
 | `llama_parity/` | Regenerates the llama.cpp tool-grammar verdicts `json_constraint_test` replays |
-| `gufo/` | Shared Python helpers and model-specific reference implementations |
+| `mbufo/` | Shared Python helpers and model-specific reference implementations |
 
-`gufo/gguf.py` reads metadata and decodes existing GGUF tensors for independent
-Qwen reference tests. `gufo/safetensors.py` validates source snapshots used by
+`mbufo/gguf.py` reads metadata and decodes existing GGUF tensors for independent
+Qwen reference tests. `mbufo/safetensors.py` validates source snapshots used by
 MiniMax's manifest and quality tooling. Both support model verification.
 
 See [performance commands](../docs/PERFORMANCE.md),

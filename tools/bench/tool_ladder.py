@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Tool-call degradation vs context length on a gufo (or any OpenAI-compatible) server.
+"""Tool-call degradation vs context length on a mbufo (or any OpenAI-compatible) server.
 
 Three single-call tool tasks (weather / email / search) are posted at growing
 filler lengths with temperature 0; each answer must be exactly one tool call
 with valid JSON arguments that carry the requested values. Engine-agnostic:
-only /v1/chat/completions with `tools` is used. `usage.gufo.component_cache`
+only /v1/chat/completions with `tools` is used. `usage.mbufo.component_cache`
 is read when present (cache reuse column) and shown as `?` otherwise.
 
   tools/bench/tool_ladder.py --url http://127.0.0.1:8741/v1/chat/completions \\
@@ -20,7 +20,7 @@ import time
 import urllib.request
 
 URL = "http://127.0.0.1:8741/v1/chat/completions"
-MODEL = "gufo-qwen3.8-flash-next"
+MODEL = "mbufo-qwen3.8-flash-next"
 BASE = ("The quick brown fox jumps over the lazy dog. In distributed "
         "systems, consistency models trade latency for guarantees; "
         "linearizability offers the strongest guarantee, while eventual "
@@ -134,8 +134,8 @@ def check(task, args):
 
 def cache_state(payload):
     usage = payload.get("usage") or {}
-    gufo = usage.get("gufo") or {}
-    cache = gufo.get("component_cache") or {}
+    mbufo = usage.get("mbufo") or {}
+    cache = mbufo.get("component_cache") or {}
     return cache.get("reuse", "?"), cache.get("selected_tokens", 0)
 
 

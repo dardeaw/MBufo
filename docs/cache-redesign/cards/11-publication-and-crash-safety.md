@@ -109,14 +109,14 @@ and preservation of unknown/symlink/hard-link contents.
 
 The focused disk, publication and package-boundary tests pass in ordinary and
 ASan/UBSan builds with pinned GCC 15.3.0 and CMake 4.3.4. A separate
-`BUILD_TESTING=OFF` CPU build of `gufo_cache` validates the production path.
+`BUILD_TESTING=OFF` CPU build of `mbufo_cache` validates the production path.
 These process-abort and syscall-order checks do not simulate a physical power
 failure or filesystem-specific storage failures.
 
 Reproduce in the pinned CPU dependency shell described by card 10:
 
 ```sh
-cmake --preset cpu-test -DGUFO_BUILD_TOOLS=ON
+cmake --preset cpu-test -DMBUFO_BUILD_TOOLS=ON
 cmake --build --preset cpu-test --target cache_disk_test cache_disk_publication_test cache_disk_publication_bench --parallel 4
 ctest --preset cpu-test -R '^cache_(disk|disk_publication|boundary)_test$' --output-on-failure
 build/cpu-test/tests/cache/cache_disk_publication_bench /tmp

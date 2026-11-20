@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_MODULES_FWD_HPP_
-#define GUFO_MODELS_QWEN_MODULES_FWD_HPP_
+#ifndef MBUFO_MODELS_QWEN_MODULES_FWD_HPP_
+#define MBUFO_MODELS_QWEN_MODULES_FWD_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +10,7 @@
 #include "src/models/qwen/ssm.hpp"
 #include "src/models/qwen/state.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 /// CPU reference and HIP launch overloads are intentionally distinct. Backend
 /// selection is a composition-time type choice, not a runtime tag branch.
@@ -65,6 +65,6 @@ void UnembedForward(const CpuLayerContext& ctx,
 std::uint32_t SampleForward(const CpuModuleContext& ctx,
                             std::span<const float> logits) noexcept;
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 
-#endif  // GUFO_MODELS_QWEN_MODULES_FWD_HPP_
+#endif  // MBUFO_MODELS_QWEN_MODULES_FWD_HPP_

@@ -17,7 +17,7 @@
 #include "src/models/minimax_h3/json.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 namespace {
 
 constexpr std::size_t kMaximumTokenizerBytes = 32U << 20U;
@@ -650,4 +650,4 @@ bool Tokenizer::Decode(const std::vector<std::uint32_t>& ids, std::string* text,
   return true;
 }
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3

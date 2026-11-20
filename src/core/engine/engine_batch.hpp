@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_ENGINE_ENGINE_BATCH_HPP_
-#define GUFO_CORE_ENGINE_ENGINE_BATCH_HPP_
+#ifndef MBUFO_CORE_ENGINE_ENGINE_BATCH_HPP_
+#define MBUFO_CORE_ENGINE_ENGINE_BATCH_HPP_
 
 // L1 engine orchestration: speculative stepping, optional capabilities, and
 // the engine factory registry.
@@ -19,8 +19,10 @@
 #include <vector>
 
 #include "src/core/engine/engine_backend.hpp"
+#include "src/core/engine/attention_contract.hpp"
+#include "src/core/engine/moe_contract.hpp"
 
-namespace gufo::core::engine {
+namespace mbufo::core::engine {
 
 /// Result of one SpeculativeSession::DecodeStep.
 struct DecodeOutcome {
@@ -93,6 +95,12 @@ using EngineModelFactory =
 struct EngineBackendInfo {
   std::string name;
   std::string description;
+  /// True for an engine that serves mixture-of-experts models (including engines whose dense variants report
+  /// moe_layers == 0). Its models must implement MoeCapable (moe_contract.hpp); Create enforces it both ways.
+  bool moe{false};
+  /// False only for an engine that runs no attention at all. Every other engine's model must implement AttentionCapable
+  /// (attention_contract.hpp); Create refuses it otherwise.
+  bool attention{true};
 };
 
 /// Process-wide registry mapping serve-facing engine names ("llama", ...)
@@ -133,6 +141,8 @@ class EngineRegistry {
       std::string_view name, const EngineLoadRequest& request,
       std::string* error_msg) const {
     EngineModelFactory factory;
+    bool is_moe = false;
+    bool has_attention = true;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       const auto it = entries_.find(std::string(name));
@@ -143,9 +153,39 @@ class EngineRegistry {
         return nullptr;
       }
       factory = it->second.factory;
+      is_moe = it->second.info.moe;
+      has_attention = it->second.info.attention;
     }
     EngineLoadRequest named = request;
-    return factory(named, error_msg);
+    std::shared_ptr<EngineModel> model = factory(named, error_msg);
+    if (!model) return model;
+    // MoE contract: the registered kind and the model's capability must agree, and the declaration must validate.
+    const auto* moe = dynamic_cast<const MoeCapable*>(model.get());
+    std::string problem;
+    if (is_moe && moe == nullptr) {
+      problem = "engine '" + std::string(name) + "' is registered as MoE but its model does not implement MoeCapable";
+    } else if (!is_moe && moe != nullptr) {
+      problem = "engine '" + std::string(name) + "' implements MoeCapable but is registered as dense (set EngineBackendInfo::moe)";
+    } else if (moe != nullptr) {
+      const MoeContractReport report = ValidateMoeContract(moe->MoeGeometryInfo(), moe->MoeKernelsInfo());
+      if (!report.ok()) {
+        problem = "engine '" + std::string(name) + "' violates the MoE contract: " + report.problems.front();
+      }
+    }
+    if (problem.empty() && has_attention) {
+      const auto* attn = dynamic_cast<const AttentionCapable*>(model.get());
+      if (attn == nullptr) {
+        problem = "engine '" + std::string(name) + "' does not implement AttentionCapable (attention contract)";
+      } else {
+        const AttentionContractReport report = ValidateAttentionContract(attn->AttentionGeometryInfo(), attn->AttentionKernelsInfo());
+        if (!report.ok()) problem = "engine '" + std::string(name) + "' violates the attention contract: " + report.problems.front();
+      }
+    }
+    if (!problem.empty()) {
+      if (error_msg != nullptr) *error_msg = problem;
+      return nullptr;
+    }
+    return model;
   }
 
  private:
@@ -186,6 +226,6 @@ class EngineRegistrar {
   }
 };
 
-}  // namespace gufo::core::engine
+}  // namespace mbufo::core::engine
 
-#endif  // GUFO_CORE_ENGINE_ENGINE_BATCH_HPP_
+#endif  // MBUFO_CORE_ENGINE_ENGINE_BATCH_HPP_

@@ -21,7 +21,7 @@
 #include "src/models/qwen38_flash_next/ngram.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 namespace {
 
 // gfx1151, served repository prompts: 4096-token chunks prefill 24K-102K
@@ -32,11 +32,11 @@ namespace {
 // A wider prefill tile borrowed from a sibling fork (UD-IQ4_XS 40K: 8192
 // +3.2%) does not reproduce here: on UD-Q4_K_XL this box measured 4096 vs
 // 8192 within run-to-run noise at 24K (1390 vs 1369) and 48K (1333 vs
-// 1351), and 16384 is no better. 4096 stays the default; GUFO_PREFILL_TILE
+// 1351), and 16384 is no better. 4096 stays the default; MBUFO_PREFILL_TILE
 // overrides it for re-measurement.
 std::uint32_t PrefillChunkTokens() {
   static const std::uint32_t value = [] {
-    const char* const raw = std::getenv("GUFO_PREFILL_TILE");
+    const char* const raw = std::getenv("MBUFO_PREFILL_TILE");
     if (raw != nullptr && raw[0] != '\0') {
       char* end = nullptr;
       const unsigned long parsed = std::strtoul(raw, &end, 10);
@@ -282,7 +282,7 @@ std::uint32_t Model::PrefillThroughCapacity() const noexcept {
 
 float Model::MtpConfidenceGate() noexcept {
   static const float gate = [] {
-    const char* e = std::getenv("GUFO_MTP_GATE_P");
+    const char* e = std::getenv("MBUFO_MTP_GATE_P");
     // Default off: on ROCmFP4-FAST every gate 0.5..0.9 measured ~25%
     // decode TPS regression (head top-1 mass is intrinsically low, so
     // chains trim to 1-2 tokens while MTP overhead stays).
@@ -292,12 +292,12 @@ float Model::MtpConfidenceGate() noexcept {
 }
 
 bool Model::KvKey4Bit() const noexcept {
-  const char* value = std::getenv("GUFO_KV_Q4");
+  const char* value = std::getenv("MBUFO_KV_Q4");
   return options_.kv_cache_quant == "q8" && value != nullptr &&
          *value != '\0' && *value != '0';
 }
 bool Model::KvValue4Bit() const noexcept {
-  const char* value = std::getenv("GUFO_KV_V4");
+  const char* value = std::getenv("MBUFO_KV_V4");
   return options_.kv_cache_quant == "q8" && value != nullptr &&
          *value != '\0' && *value != '0';
 }
@@ -1796,9 +1796,9 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
   // draft-length controller learns short drafts. Measured C4 (q8, MTP,
   // 16 requests): cap 8 -> 2.52 tokens per verify round, 88.5 tok/s;
   // cap 64 -> 3.17 tokens per round, 96.5 tok/s, 20% fewer rounds.
-  // GUFO_VERIFY_BATCH_ROWS=8 restores the C1-exact grouping.
+  // MBUFO_VERIFY_BATCH_ROWS=8 restores the C1-exact grouping.
   static const std::uint32_t kVerifyBatchMaxRows = [] {
-    const char* e = std::getenv("GUFO_VERIFY_BATCH_ROWS");
+    const char* e = std::getenv("MBUFO_VERIFY_BATCH_ROWS");
     const long v = e != nullptr ? std::strtol(e, nullptr, 10) : 0;
     return v > 0 ? static_cast<std::uint32_t>(v) : 64U;
   }();
@@ -1837,7 +1837,7 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
     const auto forward_start = std::chrono::steady_clock::now();
     if (!exec.ForwardBatch(group, error_msg))
       return false;
-    if (with_chunk && std::getenv("GUFO_MIXED_LOG") != nullptr) {
+    if (with_chunk && std::getenv("MBUFO_MIXED_LOG") != nullptr) {
       const auto now = std::chrono::steady_clock::now();
       std::uint32_t verify_rows = 0;
       for (std::size_t i = begin; i < end; ++i)
@@ -2303,4 +2303,4 @@ bool Session::EvaluateBatchWithChunk(std::span<const AdvanceRequest> advances,
   return true;
 }
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next

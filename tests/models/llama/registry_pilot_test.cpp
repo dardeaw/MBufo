@@ -13,8 +13,8 @@
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/llama/engine_adapter.hpp"
 
-namespace g = gufo::models::llama;
-namespace e = gufo::core::engine;
+namespace g = mbufo::models::llama;
+namespace e = mbufo::core::engine;
 
 namespace {
 

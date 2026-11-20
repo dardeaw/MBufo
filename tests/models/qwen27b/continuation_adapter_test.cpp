@@ -13,11 +13,11 @@
 #include "src/cache/slot.hpp"
 #include "src/core/gguf_reader.hpp"
 
-namespace cache = gufo::cache;
-namespace hip = gufo::hip;
-namespace qwen = gufo::models::qwen;
+namespace cache = mbufo::cache;
+namespace hip = mbufo::hip;
+namespace qwen = mbufo::models::qwen;
 namespace vision = qwen::vision;
-using Token = gufo::tokenization::TokenId;
+using Token = mbufo::tokenization::TokenId;
 void FailNextResetSubmission();
 void FailNextTransferWait();
 namespace {
@@ -262,7 +262,7 @@ void Check(const std::shared_ptr<const hip::QwenGpuModel>& model, bool fp16) {
   std::vector<Token> tokens(9000);
   for (std::size_t i = 0; i < tokens.size(); ++i)
     tokens[i] = text[i % text.size()];
-  gufo::models::GenerationOptions generation;
+  mbufo::models::GenerationOptions generation;
   generation.max_new_tokens = 4;
   generation.sampling.temperature = 0;
   auto history = std::vector<Token>(tokens.begin(), tokens.begin() + 64);
@@ -535,13 +535,13 @@ std::shared_ptr<vision::Prompt> Image(bool blue) {
   prompt->tokens = {vision::kImageToken, vision::kImageToken,
                     vision::kImageToken, vision::kImageToken, 42};
   prompt->rope.images.push_back(grid);
-  gufo::core::Image pixels;
+  mbufo::core::Image pixels;
   pixels.width = pixels.height = 64;
   pixels.pixels.resize(64 * 64 * 3);
   for (std::size_t i = blue ? 2 : 0; i < pixels.pixels.size(); i += 3)
     pixels.pixels[i] = 255;
   prompt->images.push_back(
-      {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
+      {std::make_shared<const mbufo::core::Image>(std::move(pixels)), grid});
   prompt->images.back().prefix_identity.fill(blue ? 2 : 1);
   prompt->cache_identity.assign(32, blue ? 2 : 1);
   return prompt;
@@ -695,10 +695,10 @@ void CheckPrefillCancellation(
 void CheckDraftComponents(std::shared_ptr<const hip::QwenGpuModel> model,
                           const char* draft_path) {
   std::string error;
-  auto reader = gufo::core::GgufReader::OpenFile(draft_path, &error);
+  auto reader = mbufo::core::GgufReader::OpenFile(draft_path, &error);
   Require(bool(reader), error.c_str());
   auto draft_model = hip::QwenDFlashGpuModel::Create(
-      std::shared_ptr<const gufo::core::GgufReader>(std::move(reader)), model,
+      std::shared_ptr<const mbufo::core::GgufReader>(std::move(reader)), model,
       &error);
   Require(bool(draft_model), error.c_str());
   qwen::ContinuationAdapter adapter(
@@ -878,11 +878,11 @@ int main(int argc, const char* const* argv) {
           "Usage: continuation_adapter_test MODEL.gguf "
           "[--guard-only|--image-only|--prefill-cancel|--draft DRAFT.gguf]");
     std::string error;
-    auto reader = gufo::core::GgufReader::OpenFile(argv[1], &error);
+    auto reader = mbufo::core::GgufReader::OpenFile(argv[1], &error);
     Require(bool(reader), error.c_str());
     auto encoder = vision::Encoder::Open(argv[1], {}, 5120);
     auto model = hip::QwenGpuModel::CreateFromGguf(
-        std::shared_ptr<const gufo::core::GgufReader>(std::move(reader)),
+        std::shared_ptr<const mbufo::core::GgufReader>(std::move(reader)),
         &error, encoder);
     Require(bool(model), error.c_str());
     if (cancel_only) {

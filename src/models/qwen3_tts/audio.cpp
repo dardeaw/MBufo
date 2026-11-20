@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::models::qwen3_tts {
+namespace mbufo::models::qwen3_tts {
 namespace {
 
 constexpr std::size_t kMaximumEncodedBytes = 12U << 20U;
@@ -324,4 +324,4 @@ std::vector<float> ResampleMono(const AudioBuffer& audio,
   return result;
 }
 
-}  // namespace gufo::models::qwen3_tts
+}  // namespace mbufo::models::qwen3_tts

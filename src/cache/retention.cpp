@@ -4,7 +4,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 namespace {
 bool Prefix(std::span<const Token> a, std::span<const Token> b) {
   return a.size() <= b.size() && std::equal(a.begin(), a.end(), b.begin());
@@ -701,4 +701,4 @@ std::uint32_t RetentionPolicy::Rank(CheckpointId id) const {
     throw std::invalid_argument("unknown retained checkpoint");
   return Priority(i);
 }
-}  // namespace gufo::cache
+}  // namespace mbufo::cache

@@ -6,7 +6,7 @@
 #include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 
-namespace gufo::models::qwen_image_21::hip {
+namespace mbufo::models::qwen_image_21::hip {
 namespace {
 // Read pairs of adjacent NHWC channels, then transpose in LDS into the trained
 // convolution's [channel][kernel_y][kernel_x] order. Each block covers four
@@ -258,4 +258,4 @@ bool ExpandConvolution3(const std::uint16_t* input, std::uint16_t* output,
                                                 start, count);
   return true;
 }
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace mbufo::models::qwen_image_21::hip

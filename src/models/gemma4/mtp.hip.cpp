@@ -16,12 +16,12 @@
 #include <hip/hip_runtime.h>
 #endif
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 namespace {
 
 #if defined(ENGINE_ENABLE_HIP)
 
-namespace q38 = ::gufo::models::qwen38_flash_next::rocm;
+namespace q38 = ::mbufo::models::qwen38_flash_next::rocm;
 
 constexpr std::uint32_t kHidden = 1024;
 constexpr std::uint32_t kFf = 8192;
@@ -433,4 +433,4 @@ bool MtpDrafter::Step(const float* tgt_emb, const float* tgt_hidden,
 #endif
 }
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4

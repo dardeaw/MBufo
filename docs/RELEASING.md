@@ -1,6 +1,6 @@
 # Releasing
 
-Gufo uses squash merges and Conventional Commit pull request titles to keep
+MBufo uses squash merges and Conventional Commit pull request titles to keep
 `main` machine-readable. A pull request may contain arbitrary work-in-progress
 commits; its title becomes the single commit retained on `main`.
 
@@ -49,7 +49,7 @@ documented command-line interface, HTTP API and public Nix flake outputs. A
 change is breaking when an existing documented use must be changed to keep
 working.
 
-Before `1.0.0`, Gufo uses this policy:
+Before `1.0.0`, MBufo uses this policy:
 
 - `fix` and `perf` changes increment the patch version.
 - `feat` changes increment the minor version.
@@ -84,14 +84,14 @@ version, changelog or release manifest in an ordinary feature or fix pull
 request.
 
 Nix keeps release identity and source identity separate. The default package is
-a development build and reports `gufo version development (<revision>)`.
+a development build and reports `mbufo version development (<revision>)`.
 Official artifacts build the `release` package from a `vX.Y.Z` tag and report
-`gufo version X.Y.Z (<revision>)`. Both package outputs retain the exact flake
+`mbufo version X.Y.Z (<revision>)`. Both package outputs retain the exact flake
 revision; only the explicitly selected release output reads the semantic version
 from `version.txt`.
 
 After Release Please creates a GitHub Release, the same workflow sends its exact
 `vX.Y.Z` tag to the Toolboxes repository. Toolboxes builds the release package
 from that tag and publishes OCI images tagged `X.Y.Z`, `X.Y` and `latest`.
-Rolling Toolboxes images remain separate: they follow Gufo `main` and use `edge`
+Rolling Toolboxes images remain separate: they follow MBufo `main` and use `edge`
 and `sha-<revision>` tags.

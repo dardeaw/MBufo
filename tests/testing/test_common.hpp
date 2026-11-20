@@ -26,7 +26,7 @@
 
 #include "src/testing/compare/logit_comparator.hpp"
 
-namespace gufo::test {
+namespace mbufo::test {
 
 // ---------------------------------------------------------------------------
 // Seeded RNG
@@ -317,7 +317,7 @@ inline bool save_baseline(std::string_view path, const BaselineRecord& rec) {
 }
 
 // ---------------------------------------------------------------------------
-// CompareLogits wrapper (reuses gufo::testing::CompareLogits)
+// CompareLogits wrapper (reuses mbufo::testing::CompareLogits)
 // ---------------------------------------------------------------------------
 
 struct ModuleCompareResult {
@@ -336,8 +336,8 @@ struct ModuleCompareResult {
 inline ModuleCompareResult compare_module_logits(
     std::span<const float> reference, std::span<const float> candidate,
     float atol = 1e-3F, float rtol = 1e-3F) {
-  gufo::testing::LogitCompareResult r =
-      gufo::testing::CompareLogits(reference, candidate, atol, rtol);
+  mbufo::testing::LogitCompareResult r =
+      mbufo::testing::CompareLogits(reference, candidate, atol, rtol);
   ModuleCompareResult out;
   out.match = r.match;
   out.finite = r.finite;
@@ -377,4 +377,4 @@ inline std::string format_module_result(std::string_view name, bool pass,
   return s.str();
 }
 
-}  // namespace gufo::test
+}  // namespace mbufo::test

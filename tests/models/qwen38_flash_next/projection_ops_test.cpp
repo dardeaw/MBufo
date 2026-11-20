@@ -17,7 +17,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
-namespace q = gufo::models::qwen38_flash_next::rocm;
+namespace q = mbufo::models::qwen38_flash_next::rocm;
 namespace {
 
 void CheckHip(hipError_t error, const char* operation) {
@@ -210,7 +210,7 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
 void CheckAttentionProjection(
     const void* weights, const __half* input, const float* projected,
     std::uint32_t batch,
-    const gufo::models::qwen38_flash_next::YarnRope& yarn = {}) {
+    const mbufo::models::qwen38_flash_next::YarnRope& yarn = {}) {
   constexpr std::uint32_t start = 131069;
   const std::size_t query_bytes = (std::size_t(batch) * 6144 + 16) * 4;
   const std::size_t cache_bytes =
@@ -259,7 +259,7 @@ void CheckAttentionProjection(
   hipGraph_t graph = nullptr;
   hipGraphExec_t replay = nullptr;
   CheckHip(hipStreamCreate(&stream), "attention stream");
-  gufo::models::qwen::vision::DeviceInput vision;
+  mbufo::models::qwen::vision::DeviceInput vision;
   vision.PrepareRope(stream);
   const auto* descriptor = vision.rope();
   vision.PrepareRope(stream);
@@ -1091,7 +1091,7 @@ double Run(std::size_t batch, std::size_t m, std::size_t k, std::uint32_t seed,
                              static_cast<std::uint32_t>(batch));
     CheckAttentionProjection(
         d_w, d_x_half, d_f16, static_cast<std::uint32_t>(batch),
-        gufo::models::qwen38_flash_next::MakeYarnRope(
+        mbufo::models::qwen38_flash_next::MakeYarnRope(
             {.factor = 2.5F, .original_context = 262144}, 64, 1e7F));
   }
   (void)hipFree(d_w);

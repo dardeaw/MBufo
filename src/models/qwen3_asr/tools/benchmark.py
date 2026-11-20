@@ -12,7 +12,7 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--gufo", type=Path, default=Path("result/bin/gufo"))
+    parser.add_argument("--mbufo", type=Path, default=Path("result/bin/mbufo"))
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--audio", type=Path, required=True)
     parser.add_argument("--repeat", type=int, default=5)
@@ -31,7 +31,7 @@ def main() -> int:
     if args.repeat <= 0 or args.warmup < 0:
         raise ValueError("repeat must be positive and warmup non-negative")
     command = [
-        str(args.gufo),
+        str(args.mbufo),
         "transcribe",
         "--model",
         str(args.model),
@@ -64,7 +64,7 @@ def main() -> int:
         raise ValueError("native Qwen3-ASR benchmark returned empty audio")
     total_ms = median(runs, "total_ms")
     report = {
-        "schema": "gufo.qwen3-asr.benchmark.v1",
+        "schema": "mbufo.qwen3-asr.benchmark.v1",
         "model": str(args.model),
         "audio": str(args.audio),
         "audio_seconds": duration,

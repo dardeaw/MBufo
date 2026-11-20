@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_VOCAB_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_VOCAB_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_VOCAB_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_VOCAB_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #include <span>
 #include <vector>
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 /// Output rows the MTP draft head scores. Each draft token projects through
 /// the output head; over all 248,320 rows that is a 675 MB read, about 3 ms
@@ -122,6 +122,6 @@ private:
   std::optional<std::size_t> prior_miss_;  ///< the miss before last_miss_
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 
 #endif

@@ -30,7 +30,7 @@ class CacheStallsTests(unittest.TestCase):
             return {"text": "", "reasoning": reasoning, "tools": [], "finish": "length",
                     "usage": {"prompt_tokens": total, "cached_tokens": cached,
                               "completion_tokens": 128,
-                              "gufo": {"prefill_tokens": total - cached}}}
+                              "mbufo": {"prefill_tokens": total - cached}}}
 
         with redirect_stderr(io.StringIO()):
             check_cache_stalls(None, "fixture", checks, chat_result, 2, 262144)

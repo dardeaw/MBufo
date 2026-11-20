@@ -134,15 +134,15 @@ libjpeg, libwebp and OpenSSL. Release configuration uses the production
 package's `inputsFrom` dependency shell.
 
 ```sh
-cmake --preset cpu-test -DGUFO_BUILD_TOOLS=ON
+cmake --preset cpu-test -DMBUFO_BUILD_TOOLS=ON
 cmake --build --preset cpu-test --target cache_prefix_index_test cache_prefix_index_bench --parallel 4
 ctest --preset cpu-test -R '^cache_(prefix_index|checkpoint|ledger|adapter|adapter_lifecycle|boundary)_test$' --output-on-failure
 build/cpu-test/src/cache/cache_prefix_index_bench
 cmake --preset cpu-sanitizer
 cmake --build --preset cpu-sanitizer --target cache_prefix_index_test cache_checkpoint_test cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test --parallel 4
 ctest --preset cpu-sanitizer -R '^cache_(prefix_index|checkpoint|ledger|adapter|adapter_lifecycle|boundary)_test$' --output-on-failure
-cmake --preset release -DGUFO_BUILD_TOOLS=OFF
-cmake --build --preset release --target gufo_cache --parallel 4
+cmake --preset release -DMBUFO_BUILD_TOOLS=OFF
+cmake --build --preset release --target mbufo_cache --parallel 4
 cmake --build --preset pr --parallel 4
 nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
 ```

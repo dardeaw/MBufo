@@ -1,11 +1,11 @@
 {
-  "schema": "gufo.ds4-quality-qualification.v1",
+  "schema": "mbufo.ds4-quality-qualification.v1",
   "date": "2026-09-10",
   "candidate": {
     "source_commit": "76d2f8b66918d0244f58d68b388ec7a40e90977e",
     "working_tree_changes": true,
     "production_source_sha256": "b760954f621995ac9639e3946b68d1c9adc0d2d0d896e3446329e96b6b9dcccb",
-    "nix_output": "/nix/store/444s9difsbvkzc64q7xayw79zymjw3g3-gufo-76d2f8b-dirty",
+    "nix_output": "/nix/store/444s9difsbvkzc64q7xayw79zymjw3g3-mbufo-76d2f8b-dirty",
     "binary_sha256": "b16e356d11905d16f27b9f3d9377ce348f39c6faad04588af8e64235e6488e53",
     "quality_binary_sha256": "d7492bf4a99fc29262056a3b8c1431472abbaa4228128f62c8992b79450338aa",
     "serving_binary_sha256": "815a9005f61f7e5974697a18b0fdc7d973492f789fce6e2506c54b462dfdf29d"

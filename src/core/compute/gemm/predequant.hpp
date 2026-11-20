@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_GEMM_PREDEQUANT_HPP_
-#define GUFO_CORE_COMPUTE_GEMM_PREDEQUANT_HPP_
+#ifndef MBUFO_CORE_COMPUTE_GEMM_PREDEQUANT_HPP_
+#define MBUFO_CORE_COMPUTE_GEMM_PREDEQUANT_HPP_
 
 // Layer-major prefill support shared by the engines: the weights of the layer being prefilled are dequantized ONCE
 // into the tiled F16 layout (gemm.hpp, kTiledRows) and every chunk of the prompt then runs through that layer with
@@ -12,7 +12,7 @@
 
 #include "src/core/compute/gemm/gemm.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 
 struct PreDequant {
   static constexpr int kMax = 8;
@@ -45,6 +45,6 @@ inline bool PreDequantAdd(PreDequant& pd, __half*& cursor, const void* dev, int 
   return true;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
-#endif  // GUFO_CORE_COMPUTE_GEMM_PREDEQUANT_HPP_
+#endif  // MBUFO_CORE_COMPUTE_GEMM_PREDEQUANT_HPP_

@@ -10,7 +10,7 @@
 #include "src/models/qwen/hip/ops/swiglu.hpp"
 #endif
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 void FfnForward(const CpuModuleContext&, const FfnLayerView& view,
                 std::span<const float> x, std::span<float> gate_scratch,
@@ -45,13 +45,13 @@ void FfnForward(const HipModuleContext& ctx, const FfnLayerView& view,
   (void)gate_scratch;
   (void)up_scratch;
   const auto stream = static_cast<hipStream_t>(ctx.Stream());
-  ::gufo::core::compute::gemm::LaunchFusedSwiGLUGEMV(
+  ::mbufo::core::compute::gemm::LaunchFusedSwiGLUGEMV(
       view.gate.data, view.gate.type, view.up.data, view.up.type, x.data(),
       act_scratch.data(), view.intermediate_size, view.hidden_size, stream);
-  ::gufo::hip::LaunchGEMV(view.down.data, view.down.type, act_scratch.data(),
+  ::mbufo::hip::LaunchGEMV(view.down.data, view.down.type, act_scratch.data(),
                           out.data(), view.hidden_size, view.intermediate_size,
                           stream, ctx.PreqScratch(), ctx.PreqBytes());
 }
 #endif
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

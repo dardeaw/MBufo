@@ -7,7 +7,7 @@
 
 #include "src/core/hip/host_allocations.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 struct PinnedStorage {
   cache::ResourceCharge metadata;
@@ -31,4 +31,4 @@ cache::StagingAllocator PinnedStagingAllocator(cache::ResourceLedger& ledger) {
         storage, {static_cast<std::uint8_t*>(storage->data), bytes}};
   };
 }
-}  // namespace gufo::hip
+}  // namespace mbufo::hip

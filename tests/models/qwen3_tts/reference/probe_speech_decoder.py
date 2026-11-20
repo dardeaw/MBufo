@@ -127,7 +127,7 @@ def main() -> None:
         text=True,
     ).stdout.strip()
     metadata = {
-        "schema": "gufo.qwen3-tts-speech-decoder-probe.v1",
+        "schema": "mbufo.qwen3-tts-speech-decoder-probe.v1",
         "reference_commit": reference_commit,
         "device": args.device,
         "dtype": args.dtype,

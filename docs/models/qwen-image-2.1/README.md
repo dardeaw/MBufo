@@ -4,7 +4,7 @@ Native HIP image generation and editing on AMD Strix Halo (`gfx1151`). Loads
 BF16 safetensors directly; Python is not needed for inference. The checkpoint
 contains a diffusion transformer, Qwen3-VL prompt encoder and RGBA VAE.
 
-Weights use the **non-commercial Qwen Research License**, separate from Gufo's
+Weights use the **non-commercial Qwen Research License**, separate from MBufo's
 MIT license. See the [pinned sources and model contract](../../../src/models/qwen_image_21/UPSTREAM.md).
 
 Download about 33.1 GB and start the server:
@@ -13,7 +13,7 @@ Download about 33.1 GB and start the server:
 MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1 \
   --revision b3179ad355be050328e483a9dfdd9e60cd62adfa)
 nix build
-./result/bin/gufo serve image --model "$MODEL_DIR" \
+./result/bin/mbufo serve image --model "$MODEL_DIR" \
   --served-model-name Qwen-Image-2.1 --port 8080
 ```
 
@@ -54,12 +54,12 @@ jq -r '.data[0].b64_json' response.json | base64 --decode > output.png
 Edit noise combines `seed` with the resized reference pixels. The same edit
 replays exactly, including after restarting the server, while editing an image
 with its generation seed no longer reuses its original noise. Seeded edits
-therefore differ from older Gufo releases; generation seeds are unchanged.
+therefore differ from older MBufo releases; generation seeds are unchanged.
 
-The official repository recommends 2048²; Gufo follows the pinned Diffusers
+The official repository recommends 2048²; MBufo follows the pinned Diffusers
 1024² default. Set `size` explicitly for larger output. Output is PNG/base64;
 URL output, separate masks, streaming and `input_fidelity` are unsupported.
-OpenAI SDK clients use the local `/v1` base URL; `seed` and `steps` are Gufo
+OpenAI SDK clients use the local `/v1` base URL; `seed` and `steps` are MBufo
 extensions supplied through `extra_body`.
 
 For llama-swap, add this model and send the same requests to the proxy:
@@ -68,12 +68,12 @@ For llama-swap, add this model and send the same requests to the proxy:
 models:
   Qwen-Image-2.1:
     cmd: >
-      /path/to/gufo serve image --model /path/to/snapshot
+      /path/to/mbufo serve image --model /path/to/snapshot
       --served-model-name Qwen-Image-2.1 --port ${PORT}
 ```
 
 For larger uploads, raise `--max-request-bytes` and the proxy's body limit.
-`/health`, `/ready` and `/v1/models` are available. Nix `mkGufoServe` supports
+`/health`, `/ready` and `/v1/models` are available. Nix `mkMBufoServe` supports
 `modality = "image"` with `model` and `servedModelName`.
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) ·

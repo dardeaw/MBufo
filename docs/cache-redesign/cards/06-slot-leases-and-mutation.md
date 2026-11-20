@@ -109,7 +109,7 @@ The baseline predates review follow-ups; remeasurement is recorded below if the
 implementation changes. Commands and ignored artifact directories:
 
 ```sh
-nix develop -c cmake --preset cpu-test -DGUFO_BUILD_TOOLS=ON
+nix develop -c cmake --preset cpu-test -DMBUFO_BUILD_TOOLS=ON
 nix develop -c cmake --build --preset cpu-test --target cache_slot_test cache_slot_bench cache_checkpoint_test cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test cache_prefix_index_test --parallel 4
 nix develop -c ctest --preset cpu-test -R '^cache_(slot|checkpoint|adapter|adapter_lifecycle|ledger|prefix_index|boundary)_test$' --output-on-failure
 build/cpu-test/tests/cache/cache_slot_bench
@@ -180,6 +180,6 @@ Review comments and the fix response are retained in
 [PR #501](https://github.com/gufo-org/gufo/pull/501). The independent race
 reproducer rebuilt against the fixed ThreadSanitizer library passed with
 `TSAN_OPTIONS=halt_on_error=1`, reporting zero persistence-admission errors.
-Its source/report remain in `/tmp/gufo-pr501-review-persistence.cpp` and
-`/tmp/gufo-pr501-review-persistence-tsan.log`; the final local hosted report is
-`/tmp/gufo-card06-final-pr.log`.
+Its source/report remain in `/tmp/mbufo-pr501-review-persistence.cpp` and
+`/tmp/mbufo-pr501-review-persistence-tsan.log`; the final local hosted report is
+`/tmp/mbufo-card06-final-pr.log`.

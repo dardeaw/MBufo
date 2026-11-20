@@ -8,7 +8,7 @@
 #include <span>
 #include <string_view>
 
-namespace gufo::cli {
+namespace mbufo::cli {
 
 namespace {
 
@@ -52,16 +52,16 @@ void PrintStartupBanner(std::string_view version,
   const bool unicode = SupportsUnicode();
   const char* eyes = unicode ? "(◉,◉)" : "(o,o)";
   const char* separator = unicode ? " · " : " - ";
-  // Logo orange, matching the eyes in assets/gufo-logo.jpg.
+  // Logo orange, matching the eyes in assets/mbufo-logo.jpg.
   const char* tint = color ? "\033[38;2;232;140;42m" : "";
   const char* bold = color ? "\033[1m" : "";
   const char* reset = color ? "\033[0m" : "";
 
-  std::clog << "  " << tint << ",___," << reset << "   " << bold << "gufo"
+  std::clog << "  " << tint << ",___," << reset << "   " << bold << "mbufo"
             << reset << ' ' << version << '\n'
             << "  " << tint << eyes << reset << "   Fast LLM & DiT inference"
             << separator << "gfx1151\n"
             << std::flush;
 }
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli

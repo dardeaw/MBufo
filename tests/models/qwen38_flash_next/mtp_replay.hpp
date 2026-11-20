@@ -1,5 +1,5 @@
-#ifndef GUFO_TESTS_QWEN38_FLASH_NEXT_MTP_REPLAY_HPP_
-#define GUFO_TESTS_QWEN38_FLASH_NEXT_MTP_REPLAY_HPP_
+#ifndef MBUFO_TESTS_QWEN38_FLASH_NEXT_MTP_REPLAY_HPP_
+#define MBUFO_TESTS_QWEN38_FLASH_NEXT_MTP_REPLAY_HPP_
 
 #include <cstdint>
 #include <stdexcept>
@@ -8,7 +8,7 @@
 
 #include "src/models/qwen38_flash_next/engine.hpp"
 
-namespace gufo::test {
+namespace mbufo::test {
 
 struct MtpReplay {
   std::vector<std::int32_t> tokens;
@@ -42,6 +42,6 @@ inline MtpReplay DecodeMtpReplay(models::qwen38_flash_next::Session& session,
   return result;
 }
 
-}  // namespace gufo::test
+}  // namespace mbufo::test
 
 #endif

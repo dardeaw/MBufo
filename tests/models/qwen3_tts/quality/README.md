@@ -29,7 +29,7 @@ nix develop --command python3 \
   --reference-npy artifacts/qwen3_tts/rocm/waveform.npy \
   --candidate-wav /tmp/qwen3-tts-native.wav \
   --asr-model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision> \
-  --gufo result/bin/gufo
+  --mbufo result/bin/mbufo
 ```
 
 For native optimization A/B tests, pass the retained baseline directly with

@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
   }
 
   std::string error;
-  auto model = gufo::models::bge_m3::ModelRegistry::Instance().Create(
+  auto model = mbufo::models::bge_m3::ModelRegistry::Instance().Create(
       "bge-m3", model_path, &error);
   if (model == nullptr) {
     std::cerr << "bge_m3_embed: load failed: " << error << "\n";
@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
   std::vector<std::uint32_t> ids;
   if (has_text) {
     auto encoded = model->Tokenizer().Encode(
-        text, gufo::models::bge_m3::kBgeM3Leg1MaxTokens);
+        text, mbufo::models::bge_m3::kBgeM3Leg1MaxTokens);
     if (!encoded.has_value()) {
       std::cerr << "bge_m3_embed: tokenize failed (over leg-1 window?)\n";
       return 3;
@@ -141,7 +141,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  gufo::models::bge_m3::EngineSession session(model.get());
+  mbufo::models::bge_m3::EngineSession session(model.get());
   if (dump_ids) {
     std::cout << "ids[" << ids.size() << "]:";
     for (const auto id : ids) std::cout << " " << id;

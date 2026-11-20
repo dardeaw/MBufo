@@ -1,11 +1,11 @@
-#ifndef GUFO_EVAL_TRACE_HPP_
-#define GUFO_EVAL_TRACE_HPP_
+#ifndef MBUFO_EVAL_TRACE_HPP_
+#define MBUFO_EVAL_TRACE_HPP_
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace gufo::eval {
+namespace mbufo::eval {
 
 struct EvalCaseTrace {
   std::string case_id;
@@ -24,6 +24,6 @@ struct EvalTraceReport {
   std::vector<EvalCaseTrace> cases;
 };
 
-}  // namespace gufo::eval
+}  // namespace mbufo::eval
 
-#endif  // GUFO_EVAL_TRACE_HPP_
+#endif  // MBUFO_EVAL_TRACE_HPP_

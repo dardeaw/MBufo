@@ -6,7 +6,7 @@
 
 #include "src/models/minimax_h3/runtime.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 namespace {
 
@@ -140,4 +140,4 @@ std::unique_ptr<ResidencyBackend> CreateHipResidencyBackend(
   return backend;
 }
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3

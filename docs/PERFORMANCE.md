@@ -125,20 +125,20 @@ changes.
 ```sh
 MODEL=models/<model>/<artifact>.gguf
 
-./result/bin/gufo bench \
+./result/bin/mbufo bench \
   --model "$MODEL" \
   --n-prompt 128,512,1024,2048,4096 \
   --n-gen 0 \
   --repetitions 3
 
-./result/bin/gufo bench \
+./result/bin/mbufo bench \
   --model "$MODEL" \
   --n-prompt 2048 \
   --n-gen 128 \
   --n-depth 4096,8192,12288,16384 \
   --repetitions 1
 
-./result/bin/gufo bench \
+./result/bin/mbufo bench \
   --model "$MODEL" \
   --validate-prefill 1024 \
   --n-prompt 1024 \
@@ -157,7 +157,7 @@ largest requested concurrency:
 ```sh
 MODEL=models/<model>/<artifact>.gguf
 
-./result/bin/gufo serve \
+./result/bin/mbufo serve \
   --host 127.0.0.1 \
   --port 8080 \
   --sessions 4 \
@@ -169,7 +169,7 @@ MODEL=models/<model>/<artifact>.gguf
 In another shell, run the canonical C=1/C=2/C=4 harness:
 
 ```sh
-tools/serving/gufo-serving-bench.py \
+tools/serving/mbufo-serving-bench.py \
   --base-url http://127.0.0.1:8080 \
   --concurrency 1,2,4 \
   --warmup 1 \
@@ -177,7 +177,7 @@ tools/serving/gufo-serving-bench.py \
   --max-tokens 128 \
   --output artifacts/serving/benchmark.json
 
-./result/bin/gufo diagnose \
+./result/bin/mbufo diagnose \
   --validate-artifact artifacts/serving/benchmark.json
 ```
 
@@ -186,7 +186,7 @@ different request types in each wave; `homogeneous` runs C copies of each case
 to measure the best case for shared draft behavior:
 
 ```sh
-tools/serving/gufo-serving-bench.py \
+tools/serving/mbufo-serving-bench.py \
   --base-url http://127.0.0.1:8080 \
   --suite docs/models/qwen3.8-27b/artifacts/speculative-corpus.json \
   --corpus-layout distinct \
@@ -194,7 +194,7 @@ tools/serving/gufo-serving-bench.py \
   --max-tokens 128 \
   --output artifacts/serving/speculative-distinct.json
 
-tools/serving/gufo-serving-bench.py \
+tools/serving/mbufo-serving-bench.py \
   --base-url http://127.0.0.1:8080 \
   --suite docs/models/qwen3.8-27b/artifacts/speculative-corpus.json \
   --corpus-layout homogeneous \
@@ -226,7 +226,7 @@ The report keeps these metrics separate:
 
 Raw per-request samples and p50/p95/p99 summaries are retained. Endpoint hosts,
 prompt text, generated text, model paths, timestamps, and token IDs are never
-written to the artifact. `gufo bench` remains the direct model-path
+written to the artifact. `mbufo bench` remains the direct model-path
 microbenchmark; use this serving harness for TTFT, ITL, queueing, and
 concurrency decisions.
 
@@ -236,7 +236,7 @@ The check reads the code objects in a binary. It does not use a GPU. Run it
 after each compiler or ROCm update, and after each kernel change:
 
 ```sh
-python3 tools/ci/check-kernel-resources.py result/bin/gufo \
+python3 tools/ci/check-kernel-resources.py result/bin/mbufo \
   --baseline tools/ci/kernel-resources.json
 ```
 
@@ -245,7 +245,7 @@ each kernel that has more scratch, more spilled VGPRs or less VGPR occupancy
 than in the base build:
 
 ```sh
-python3 tools/ci/check-kernel-resources.py new/bin/gufo --compare old/bin/gufo
+python3 tools/ci/check-kernel-resources.py new/bin/mbufo --compare old/bin/mbufo
 ```
 
 Change the baseline only after you decide that a new allowance is correct.
@@ -257,7 +257,7 @@ Compare allocation, mapped-registration, first-touch, warm-access, copy,
 advice/prefetch, synchronization, teardown, fault, and checksum behavior:
 
 ```sh
-./result/bin/gufo diagnose \
+./result/bin/mbufo diagnose \
   --benchmark allocation \
   --working-set-mib 64,1024 \
   --warmup 2 \
@@ -277,10 +277,10 @@ List cases, then run the smallest relevant matrix:
 
 ```sh
 nix develop -c cmake --preset gpu-test
-nix develop -c cmake --build --preset gpu-test --target gufo-kernel-bench tune_hipblaslt
-./build/gpu-test/gufo-kernel-bench --help
+nix develop -c cmake --build --preset gpu-test --target mbufo-kernel-bench tune_hipblaslt
+./build/gpu-test/mbufo-kernel-bench --help
 
-./build/gpu-test/gufo-kernel-bench \
+./build/gpu-test/mbufo-kernel-bench \
   --case decode-attention \
   --context 4096,8192,12288,16384 \
   --warmup 5 \
@@ -361,7 +361,7 @@ busy, and what changed between two runs.
 ```sh
 # profile a command and analyze in one step
 nix develop -c python3 tools/prof/prof.py run --stages qwen -- \
-  ./result/bin/gufo bench --model "$MODEL" -p 2048 -n 0 -r 1
+  ./result/bin/mbufo bench --model "$MODEL" -p 2048 -n 0 -r 1
 
 # re-analyze an existing database
 nix develop -c python3 tools/prof/prof.py show /tmp/prof/prof_results.db --top 20
@@ -374,7 +374,7 @@ nix develop -c python3 tools/prof/prof.py show /tmp/prof/prof_results.db --passe
 nix develop -c python3 tools/prof/prof.py diff before_results.db after_results.db
 
 # H3: one real-weight block, without generating a video
-GUFO_H3_MODEL_ROOT=/var/llms/huggingface/MiniMax-H3 \
+MBUFO_H3_MODEL_ROOT=/var/llms/huggingface/MiniMax-H3 \
   nix develop -c python3 tools/prof/prof.py run --stages h3 -- \
   ./build/gpu-test/minimax_h3_dit_hip_test --profile-7136-fused
 ```
@@ -398,8 +398,8 @@ nix develop -c rocprofv3 \
   --scratch-memory-trace \
   --stats \
   --summary \
-  --output-directory /tmp/gufo-profile \
-  -- ./build/gpu-test/gufo-kernel-bench \
+  --output-directory /tmp/mbufo-profile \
+  -- ./build/gpu-test/mbufo-kernel-bench \
     --case decode-attention \
     --context 16384 \
     --warmup 1 \
@@ -432,12 +432,12 @@ microbenchmark before acting on the mix.
 
 ```sh
 ./build/gpu-test/tune_hipblaslt \
-  --out /tmp/gufo-hipblaslt-plans.bin \
+  --out /tmp/mbufo-hipblaslt-plans.bin \
   --warmup 3 \
   --repetitions 10
 
-GUFO_HIPBLASLT_PLAN_CACHE=/tmp/gufo-hipblaslt-plans.bin \
-  ./result/bin/gufo bench ...
+MBUFO_HIPBLASLT_PLAN_CACHE=/tmp/mbufo-hipblaslt-plans.bin \
+  ./result/bin/mbufo bench ...
 
 nix develop -c tools/bench/build.sh tools/qwen27b/deltanet_bench.hip
 /tmp/deltanet_bench 8 48
@@ -449,14 +449,14 @@ nix develop -c tools/bench/build.sh tools/qwen27b/attention_bench.hip
 
 The recurrence probe checks exact outputs/state with a rotating 144 MiB state
 working set. The Qwen27B model suite checks full-logit rollback, including
-replay-ring wraparound; `gufo bench` measures actual speculative throughput.
+replay-ring wraparound; `mbufo bench` measures actual speculative throughput.
 
 Generated profiler, plan, and replay artifacts stay outside the repository.
 
 ### Dispatch telemetry
 
 ```sh
-GUFO_DISPATCH_TELEMETRY=1 ./build/gpu-test/gufo-kernel-bench ...
+MBUFO_DISPATCH_TELEMETRY=1 ./build/gpu-test/mbufo-kernel-bench ...
 ```
 
 Telemetry is diagnostic JSONL. It records semantic dispatch decisions and

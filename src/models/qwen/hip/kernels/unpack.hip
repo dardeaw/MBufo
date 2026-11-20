@@ -6,7 +6,7 @@
 
 #include "src/models/qwen/hip/ops/token.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 __global__ void UnpackQGKernel(const float* __restrict__ qg_interleaved,
                                float* __restrict__ q_out,
@@ -36,5 +36,5 @@ void LaunchUnpackQG(const float* qg_interleaved, float* q_out, float* gate_out,
       qg_interleaved, q_out, gate_out, num_heads, head_dim);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif

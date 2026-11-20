@@ -10,7 +10,7 @@
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/vision/image_cache.hpp"
 
-namespace gufo::models::qwen::vision {
+namespace mbufo::models::qwen::vision {
 namespace {
 constexpr std::uint32_t kResizeFactor = kPatchSize * kMergeSize;
 constexpr std::uint32_t kMinPixels = 65536;
@@ -334,4 +334,4 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
   }
   return prompt;
 }
-}  // namespace gufo::models::qwen::vision
+}  // namespace mbufo::models::qwen::vision

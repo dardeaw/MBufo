@@ -74,19 +74,19 @@ int main(int argc, char** argv) {
   }
 
   std::string error;
-  auto model = gufo::models::qwen_reranker::ModelRegistry::Instance().Create(
+  auto model = mbufo::models::qwen_reranker::ModelRegistry::Instance().Create(
       "qwen-reranker", model_path, &error);
   if (model == nullptr) {
     std::cerr << "qwen_rerank_score: load failed: " << error << "\n";
     return 3;
   }
-  gufo::models::qwen_reranker::EngineSession session(model.get());
+  mbufo::models::qwen_reranker::EngineSession session(model.get());
   std::vector<float> scores;
   scores.reserve(documents.size());
   double total_ms = 0.0;
   std::size_t prompt_tokens = 0;
   for (const auto& document : documents) {
-    auto ids = gufo::models::qwen_reranker::EngineModel::BuildRerankIds(
+    auto ids = mbufo::models::qwen_reranker::EngineModel::BuildRerankIds(
         model->Qwen().GetTokenizer(), instruction, query, document, &error);
     if (!ids.has_value()) {
       std::cerr << "qwen_rerank_score: encode failed: " << error << "\n";
@@ -103,8 +103,8 @@ int main(int argc, char** argv) {
     if (scores.size() == 1) {
       const auto yes_id = model->YesId();
       const auto no_id = model->NoId();
-      const gufo::tokenization::TokenId yes_arr[1] = {yes_id};
-      const gufo::tokenization::TokenId no_arr[1] = {no_id};
+      const mbufo::tokenization::TokenId yes_arr[1] = {yes_id};
+      const mbufo::tokenization::TokenId no_arr[1] = {no_id};
       std::cout << "{\"debug_first_pair\":{\"yes_id\":" << yes_id
                 << ",\"no_id\":" << no_id << ",\"yes_token\":\""
                 << JsonEscape(model->Qwen().GetTokenizer().Decode(yes_arr))
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
   }
   std::cout << "],\"prompt_tokens\":" << prompt_tokens
             << ",\"prefill_ms\":" << total_ms;
-  const auto order = gufo::core::rerank::RankIndices(scores, top_n);
+  const auto order = mbufo::core::rerank::RankIndices(scores, top_n);
   std::cout << ",\"ranking\":[";
   for (std::size_t i = 0; i < order.size(); ++i) {
     if (i > 0)

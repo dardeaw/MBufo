@@ -117,7 +117,7 @@
 #define GGML_LOG_DEBUG(...) ((void)0)
 #endif
 
-// Gufo manages HIP graphs outside this matrix adapter.
+// MBufo manages HIP graphs outside this matrix adapter.
 #undef GGML_HIP_USE_GRAPHS
 #undef GGML_HIP_GRAPHS
 

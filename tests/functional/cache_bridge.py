@@ -85,7 +85,7 @@ def check_cache_bridge(client, model, checks, chat_result, capacity_bytes):
         print(f"CHECK {label}", file=sys.stderr, flush=True)
         usage = result["usage"]
         total, reused, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
-                                    usage["gufo"]["prefill_tokens"])
+                                    usage["mbufo"]["prefill_tokens"])
         assert all(type(n) is int and n >= 0 for n in (total, reused, prefilled)), usage
         assert reused + prefilled == total, usage
         if cold:
@@ -104,7 +104,7 @@ def check_cache_bridge(client, model, checks, chat_result, capacity_bytes):
             raise AssertionError(f"unqualified: {side} background requests published "
                                  f"{published} of {capacity_bytes} budget bytes")
         _, result = chat(f"bridge_fill_{side:03d}", notice(side))
-        published += result["usage"]["gufo"]["cache_snapshot_bytes"]
+        published += result["usage"]["mbufo"]["cache_snapshot_bytes"]
         side += 1
 
     system = {"role": "system", "content": system_prompt()}
@@ -136,17 +136,17 @@ def check_cache_bridge(client, model, checks, chat_result, capacity_bytes):
     # the bridge replays: the user message two turns back starts at
     # shared + prompt[turn - 2] - prompt[1].
     prompts = [warm["usage"]["prompt_tokens"] for _, warm in turns]
-    restored = [warm["usage"]["gufo"]["cache_restore_bytes"] for _, warm in turns]
+    restored = [warm["usage"]["mbufo"]["cache_restore_bytes"] for _, warm in turns]
     evidence = []
     for turn in range(3, TURNS + 1):
         usage = turns[turn - 1][1]["usage"]
         floor = shared + prompts[turn - 3] - prompts[0] - BOUNDARY_ALLOWANCE - LEARN_MIN_TOKENS
         evidence.append({"turn": turn, "prompt_tokens": usage["prompt_tokens"],
                          "cached_tokens": usage["cached_tokens"], "floor": floor,
-                         "cache_miss_reason": usage["gufo"].get("cache_miss_reason"),
+                         "cache_miss_reason": usage["mbufo"].get("cache_miss_reason"),
                          "cache_common_prefix_tokens":
-                             usage["gufo"].get("cache_common_prefix_tokens"),
-                         "cache_checkpoint_tokens": usage["gufo"].get("cache_checkpoint_tokens")})
+                             usage["mbufo"].get("cache_common_prefix_tokens"),
+                         "cache_checkpoint_tokens": usage["mbufo"].get("cache_checkpoint_tokens")})
     checks["bridge_evidence"] = {"capacity_bytes": capacity_bytes, "shared_tokens": shared,
                                  "fill_requests": side - TURNS * SIDE_REQUESTS,
                                  "restored_bytes": restored, "turns": evidence}

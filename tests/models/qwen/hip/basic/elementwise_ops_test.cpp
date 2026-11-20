@@ -45,19 +45,19 @@ void TestGpuRMSNorm() {
       }
       const double inverse_rms =
           1.0 / std::sqrt(sum_squared / static_cast<double>(dim) + 1e-6F);
-      gufo::test::DeviceBuffer<float> input(host_input);
-      gufo::test::DeviceBuffer<float> weight(host_weight);
-      gufo::test::DeviceBuffer<float> output(dim);
+      mbufo::test::DeviceBuffer<float> input(host_input);
+      mbufo::test::DeviceBuffer<float> weight(host_weight);
+      mbufo::test::DeviceBuffer<float> output(dim);
       for (const bool weighted : {false, true}) {
         for (std::size_t i = 0; i < dim; ++i) {
           expected[i] = static_cast<float>(host_input[i] * inverse_rms *
                                            (weighted ? host_weight[i] : 1.0F));
         }
-        gufo::hip::LaunchRMSNorm(input.data(),
+        mbufo::hip::LaunchRMSNorm(input.data(),
                                  weighted ? weight.data() : nullptr,
                                  output.data(), dim, 1e-6F);
         const auto actual = output.CopyToHost();
-        gufo::test::ExpectSpanNear(expected, actual, 1e-4F,
+        mbufo::test::ExpectSpanNear(expected, actual, 1e-4F,
                                    "GPU RMSNorm output");
       }
     }
@@ -78,9 +78,9 @@ void TestGpuBatchedRMSNorm() {
         value = draw();
       for (auto& weight : weights)
         weight = draw();
-      gufo::test::DeviceBuffer<float> input(values), weight(weights);
-      gufo::test::DeviceBuffer<float> output(values.size());
-      gufo::test::DeviceBuffer<std::uint16_t> bf16(values.size());
+      mbufo::test::DeviceBuffer<float> input(values), weight(weights);
+      mbufo::test::DeviceBuffer<float> output(values.size());
+      mbufo::test::DeviceBuffer<std::uint16_t> bf16(values.size());
       for (const float scale : {0.001F, 0.3F, 30.0F}) {
         auto scaled = values;
         for (auto& value : scaled)
@@ -100,18 +100,18 @@ void TestGpuBatchedRMSNorm() {
                                      (weighted ? weights[i] : 1.0F));
           }
           const auto* norm_weight = weighted ? weight.data() : nullptr;
-          gufo::hip::LaunchBatchedRMSNorm(input.data(), norm_weight,
+          mbufo::hip::LaunchBatchedRMSNorm(input.data(), norm_weight,
                                           output.data(), bf16.data(), rows, dim,
                                           1e-6F);
           const auto actual = output.CopyToHost();
           const auto actual_bf16 = bf16.CopyToHost();
-          gufo::test::ExpectSpanNear(expected, actual, 1e-5F,
+          mbufo::test::ExpectSpanNear(expected, actual, 1e-5F,
                                      "batched RMSNorm FP64 formula");
           for (std::size_t row = 0; row < rows; ++row)
-            gufo::hip::LaunchRMSNorm(input.data() + row * dim, norm_weight,
+            mbufo::hip::LaunchRMSNorm(input.data() + row * dim, norm_weight,
                                      output.data() + row * dim, dim, 1e-6F);
           const auto scalar = output.CopyToHost();
-          gufo::test::Expect(
+          mbufo::test::Expect(
               std::memcmp(actual.data(), scalar.data(),
                           actual.size() * sizeof(float)) == 0,
               "scalar and batched RMSNorm must be byte identical");
@@ -119,13 +119,13 @@ void TestGpuBatchedRMSNorm() {
             const auto bits = std::bit_cast<std::uint32_t>(actual[i]);
             const auto rounded = static_cast<std::uint16_t>(
                 (bits + 0x7FFFU + ((bits >> 16U) & 1U)) >> 16U);
-            gufo::test::Expect(actual_bf16[i] == rounded,
+            mbufo::test::Expect(actual_bf16[i] == rounded,
                                "batched RMSNorm BF16 rounding");
           }
-          gufo::hip::LaunchBatchedRMSNorm(input.data(), norm_weight, nullptr,
+          mbufo::hip::LaunchBatchedRMSNorm(input.data(), norm_weight, nullptr,
                                           bf16.data(), rows, dim, 1e-6F);
           const auto bf16_only = bf16.CopyToHost();
-          gufo::test::Expect(
+          mbufo::test::Expect(
               std::memcmp(actual_bf16.data(), bf16_only.data(),
                           actual_bf16.size() * sizeof(std::uint16_t)) == 0,
               "batched RMSNorm optional FP32 output");
@@ -140,15 +140,15 @@ void TestGpuResidualAdd() {
   const std::vector<float> host_lhs(dim, 3.5F);
   const std::vector<float> host_rhs(dim, 1.5F);
   const std::vector<float> expected(dim, 5.0F);
-  gufo::test::DeviceBuffer<float> lhs(host_lhs);
-  gufo::test::DeviceBuffer<float> rhs(host_rhs);
-  gufo::test::DeviceBuffer<float> output(dim);
+  mbufo::test::DeviceBuffer<float> lhs(host_lhs);
+  mbufo::test::DeviceBuffer<float> rhs(host_rhs);
+  mbufo::test::DeviceBuffer<float> output(dim);
 
-  gufo::hip::LaunchResidualAdd(lhs.data(), rhs.data(), output.data(), dim);
+  mbufo::hip::LaunchResidualAdd(lhs.data(), rhs.data(), output.data(), dim);
   HIP_CHECK(hipDeviceSynchronize());
 
   const auto actual = output.CopyToHost();
-  gufo::test::ExpectSpanNear(expected, actual, 1e-5F,
+  mbufo::test::ExpectSpanNear(expected, actual, 1e-5F,
                              "GPU residual-add output");
 }
 
@@ -157,9 +157,9 @@ void TestGpuResidualAdd() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen elementwise GPU ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

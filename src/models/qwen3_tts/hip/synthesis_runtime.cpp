@@ -17,7 +17,7 @@
 #include "src/models/qwen3_tts/hip/talker_runtime.hpp"
 #include "src/models/qwen3_tts/tokenizer.hpp"
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 namespace {
 
 void SetError(std::string* error, std::string_view message) {
@@ -451,4 +451,4 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
   return impl_->Generate(request, is_cancelled, result, error);
 }
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip

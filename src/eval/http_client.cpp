@@ -11,7 +11,7 @@
 #include <string>
 #include <utility>
 
-namespace gufo::eval {
+namespace mbufo::eval {
 namespace {
 
 constexpr std::size_t kMaximumResponseBytes =
@@ -128,7 +128,7 @@ HttpResult HttpClient::Request(std::string_view method,
                    static_cast<long>(timeout.count()));
   curl_easy_setopt(handle.get(), CURLOPT_WRITEFUNCTION, AppendResponse);
   curl_easy_setopt(handle.get(), CURLOPT_WRITEDATA, &result.body);
-  curl_easy_setopt(handle.get(), CURLOPT_USERAGENT, "gufo-eval/1");
+  curl_easy_setopt(handle.get(), CURLOPT_USERAGENT, "mbufo-eval/1");
   curl_easy_setopt(handle.get(), CURLOPT_FOLLOWLOCATION, 0L);
   if (method == "POST") {
     curl_easy_setopt(handle.get(), CURLOPT_POST, 1L);
@@ -188,4 +188,4 @@ std::string NormalizeBaseUrl(std::string base_url) {
   return base_url;
 }
 
-}  // namespace gufo::eval
+}  // namespace mbufo::eval

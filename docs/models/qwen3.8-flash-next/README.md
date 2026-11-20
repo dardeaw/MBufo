@@ -17,8 +17,8 @@ nix develop -c hf download unsloth/Qwen3.8-Flash-Next-GGUF \
 nix build
 MODEL=/path/to/first-target-shard.gguf
 MTP=/path/to/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
-./result/bin/gufo chat --model "$MODEL"
-./result/bin/gufo serve llm --model "$MODEL" --speculative mtp \
+./result/bin/mbufo chat --model "$MODEL"
+./result/bin/mbufo serve llm --model "$MODEL" --speculative mtp \
   --mtp-model "$MTP" --sessions 2 --context 32768
 ```
 
@@ -84,8 +84,8 @@ Timings report
 The official template defaults to thinking on, `xhigh` effort and preserving
 prior reasoning. Use the [reasoning controls](../../SERVER.md#reasoning-controls)
 for explicit effort/thinking overrides. Native context is 262144. A larger
-context needs static YaRN and `--enable-yarn`: `gufo serve llm` refuses to
-start with `--context` above 262144 without it, and `gufo bench` refuses a
+context needs static YaRN and `--enable-yarn`: `mbufo serve llm` refuses to
+start with `--context` above 262144 without it, and `mbufo bench` refuses a
 workload whose depth plus prompt or generation tokens exceeds 262144. With
 the flag, the factor is context / 262144 (`--context 409600` gives 1.5625).
 The flag is an error at or below 262144, where it would have no effect.

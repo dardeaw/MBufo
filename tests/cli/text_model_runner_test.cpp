@@ -26,27 +26,27 @@
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 
-using gufo::tokenization::kImEnd;
-using gufo::tokenization::kImStart;
+using mbufo::tokenization::kImEnd;
+using mbufo::tokenization::kImStart;
 
 namespace {
 
-using gufo::server::ChatRequest;
-using gufo::server::TextDecodeSelection;
-using gufo::server::TextExecutionPlan;
-using gufo::server::TextExecutionPlanKind;
-using gufo::server::TextModelRunner;
-using gufo::server::TextPrefillStep;
-using gufo::server::TextRunnerAdvance;
-using gufo::server::TextRunnerCapabilities;
-using gufo::server::TextRunnerDescriptor;
-using gufo::server::TextRunnerDiskCacheOptions;
-using gufo::server::TextRunnerMeasuredResources;
-using gufo::server::TextRunnerPool;
-using gufo::server::TextRunnerResourceClaim;
-using gufo::server::TextRunnerSnapshot;
-using gufo::server::TextRunnerState;
-using gufo::server::TextRunnerToken;
+using mbufo::server::ChatRequest;
+using mbufo::server::TextDecodeSelection;
+using mbufo::server::TextExecutionPlan;
+using mbufo::server::TextExecutionPlanKind;
+using mbufo::server::TextModelRunner;
+using mbufo::server::TextPrefillStep;
+using mbufo::server::TextRunnerAdvance;
+using mbufo::server::TextRunnerCapabilities;
+using mbufo::server::TextRunnerDescriptor;
+using mbufo::server::TextRunnerDiskCacheOptions;
+using mbufo::server::TextRunnerMeasuredResources;
+using mbufo::server::TextRunnerPool;
+using mbufo::server::TextRunnerResourceClaim;
+using mbufo::server::TextRunnerSnapshot;
+using mbufo::server::TextRunnerState;
+using mbufo::server::TextRunnerToken;
 
 void Expect(bool condition, std::string_view message) {
   if (!condition) {
@@ -242,7 +242,7 @@ public:
   }
 
   [[nodiscard]] TextDecodeSelection SelectNext(
-      TextRunnerState& state, gufo::sampling::SamplerState&) const override {
+      TextRunnerState& state, mbufo::sampling::SamplerState&) const override {
     auto& fake = RequireFakeState(state);
     if (!fake.frontier.has_value()) {
       throw std::logic_error("fake state has no decode frontier");
@@ -307,16 +307,16 @@ void TestPromptCountingValidatesCapabilitiesBeforeInference() {
   ChatRequest request;
   Expect(!runner.CountPromptTokens(request),
          "unsupported template has no count");
-  gufo::tokenization::ChatMessage message;
-  message.role = gufo::tokenization::ChatRole::kUser;
+  mbufo::tokenization::ChatMessage message;
+  message.role = mbufo::tokenization::ChatRole::kUser;
   message.content = std::string(runner.Descriptor().max_context + 1, 'x');
   request.messages.push_back(message);
   Expect(runner.CountPromptTokens(request) == message.content.size(),
          "counting accepts text beyond the execution context");
   // A text renderer can ignore images. Counting must reject them first,
   // including images carried by a tool result.
-  for (const auto role : {gufo::tokenization::ChatRole::kUser,
-                          gufo::tokenization::ChatRole::kTool}) {
+  for (const auto role : {mbufo::tokenization::ChatRole::kUser,
+                          mbufo::tokenization::ChatRole::kTool}) {
     auto& input = request.messages.front();
     input.role = role;
     input.images = {{0, std::make_shared<const std::vector<std::uint8_t>>(
@@ -695,7 +695,7 @@ public:
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
     auto descriptor = SnapshotRunner::Descriptor();
     descriptor.max_context = max_context_;
-    descriptor.persistence = gufo::server::TextRunnerPersistenceDescriptor{
+    descriptor.persistence = mbufo::server::TextRunnerPersistenceDescriptor{
         .compatibility_identity = identity_,
         .payload_version = 1,
     };
@@ -774,7 +774,7 @@ class TemporaryDirectory {
 public:
   TemporaryDirectory() {
     std::string pattern = (std::filesystem::temp_directory_path() /
-                           "gufo-runner-disk-cache-XXXXXX")
+                           "mbufo-runner-disk-cache-XXXXXX")
                               .string();
     const char* created = ::mkdtemp(pattern.data());
     if (created == nullptr) {
@@ -1594,7 +1594,7 @@ void TestNewImageGetsAStableCheckpoint() {
     using SnapshotRunner::SnapshotRunner;
     void SetPromptContext(
         TextRunnerState&,
-        std::shared_ptr<const gufo::server::TextPromptContext>) const override {
+        std::shared_ptr<const mbufo::server::TextPromptContext>) const override {
     }
   };
   auto stats = std::make_shared<FakeStats>();
@@ -1606,7 +1606,7 @@ void TestNewImageGetsAStableCheckpoint() {
       (void)text.Prefill(64);
     text.Commit();
   }
-  auto image = std::make_shared<gufo::server::TextPromptContext>();
+  auto image = std::make_shared<mbufo::server::TextPromptContext>();
   image->cache_identity = {10};
   image->cache_prefixes = {{5, {}}};
   const std::vector<TextRunnerToken> prompt{1, 2, 3, 50, 51, 60, 61, 40, 41};
@@ -1985,7 +1985,7 @@ void TestEntryCapacityEvictionIsLogged() {
   TextRunnerPool pool(runner, 1);
 
   for (std::size_t i = 0;
-       i <= gufo::server::TextRunnerRamCacheOptions::kMaxEntries; ++i) {
+       i <= mbufo::server::TextRunnerRamCacheOptions::kMaxEntries; ++i) {
     const std::vector<TextRunnerToken> prefix{
         static_cast<TextRunnerToken>(i + 1), 0};
     auto request = pool.Acquire(prefix);
@@ -2005,7 +2005,7 @@ void TestEntryCapacityEvictionIsLogged() {
 }
 
 void TestSnapshotCacheCapacityIsReportedAtStartup() {
-  using gufo::server::TextRunnerRamCacheOptions;
+  using mbufo::server::TextRunnerRamCacheOptions;
   // Automatic sizing takes the model budget; an explicit limit may use the
   // larger ceiling the model reports, or the budget when it reports none.
   for (const std::optional<std::size_t> ceiling :
@@ -2058,7 +2058,7 @@ void TestSnapshotCacheCapacityIsReportedAtStartup() {
 }
 
 void TestMeminfoAvailableExcludesFreeCma() {
-  using gufo::server::MeminfoAvailableBytes;
+  using mbufo::server::MeminfoAvailableBytes;
   constexpr std::uint64_t kib = 1024;
   // Ubuntu 26.04's KHO scratch reports free CMA pages with CmaTotal 0.
   Expect(MeminfoAvailableBytes("MemTotal:       131072000 kB\n"
@@ -2078,10 +2078,10 @@ void TestMeminfoAvailableExcludesFreeCma() {
 
 void TestCgroupAvailableCountsReclaimableCache() {
   namespace fs = std::filesystem;
-  using gufo::server::CgroupAvailableBytes;
+  using mbufo::server::CgroupAvailableBytes;
   constexpr std::uint64_t gib = std::uint64_t{1} << 30;
   const auto root = fs::temp_directory_path() /
-                    ("gufo_cgroup_test_" + std::to_string(::getpid()));
+                    ("mbufo_cgroup_test_" + std::to_string(::getpid()));
   fs::remove_all(root);
   const auto write = [&](const fs::path& dir, const char* name,
                          const std::string& text) {
@@ -2170,7 +2170,7 @@ void TestSnapshotStartupReportsSelectedLimits() {
                                                          : 11 * gib;
       claim.retained_snapshot_capacity_bytes = available / 2;
       claim.retained_snapshot_ceiling_bytes =
-          available - gufo::server::kHostSnapshotHeadroomBytes;
+          available - mbufo::server::kHostSnapshotHeadroomBytes;
       return claim;
     }
 
@@ -2218,21 +2218,21 @@ void TestPreparedConstraintVocabularyKeepsGrammarBehavior() {
   class VocabularyRunner final : public FakeRunner {
   public:
     VocabularyRunner() : FakeRunner(std::make_shared<FakeStats>()) {}
-    std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
+    std::shared_ptr<const mbufo::sampling::ConstraintVocabulary>
     BuildConstraintVocabulary() const override {
       ++builds;
       // Single bytes, a few multi-byte pieces and a stop token.
       static const std::vector<std::string> extra{"{\"", "\":", "\",\"",
                                                   "ab",  "12",  "\"}"};
-      return std::make_shared<gufo::sampling::ConstraintVocabulary>(
+      return std::make_shared<mbufo::sampling::ConstraintVocabulary>(
           128 + extra.size() + 1, [](std::uint32_t id) {
             if (id < 128)
-              return gufo::sampling::ConstraintVocabulary::Piece{
+              return mbufo::sampling::ConstraintVocabulary::Piece{
                   std::string(1, static_cast<char>(id)), false};
             if (id < 128 + extra.size())
-              return gufo::sampling::ConstraintVocabulary::Piece{
+              return mbufo::sampling::ConstraintVocabulary::Piece{
                   extra[id - 128], false};
-            return gufo::sampling::ConstraintVocabulary::Piece{"", true};
+            return mbufo::sampling::ConstraintVocabulary::Piece{"", true};
           });
     }
     mutable std::size_t builds{0};
@@ -2243,14 +2243,14 @@ void TestPreparedConstraintVocabularyKeepsGrammarBehavior() {
   Expect(size == 135 && prepared.PrepareConstraintVocabulary() == size &&
              prepared.builds == 1,
          "preparation builds the vocabulary once");
-  const auto grammar = gufo::sampling::JsonConstraint::Compile(
-      gufo::json::parse(
+  const auto grammar = mbufo::sampling::JsonConstraint::Compile(
+      mbufo::json::parse(
           R"({"type":"object","properties":{"keyword":{"type":"string"},)"
           R"("n":{"type":"integer"}},"required":["keyword","n"],)"
           R"("additionalProperties":false})"),
       false);
-  const auto other = gufo::sampling::JsonConstraint::Compile(
-      gufo::json::parse(
+  const auto other = mbufo::sampling::JsonConstraint::Compile(
+      mbufo::json::parse(
           R"({"type":"object","properties":{},"additionalProperties":false})"),
       false);
   const auto binding = prepared.BindConstraint(grammar);
@@ -2278,46 +2278,46 @@ void TestPreparedConstraintVocabularyKeepsGrammarBehavior() {
 }
 
 void TestServerInstructionsAreFraming() {
-  using namespace gufo::tokenization;
+  using namespace mbufo::tokenization;
   class ConstraintRunner final : public FakeRunner {
   public:
-    explicit ConstraintRunner(gufo::sampling::JsonConstraint::ToolFormat format)
+    explicit ConstraintRunner(mbufo::sampling::JsonConstraint::ToolFormat format)
         : FakeRunner(std::make_shared<FakeStats>()), format_(format) {}
-    gufo::sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    mbufo::sampling::JsonConstraint::ToolFormat ToolFormat() const override {
       return format_;
     }
-    std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
+    std::shared_ptr<const mbufo::sampling::ConstraintVocabulary>
     BuildConstraintVocabulary() const override {
-      return std::make_shared<gufo::sampling::ConstraintVocabulary>(
+      return std::make_shared<mbufo::sampling::ConstraintVocabulary>(
           256, [](std::uint32_t id) {
-            return gufo::sampling::ConstraintVocabulary::Piece{
+            return mbufo::sampling::ConstraintVocabulary::Piece{
                 std::string(1, static_cast<char>(id)), false};
           });
     }
 
   private:
-    gufo::sampling::JsonConstraint::ToolFormat format_;
+    mbufo::sampling::JsonConstraint::ToolFormat format_;
   };
   // Only runners without a native call syntax use the JSON envelope and its
   // instruction; a native runner never switches syntax for a schema (#383).
   const ConstraintRunner runner(
-      gufo::sampling::JsonConstraint::ToolFormat::kJson);
+      mbufo::sampling::JsonConstraint::ToolFormat::kJson);
   const ConstraintRunner native_runner(
-      gufo::sampling::JsonConstraint::ToolFormat::kQwen);
+      mbufo::sampling::JsonConstraint::ToolFormat::kQwen);
   for (const auto format :
-       {gufo::sampling::JsonConstraint::ToolFormat::kQwen,
-        gufo::sampling::JsonConstraint::ToolFormat::kDeepSeek}) {
+       {mbufo::sampling::JsonConstraint::ToolFormat::kQwen,
+        mbufo::sampling::JsonConstraint::ToolFormat::kDeepSeek}) {
     const ConstraintRunner plain_runner(format);
     for (const bool json : {false, true}) {
       ChatRequest request;
       if (json)
-        request.response_format = gufo::sampling::JsonConstraint::Compile(
-            gufo::json::parse(
+        request.response_format = mbufo::sampling::JsonConstraint::Compile(
+            mbufo::json::parse(
                 R"({"type":"object","properties":{},"additionalProperties":false})"),
             false);
-      gufo::sampling::SamplingConfig sampling;
-      std::optional<gufo::sampling::JsonConstraint::ToolFormat> observed;
-      const auto constrained = gufo::server::ConstrainChatRequest(
+      mbufo::sampling::SamplingConfig sampling;
+      std::optional<mbufo::sampling::JsonConstraint::ToolFormat> observed;
+      const auto constrained = mbufo::server::ConstrainChatRequest(
           request, plain_runner, &sampling, &observed);
       Expect(observed == format && constrained.has_value() == json,
              "plain and JSON answers retain the native output dialect");
@@ -2357,13 +2357,13 @@ void TestServerInstructionsAreFraming() {
           request.messages.emplace_back(role, client);
         request.messages.emplace_back(
             ChatRole::kUser, role == ChatRole::kUser ? client : "Call record.");
-        gufo::sampling::SamplingConfig sampling;
-        std::optional<gufo::sampling::JsonConstraint::ToolFormat> format;
-        const auto constrained = gufo::server::ConstrainChatRequest(
+        mbufo::sampling::SamplingConfig sampling;
+        std::optional<mbufo::sampling::JsonConstraint::ToolFormat> format;
+        const auto constrained = mbufo::server::ConstrainChatRequest(
             request, runner, &sampling, &format);
         Expect(
             constrained &&
-                format == gufo::sampling::JsonConstraint::ToolFormat::kJson &&
+                format == mbufo::sampling::JsonConstraint::ToolFormat::kJson &&
                 sampling.constraint,
             "the actual request path selects and binds the JSON fallback");
         Expect(constrained->messages.front().content ==
@@ -2376,7 +2376,7 @@ void TestServerInstructionsAreFraming() {
         Expect(instruction.find("<tool_call>") != std::string::npos &&
                    instruction.find("</tool_call>") != std::string::npos,
                "JSON fallback uses the server framing field");
-        const auto prepared = gufo::models::qwen::vision::Prepare(
+        const auto prepared = mbufo::models::qwen::vision::Prepare(
             *tokenizer, constrained->messages, constrained->tools, options, {},
             8192);
         auto without = constrained->messages;
@@ -2424,15 +2424,15 @@ void TestServerInstructionsAreFraming() {
     request.reasoning.enabled = false;
     request.response_format =
         schema
-            ? gufo::sampling::JsonConstraint::Compile(
-                  gufo::json::parse(
+            ? mbufo::sampling::JsonConstraint::Compile(
+                  mbufo::json::parse(
                       R"({"type":"object","properties":{"text":{"type":"string","const":"<tool_call>"}},"required":["text"],"additionalProperties":false})"),
                   true)
-            : gufo::sampling::JsonConstraint::Object();
+            : mbufo::sampling::JsonConstraint::Object();
     request.response_format_description = "Describe <tool_call> in the schema.";
-    gufo::sampling::SamplingConfig sampling;
+    mbufo::sampling::SamplingConfig sampling;
     auto constrained =
-        gufo::server::ConstrainChatRequest(request, runner, &sampling);
+        mbufo::server::ConstrainChatRequest(request, runner, &sampling);
     Expect(constrained &&
                constrained->messages.front().content ==
                    request.messages.front().content &&
@@ -2455,9 +2455,9 @@ void TestServerInstructionsAreFraming() {
       {.name = "record",
        .parameters_json =
            R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})"}};
-  gufo::sampling::SamplingConfig sampling;
+  mbufo::sampling::SamplingConfig sampling;
   const auto constrained =
-      gufo::server::ConstrainChatRequest(native, native_runner, &sampling);
+      mbufo::server::ConstrainChatRequest(native, native_runner, &sampling);
   Expect(constrained && constrained->messages.front().framing_suffix.empty(),
          "native constraints add no instruction or change to the prompt");
   // Schemas native tags cannot enforce exactly, beside an ordinary neighbor,
@@ -2492,11 +2492,11 @@ void TestServerInstructionsAreFraming() {
             {.name = "record",
              .parameters_json = schema,
              .definition_json = definition}};
-        gufo::sampling::SamplingConfig sampled;
-        std::optional<gufo::sampling::JsonConstraint::ToolFormat> format;
+        mbufo::sampling::SamplingConfig sampled;
+        std::optional<mbufo::sampling::JsonConstraint::ToolFormat> format;
         std::optional<ChatRequest> result;
         try {
-          result = gufo::server::ConstrainChatRequest(request, native_runner,
+          result = mbufo::server::ConstrainChatRequest(request, native_runner,
                                                       &sampled, &format);
         } catch (const std::invalid_argument&) {
           // An impossible strict schema is rejected before generation.
@@ -2505,7 +2505,7 @@ void TestServerInstructionsAreFraming() {
         }
         Expect(
             result &&
-                format == gufo::sampling::JsonConstraint::ToolFormat::kQwen &&
+                format == mbufo::sampling::JsonConstraint::ToolFormat::kQwen &&
                 sampled.constraint,
             "a native runner keeps native calls for every schema");
         Expect(result->messages.front().framing_suffix.empty() &&

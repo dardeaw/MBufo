@@ -12,7 +12,7 @@
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 template<typename T>
@@ -291,5 +291,5 @@ std::span<const float> QwenMtpGpuExecutor::CopyLastLogits() {
   return h_logits_;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

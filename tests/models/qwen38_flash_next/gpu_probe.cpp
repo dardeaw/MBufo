@@ -33,14 +33,14 @@
 #include "src/models/qwen38_flash_next/reference.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
-namespace q = gufo::models::qwen38_flash_next;
+namespace q = mbufo::models::qwen38_flash_next;
 
 void AuditMtp(q::rocm::Executor& executor, const q::rocm::DeviceModel& device,
               const q::ModelWeights& weights, const q::MtpWeights& mtp,
-              const gufo::tokenization::QwenTokenizer& tokenizer,
+              const mbufo::tokenization::QwenTokenizer& tokenizer,
               const std::filesystem::path& path);
 void AuditMtpCosts(q::rocm::Executor& executor,
-                   const gufo::tokenization::QwenTokenizer& tokenizer,
+                   const mbufo::tokenization::QwenTokenizer& tokenizer,
                    std::span<const std::uint32_t> depths,
                    std::span<const std::uint32_t> concurrencies,
                    bool sampled_head);
@@ -92,7 +92,7 @@ namespace {
 // greedy token sequences; family-sized logit deltas are fine as long as the
 // argmax text agrees.
 void TextMixed(q::rocm::Executor& executor,
-               gufo::tokenization::QwenTokenizer& tokenizer,
+               mbufo::tokenization::QwenTokenizer& tokenizer,
                const q::ModelWeights& weights) {
   const auto& c = weights.config;
   const std::uint32_t context = 256;
@@ -100,7 +100,7 @@ void TextMixed(q::rocm::Executor& executor,
   const auto idsB = tokenizer.Encode("Quantum mechanics describes nature.");
   std::string error;
   auto make = [&]() {
-    auto s = executor.CreateSession(gufo::core::SessionMode::kAutoregressive,
+    auto s = executor.CreateSession(mbufo::core::SessionMode::kAutoregressive,
                                     context, &error);
     if (!s)
       throw std::runtime_error(std::string("text session failed: ") + error);
@@ -200,7 +200,7 @@ void TextMixed(q::rocm::Executor& executor,
 // the tail must take the legacy per-item path (counter stays); the 8-row
 // chunk must fire mixed. Both compare report-only (phase/family gaps apply).
 void BigBatch(q::rocm::Executor& executor,
-              gufo::tokenization::QwenTokenizer& tokenizer,
+              mbufo::tokenization::QwenTokenizer& tokenizer,
               const q::ModelWeights& weights, std::uint32_t chunk_rows,
               bool expect_mixed) {
   const auto& c = weights.config;
@@ -213,7 +213,7 @@ void BigBatch(q::rocm::Executor& executor,
     throw std::runtime_error("big-batch prompt too short");
   std::string error;
   auto make = [&]() {
-    auto s = executor.CreateSession(gufo::core::SessionMode::kAutoregressive,
+    auto s = executor.CreateSession(mbufo::core::SessionMode::kAutoregressive,
                                     context, &error);
     if (!s)
       throw std::runtime_error(std::string("big session failed: ") + error);
@@ -323,7 +323,7 @@ void BigBatch(q::rocm::Executor& executor,
 // tail. MtpPosition must track the tracked trunk position exactly like legacy
 // (tail ran), for the chunk and (unchanged) for decodes. Needs --mtp-model.
 void MtpBatch(q::rocm::Executor& executor,
-              gufo::tokenization::QwenTokenizer& tokenizer,
+              mbufo::tokenization::QwenTokenizer& tokenizer,
               const q::ModelWeights& weights, std::uint32_t kChunk) {
   if (!executor.has_mtp())
     throw std::runtime_error("MX_MTP needs --mtp-model");
@@ -338,7 +338,7 @@ void MtpBatch(q::rocm::Executor& executor,
     throw std::runtime_error("mtp prompt too short");
   std::string error;
   auto make = [&]() {
-    auto s = executor.CreateSession(gufo::core::SessionMode::kSpeculative,
+    auto s = executor.CreateSession(mbufo::core::SessionMode::kSpeculative,
                                     context, &error);
     if (!s)
       throw std::runtime_error(std::string("mtp session failed: ") + error);
@@ -439,13 +439,13 @@ void MtpBatch(q::rocm::Executor& executor,
 }
 
 void AuditMixed(q::rocm::Executor& executor,
-                gufo::tokenization::QwenTokenizer& tokenizer,
+                mbufo::tokenization::QwenTokenizer& tokenizer,
                 const q::ModelWeights& weights) {
-  if (::setenv("GUFO_MIXED_BATCH",
-               std::getenv("GUFO_MIXED_BATCH") ? std::getenv("GUFO_MIXED_BATCH")
+  if (::setenv("MBUFO_MIXED_BATCH",
+               std::getenv("MBUFO_MIXED_BATCH") ? std::getenv("MBUFO_MIXED_BATCH")
                                                : "1",
                1) != 0)
-    throw std::runtime_error("cannot set GUFO_MIXED_BATCH");
+    throw std::runtime_error("cannot set MBUFO_MIXED_BATCH");
   const auto& c = weights.config;
   const std::uint32_t context = 256;
   auto stretch = [&](const std::string& text, std::size_t n) {
@@ -467,7 +467,7 @@ void AuditMixed(q::rocm::Executor& executor,
       stretch("Quantum mechanics describes nature at small scales.", 52);
   std::string error;
   auto make = [&]() {
-    auto s = executor.CreateSession(gufo::core::SessionMode::kAutoregressive,
+    auto s = executor.CreateSession(mbufo::core::SessionMode::kAutoregressive,
                                     context, &error);
     if (!s)
       throw std::runtime_error("mixed audit session failed: " + error);
@@ -759,7 +759,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   std::string error;
-  auto reader = gufo::core::GgufReader::OpenFile(model_path, &error);
+  auto reader = mbufo::core::GgufReader::OpenFile(model_path, &error);
   if (!reader) {
     std::fprintf(stderr, "open failed: %s\n", error.c_str());
     return 1;
@@ -770,7 +770,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   auto tokenizer =
-      gufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &error);
+      mbufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &error);
   if (!tokenizer) {
     std::fprintf(stderr, "tokenizer failed: %s\n", error.c_str());
     return 1;
@@ -804,10 +804,10 @@ int main(int argc, char** argv) {
     }
   }
 
-  std::shared_ptr<gufo::core::GgufReader> mtp_reader;
+  std::shared_ptr<mbufo::core::GgufReader> mtp_reader;
   std::optional<q::MtpWeights> mtp_weights;
   if (!mtp_path.empty()) {
-    mtp_reader = gufo::core::GgufReader::OpenFile(mtp_path, &error);
+    mtp_reader = mbufo::core::GgufReader::OpenFile(mtp_path, &error);
     if (mtp_reader)
       mtp_weights = q::MtpWeights::Bind(*mtp_reader, c, &error);
     if (!mtp_weights) {
@@ -886,7 +886,7 @@ int main(int argc, char** argv) {
     }
   }
   auto session = executor->CreateSession(
-      gufo::core::SessionMode::kAutoregressive, context, &error);
+      mbufo::core::SessionMode::kAutoregressive, context, &error);
   if (!session) {
     std::fprintf(stderr, "session failed: %s\n", error.c_str());
     return 1;

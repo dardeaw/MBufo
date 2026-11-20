@@ -7,9 +7,9 @@
   "fixture_fix": "6f62a09d1d27cc9e4775e0bbe9e6f236e7cd9ab2",
   "candidate": {
     "binary": {
-      "path": "/nix/store/8bjsvxwkp9bp7dgkidxrgfgc4rffwkdj-gufo-0-unstable-79c62c9-dirty/bin/gufo",
+      "path": "/nix/store/8bjsvxwkp9bp7dgkidxrgfgc4rffwkdj-mbufo-0-unstable-79c62c9-dirty/bin/mbufo",
       "sha256": "813bb894b5cbe6620720374f0d3b5bbc780800c8e1ed0ca64f3ba8c61141dde0",
-      "wrapped_path": "/nix/store/8bjsvxwkp9bp7dgkidxrgfgc4rffwkdj-gufo-0-unstable-79c62c9-dirty/bin/.gufo-wrapped",
+      "wrapped_path": "/nix/store/8bjsvxwkp9bp7dgkidxrgfgc4rffwkdj-mbufo-0-unstable-79c62c9-dirty/bin/.mbufo-wrapped",
       "wrapped_sha256": "a577f887ebee700d66bea845922dc023a73558ac6d8900aad6380138daa7d72f"
     },
     "toolchain": "Pinned Nix production package; ROCm 7.2.3; gfx1151",
@@ -85,7 +85,7 @@
         637
       ],
       "application": "Shared cgroup memory-budget discovery retains reclaimable inactive file pages, dirty/writeback exclusions and parent limits. The runner implementation, header and hosted runner tests are byte-identical to current main.",
-      "evidence": "/home/mixer/gufo-qualification/pr540-2026-10-19/cgroup-budget-review.json"
+      "evidence": "/home/mixer/mbufo-qualification/pr540-2026-10-19/cgroup-budget-review.json"
     }
   ],
   "native_checks": [
@@ -93,14 +93,14 @@
       "case": "snapshot-copy",
       "status": "passed",
       "command": [
-        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen38_flash_next/qwen38_flash_next_snapshot_copy_test"
+        "/home/mixer/.codex/worktrees/89e3/mbufo/build/gpu-test/tests/models/qwen38_flash_next/qwen38_flash_next_snapshot_copy_test"
       ]
     },
     {
       "case": "q4-adapter",
       "status": "passed",
       "command": [
-        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
+        "/home/mixer/.codex/worktrees/89e3/mbufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
         "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf"
       ]
     },
@@ -108,7 +108,7 @@
       "case": "q4-draft-adapter",
       "status": "passed",
       "command": [
-        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
+        "/home/mixer/.codex/worktrees/89e3/mbufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
         "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf",
         "--draft",
         "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
@@ -118,7 +118,7 @@
       "case": "q4-serving-cache",
       "status": "passed",
       "command": [
-        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/home/mixer/.codex/worktrees/89e3/mbufo/build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
         "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf",
         "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
         "--cache-only"
@@ -128,7 +128,7 @@
       "case": "q4-target",
       "status": "passed",
       "command": [
-        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_target_test",
+        "/home/mixer/.codex/worktrees/89e3/mbufo/build/gpu-test/tests/models/qwen27b/qwen27b_target_test",
         "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf"
       ]
     },
@@ -136,7 +136,7 @@
       "case": "q8-adapter",
       "status": "passed",
       "command": [
-        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
+        "/home/mixer/.codex/worktrees/89e3/mbufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
         "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf"
       ]
     },
@@ -144,7 +144,7 @@
       "case": "q8-draft-adapter",
       "status": "passed",
       "command": [
-        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
+        "/home/mixer/.codex/worktrees/89e3/mbufo/build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_test",
         "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf",
         "--draft",
         "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
@@ -154,7 +154,7 @@
       "case": "q8-serving-cache",
       "status": "passed",
       "command": [
-        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/home/mixer/.codex/worktrees/89e3/mbufo/build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
         "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf",
         "/persist/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
         "--cache-only"
@@ -164,7 +164,7 @@
       "case": "q8-target",
       "status": "passed",
       "command": [
-        "/home/mixer/.codex/worktrees/89e3/gufo/build/gpu-test/tests/models/qwen27b/qwen27b_target_test",
+        "/home/mixer/.codex/worktrees/89e3/mbufo/build/gpu-test/tests/models/qwen27b/qwen27b_target_test",
         "/persist/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf"
       ]
     }
@@ -841,7 +841,7 @@
     "Short request probes do not qualify long-context or concurrent serving",
     "Startup wall times were not a matched filesystem-cache experiment"
   ],
-  "raw_evidence_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19",
+  "raw_evidence_directory": "/home/mixer/mbufo-qualification/pr540-2026-10-19",
   "http_checks": {
     "q4/off": {
       "status": "passed",
@@ -879,7 +879,7 @@
         "disk-spacing-disk": "passed"
       },
       "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
-      "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q4-off-http"
+      "raw_directory": "/home/mixer/mbufo-qualification/pr540-2026-10-19/q4-off-http"
     },
     "q4/dflash2": {
       "status": "passed",
@@ -917,7 +917,7 @@
         "disk-spacing-disk": "passed"
       },
       "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
-      "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q4-dflash2-http"
+      "raw_directory": "/home/mixer/mbufo-qualification/pr540-2026-10-19/q4-dflash2-http"
     },
     "q8/off": {
       "status": "passed",
@@ -955,7 +955,7 @@
         "disk-spacing-disk": "passed"
       },
       "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
-      "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q8-off-http"
+      "raw_directory": "/home/mixer/mbufo-qualification/pr540-2026-10-19/q8-off-http"
     },
     "q8/dflash2": {
       "status": "passed",
@@ -993,7 +993,7 @@
         "disk-spacing-disk": "passed"
       },
       "harness_sha256": "db450e45cb5ea5abfe0da4f466a94e21cdd2b8ad125283ffa225859e55d5b002",
-      "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/q8-dflash2-http"
+      "raw_directory": "/home/mixer/mbufo-qualification/pr540-2026-10-19/q8-dflash2-http"
     }
   },
   "readiness_resources": {
@@ -1049,7 +1049,7 @@
         "cache-concurrency"
       ],
       "interrupted_stage": "cache-shared-prefix",
-      "raw_directory": "/home/mixer/gufo-qualification/pr540-2026-10-19/flash-off-http"
+      "raw_directory": "/home/mixer/mbufo-qualification/pr540-2026-10-19/flash-off-http"
     },
     "mtp": {
       "status": "not_run"
@@ -1064,12 +1064,12 @@
       "94fee48e": "fix(cache): recompute prompts that end at a partial-prefill frontier"
     },
     "binaries": {
-      "main": "/nix/store/sl0bsz4lqvwlpc760vknd5fh5wq0k5mq-gufo-0-unstable-1b0a5a8",
-      "merge": "/nix/store/nfrv8pn69hmwlqd3dahj1z1nccdxa2af-gufo-0-unstable-8ed4da9",
-      "fixed": "/nix/store/zv4a29a5170jgz2n95yb5vjmp209ld44-gufo-0-unstable-e8713ab",
-      "frontier_fix": "/nix/store/hrlclc1lhx4iilvlw5y9wq1rdlqvr24w-gufo-0-unstable-94fee48"
+      "main": "/nix/store/sl0bsz4lqvwlpc760vknd5fh5wq0k5mq-mbufo-0-unstable-1b0a5a8",
+      "merge": "/nix/store/nfrv8pn69hmwlqd3dahj1z1nccdxa2af-mbufo-0-unstable-8ed4da9",
+      "fixed": "/nix/store/zv4a29a5170jgz2n95yb5vjmp209ld44-mbufo-0-unstable-e8713ab",
+      "frontier_fix": "/nix/store/hrlclc1lhx4iilvlw5y9wq1rdlqvr24w-mbufo-0-unstable-94fee48"
     },
-    "raw_evidence_directory": "/home/mixer/gufo-qualification/pr540-2026-10-20",
+    "raw_evidence_directory": "/home/mixer/mbufo-qualification/pr540-2026-10-20",
     "server_settings": "--sessions 4 --context 32768 --prefill-chunk 1024 --cache-ram-bytes 16GiB (Flash MTP 8GiB) --sampling-preset qwen38",
     "native_checks": "8ed4da99: 9/9 native (Q4/Q8 adapter, draft adapter, serving cache, target) and 3/3 attention operator checks pass; e8713ab: Q4 adapter, draft adapter and serving-cache checks pass",
     "http_checks": {

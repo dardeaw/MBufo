@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Trace Gufo against pinned, unmodified upstream PyTorch DFlash2 operators.
+"""Trace MBufo against pinned, unmodified upstream PyTorch DFlash2 operators.
 
 Consume --trace output from qwen_dflash_gpu_test. Weights come from the same
 GGUF artifact: this checks execution and binding, not the GGUF converter or
@@ -105,7 +105,7 @@ def compare(args) -> dict:
     if hashlib.sha256(args.upstream.read_bytes()).hexdigest() != UPSTREAM_SHA256:
         raise ValueError("upstream model.py does not match the pinned source")
     upstream = module("dflash_upstream", args.upstream)
-    codec = module("gufo_gguf", ROOT / "tools/gufo/gguf.py")
+    codec = module("mbufo_gguf", ROOT / "tools/mbufo/gguf.py")
     weights = Weights(args.draft, codec)
     meta = json.loads((args.trace / "trace.json").read_text())
     config = upstream.Qwen3Config(**json.loads(args.config.read_text()))
@@ -155,10 +155,10 @@ def compare(args) -> dict:
         reference = tensor.detach().float().cpu().numpy().reshape(-1)
         actual = np.fromfile(path, dtype="<f4")
         if actual.shape != reference.shape or not np.isfinite(reference).all():
-            raise ValueError(f"{name}: Gufo shape={actual.shape}, reference shape={reference.shape}, "
+            raise ValueError(f"{name}: MBufo shape={actual.shape}, reference shape={reference.shape}, "
                              f"reference finite={np.isfinite(reference).sum()}/{reference.size}")
         if not np.isfinite(actual).all():
-            raise ValueError(f"{name}: nonfinite Gufo output")
+            raise ValueError(f"{name}: nonfinite MBufo output")
         error = actual.astype(np.float64) - reference
         norm = float(np.sqrt(np.mean(reference.astype(np.float64) ** 2)))
         rmse = float(np.sqrt(np.mean(error ** 2)))
@@ -168,7 +168,7 @@ def compare(args) -> dict:
         }
     record("embedding", embedding)
 
-    # Match Gufo's documented packed-BF16 input rounding without changing any
+    # Match MBufo's documented packed-BF16 input rounding without changing any
     # upstream operator equations. Feature injection retains FP32 activations.
     for name, submodule in model.named_modules():
         if (meta.get("block_activation_dtype", "bf16") == "bf16"
@@ -262,7 +262,7 @@ def compare(args) -> dict:
             or not np.allclose(actual_q.sum(axis=1), 1.0, rtol=0, atol=1e-5)):
         raise ValueError("trace has malformed proposal probabilities")
     for row in range(block - 1):
-        # Gufo samples in its own candidate order. Upstream topk is unsorted,
+        # MBufo samples in its own candidate order. Upstream topk is unsorted,
         # so a shared random seed need not produce the same categorical draw.
         choice = int(np.searchsorted(
             np.cumsum(actual_q[row], dtype=np.float64), uniforms[row], side="right"))
@@ -284,7 +284,7 @@ def compare(args) -> dict:
                                  for token in expected.keys() | actual.keys()) * 0.5))
     # Check the original selector independently of accumulated layer/GEMM
     # differences, using captured unary logits and projected hidden vectors.
-    # Force its sampled predecessor path to Gufo's so every conditional q row
+    # Force its sampled predecessor path to MBufo's so every conditional q row
     # refers to exactly the same prefix. Candidate order is not a distribution.
     selector = model.candidate_selector
     selector.hidden_projection = torch.nn.Identity()

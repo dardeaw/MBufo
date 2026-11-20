@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_OPS_SSM_HPP_
-#define GUFO_MODELS_QWEN_HIP_OPS_SSM_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_OPS_SSM_HPP_
+#define MBUFO_MODELS_QWEN_HIP_OPS_SSM_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 inline constexpr std::size_t kSsmReplayCapacity = 16;
 
@@ -160,8 +160,8 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
     QwenRecurrentStateStorage state_storage = QwenRecurrentStateStorage::kFp32,
     void* fp16_out = nullptr);
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_OPS_SSM_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_OPS_SSM_HPP_

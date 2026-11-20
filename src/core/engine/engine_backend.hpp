@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_ENGINE_ENGINE_BACKEND_HPP_
-#define GUFO_CORE_ENGINE_ENGINE_BACKEND_HPP_
+#ifndef MBUFO_CORE_ENGINE_ENGINE_BACKEND_HPP_
+#define MBUFO_CORE_ENGINE_ENGINE_BACKEND_HPP_
 
 // L0 engine surface: the Load -> CreateSession -> Sync -> Evaluate/Forward
 // -> Logits/Length contract shared by all five engines (llama, glimmer,
@@ -20,7 +20,7 @@
 #include <string_view>
 #include <vector>
 
-namespace gufo::core::engine {
+namespace mbufo::core::engine {
 
 /// One conversation's decode context. Sync feeds a prompt, Evaluate appends
 /// one token, Forward runs a span starting at a position; the logits of the
@@ -75,6 +75,6 @@ class EngineModel {
   EngineModel() = default;
 };
 
-}  // namespace gufo::core::engine
+}  // namespace mbufo::core::engine
 
-#endif  // GUFO_CORE_ENGINE_ENGINE_BACKEND_HPP_
+#endif  // MBUFO_CORE_ENGINE_ENGINE_BACKEND_HPP_

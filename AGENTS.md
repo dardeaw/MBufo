@@ -8,7 +8,7 @@ Linux source-build prerequisites are in [README.md](README.md#build-from-source)
 
 ```sh
 nix build                              # production package, no tests/tools
-./result/bin/gufo diagnose
+./result/bin/mbufo diagnose
 nix build .#checks.x86_64-linux.pr      # bounded hosted CPU/repository checks
 nix develop                            # GPU development and reference tools
 
@@ -18,7 +18,7 @@ cmake --build --preset release --parallel 4
 ```
 
 Stage only task-owned paths before Nix builds; flakes include tracked files.
-Measure performance with `result/bin/gufo` or `build/release/gufo`. Preserve
+Measure performance with `result/bin/mbufo` or `build/release/mbufo`. Preserve
 compiler/dependency versions when comparing results.
 
 ## Focused tests

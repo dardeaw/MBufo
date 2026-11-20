@@ -6,7 +6,7 @@
 #include "src/models/qwen/hip/ops/norm_residual.hpp"
 #endif
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 void ResidualAdd(const CpuModuleContext&, std::span<float> dst,
                  std::span<const float> src) noexcept {
@@ -18,9 +18,9 @@ void ResidualAdd(const CpuModuleContext&, std::span<float> dst,
 #if defined(ENGINE_ENABLE_HIP)
 void ResidualAdd(const HipModuleContext& ctx, std::span<float> dst,
                  std::span<const float> src) noexcept {
-  ::gufo::hip::LaunchResidualAdd(dst.data(), src.data(), dst.data(), dst.size(),
+  ::mbufo::hip::LaunchResidualAdd(dst.data(), src.data(), dst.data(), dst.size(),
                                  static_cast<hipStream_t>(ctx.Stream()));
 }
 #endif
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

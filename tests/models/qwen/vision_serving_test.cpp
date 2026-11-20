@@ -16,7 +16,7 @@
 #include "src/models/qwen38_flash_next/engine.hpp"
 
 namespace {
-using namespace gufo;
+using namespace mbufo;
 using Backend = server::InferenceBackend;
 
 void Require(bool condition, std::string_view message) {
@@ -87,8 +87,8 @@ void CheckFlashIncrementalOracle(
                                          prompt->tokens.end());
   std::string error;
   auto incremental = model->CreateSession(
-      gufo::core::SessionMode::kAutoregressive, model->MaxContext(), &error);
-  auto bulk = model->CreateSession(gufo::core::SessionMode::kAutoregressive,
+      mbufo::core::SessionMode::kAutoregressive, model->MaxContext(), &error);
+  auto bulk = model->CreateSession(mbufo::core::SessionMode::kAutoregressive,
                                    model->MaxContext(), &error);
   Require(incremental && bulk, error);
   incremental->ConfigureVision(prompt);
@@ -547,7 +547,7 @@ int main(int argc, char** argv) {
       CheckFlashIncrementalOracle(qfn, continuation, continued);
 
     std::array<char, 64> pattern{};
-    const std::string temporary = "/tmp/gufo-vision-cache-XXXXXX";
+    const std::string temporary = "/tmp/mbufo-vision-cache-XXXXXX";
     std::copy(temporary.begin(), temporary.end(), pattern.begin());
     Require(::mkdtemp(pattern.data()) != nullptr, "cannot create test cache");
     struct Cleanup {

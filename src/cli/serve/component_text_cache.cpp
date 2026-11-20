@@ -18,7 +18,7 @@
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/core/crypto/sha256.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 using Clock = std::chrono::steady_clock;
 class SettledSignal final : public cache::CompletionSignal {
@@ -1836,4 +1836,4 @@ std::size_t ServingCacheLease::CaptureBytes(std::size_t boundary) const {
 std::unique_ptr<TextRunnerSnapshot> ServingCacheLease::Capture() {
   return component_->Capture();
 }
-}  // namespace gufo::server
+}  // namespace mbufo::server

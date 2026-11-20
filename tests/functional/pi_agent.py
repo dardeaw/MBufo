@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real Pi agent regression for #368; executes generated code in disposable fixtures.
 
-Requires Pi 0.87.0 and Node, and an already-running local Gufo server. Keeps Pi
+Requires Pi 0.87.0 and Node, and an already-running local MBufo server. Keeps Pi
 sessions, exact HTTP bodies/SSE, task files and individual request/task timings.
 """
 
@@ -25,7 +25,7 @@ import urllib.parse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 
-from gufo.control_tokens import kImEnd, kImStart  # noqa: E402
+from mbufo.control_tokens import kImEnd, kImStart  # noqa: E402
 
 from metrics import summarize
 
@@ -214,7 +214,7 @@ def validate_requests(rows, server_log=None):
         generated = usage.get("completion_tokens", usage.get("output_tokens"))
         assert prompt > 0 and generated > 0, row
         assert usage["total_tokens"] == prompt + generated, row
-        metrics = row.get("metrics", usage.get("gufo", {}))
+        metrics = row.get("metrics", usage.get("mbufo", {}))
         if server_log:
             fields = completed[row["request_id"]]
             for field in ("queue_ms", "ttft_ms", "duration_ms"):
@@ -338,7 +338,7 @@ def run_case(args, recorder, env, index, name):
     command = [
         str(args.pi), "--offline", "--no-extensions", "--no-skills",
         "--no-prompt-templates", "--no-themes", "--no-context-files",
-        "--provider", "gufo-regression", "--model", args.model,
+        "--provider", "mbufo-regression", "--model", args.model,
         "--thinking", args.thinking, "--session", str(session),
         "--mode", "json", "--print", PROMPTS[name],
     ]
@@ -395,7 +395,7 @@ def main():
     parser.add_argument("--pi", type=Path, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--server-log", type=Path, required=True, help="Gufo informational log for request timing correlation")
+    parser.add_argument("--server-log", type=Path, required=True, help="MBufo informational log for request timing correlation")
     parser.add_argument("--passes", type=int, default=5)
     parser.add_argument("--case", action="append", choices=tuple(PROMPTS),
                         help="Select affected tasks explicitly; repeat to select more than one")
@@ -407,7 +407,7 @@ def main():
     parser.add_argument("--sampling", type=json.loads, default={}, help="Optional request overrides as JSON; otherwise server defaults")
     args = parser.parse_args()
     upstream = urllib.parse.urlsplit(args.base_url)
-    assert upstream.scheme == "http" and upstream.hostname in {"127.0.0.1", "localhost", "::1"}, "Loopback Gufo only"
+    assert upstream.scheme == "http" and upstream.hostname in {"127.0.0.1", "localhost", "::1"}, "Loopback MBufo only"
     assert not args.output.exists(), "Use a fresh output directory; preserve previous evidence"
     args.output.mkdir(parents=True)
     version = subprocess.check_output([str(args.pi), "--version"], text=True).strip()
@@ -425,7 +425,7 @@ def main():
     thread.start()
     config = args.output / "pi-config"
     config.mkdir()
-    save(config / "models.json", {"providers": {"gufo-regression": {
+    save(config / "models.json", {"providers": {"mbufo-regression": {
         "baseUrl": f"http://127.0.0.1:{recorder.server_port}/v1", "api": args.api,
         "apiKey": "local-functional-test", "compat": {"supportsStrictMode": False},
         "models": [{"id": args.model, "reasoning": args.thinking != "off",

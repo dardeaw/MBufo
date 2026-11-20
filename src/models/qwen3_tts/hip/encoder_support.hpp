@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_TTS_HIP_ENCODER_SUPPORT_HPP_
-#define GUFO_MODELS_QWEN3_TTS_HIP_ENCODER_SUPPORT_HPP_
+#ifndef MBUFO_MODELS_QWEN3_TTS_HIP_ENCODER_SUPPORT_HPP_
+#define MBUFO_MODELS_QWEN3_TTS_HIP_ENCODER_SUPPORT_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +16,7 @@
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 
 void RequireEncoderHip(hipError_t status, std::string_view operation);
 void RequireEncoderRocblas(rocblas_status status, std::string_view operation);
@@ -106,7 +106,7 @@ private:
   rocblas_handle handle_{nullptr};
 };
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 #endif
 
-#endif  // GUFO_MODELS_QWEN3_TTS_HIP_ENCODER_SUPPORT_HPP_
+#endif  // MBUFO_MODELS_QWEN3_TTS_HIP_ENCODER_SUPPORT_HPP_

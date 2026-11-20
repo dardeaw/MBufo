@@ -12,7 +12,7 @@
 
 #include "src/models/qwen3_tts/hip/talker_ops.hpp"
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 namespace {
 
 // Preserve the descending shared-memory sum tree. Once only the first wave
@@ -972,6 +972,6 @@ bool LaunchBfloat16GemvGrouped(const Bfloat16GemvGroup* groups,
                     : dispatch_groups.template operator()<uint2>();
 }
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)

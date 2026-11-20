@@ -7,10 +7,10 @@
 
 #include "src/core/json.hpp"
 
-namespace gufo::eval {
+namespace mbufo::eval {
 namespace {
 
-using gufo::json::Value;
+using mbufo::json::Value;
 
 void SetError(std::string* error, std::string message) {
   if (error != nullptr) {
@@ -96,9 +96,9 @@ std::optional<EvalSuite> LoadEvalSuite(const std::filesystem::path& path,
   contents << input.rdbuf();
 
   try {
-    const Value root = gufo::json::parse(contents.str());
+    const Value root = mbufo::json::parse(contents.str());
     if (!root.is_object() ||
-        RequireString(root, "schema") != "gufo.eval-cases.v2") {
+        RequireString(root, "schema") != "mbufo.eval-cases.v2") {
       throw std::runtime_error("unsupported evaluation schema");
     }
 
@@ -162,4 +162,4 @@ std::string_view AnswerKindName(AnswerKind kind) noexcept {
   return "unknown";
 }
 
-}  // namespace gufo::eval
+}  // namespace mbufo::eval

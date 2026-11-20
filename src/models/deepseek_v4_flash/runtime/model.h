@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_H_
-#define GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_H_
+#ifndef MBUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_H_
+#define MBUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -147,4 +147,4 @@ int ds4_session_ctx(const ds4_session* session);
 uint32_t ds4_session_prefill_capacity(const ds4_session* session);
 uint64_t ds4_session_payload_bytes(const ds4_session* session);
 
-#endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_H_
+#endif  // MBUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_H_

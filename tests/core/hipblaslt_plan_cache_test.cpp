@@ -11,11 +11,11 @@
 
 namespace {
 
-using gufo::hip::detail::HipblasLtPlanDatabase;
-using gufo::hip::detail::HipblasLtPlanDatabaseKey;
-using gufo::hip::detail::HipblasLtPlanDatabaseLoadStatus;
-using gufo::hip::detail::HipblasLtPlanDataType;
-using gufo::hip::detail::HipblasLtPlanRecord;
+using mbufo::hip::detail::HipblasLtPlanDatabase;
+using mbufo::hip::detail::HipblasLtPlanDatabaseKey;
+using mbufo::hip::detail::HipblasLtPlanDatabaseLoadStatus;
+using mbufo::hip::detail::HipblasLtPlanDataType;
+using mbufo::hip::detail::HipblasLtPlanRecord;
 
 void Expect(bool condition, const std::string& message) {
   if (!condition) {
@@ -54,37 +54,37 @@ HipblasLtPlanDatabase MakeDatabase() {
 
 int main() {
   const auto temporary_directory =
-      std::filesystem::temp_directory_path() / "gufo-hipblaslt-cache-test";
+      std::filesystem::temp_directory_path() / "mbufo-hipblaslt-cache-test";
   std::filesystem::create_directories(temporary_directory);
   const auto database_path = temporary_directory / "plans.bin";
   const auto truncated_path = temporary_directory / "truncated.bin";
 
   const auto expected = MakeDatabase();
   std::string error;
-  Expect(gufo::hip::detail::SaveHipblasLtPlanDatabase(database_path, expected,
+  Expect(mbufo::hip::detail::SaveHipblasLtPlanDatabase(database_path, expected,
                                                       &error),
          "save database: " + error);
 
   const auto loaded =
-      gufo::hip::detail::LoadHipblasLtPlanDatabase(database_path, expected.key);
+      mbufo::hip::detail::LoadHipblasLtPlanDatabase(database_path, expected.key);
   Expect(loaded.status == HipblasLtPlanDatabaseLoadStatus::kLoaded,
          "load compatible database");
   Expect(loaded.database.key == expected.key, "round-trip database key");
   Expect(loaded.database.records == expected.records,
          "round-trip database records");
 
-  const auto* record = gufo::hip::detail::FindHipblasLtPlanRecord(
+  const auto* record = mbufo::hip::detail::FindHipblasLtPlanRecord(
       loaded.database, 128, 17408, 5120, HipblasLtPlanDataType::kBfloat16);
   Expect(record != nullptr && record->algorithm_id == 42,
          "lookup exact GEMM shape");
-  Expect(gufo::hip::detail::FindHipblasLtPlanRecord(
+  Expect(mbufo::hip::detail::FindHipblasLtPlanRecord(
              loaded.database, 256, 17408, 5120,
              HipblasLtPlanDataType::kBfloat16) == nullptr,
          "reject unrecorded GEMM shape");
 
   auto incompatible_key = expected.key;
   ++incompatible_key.hip_runtime_version;
-  const auto incompatible = gufo::hip::detail::LoadHipblasLtPlanDatabase(
+  const auto incompatible = mbufo::hip::detail::LoadHipblasLtPlanDatabase(
       database_path, incompatible_key);
   Expect(incompatible.status == HipblasLtPlanDatabaseLoadStatus::kIncompatible,
          "detect ROCm runtime change");
@@ -93,14 +93,14 @@ int main() {
     std::ofstream truncated(truncated_path, std::ios::binary);
     truncated.write("STRIXLT", 7);
   }
-  const auto invalid = gufo::hip::detail::LoadHipblasLtPlanDatabase(
+  const auto invalid = mbufo::hip::detail::LoadHipblasLtPlanDatabase(
       truncated_path, expected.key);
   Expect(invalid.status == HipblasLtPlanDatabaseLoadStatus::kInvalid,
          "reject truncated database");
 
   auto duplicate = expected;
   duplicate.records.push_back(duplicate.records.front());
-  Expect(!gufo::hip::detail::SaveHipblasLtPlanDatabase(
+  Expect(!mbufo::hip::detail::SaveHipblasLtPlanDatabase(
              temporary_directory / "duplicate.bin", duplicate, &error),
          "reject duplicate shape records");
 
@@ -113,13 +113,13 @@ int main() {
       auto update = MakeDatabase();
       update.records[0].batch_size = i;
       std::string failure;
-      if (!gufo::hip::detail::SaveHipblasLtPlanDatabase(concurrent_path, update,
+      if (!mbufo::hip::detail::SaveHipblasLtPlanDatabase(concurrent_path, update,
                                                         &failure))
         writers_ok = false;
     });
   for (auto& writer : writers)
     writer.join();
-  const auto combined = gufo::hip::detail::LoadHipblasLtPlanDatabase(
+  const auto combined = mbufo::hip::detail::LoadHipblasLtPlanDatabase(
       concurrent_path, expected.key);
   Expect(writers_ok &&
              combined.status == HipblasLtPlanDatabaseLoadStatus::kLoaded &&

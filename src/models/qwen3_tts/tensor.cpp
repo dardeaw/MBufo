@@ -4,7 +4,7 @@
 #include <limits>
 #include <optional>
 
-namespace gufo::models::qwen3_tts {
+namespace mbufo::models::qwen3_tts {
 
 std::size_t DTypeSize(DType dtype) {
   switch (dtype) {
@@ -62,4 +62,4 @@ void TensorStore::SetData(const std::string& name, const void* data,
   }
 }
 
-}  // namespace gufo::models::qwen3_tts
+}  // namespace mbufo::models::qwen3_tts

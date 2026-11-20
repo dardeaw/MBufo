@@ -6,7 +6,7 @@
 #include <vector>
 
 void TestQwenSsmConvRecurrence() {
-  gufo::core::ModelConfig config;
+  mbufo::core::ModelConfig config;
   config.num_layers = 64;
   config.hidden_size = 5120;
   config.intermediate_size = 17408;
@@ -25,7 +25,7 @@ void TestQwenSsmConvRecurrence() {
   const std::uint32_t key_dim = config.ssm_state_size;
   const std::uint32_t val_dim = config.SsmValueSize();
 
-  gufo::models::QwenSsmCache cache(num_layers, conv_channels,
+  mbufo::models::QwenSsmCache cache(num_layers, conv_channels,
                                    config.ssm_conv_kernel, num_heads, key_dim,
                                    val_dim);
 
@@ -40,7 +40,7 @@ void TestQwenSsmConvRecurrence() {
   assert(deltanet[0] == 0.0F);
 
   // Create dummy layer
-  gufo::models::QwenLayerWeights layer;
+  mbufo::models::QwenLayerWeights layer;
   layer.is_full_attention = false;
 
   std::vector<float> in(config.hidden_size, 0.1F);
@@ -49,7 +49,7 @@ void TestQwenSsmConvRecurrence() {
   std::vector<float> out_buf(config.ssm_inner_size, 0.0F);
   std::vector<float> out(config.hidden_size, 0.0F);
 
-  gufo::models::ForwardSSM(in, layer, config, cache, 0, qkv_buf, gate_buf,
+  mbufo::models::ForwardSSM(in, layer, config, cache, 0, qkv_buf, gate_buf,
                            out_buf, out);
 
   // After 1 step, cache is updated

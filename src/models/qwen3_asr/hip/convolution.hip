@@ -5,7 +5,7 @@
 
 #include "src/models/qwen3_asr/hip/audio_ops.hpp"
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 namespace {
 using B = hip_bfloat16;
 using Fragment = __attribute__((ext_vector_type(16))) unsigned short;
@@ -177,4 +177,4 @@ void LaunchConvolution3x3(const void* input, const void* weight, void* output,
   else
     throw std::invalid_argument("unsupported Qwen3-ASR convolution shape");
 }
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip

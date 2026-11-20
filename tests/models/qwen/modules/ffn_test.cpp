@@ -26,28 +26,28 @@
 
 namespace {
 
-using gufo::core::ModelConfig;
-using gufo::models::QwenLayerWeights;
-using gufo::models::qwen::build_synthetic_qwen_weights;
-using gufo::models::qwen::CpuModuleContext;
-using gufo::models::qwen::FfnForward;
-using gufo::models::qwen::FfnLayerView;
-using gufo::models::qwen::make_small_qwen_config;
-using gufo::models::qwen::MakeFfnView;
-using gufo::models::qwen::ReferenceGEMV;
-using gufo::models::qwen::ReferenceSwiGLU;
+using mbufo::core::ModelConfig;
+using mbufo::models::QwenLayerWeights;
+using mbufo::models::qwen::build_synthetic_qwen_weights;
+using mbufo::models::qwen::CpuModuleContext;
+using mbufo::models::qwen::FfnForward;
+using mbufo::models::qwen::FfnLayerView;
+using mbufo::models::qwen::make_small_qwen_config;
+using mbufo::models::qwen::MakeFfnView;
+using mbufo::models::qwen::ReferenceGEMV;
+using mbufo::models::qwen::ReferenceSwiGLU;
 
 void TestFfnModuleMatchesOracle() {
   const ModelConfig config = make_small_qwen_config();
   auto sw = build_synthetic_qwen_weights(config);
   const auto& weights = sw.weights;
-  std::mt19937 rng = gufo::test::make_seeded_rng(0xFF12u);
+  std::mt19937 rng = mbufo::test::make_seeded_rng(0xFF12u);
   const std::size_t hidden = config.hidden_size;
   const std::size_t inter = config.intermediate_size;
   const auto& layer = weights.layers[0];
 
   std::vector<float> x =
-      gufo::test::make_random_tensor(hidden, rng, -0.5F, 0.5F);
+      mbufo::test::make_random_tensor(hidden, rng, -0.5F, 0.5F);
 
   // Module output.
   FfnLayerView view = MakeFfnView(layer, config);
@@ -64,7 +64,7 @@ void TestFfnModuleMatchesOracle() {
   ReferenceSwiGLU(g, u, a);
   ReferenceGEMV(layer.ffn_down.AsFloatSpan(), a, hidden, inter, ref);
 
-  auto res = gufo::test::compare_module_logits(ref, out);
+  auto res = mbufo::test::compare_module_logits(ref, out);
   assert(res.match);
   assert(res.finite);
   float max_abs = 0.0F;

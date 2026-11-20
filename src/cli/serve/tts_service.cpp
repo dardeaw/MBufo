@@ -9,7 +9,7 @@
 #include "src/models/qwen3_tts/config.hpp"
 #include "src/models/qwen3_tts/hip/synthesis_runtime.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 std::string ModelId(models::qwen3_tts::ModelVariant variant) {
@@ -154,4 +154,4 @@ bool TtsService::Synthesize(
   return impl_->options.runner(request, is_cancelled, result, error);
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

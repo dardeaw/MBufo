@@ -14,19 +14,19 @@
 
 namespace {
 
-using gufo::minimax_h3::BuildEulerPlan;
-using gufo::minimax_h3::BuildInitialNoise;
-using gufo::minimax_h3::BuildModulationRowMap;
-using gufo::minimax_h3::BuildReuseSelection;
-using gufo::minimax_h3::BuildServingSchedule;
-using gufo::minimax_h3::BuildTextOnlyLayout;
-using gufo::minimax_h3::BuildTimeRowSchedule;
-using gufo::minimax_h3::GenerationGeometry;
-using gufo::minimax_h3::ModulationRowMapSha256;
-using gufo::minimax_h3::PackedLayoutSha256;
-using gufo::minimax_h3::ResolveGenerationGeometry;
-using gufo::minimax_h3::Sha256;
-using gufo::minimax_h3::SigmaSchedule;
+using mbufo::minimax_h3::BuildEulerPlan;
+using mbufo::minimax_h3::BuildInitialNoise;
+using mbufo::minimax_h3::BuildModulationRowMap;
+using mbufo::minimax_h3::BuildReuseSelection;
+using mbufo::minimax_h3::BuildServingSchedule;
+using mbufo::minimax_h3::BuildTextOnlyLayout;
+using mbufo::minimax_h3::BuildTimeRowSchedule;
+using mbufo::minimax_h3::GenerationGeometry;
+using mbufo::minimax_h3::ModulationRowMapSha256;
+using mbufo::minimax_h3::PackedLayoutSha256;
+using mbufo::minimax_h3::ResolveGenerationGeometry;
+using mbufo::minimax_h3::Sha256;
+using mbufo::minimax_h3::SigmaSchedule;
 
 int failures = 0;
 
@@ -330,18 +330,18 @@ void TestPacking() {
   std::vector<float> rows(elements);
   std::vector<float> round_trip(elements);
   std::string error;
-  CHECK(gufo::minimax_h3::PatchifyVideo(latent, channels, time, height, width,
+  CHECK(mbufo::minimax_h3::PatchifyVideo(latent, channels, time, height, width,
                                         rows, &error));
   constexpr float first[] = {0, 1, 6, 7, 48, 49, 54, 55, 96, 97, 102, 103};
   CHECK(std::memcmp(rows.data(), first, sizeof(first)) == 0);
-  CHECK(gufo::minimax_h3::UnpatchifyVideo(rows, channels, time, height, width,
+  CHECK(mbufo::minimax_h3::UnpatchifyVideo(rows, channels, time, height, width,
                                           round_trip, &error));
   CHECK(std::memcmp(latent.data(), round_trip.data(),
                     latent.size() * sizeof(float)) == 0);
-  CHECK(!gufo::minimax_h3::PatchifyVideo(
+  CHECK(!mbufo::minimax_h3::PatchifyVideo(
       latent, channels, time, height, width,
       std::span<float>(rows.data(), rows.size() - 1), &error));
-  CHECK(!gufo::minimax_h3::PatchifyVideo({}, std::numeric_limits<int>::max(),
+  CHECK(!mbufo::minimax_h3::PatchifyVideo({}, std::numeric_limits<int>::max(),
                                          std::numeric_limits<int>::max(), 4, 4,
                                          {}, &error));
 
@@ -354,12 +354,12 @@ void TestPacking() {
   }
   std::vector<float> packed(audio_elements);
   std::vector<float> unpacked(audio_elements);
-  CHECK(gufo::minimax_h3::PackAudio(audio, audio_channels, audio_time, packed,
+  CHECK(mbufo::minimax_h3::PackAudio(audio, audio_channels, audio_time, packed,
                                     &error));
   constexpr float expected[] = {0, 6, 12, 18, 1, 7,  13, 19, 2, 8,  14, 20,
                                 3, 9, 15, 21, 4, 10, 16, 22, 5, 11, 17, 23};
   CHECK(std::memcmp(packed.data(), expected, sizeof(expected)) == 0);
-  CHECK(gufo::minimax_h3::UnpackAudio(packed, audio_channels, audio_time,
+  CHECK(mbufo::minimax_h3::UnpackAudio(packed, audio_channels, audio_time,
                                       unpacked, &error));
   CHECK(std::memcmp(audio.data(), unpacked.data(),
                     audio.size() * sizeof(float)) == 0);
@@ -370,7 +370,7 @@ void TestNoise() {
       0x8daf78a1U, 0x78625b1aU, 0x843daf20U, 0x3314b8ddU,
       0xf33e7a58U, 0x7a10c688U, 0x77a0a5e8U, 0xdba4433bU,
   };
-  gufo::minimax_h3::NormalRng rng(42);
+  mbufo::minimax_h3::NormalRng rng(42);
   for (const std::uint32_t expected : expected_u32) {
     CHECK(rng.NextU32() == expected);
   }
@@ -396,11 +396,11 @@ void TestNoise() {
   CHECK(first->video == second->video);
   CHECK(first->audio == second->audio);
   std::vector<float> packed_audio(audio_elements);
-  CHECK(gufo::minimax_h3::PackAudio(first->audio, audio_channels, audio_time,
+  CHECK(mbufo::minimax_h3::PackAudio(first->audio, audio_channels, audio_time,
                                     packed_audio, &error));
   CHECK(std::memcmp(first->video.data(), packed_audio.data(),
                     audio_elements * sizeof(float)) != 0);
-  gufo::minimax_h3::NormalRng sequential(42);
+  mbufo::minimax_h3::NormalRng sequential(42);
   std::vector<float> expected_video(video_elements);
   std::vector<float> expected_audio_rows(audio_elements);
   sequential.Fill(expected_video);
@@ -518,7 +518,7 @@ void TestReuseAndEulerPlan() {
   }
 
 #if !defined(ENGINE_ENABLE_HIP)
-  CHECK(!gufo::minimax_h3::HipEulerUpdate(nullptr, 0, 0, nullptr, nullptr, 0,
+  CHECK(!mbufo::minimax_h3::HipEulerUpdate(nullptr, 0, 0, nullptr, nullptr, 0,
                                           0.25F, 0.5F, 0.0F, nullptr, &error));
   CHECK(error.find("ENGINE_ENABLE_HIP") != std::string::npos);
 #endif

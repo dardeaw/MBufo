@@ -13,7 +13,7 @@
 
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
-namespace q = gufo::models::qwen38_flash_next::rocm;
+namespace q = mbufo::models::qwen38_flash_next::rocm;
 namespace {
 
 // The model's MoE combine geometry: top-10 slots over a 2,560-wide hidden

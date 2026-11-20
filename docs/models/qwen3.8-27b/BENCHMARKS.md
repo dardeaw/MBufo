@@ -1,10 +1,10 @@
 # Qwen27B benchmarks
 
-AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo versus llama.cpp
+AMD Strix Halo `gfx1151`, 128 GB unified memory. MBufo versus llama.cpp
 `b11069`, using the same Q4_K_XL / Q8_K_XL targets and Q4_K_M DFlash2 draft.
-Gufo uses its adaptive controller. HTTP, greedy, thinking off.
+MBufo uses its adaptive controller. HTTP, greedy, thinking off.
 
-All Gufo rows were refreshed October 19, 2026 on `11813e51` (wave64
+All MBufo rows were refreshed October 19, 2026 on `11813e51` (wave64
 verification attention, rebased on main `23fd87dc`). DFlash2 completions match
 the earlier October 19 rows at every depth; decode gains grow with depth.
 AR pp, multi-user rates and memory match matched main controls; their changes
@@ -14,7 +14,7 @@ The [component-cache refresh](artifacts/component-cache-review.json) has separat
 per-request short-history controls and remains under qualification. These
 throughput tables retain their dates and do not qualify the new cache wiring.
 
-Positive gain favors Gufo.
+Positive gain favors MBufo.
 [Quality and measurement details](QUALITY.md) · [Model identities](artifacts/model-identities.json)
 
 ## October 21 focused prefill and sampling comparison
@@ -109,7 +109,7 @@ The October 19 sweep and all llama.cpp rows remain unchanged.
 Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 
 <!-- bench:single-ar-q4 -->
-| Qwen27B Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| Qwen27B Q4 AR<br>Depth (tokens) | MBufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | MBufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | 648.89 | 357.54 | +81.5% | 12.37 | 12.06 | +2.6% |
 | 4,096 | 608.70 | 330.42 | +84.2% | 12.20 | 11.88 | +2.7% |
@@ -126,7 +126,7 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 ---
 
 <!-- bench:single-ar-q8 -->
-| Qwen27B Q8 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| Qwen27B Q8 AR<br>Depth (tokens) | MBufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | MBufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | 479.25 | 337.08 | +42.2% | 7.19 | 7.20 | -0.1% |
 | 4,096 | 463.03 | 317.96 | +45.6% | 7.14 | 7.14 | +0.0% |
@@ -147,7 +147,7 @@ text. Output-consistency controls and their dated scope are recorded in
 the [quality details](QUALITY.md#meaning-of-exact).
 
 <!-- bench:single-dflash2-q4 -->
-| Qwen27B Q4 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
+| Qwen27B Q4 DFlash2<br>Depth (tokens) | MBufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | MBufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | MBufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | 579.58 | 347.51 | +66.8% | 26.91 | 23.40 | +15.0% | 64.74 | 35.86 | +80.5% |
 | 4,096 | 527.39 | 316.58 | +66.6% | 27.99 | 23.03 | +21.5% | 54.04 | 34.47 | +56.8% |
@@ -164,7 +164,7 @@ the [quality details](QUALITY.md#meaning-of-exact).
 ---
 
 <!-- bench:single-dflash2-q8 -->
-| Qwen27B Q8 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
+| Qwen27B Q8 DFlash2<br>Depth (tokens) | MBufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | MBufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | MBufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | 445.02 | 333.85 | +33.3% | 16.44 | 15.00 | +9.6% | 47.69 | 23.83 | +100.1% |
 | 4,096 | 407.55 | 310.23 | +31.4% | 16.71 | 16.12 | +3.7% | 41.47 | 23.59 | +75.8% |
@@ -184,7 +184,7 @@ Context 4096 per user, tg128. Throughput sums individual request decode rates,
 excluding prefill and scheduling. One AR workload per concurrency.
 
 <!-- bench:multi-ar-q4 -->
-| Qwen27B Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
+| Qwen27B Q4 AR<br>Users | MBufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
 | 1 | 12.42 | 12.20 | +1.8% |
 | 2 | 23.83 | 22.58 | +5.5% |
@@ -198,7 +198,7 @@ excluding prefill and scheduling. One AR workload per concurrency.
 ---
 
 <!-- bench:multi-ar-q8 -->
-| Qwen27B Q8 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
+| Qwen27B Q8 AR<br>Users | MBufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
 | 1 | 7.21 | 7.24 | -0.4% |
 | 2 | 14.45 | 13.71 | +5.4% |
@@ -215,7 +215,7 @@ Mixed prompts and repetitive output, context 4096 per user, up to 128 output
 tokens. Rates sum individual request decode rates. No prompt-cache hits.
 
 <!-- bench:multi-dflash2-q4 -->
-| Qwen27B Q4 DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
+| Qwen27B Q4 DFlash2<br>Users | MBufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | MBufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 37.19 | 27.15 | +37.0% | 71.55 | 37.56 | +90.5% |
 | 2 | 57.20 | 40.04 | +42.9% | 105.08 | 51.65 | +103.4% |
@@ -229,7 +229,7 @@ tokens. Rates sum individual request decode rates. No prompt-cache hits.
 ---
 
 <!-- bench:multi-dflash2-q8 -->
-| Qwen27B Q8 DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
+| Qwen27B Q8 DFlash2<br>Users | MBufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | MBufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 25.04 | 17.54 | +42.8% | 51.69 | 24.09 | +114.6% |
 | 2 | 44.50 | 31.64 | +40.6% | 87.02 | 41.60 | +109.2% |
@@ -245,7 +245,7 @@ tokens. Rates sum individual request decode rates. No prompt-cache hits.
 C1, context capacity 262144, DFlash2. Cold target/draft files to HTTP readiness.
 
 <!-- bench:loading -->
-| Qwen27B<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
+| Qwen27B<br>Target | MBufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
 | Q4 | 6.27 | 23.33 | +272.1% |
 | Q8 | 8.59 | 36.47 | +324.6% |
@@ -256,12 +256,12 @@ C1, context capacity 262144, DFlash2. Cold target/draft files to HTTP readiness.
 ## Memory occupation
 
 C1, context capacity 262144, AR. Peak memory reported by HIP. Main `23fd87dc`
-gives the same peaks. Gufo now loads the vision projector by default, and HIP
+gives the same peaks. MBufo now loads the vision projector by default, and HIP
 counts retained RAM prompt snapshots: with `--cache-ram-bytes 1073741824`, Q4
 peaks at 39.14 GiB in both rows.
 
 <!-- bench:memory-q4 -->
-| Qwen27B Q4 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
+| Qwen27B Q4 AR<br>Workload | MBufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
 | pp2048 + tg128 | 40.20 | 36.19 | -10.0% |
 | 16K prefix, pp4096 + tg128 | 50.27 | 36.62 | -27.2% |
@@ -272,7 +272,7 @@ peaks at 39.14 GiB in both rows.
 ---
 
 <!-- bench:memory-q8 -->
-| Qwen27B Q8 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
+| Qwen27B Q8 AR<br>Workload | MBufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
 | pp2048 + tg128 | 53.15 | 48.60 | -8.6% |
 | 16K prefix, pp4096 + tg128 | 63.22 | 49.02 | -22.5% |

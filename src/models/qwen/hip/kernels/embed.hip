@@ -13,7 +13,7 @@
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // All three lookups ride the shared core gather (src/core/compute/gemm/dequant_rows.hip): one decoder per
 // format in core::quant, and an unlisted format aborts instead of being decoded as another one.
@@ -41,5 +41,5 @@ void LaunchEmbeddingLookup(const void* table, core::GgmlType type,
               type, hidden_size);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif

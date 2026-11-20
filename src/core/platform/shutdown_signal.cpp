@@ -13,7 +13,7 @@
 #include <cstring>
 #endif
 
-namespace gufo::platform {
+namespace mbufo::platform {
 namespace {
 
 #if defined(_WIN32)
@@ -117,4 +117,4 @@ void NotifyShutdownHandled() noexcept {
 #endif
 }
 
-}  // namespace gufo::platform
+}  // namespace mbufo::platform

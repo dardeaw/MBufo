@@ -553,7 +553,7 @@ def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
         function = result["tools"][0]["function"]
         arguments = json.loads(function["arguments"])
         assert function["name"] == "mcp_lookup", (label, result)
-        # DeepSeek's typed string flag lets gufo's open-tool route carry named
+        # DeepSeek's typed string flag lets mbufo's open-tool route carry named
         # arguments where llama.cpp declares none (tests/fixtures records it).
         assert arguments == {} or (deepseek and name != "root_const"
                                    and arguments == {"key": "alpha"}), (label, result)

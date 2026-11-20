@@ -70,7 +70,7 @@ def link_violations(metadata: Path) -> list[str]:
     # Only this reviewed CPU platform dependency may be linked. Arbitrary relay
     # targets are rejected too, so they cannot hide a transitive model/HIP link.
     allowed = {"Threads::Threads"}
-    return [f"gufo_cache: unapproved dependency {library}"
+    return [f"mbufo_cache: unapproved dependency {library}"
             for line in metadata.read_text().splitlines()
             for library in line.split(";") if library and library not in allowed]
 
@@ -131,7 +131,7 @@ class BoundaryTests(unittest.TestCase):
             self.assertTrue(link_violations(metadata))
             metadata.write_text("\nThreads::Threads\n")
             self.assertEqual(link_violations(metadata), [])
-            for dependency in ("gufo_core", "gufo_http", "gufo_model_relay", "hip::host", "/opt/rocm/lib/libamdhip64.so"):
+            for dependency in ("mbufo_core", "mbufo_http", "mbufo_model_relay", "hip::host", "/opt/rocm/lib/libamdhip64.so"):
                 with self.subTest(dependency=dependency):
                     metadata.write_text(dependency + "\n")
                     self.assertEqual(len(link_violations(metadata)), 1)

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_PROMPT_HIDDEN_BUFFER_HPP_
-#define GUFO_MODELS_QWEN_HIP_PROMPT_HIDDEN_BUFFER_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_PROMPT_HIDDEN_BUFFER_HPP_
+#define MBUFO_MODELS_QWEN_HIP_PROMPT_HIDDEN_BUFFER_HPP_
 
 #include <cstddef>
 #include <memory>
@@ -9,7 +9,7 @@
 #include "src/cache/ledger.hpp"
 #include "src/core/hip/host_allocations.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 /// Host destination of the DFlash2 prompt capture. Up to a bound (one prompt
 /// batch of every captured layer) it is pinned, so the per-layer device-to-host
@@ -55,5 +55,5 @@ private:
   std::size_t size_{};
 };
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif

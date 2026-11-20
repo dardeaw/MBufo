@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_KV_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_KV_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_BLOCKED_KV_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_BLOCKED_KV_HPP_
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -14,7 +14,7 @@
 /// src/models/qwen38_flash_next/kernels/rocm/kernels.hpp). The flash-next
 /// header re-exports every symbol below, so existing callers keep compiling
 /// with bitwise-identical behavior.
-namespace gufo::core::compute::blocked_kv {
+namespace mbufo::core::compute::blocked_kv {
 
 /// KV cache element format of the Flash-Next attention caches.
 ///
@@ -66,7 +66,7 @@ bool PrepareAttentionKv(
     std::uint32_t n_tokens, std::uint32_t heads, std::uint32_t kv_heads,
     std::uint32_t d, std::uint32_t rotary_dim, const std::uint32_t* start_pos,
     float theta, float eps, hipStream_t stream,
-    const gufo::models::qwen::vision::DeviceRope* rope = nullptr, bool prefill = false);
+    const mbufo::models::qwen::vision::DeviceRope* rope = nullptr, bool prefill = false);
 
 /// Symmetric quantize of float rows into `codec` blocks (see .hip): 32 elements
 /// plus a per-32-block f16 scale. `codec` selects INT8 or E4M3 elements.
@@ -105,6 +105,6 @@ void AttentionKv(const float* q, const std::uint8_t* k_cache,
                  std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
                  KvCodec codec, hipStream_t stream, float score_scale = 0.0F);
 
-}  // namespace gufo::core::compute::blocked_kv
+}  // namespace mbufo::core::compute::blocked_kv
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_KV_HPP_
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_BLOCKED_KV_HPP_

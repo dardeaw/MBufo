@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GPTOSS_KERNELS_KERNELS_HPP_
-#define GUFO_MODELS_GPTOSS_KERNELS_KERNELS_HPP_
+#ifndef MBUFO_MODELS_GPTOSS_KERNELS_KERNELS_HPP_
+#define MBUFO_MODELS_GPTOSS_KERNELS_KERNELS_HPP_
 
 // GPT-OSS dense-decoder kernels (gfx1151): embedding gather, RMSNorm, NeoX
 // YaRN RoPE, dense F16 KV store, causal attention with per-head sinks and an
@@ -16,7 +16,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::gptoss::kernels {
+namespace mbufo::models::gptoss::kernels {
 
 /// Embedding lookup from a device-mirrored table (Q8_0 / F32 / F16).
 void Embed(const void* table, core::GgmlType type, const std::int32_t* ids,
@@ -93,6 +93,6 @@ void DownBiasAdd(float* out, const std::int32_t* ids, const float* down_b,
                  std::uint32_t slots, std::uint32_t hidden,
                  hipStream_t stream);
 
-}  // namespace gufo::models::gptoss::kernels
+}  // namespace mbufo::models::gptoss::kernels
 
-#endif  // GUFO_MODELS_GPTOSS_KERNELS_KERNELS_HPP_
+#endif  // MBUFO_MODELS_GPTOSS_KERNELS_KERNELS_HPP_

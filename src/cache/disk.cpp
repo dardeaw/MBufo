@@ -22,7 +22,7 @@
 #include <set>
 #include <stdexcept>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 namespace detail {
 struct DiskAvailability {
   ResourceCharge metadata;
@@ -595,7 +595,7 @@ struct DiskStore::Impl {
     // The charge returns to the ledger outside the verification lock.
     node = {};
   }
-#ifdef GUFO_CACHE_TESTING
+#ifdef MBUFO_CACHE_TESTING
   std::function<void(DiskPublicationStep)> crash_hook;
 #define DISK_STEP(step)                      \
   do {                                       \
@@ -1833,10 +1833,10 @@ void DiskStore::WaitForReclamation() {
   if (impl_->reclamation.valid())
     impl_->reclamation.get();
 }
-#ifdef GUFO_CACHE_TESTING
+#ifdef MBUFO_CACHE_TESTING
 void DiskStore::SetCrashHook(std::function<void(DiskPublicationStep)> hook) {
   std::lock_guard guard(impl_->mutex);
   impl_->crash_hook = std::move(hook);
 }
 #endif
-}  // namespace gufo::cache
+}  // namespace mbufo::cache

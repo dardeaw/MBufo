@@ -8,7 +8,7 @@
 
 #include "src/cache/disk.hpp"
 
-using namespace gufo::cache;
+using namespace mbufo::cache;
 namespace fs = std::filesystem;
 namespace {
 DiskFileId Id(std::uint64_t n) {
@@ -52,7 +52,7 @@ int main() {
   std::cout << "100k_token_manifest_bytes="
             << EncodeManifest(Manifest(100000, 1)).size() << '\n';
   for (unsigned count : {100, 1000}) {
-    char name[] = "/tmp/gufo-disk-bench-XXXXXX";
+    char name[] = "/tmp/mbufo-disk-bench-XXXXXX";
     fs::path root = mkdtemp(name);
     try {
       {

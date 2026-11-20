@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_
-#define GUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_
+#ifndef MBUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_
+#define MBUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_
 
 #include <algorithm>
 #include <atomic>
@@ -22,7 +22,7 @@
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 enum class TextGenerationErrorCode : std::uint8_t {
   kQueueFull,
@@ -555,6 +555,6 @@ TextGenerationBackend::start_chat(const ChatRequest& request,
                                                      sampling, is_cancelled);
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_
+#endif  // MBUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_

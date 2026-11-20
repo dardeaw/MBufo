@@ -40,7 +40,7 @@
 #include "src/models/gptoss/engine.hpp"
 #endif
 
-namespace gufo::cli {
+namespace mbufo::cli {
 
 // Hash emitted IDs in a portable byte order, after the timed generation.
 // Decoded text alone can hide different token sequences.
@@ -529,8 +529,8 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
     return 1;
   std::string error;
   auto session = model->CreateSession(
-      opt.speculative_backend.empty() ? gufo::core::SessionMode::kAutoregressive
-                                      : gufo::core::SessionMode::kSpeculative,
+      opt.speculative_backend.empty() ? mbufo::core::SessionMode::kAutoregressive
+                                      : mbufo::core::SessionMode::kSpeculative,
       kDefaultContext, &error);
   if (!session) {
     std::cerr << "DeepSeek session creation failed: " << error << '\n';
@@ -571,8 +571,8 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
     return 1;
   std::string error;
   auto session = model->CreateSession(
-      opt.speculative_backend.empty() ? gufo::core::SessionMode::kAutoregressive
-                                      : gufo::core::SessionMode::kSpeculative,
+      opt.speculative_backend.empty() ? mbufo::core::SessionMode::kAutoregressive
+                                      : mbufo::core::SessionMode::kSpeculative,
       kDefaultContext, &error);
   if (!session) {
     std::cerr << "DeepSeek session creation failed: " << error << '\n';
@@ -588,7 +588,7 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
   const auto reasoning = PromptReasoningOptions(opt);
   const auto chat_options =
       models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning);
-  std::cout << "=== Gufo Interactive Chat (DeepSeek V4 Flash) ===\n"
+  std::cout << "=== MBufo Interactive Chat (DeepSeek V4 Flash) ===\n"
             << "Type 'exit' or Ctrl+D to quit.\n\n";
   for (std::string input;;) {
     std::cout << ">>> User: " << std::flush;
@@ -850,7 +850,7 @@ static std::optional<PromptOptions> ParseTextOptions(
     std::span<const char* const> args, std::string* error_msg,
     std::string_view command) {
   PromptOptions opt;
-  gufo::cli::ArgParser parser("gufo prompt",
+  mbufo::cli::ArgParser parser("mbufo prompt",
                               "Execute one prompt request and exit.");
   bool speculative_explicit = false;
   RegisterTextOptions(parser, opt, speculative_explicit, command);
@@ -962,10 +962,10 @@ int RunPrompt(std::span<const char* const> args) {
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
-      PrintPromptHelp("gufo");
+      PrintPromptHelp("mbufo");
       return 2;
     }
-    PrintPromptHelp("gufo");
+    PrintPromptHelp("mbufo");
     return 0;
   }
 
@@ -988,27 +988,27 @@ int RunPrompt(std::span<const char* const> args) {
   }
 
   if (opt.prompt_text.empty() && opt.model_path.empty()) {
-    PrintPromptHelp("gufo");
+    PrintPromptHelp("mbufo");
     return 0;
   }
 
   if (opt.model_path.empty()) {
     std::cout
-        << "gufo prompt: prompt received: \"" << opt.prompt_text << "\"\n"
+        << "mbufo prompt: prompt received: \"" << opt.prompt_text << "\"\n"
         << "(Specify --model <PATH.gguf> to execute local model generation)\n";
     return 0;
   }
 
   const auto model_load_start = std::chrono::steady_clock::now();
   std::string err;
-  auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
+  auto reader_owner = mbufo::core::GgufReader::OpenFile(opt.model_path, &err);
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
               << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  const std::shared_ptr<const gufo::core::GgufReader> reader(
+  const std::shared_ptr<const mbufo::core::GgufReader> reader(
       std::move(reader_owner));
   ResolvePromptSampling(*reader, &opt);
 
@@ -1562,8 +1562,8 @@ int RunPrompt(std::span<const char* const> args) {
       return 1;
     auto session =
         model->CreateSession(opt.speculative_backend.empty()
-                                 ? gufo::core::SessionMode::kAutoregressive
-                                 : gufo::core::SessionMode::kSpeculative,
+                                 ? mbufo::core::SessionMode::kAutoregressive
+                                 : mbufo::core::SessionMode::kSpeculative,
                              kDefaultContext, &err);
     if (!session) {
       std::cerr << "Flash-Next session failed: " << err << '\n';
@@ -1588,7 +1588,7 @@ int RunPrompt(std::span<const char* const> args) {
   int dev_count = 0;
   if (!opt.force_cpu && hipGetDeviceCount(&dev_count) == hipSuccess &&
       dev_count > 0) {
-    auto qwen_policy = gufo::hip::QwenExecutionPolicy::Production();
+    auto qwen_policy = mbufo::hip::QwenExecutionPolicy::Production();
     if (const char* kv_quant = std::getenv("QWEN_KV_QUANT")) {
       const std::string value = kv_quant;
       if (value != "f16" && value != "q8") {
@@ -1611,7 +1611,7 @@ int RunPrompt(std::span<const char* const> args) {
       const long ctx_val = std::strtol(ctx_env, nullptr, 10);
       if (ctx_val >= 1024) qwen_ctx = static_cast<std::uint32_t>(ctx_val);
     }
-    auto gpu_exec = gufo::hip::QwenGpuExecutor::CreateFromGguf(
+    auto gpu_exec = mbufo::hip::QwenGpuExecutor::CreateFromGguf(
         reader, &err, qwen_ctx, qwen_policy);
     if (gpu_exec) {
       PrintModelLoadTime(model_load_start);
@@ -1730,30 +1730,30 @@ int RunChat(std::span<const char* const> args) {
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
-      PrintChatHelp("gufo");
+      PrintChatHelp("mbufo");
       return 2;
     }
-    PrintChatHelp("gufo");
+    PrintChatHelp("mbufo");
     return 0;
   }
 
   auto opt = *opt_res;
   if (opt.model_path.empty()) {
-    std::cout << "gufo chat: interactive conversation mode\n"
+    std::cout << "mbufo chat: interactive conversation mode\n"
               << "(Specify --model <PATH.gguf> to load model weights)\n";
     return 0;
   }
 
   const auto model_load_start = std::chrono::steady_clock::now();
   std::string err;
-  auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
+  auto reader_owner = mbufo::core::GgufReader::OpenFile(opt.model_path, &err);
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
               << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  const std::shared_ptr<const gufo::core::GgufReader> reader(
+  const std::shared_ptr<const mbufo::core::GgufReader> reader(
       std::move(reader_owner));
   ResolvePromptSampling(*reader, &opt);
 
@@ -1787,8 +1787,8 @@ int RunChat(std::span<const char* const> args) {
       return 1;
     flash_session = flash_model->CreateSession(
         opt.speculative_backend.empty()
-            ? gufo::core::SessionMode::kAutoregressive
-            : gufo::core::SessionMode::kSpeculative,
+            ? mbufo::core::SessionMode::kAutoregressive
+            : mbufo::core::SessionMode::kSpeculative,
         kDefaultContext, &err);
     if (!flash_session) {
       std::cerr << "Flash-Next session failed: " << err << '\n';
@@ -1801,7 +1801,7 @@ int RunChat(std::span<const char* const> args) {
   int device_count = 0;
   if (tokenizer == nullptr && !opt.force_cpu &&
       hipGetDeviceCount(&device_count) == hipSuccess && device_count > 0) {
-    auto qwen_policy = gufo::hip::QwenExecutionPolicy::Production();
+    auto qwen_policy = mbufo::hip::QwenExecutionPolicy::Production();
     if (const char* kv_quant = std::getenv("QWEN_KV_QUANT")) {
       const std::string value = kv_quant;
       if (value != "f16" && value != "q8") {
@@ -1864,7 +1864,7 @@ int RunChat(std::span<const char* const> args) {
   }
   PrintModelLoadTime(model_load_start);
 
-  std::cout << "=== Gufo Interactive Chat (" << architecture << ") ===\n"
+  std::cout << "=== MBufo Interactive Chat (" << architecture << ") ===\n"
             << "Type 'exit' or Ctrl+D to quit.\n\n";
 
   std::vector<tokenization::ChatMessage> history;
@@ -1965,4 +1965,4 @@ int RunChat(std::span<const char* const> args) {
   return 0;
 }
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli

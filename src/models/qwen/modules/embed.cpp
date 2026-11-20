@@ -2,7 +2,7 @@
 
 #include "src/models/qwen/forward.hpp"  // ForwardEmbedding
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 void EmbedForward(const CpuModuleContext&, std::uint32_t token_id,
                   const QwenTensorRef& token_embd, std::size_t hidden_size,
@@ -12,4 +12,4 @@ void EmbedForward(const CpuModuleContext&, std::uint32_t token_id,
   ForwardEmbedding(token_id, token_embd, hidden_size, out);
 }
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

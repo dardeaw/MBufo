@@ -1,6 +1,6 @@
 {
   "artifactType": "servingBenchmark",
-  "benchmarkSchema": "gufo.serving-benchmark.v1",
+  "benchmarkSchema": "mbufo.serving-benchmark.v1",
   "canonical": {
     "cppStandard": "C++20",
     "cpuArchitecture": "x86_64",

@@ -7,7 +7,7 @@
 #include <tuple>
 #include <utility>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 namespace {
 std::size_t Add(std::size_t a, std::size_t b) {
   if (b > std::numeric_limits<std::size_t>::max() - a)
@@ -866,4 +866,4 @@ std::size_t PrefixIndex::MetadataBytes() const {
   }
   return bytes;
 }
-}  // namespace gufo::cache
+}  // namespace mbufo::cache

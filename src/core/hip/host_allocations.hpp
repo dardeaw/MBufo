@@ -1,12 +1,12 @@
-#ifndef GUFO_CORE_HIP_HOST_ALLOCATIONS_HPP_
-#define GUFO_CORE_HIP_HOST_ALLOCATIONS_HPP_
+#ifndef MBUFO_CORE_HIP_HOST_ALLOCATIONS_HPP_
+#define MBUFO_CORE_HIP_HOST_ALLOCATIONS_HPP_
 
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <vector>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // Best-effort Linux long-term pins prevent CPU compaction from moving GPU
 // registrations. A restricted io_uring/memlock limit retains ordinary HIP
@@ -43,5 +43,5 @@ private:
   std::vector<Allocation> allocations_;
 };
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif

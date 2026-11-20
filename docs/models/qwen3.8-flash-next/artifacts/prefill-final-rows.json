@@ -6,9 +6,9 @@
   "hardware": "AMD Strix Halo gfx1151",
   "flake_lock_sha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
   "builds": {
-    "baseline": "/nix/store/nbnf24vxmblqbnbl4sip6iy21465cmnz-gufo-0-unstable-0772482-dirty",
-    "ffn_only": "/nix/store/kjd5f4in47l670ans37703dkniy6fbym-gufo-0-unstable-5a0a0ed-dirty",
-    "candidate": "/nix/store/z6w8198c9cnnhps818azj79yd7hp7pxk-gufo-0-unstable-5a0a0ed-dirty",
+    "baseline": "/nix/store/nbnf24vxmblqbnbl4sip6iy21465cmnz-mbufo-0-unstable-0772482-dirty",
+    "ffn_only": "/nix/store/kjd5f4in47l670ans37703dkniy6fbym-mbufo-0-unstable-5a0a0ed-dirty",
+    "candidate": "/nix/store/z6w8198c9cnnhps818azj79yd7hp7pxk-mbufo-0-unstable-5a0a0ed-dirty",
     "executor_cpp_sha256": "64d2af07c88c3d1110a3249f57a2764e1f7fe70616a8d92dd360c66e9104baa1"
   },
   "model": {
@@ -18,11 +18,11 @@
     "mtp": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
   },
   "method": {
-    "ar_command": "gufo bench --model TARGET --speculative off -p 2048 -d 0,131072 -r 1",
+    "ar_command": "mbufo bench --model TARGET --speculative off -p 2048 -d 0,131072 -r 1",
     "scope": "One warmed CLI pp2048 sample per depth. Loading and depth-prefix processing are outside the measured suffix. These are repeated-text controls, not replacements for HTTP mixed/repetitive benchmark tables.",
     "isolation": "Sequential GPU measurements without concurrent builds or inference.",
     "memory": "No additional allocation or persistent-state format change.",
-    "mtp_command": "gufo bench --model TARGET --speculative mtp --mtp-model MTP -p 2048 -d 0,65536,131072 -r 1",
+    "mtp_command": "mbufo bench --model TARGET --speculative mtp --mtp-model MTP -p 2048 -d 0,65536,131072 -r 1",
     "mtp_baseline": "Reuse the candidate measurements in prefill-deep-context.json: identical baseline store path, model, lockfile, CLI harness, ordered depths, settings and cache history.",
     "interpretation": "AR gains are single-run observations. MTP retains its full target path and stays within 0.3% of the matched control; the AR optimization cannot discard hidden rows needed by its predictor."
   },

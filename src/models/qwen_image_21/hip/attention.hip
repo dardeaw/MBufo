@@ -4,7 +4,7 @@
 #include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 
-namespace gufo::models::qwen_image_21::hip {
+namespace mbufo::models::qwen_image_21::hip {
 namespace {
 
 using Fragment = __attribute__((ext_vector_type(16))) unsigned short;
@@ -199,4 +199,4 @@ void FusedAttention128(const std::uint16_t* queries, const std::uint16_t* keys,
         rows, count, query_start, query_count, nullptr);
 }
 
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace mbufo::models::qwen_image_21::hip

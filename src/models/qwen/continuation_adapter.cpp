@@ -11,7 +11,7 @@
 
 #include "src/core/hip/snapshot_copy.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 namespace {
 using cache::Rows;
 using cache::TransferResult;
@@ -1083,4 +1083,4 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
     return false;
   }
 }
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

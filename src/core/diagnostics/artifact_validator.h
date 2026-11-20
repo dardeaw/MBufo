@@ -1,12 +1,12 @@
-#ifndef GUFO_CORE_DIAGNOSTICS_ARTIFACT_VALIDATOR_H_
-#define GUFO_CORE_DIAGNOSTICS_ARTIFACT_VALIDATOR_H_
+#ifndef MBUFO_CORE_DIAGNOSTICS_ARTIFACT_VALIDATOR_H_
+#define MBUFO_CORE_DIAGNOSTICS_ARTIFACT_VALIDATOR_H_
 
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 struct ValidationResult {
   bool is_valid{true};
@@ -25,6 +25,6 @@ struct ValidationResult {
 [[nodiscard]] ValidationResult ValidateArtifactFile(
     const std::filesystem::path& file_path);
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics
 
-#endif  // GUFO_CORE_DIAGNOSTICS_ARTIFACT_VALIDATOR_H_
+#endif  // MBUFO_CORE_DIAGNOSTICS_ARTIFACT_VALIDATOR_H_

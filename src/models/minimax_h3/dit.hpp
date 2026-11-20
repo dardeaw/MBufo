@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_MINIMAX_H3_DIT_HPP_
-#define GUFO_MODELS_MINIMAX_H3_DIT_HPP_
+#ifndef MBUFO_MODELS_MINIMAX_H3_DIT_HPP_
+#define MBUFO_MODELS_MINIMAX_H3_DIT_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +10,7 @@
 
 #include "src/models/minimax_h3/runtime.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 inline constexpr std::size_t kDitBlocks = 50;
 inline constexpr std::size_t kDitHiddenSize = 5376;
@@ -165,6 +165,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3
 
-#endif  // GUFO_MODELS_MINIMAX_H3_DIT_HPP_
+#endif  // MBUFO_MODELS_MINIMAX_H3_DIT_HPP_

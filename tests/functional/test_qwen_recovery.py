@@ -15,7 +15,7 @@ def response(cached=0):
                      "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 20000, "completion_tokens": 1,
                   "prompt_tokens_details": {"cached_tokens": cached},
-                  "gufo": {"prefill_tokens": 20000 - cached,
+                  "mbufo": {"prefill_tokens": 20000 - cached,
                            "component_cache": {"selected_tokens": cached}}},
     }
 
@@ -58,7 +58,7 @@ class QwenRecoveryEvidenceTest(unittest.TestCase):
             elif kind == "cache":
                 cold = response(1)
             elif kind == "prefill":
-                cold["usage"]["gufo"]["prefill_tokens"] -= 1
+                cold["usage"]["mbufo"]["prefill_tokens"] -= 1
             elif kind == "missing":
                 cold["usage"]["prompt_tokens_details"].clear()
             else:
@@ -91,7 +91,7 @@ class QwenRecoveryEvidenceTest(unittest.TestCase):
             if key == "cached":
                 result["usage"]["prompt_tokens_details"]["cached_tokens"] = 10000
             else:
-                result["usage"]["gufo"]["component_cache"]["selected_tokens"] = 10000
+                result["usage"]["mbufo"]["component_cache"]["selected_tokens"] = 10000
             with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
                 with self.assertRaises(RuntimeError):
                     assert_publication_wait(directory, "rewrite", WAIT, result)

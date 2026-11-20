@@ -1,5 +1,5 @@
 {
-  "schema": "gufo.ds4-dspark-sampling.v1",
+  "schema": "mbufo.ds4-dspark-sampling.v1",
   "date": "2026-09-19",
   "source_base": "8342fe1bd1ecbc646271f45e9ca904754b10e34b",
   "canonical": {
@@ -40,8 +40,8 @@
     }
   },
   "releases": {
-    "baseline": "/nix/store/gcsl2m44v2674ya79vxz4j2699vckzrw-gufo-a6c029d-dirty/bin/gufo",
-    "hybrid": "/nix/store/75p75cb4rmvsck49zj2n1ry4l50h8338-gufo-8342fe1-dirty/bin/gufo"
+    "baseline": "/nix/store/gcsl2m44v2674ya79vxz4j2699vckzrw-mbufo-a6c029d-dirty/bin/mbufo",
+    "hybrid": "/nix/store/75p75cb4rmvsck49zj2n1ry4l50h8338-mbufo-8342fe1-dirty/bin/mbufo"
   },
   "settings": {
     "temperature": 1,
@@ -448,7 +448,7 @@
     "The naming case ended before 128 tokens: 23 baseline and 21 hybrid.",
     "No full-logit arrays retained."
   ],
-  "quality_release": "/nix/store/j3zj2xg9mw5g35jza9zyz5i8kpmnb3ky-gufo-8342fe1-dirty/bin/gufo",
+  "quality_release": "/nix/store/j3zj2xg9mw5g35jza9zyz5i8kpmnb3ky-mbufo-8342fe1-dirty/bin/mbufo",
   "quality": {
     "nix_release_build": "passed",
     "focused_ctest": [
@@ -496,5 +496,5 @@
       }
     ]
   },
-  "published_release": "/nix/store/mwfi22zq48xw1wb54j1v6bpa92j4mlhf-gufo-8342fe1-dirty/bin/gufo"
+  "published_release": "/nix/store/mwfi22zq48xw1wb54j1v6bpa92j4mlhf-mbufo-8342fe1-dirty/bin/mbufo"
 }

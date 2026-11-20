@@ -17,7 +17,7 @@
 #include "src/models/minimax_h3/sha256.hpp"
 #include "src/models/minimax_h3/tokenizer.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 std::optional<int> ResolveDurationFrames(std::string_view seconds,
                                          std::string* error) {
@@ -136,7 +136,7 @@ bool WriteAtomic(const std::filesystem::path& path, std::string_view contents,
                         filesystem_error.message());
     return false;
   }
-  const std::filesystem::path partial = path.string() + ".gufo-partial-" +
+  const std::filesystem::path partial = path.string() + ".mbufo-partial-" +
                                         std::to_string(::getpid()) + "-" +
                                         std::to_string(NextOutputNonce());
   {
@@ -198,7 +198,7 @@ bool WriteFramesAtomic(const std::filesystem::path& directory,
   }
   const std::filesystem::path partial =
       parent /
-      (directory.filename().string() + ".gufo-partial-" +
+      (directory.filename().string() + ".mbufo-partial-" +
        std::to_string(::getpid()) + "-" + std::to_string(NextOutputNonce()));
   std::filesystem::remove_all(partial, filesystem_error);
   filesystem_error.clear();
@@ -294,7 +294,7 @@ bool WriteLatentsAtomic(const std::filesystem::path& directory,
   }
   const std::filesystem::path partial =
       parent /
-      (directory.filename().string() + ".gufo-partial-" +
+      (directory.filename().string() + ".mbufo-partial-" +
        std::to_string(::getpid()) + "-" + std::to_string(NextOutputNonce()));
   std::filesystem::remove_all(partial, filesystem_error);
   filesystem_error.clear();
@@ -327,7 +327,7 @@ bool WriteLatentsAtomic(const std::filesystem::path& directory,
   }
   std::ostringstream manifest;
   manifest << "{\n"
-           << "  \"schema\": \"gufo.minimax-h3-final-latents.v1\",\n"
+           << "  \"schema\": \"mbufo.minimax-h3-final-latents.v1\",\n"
            << "  \"video\": {\"dtype\": \"F32\", \"shape\": ["
            << kH3VideoLatentChannels << ", "
            << geometry.temporal.video_latent_frames << ", "
@@ -807,7 +807,7 @@ std::string GenerationTelemetryJson(const GenerationTelemetry& telemetry) {
   }
   std::ostringstream output;
   output << std::fixed << std::setprecision(3) << "{\n"
-         << "  \"schema\": \"gufo.minimax-h3-generation-telemetry.v1\",\n"
+         << "  \"schema\": \"mbufo.minimax-h3-generation-telemetry.v1\",\n"
          << "  \"prompt_tokens\": " << telemetry.prompt_tokens << ",\n"
          << "  \"inventory_ms\": " << telemetry.inventory_ms << ",\n"
          << "  \"inventory_json_bytes\": "
@@ -949,4 +949,4 @@ std::string GenerationTelemetryJson(const GenerationTelemetry& telemetry) {
   return output.str();
 }
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3

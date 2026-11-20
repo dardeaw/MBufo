@@ -13,11 +13,11 @@
     "ar-baseline-d0": {
       "source": {
         "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
-        "binary_path": "/nix/store/n043k1hsjh205v3n0byg72r7p2mxadxa-gufo-154a892-dirty/bin/gufo",
+        "binary_path": "/nix/store/n043k1hsjh205v3n0byg72r7p2mxadxa-mbufo-154a892-dirty/bin/mbufo",
         "binary_sha256": "a7b3a45282242927509594da08811b918695d6c00488c0c16f67a9cb7575d3f5",
         "buildMode": "nix-release"
       },
-      "implementation": "gufo",
+      "implementation": "mbufo",
       "variant": "Q4_K_XL",
       "mode": "ar",
       "depth": 0,
@@ -44,7 +44,7 @@
         "requested_logical_concurrency": 1,
         "physical_execution_width": 1,
         "execution_plan": "serial-c1",
-        "metrics_source": "gufo",
+        "metrics_source": "mbufo",
         "cache_hit": false,
         "draft_tokens": 0,
         "draft_accepted_tokens": 0,
@@ -60,11 +60,11 @@
     "ar-prune-d0": {
       "source": {
         "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
-        "binary_path": "/nix/store/vjir5wgp3nfha7gj3wr4szvkyrv7gf1f-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_path": "/nix/store/vjir5wgp3nfha7gj3wr4szvkyrv7gf1f-mbufo-ae1e99a-dirty/bin/mbufo",
         "binary_sha256": "b59185d2e331a64647b51957628118b7c8047d3f6194d4c891e712ea265e1862",
         "buildMode": "nix-release"
       },
-      "implementation": "gufo",
+      "implementation": "mbufo",
       "variant": "Q4_K_XL",
       "mode": "ar",
       "depth": 0,
@@ -91,7 +91,7 @@
         "requested_logical_concurrency": 1,
         "physical_execution_width": 1,
         "execution_plan": "serial-c1",
-        "metrics_source": "gufo",
+        "metrics_source": "mbufo",
         "cache_hit": false,
         "draft_tokens": 0,
         "draft_accepted_tokens": 0,
@@ -107,11 +107,11 @@
     "ar-norm-d0": {
       "source": {
         "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
-        "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-mbufo-ae1e99a-dirty/bin/mbufo",
         "binary_sha256": "a87a20eded2b0b7377c4e133d60e213585c94c72e2ed009bd0e72ea2800e934b",
         "buildMode": "nix-release"
       },
-      "implementation": "gufo",
+      "implementation": "mbufo",
       "variant": "Q4_K_XL",
       "mode": "ar",
       "depth": 0,
@@ -138,7 +138,7 @@
         "requested_logical_concurrency": 1,
         "physical_execution_width": 1,
         "execution_plan": "serial-c1",
-        "metrics_source": "gufo",
+        "metrics_source": "mbufo",
         "cache_hit": false,
         "draft_tokens": 0,
         "draft_accepted_tokens": 0,
@@ -154,11 +154,11 @@
     "ar-norm-d0-repeat": {
       "source": {
         "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
-        "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-mbufo-ae1e99a-dirty/bin/mbufo",
         "binary_sha256": "a87a20eded2b0b7377c4e133d60e213585c94c72e2ed009bd0e72ea2800e934b",
         "buildMode": "nix-release"
       },
-      "implementation": "gufo",
+      "implementation": "mbufo",
       "variant": "Q4_K_XL",
       "mode": "ar",
       "depth": 0,
@@ -185,7 +185,7 @@
         "requested_logical_concurrency": 1,
         "physical_execution_width": 1,
         "execution_plan": "serial-c1",
-        "metrics_source": "gufo",
+        "metrics_source": "mbufo",
         "cache_hit": false,
         "draft_tokens": 0,
         "draft_accepted_tokens": 0,
@@ -201,11 +201,11 @@
     "ar-baseline-d32": {
       "source": {
         "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
-        "binary_path": "/nix/store/n043k1hsjh205v3n0byg72r7p2mxadxa-gufo-154a892-dirty/bin/gufo",
+        "binary_path": "/nix/store/n043k1hsjh205v3n0byg72r7p2mxadxa-mbufo-154a892-dirty/bin/mbufo",
         "binary_sha256": "a7b3a45282242927509594da08811b918695d6c00488c0c16f67a9cb7575d3f5",
         "buildMode": "nix-release"
       },
-      "implementation": "gufo",
+      "implementation": "mbufo",
       "variant": "Q4_K_XL",
       "mode": "ar",
       "depth": 32768,
@@ -232,7 +232,7 @@
         "requested_logical_concurrency": 1,
         "physical_execution_width": 1,
         "execution_plan": "serial-c1",
-        "metrics_source": "gufo",
+        "metrics_source": "mbufo",
         "cache_hit": true,
         "draft_tokens": 0,
         "draft_accepted_tokens": 0,
@@ -248,11 +248,11 @@
     "ar-norm-d32": {
       "source": {
         "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
-        "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-mbufo-ae1e99a-dirty/bin/mbufo",
         "binary_sha256": "a87a20eded2b0b7377c4e133d60e213585c94c72e2ed009bd0e72ea2800e934b",
         "buildMode": "nix-release"
       },
-      "implementation": "gufo",
+      "implementation": "mbufo",
       "variant": "Q4_K_XL",
       "mode": "ar",
       "depth": 32768,
@@ -279,7 +279,7 @@
         "requested_logical_concurrency": 1,
         "physical_execution_width": 1,
         "execution_plan": "serial-c1",
-        "metrics_source": "gufo",
+        "metrics_source": "mbufo",
         "cache_hit": true,
         "draft_tokens": 0,
         "draft_accepted_tokens": 0,
@@ -436,11 +436,11 @@
     "ar-stream-d0": {
       "source": {
         "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
-        "binary_path": "/nix/store/jn5vyv64n5ib5f1mm4qsnvz4xadhn9gh-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_path": "/nix/store/jn5vyv64n5ib5f1mm4qsnvz4xadhn9gh-mbufo-ae1e99a-dirty/bin/mbufo",
         "binary_sha256": "6e897c7ed3ca26f56670bdd949f788aa3da91f2edd7e652464bdf1e88093bb47",
         "buildMode": "nix-release"
       },
-      "implementation": "gufo",
+      "implementation": "mbufo",
       "variant": "Q4_K_XL",
       "mode": "ar",
       "depth": 0,
@@ -467,7 +467,7 @@
         "requested_logical_concurrency": 1,
         "physical_execution_width": 1,
         "execution_plan": "serial-c1",
-        "metrics_source": "gufo",
+        "metrics_source": "mbufo",
         "cache_hit": false,
         "draft_tokens": 0,
         "draft_accepted_tokens": 0,
@@ -483,11 +483,11 @@
     "ar-pair-d0": {
       "source": {
         "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
-        "binary_path": "/nix/store/74mghf54szy7f0s50npq0nmbyr82blsg-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_path": "/nix/store/74mghf54szy7f0s50npq0nmbyr82blsg-mbufo-ae1e99a-dirty/bin/mbufo",
         "binary_sha256": "e5fe169f9a7de24a058b4c9ab18549c37dd92ecf508e7bd8a3a0d03d4a7662a3",
         "buildMode": "nix-release"
       },
-      "implementation": "gufo",
+      "implementation": "mbufo",
       "variant": "Q4_K_XL",
       "mode": "ar",
       "depth": 0,
@@ -514,7 +514,7 @@
         "requested_logical_concurrency": 1,
         "physical_execution_width": 1,
         "execution_plan": "serial-c1",
-        "metrics_source": "gufo",
+        "metrics_source": "mbufo",
         "cache_hit": false,
         "draft_tokens": 0,
         "draft_accepted_tokens": 0,
@@ -655,11 +655,11 @@
       "ar-normal-memory-d0": {
         "source": {
           "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
-          "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-gufo-ae1e99a-dirty/bin/gufo",
+          "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-mbufo-ae1e99a-dirty/bin/mbufo",
           "binary_sha256": "a87a20eded2b0b7377c4e133d60e213585c94c72e2ed009bd0e72ea2800e934b",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "ar",
         "depth": 0,
@@ -694,7 +694,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": false,
           "draft_tokens": 0,
           "draft_accepted_tokens": 0,
@@ -710,11 +710,11 @@
       "ar-huge-parallel-d0": {
         "source": {
           "revision": "9b233694696130223bd8516a135442fb5f1416a3",
-          "binary_path": "/nix/store/dd0js3pq9sajggiqihkv5i01i9za15wf-gufo-9b23369-dirty/bin/gufo",
+          "binary_path": "/nix/store/dd0js3pq9sajggiqihkv5i01i9za15wf-mbufo-9b23369-dirty/bin/mbufo",
           "binary_sha256": "2e37141979235076d454173054a547c800ff7fd90059b68f5cd9261c103e83a2",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "ar",
         "depth": 0,
@@ -749,7 +749,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": false,
           "draft_tokens": 0,
           "draft_accepted_tokens": 0,
@@ -765,11 +765,11 @@
       "ar-huge-final-d32": {
         "source": {
           "revision": "9b233694696130223bd8516a135442fb5f1416a3",
-          "binary_path": "/nix/store/fiynhkji5j5kwg7135v5lgjhfh89ljfb-gufo-9b23369-dirty/bin/gufo",
+          "binary_path": "/nix/store/fiynhkji5j5kwg7135v5lgjhfh89ljfb-mbufo-9b23369-dirty/bin/mbufo",
           "binary_sha256": "00e3940504b2e77dc1864c15fdb4c7e7c27d0f835c894a3acd31043346f1274b",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "ar",
         "depth": 32768,
@@ -804,7 +804,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": true,
           "draft_tokens": 0,
           "draft_accepted_tokens": 0,
@@ -950,11 +950,11 @@
       "final-reductions-ar-d0": {
         "source": {
           "revision": "f7a6eff-dirty",
-          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-mbufo-f7a6eff-dirty/bin/mbufo",
           "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "ar",
         "depth": 0,
@@ -989,7 +989,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": false,
           "draft_tokens": 0,
           "draft_accepted_tokens": 0,
@@ -1004,11 +1004,11 @@
       "final-reductions-ar-d32": {
         "source": {
           "revision": "f7a6eff-dirty",
-          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-mbufo-f7a6eff-dirty/bin/mbufo",
           "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "ar",
         "depth": 32768,
@@ -1043,7 +1043,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": true,
           "draft_tokens": 0,
           "draft_accepted_tokens": 0,
@@ -1059,7 +1059,7 @@
     "sampled_replay": {
       "source": {
         "revision": "f7a6eff-dirty",
-        "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+        "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-mbufo-f7a6eff-dirty/bin/mbufo",
         "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
         "buildMode": "nix-release"
       },

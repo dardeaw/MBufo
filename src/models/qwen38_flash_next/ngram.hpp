@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_NGRAM_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_NGRAM_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_NGRAM_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_NGRAM_HPP_
 
 #include <array>
 #include <atomic>
@@ -16,7 +16,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 /// Newest-first tail of the previous tokens of one sequence, the complete
 /// hash state of the PLE window. Copying it snapshots the state.
@@ -160,6 +160,6 @@ private:
   bool stop_{false};
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_NGRAM_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_NGRAM_HPP_

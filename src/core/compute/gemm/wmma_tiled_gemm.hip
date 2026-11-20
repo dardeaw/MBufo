@@ -17,8 +17,8 @@
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/quant/quant_traits.hpp"
 
-namespace gufo::core::compute::gemm {
-namespace quant = ::gufo::core::quant;
+namespace mbufo::core::compute::gemm {
+namespace quant = ::mbufo::core::quant;
 namespace {
 
 typedef _Float16 v16h_t __attribute__((ext_vector_type(16)));
@@ -186,6 +186,6 @@ bool TiledF16Gemm(const __half* w_tiled, const __half* x, float* y, std::size_t 
   return LaunchTiled<void>(w_tiled, x, y, batch, m, k, 0, stream);
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // ENGINE_ENABLE_HIP

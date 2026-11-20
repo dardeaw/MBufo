@@ -120,7 +120,7 @@ def serve(root, log):
         if method == "initialize":
             result = {"protocolVersion": message["params"].get("protocolVersion", "2025-06-18"),
                       "capabilities": {"tools": {}},
-                      "serverInfo": {"name": "gufo-transaction-fixture", "version": "1"}}
+                      "serverInfo": {"name": "mbufo-transaction-fixture", "version": "1"}}
         elif method == "tools/list":
             result = {"tools": TOOLS}
         elif method == "tools/call":

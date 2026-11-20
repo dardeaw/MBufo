@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_
-#define GUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_
+#ifndef MBUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_
+#define MBUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_
 
 #include <span>
 #include <string>
@@ -9,7 +9,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/reasoning.hpp"
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 
 struct ChatMessage {
   struct ToolArgument {
@@ -83,6 +83,6 @@ struct ChatTemplateOptions {
 [[nodiscard]] std::string_view DeepSeekReasoningEffortName(
     ReasoningEffort effort) noexcept;
 
-}  // namespace gufo::models::deepseek_v4_flash
+}  // namespace mbufo::models::deepseek_v4_flash
 
-#endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_
+#endif  // MBUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_

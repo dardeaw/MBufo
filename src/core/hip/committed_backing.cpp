@@ -16,7 +16,7 @@
 
 #include "src/core/hip/host_allocations.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace detail {
 namespace {
 struct CommittedPages {
@@ -455,4 +455,4 @@ std::size_t CommittedBackingPool::LongTermPinnedBytes() const noexcept {
   return state_->pinned_bytes.load(std::memory_order_relaxed);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip

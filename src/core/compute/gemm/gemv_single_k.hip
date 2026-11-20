@@ -15,7 +15,7 @@
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/quant/quant_traits.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 namespace {
 
 constexpr int kRows = 2;  // rows per wave: measured best (224-230 GB/s); 4 and 8 rows spill the memory pipeline
@@ -123,7 +123,7 @@ bool QuantGemvSingle(const void* w, int type, const float* x, float* y, std::siz
   if (w == nullptr || x == nullptr || y == nullptr || m == 0 || k == 0 || k % 256 != 0 ||
       reinterpret_cast<std::uintptr_t>(w) % 16 != 0 || reinterpret_cast<std::uintptr_t>(x) % 16 != 0)
     return false;
-  namespace q = ::gufo::core::quant;
+  namespace q = ::mbufo::core::quant;
   bool launched = false;
   (void)q::AllFormats::Dispatch(type, [&](auto fm) {
     using F = decltype(fm);
@@ -138,6 +138,6 @@ bool QuantGemvSingle(const void* w, int type, const float* x, float* y, std::siz
   return launched;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // ENGINE_ENABLE_HIP

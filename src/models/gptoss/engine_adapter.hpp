@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GPTOSS_ENGINE_ADAPTER_HPP_
-#define GUFO_MODELS_GPTOSS_ENGINE_ADAPTER_HPP_
+#ifndef MBUFO_MODELS_GPTOSS_ENGINE_ADAPTER_HPP_
+#define MBUFO_MODELS_GPTOSS_ENGINE_ADAPTER_HPP_
 
 // GPT-OSS adapter: exposes the gptoss::Model/Session through the L0/L1
 // engine abstraction (EngineModel / SpeculativeSession).
@@ -16,10 +16,11 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/engine/attention_contract.hpp"
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/gptoss/engine.hpp"
 
-namespace gufo::models::gptoss {
+namespace mbufo::models::gptoss {
 
 class GptossEngineSession final : public core::engine::SpeculativeSession {
  public:
@@ -54,7 +55,7 @@ class GptossEngineSession final : public core::engine::SpeculativeSession {
   std::unique_ptr<Session> inner_;
 };
 
-class GptossEngineModel final : public core::engine::EngineModel {
+class GptossEngineModel final : public core::engine::EngineModel, public core::engine::MoeCapable, public core::engine::AttentionCapable {
  public:
   [[nodiscard]] static std::shared_ptr<GptossEngineModel> Load(
       const std::string& model_path, const ModelOptions& options,
@@ -71,6 +72,10 @@ class GptossEngineModel final : public core::engine::EngineModel {
   [[nodiscard]] std::uint32_t MaxContext() const noexcept override;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept override;
   [[nodiscard]] std::string ModelName() const override;
+  [[nodiscard]] core::engine::AttentionGeometry AttentionGeometryInfo() const override;
+  [[nodiscard]] core::engine::AttentionKernelInfo AttentionKernelsInfo() const override;
+  [[nodiscard]] core::engine::MoeGeometry MoeGeometryInfo() const override;
+  [[nodiscard]] core::engine::MoeKernelInfo MoeKernelsInfo() const override;
 
   // L0-external gptoss pass-throughs (unchanged gptoss semantics).
   [[nodiscard]] std::string Decode(
@@ -86,6 +91,10 @@ class GptossEngineModel final : public core::engine::EngineModel {
   std::shared_ptr<Model> model_;
 };
 
-}  // namespace gufo::models::gptoss
+/// The MoE contract declaration of a loaded model (also what mbufo serve checks when it loads one).
+[[nodiscard]] core::engine::MoeGeometry DescribeMoeGeometry(const Model& model);
+[[nodiscard]] core::engine::MoeKernelInfo DescribeMoeKernels();
 
-#endif  // GUFO_MODELS_GPTOSS_ENGINE_ADAPTER_HPP_
+}  // namespace mbufo::models::gptoss
+
+#endif  // MBUFO_MODELS_GPTOSS_ENGINE_ADAPTER_HPP_

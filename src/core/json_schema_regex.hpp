@@ -1,12 +1,12 @@
-#ifndef GUFO_CORE_JSON_SCHEMA_REGEX_HPP_
-#define GUFO_CORE_JSON_SCHEMA_REGEX_HPP_
+#ifndef MBUFO_CORE_JSON_SCHEMA_REGEX_HPP_
+#define MBUFO_CORE_JSON_SCHEMA_REGEX_HPP_
 
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
 
-namespace gufo::sampling {
+namespace mbufo::sampling {
 
 // An immutable Unicode DFA for the intersection of string predicates.
 // Every admitted prefix has an accepting continuation within the length bounds.
@@ -32,5 +32,5 @@ private:
   std::shared_ptr<const Impl> impl_;
 };
 
-}  // namespace gufo::sampling
+}  // namespace mbufo::sampling
 #endif

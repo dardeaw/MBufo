@@ -3,12 +3,13 @@
 // follows the serve-side model_kind convention).
 
 #include "src/models/qwen38_flash_next/engine_adapter.hpp"
+#include "src/models/qwen38_flash_next/weights.hpp"
 
 #include <algorithm>
 #include <utility>
 #include <vector>
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 FlashNextEngineSession::FlashNextEngineSession(
     std::shared_ptr<Model> model, std::unique_ptr<Session> inner,
@@ -400,9 +401,76 @@ std::uint32_t FlashNextEngineModel::MaxContext() const noexcept {
   return model_->MaxContext();
 }
 
+core::engine::MoeGeometry DescribeMoeGeometry(const Model& model) {
+  const auto& w = model.weights();
+  const auto& c = w.config;
+  core::engine::MoeGeometry g;
+  if (c.num_experts == 0) return g;
+  g.experts = c.num_experts;
+  g.top_k = c.num_experts_used;
+  g.hidden = c.hidden_size;
+  g.expert_ff = c.expert_ff;
+  g.shared_ff = c.shared_expert_ff;
+  for (const auto& l : w.layers) {
+    if (l.ffn_gate_exps.SizeBytes() == 0) continue;
+    g.AddLayer(static_cast<int>(l.ffn_gate_exps.type), static_cast<int>(l.ffn_up_exps.type), static_cast<int>(l.ffn_down_exps.type));
+  }
+  return g;
+}
+
+core::engine::MoeKernelInfo DescribeMoeKernels() {
+  core::engine::MoeKernelInfo k;
+  k.origin = core::engine::MoeKernelOrigin::kModelPrivate;
+  k.gate_up_kernel = "qfn_mmq::mul_mat_vec_q_moe (Q4_K gate/up x Q8_1 int dot, 205 GB/s)";
+  k.down_kernel = "qfn_mmq::mul_mat_vec_q_moe (ROCmFP4 type 101 down x Q8_1 int dot); HC-fused epilogue";
+  k.private_reason =
+      "integer-dot kernels ported from llama.cpp mmvq with the ggml 36-byte half2 Q8_1 activation block and an HC-fused epilogue; "
+      "the core row-dot layer uses the 40-byte float Q8_1 block, so sharing needs one activation layout first";
+  k.masks_inactive_slots = true;
+  k.graph_capture_safe = true;
+  return k;
+}
+
+core::engine::MoeGeometry FlashNextEngineModel::MoeGeometryInfo() const { return DescribeMoeGeometry(*model_); }
+core::engine::MoeKernelInfo FlashNextEngineModel::MoeKernelsInfo() const { return DescribeMoeKernels(); }
+
 std::size_t FlashNextEngineModel::ResidentBytes() const noexcept {
   return model_->ResidentBytes();
 }
+
+
+core::engine::AttentionGeometry DescribeAttentionGeometry(const Model& model) {
+  const auto& c = model.weights().config;
+  core::engine::AttentionGeometry g;
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    core::engine::AttentionGroup a;
+    if (c.full_attention_interval != 0 && ((il + 1) % c.full_attention_interval) == 0) {
+      a.heads = c.num_heads;
+      a.kv_heads = c.num_kv_heads;
+      a.head_dim = c.head_dim;
+    } else {
+      a.kind = core::engine::AttentionKind::kLinearRecurrent;
+      a.heads = c.ssm_num_v_heads;
+      a.kv_heads = c.ssm_num_k_heads;
+      a.head_dim = c.ssm_head_dim;
+      a.kv_format = core::engine::AttentionKvFormat::kModelSpecific;
+    }
+    g.AddLayer(a);
+  }
+  return g;
+}
+
+core::engine::AttentionKernelInfo DescribeAttentionKernels() {
+  core::engine::AttentionKernelInfo k;
+  k.decode = {core::engine::AttentionKernelOrigin::kModelPrivate, "flash-next gated GQA decode (blocked KV + mixed-batch kernels)",
+              "gated GQA with the learned indexer path; the core split-K row-chunk kernels are not wired in yet (migration candidate)", "", false};
+  k.prefill = {core::engine::AttentionKernelOrigin::kModelPrivate, "flash-next gated GQA prefill",
+               "gated GQA prefill is not on the core WMMA flash kernels yet (migration candidate)", "", false};
+  return k;
+}
+
+core::engine::AttentionGeometry FlashNextEngineModel::AttentionGeometryInfo() const { return DescribeAttentionGeometry(*model_); }
+core::engine::AttentionKernelInfo FlashNextEngineModel::AttentionKernelsInfo() const { return DescribeAttentionKernels(); }
 
 std::string FlashNextEngineModel::ModelName() const {
   return model_->ModelName();
@@ -439,7 +507,7 @@ namespace {
 // Load directly with full ModelOptions.
 const core::engine::EngineRegistrar kRegisterFlashNextEngine(
     core::engine::EngineBackendInfo{
-        "qwen38-flash-next", "Qwen3.8-Flash-Next text (f16/q8 KV)"},
+        "qwen38-flash-next", "Qwen3.8-Flash-Next text (f16/q8 KV)", true},
     [](const core::engine::EngineLoadRequest& request,
        std::string* error_msg) -> std::shared_ptr<core::engine::EngineModel> {
       ModelOptions options;
@@ -455,4 +523,4 @@ const core::engine::EngineRegistrar kRegisterFlashNextEngine(
 
 }  // namespace
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next

@@ -13,7 +13,7 @@
 
 #include "src/models/qwen3_asr/tokenizer.hpp"
 
-namespace qwen3_asr = gufo::models::qwen3_asr;
+namespace qwen3_asr = mbufo::models::qwen3_asr;
 
 namespace {
 

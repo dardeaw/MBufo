@@ -11,7 +11,7 @@
 #include "src/models/qwen/hip/ops/norm_residual.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 __global__ void BatchedResidualAddKernel(const float* __restrict__ a,
                                          const float* __restrict__ b,
@@ -33,5 +33,5 @@ void LaunchBatchedResidualAdd(const float* a, const float* b, float* out,
                                                                  total);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

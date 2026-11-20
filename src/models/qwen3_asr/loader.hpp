@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_LOADER_HPP_
-#define GUFO_MODELS_QWEN3_ASR_LOADER_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_LOADER_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_LOADER_HPP_
 
 #include <cstddef>
 #include <initializer_list>
@@ -11,7 +11,7 @@
 #include "src/models/qwen3_asr/config.hpp"
 #include "src/models/qwen3_asr/tensor.hpp"
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 
 struct MappedRegion {
   const std::byte* data{nullptr};
@@ -36,6 +36,6 @@ struct LoadResult {
 [[nodiscard]] LoadResult LoadModelDirectory(const std::string& model_dir);
 [[nodiscard]] bool LooksLikeQwen3Asr(const std::string& model_dir);
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr
 
-#endif  // GUFO_MODELS_QWEN3_ASR_LOADER_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_LOADER_HPP_

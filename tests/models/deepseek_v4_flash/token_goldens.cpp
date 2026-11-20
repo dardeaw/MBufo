@@ -3,9 +3,9 @@
 
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "tests/models/chat_template_golden_helpers.hpp"
-namespace gufo::testing::ds4 {
-namespace ds4 = gufo::models::deepseek_v4_flash;
-using namespace gufo::testing::chat_goldens;
+namespace mbufo::testing::ds4 {
+namespace ds4 = mbufo::models::deepseek_v4_flash;
+using namespace mbufo::testing::chat_goldens;
 void CheckDeepSeekCase(const json::Value& fixture, std::string_view case_name,
                        const ds4::Model& model,
                        std::span<const ds4::ChatMessage> messages,
@@ -25,7 +25,7 @@ void CheckDeepSeekCase(const json::Value& fixture, std::string_view case_name,
 }
 
 void CheckTokenGoldens(const ds4::Model& model) {
-  std::ifstream input(GUFO_CHAT_TEMPLATE_HF_GOLDENS, std::ios::binary);
+  std::ifstream input(MBUFO_CHAT_TEMPLATE_HF_GOLDENS, std::ios::binary);
   Expect(input.good(), "Hugging Face golden fixture opens");
   const std::string text{std::istreambuf_iterator<char>(input), {}};
   const auto fixture = json::parse(text);
@@ -57,14 +57,14 @@ void CheckTokenGoldens(const ds4::Model& model) {
   ds4::ChatTemplateOptions options;
   CheckDeepSeekCase(fixture, "chat", model, base, {}, options);
   options.enable_thinking = true;
-  options.reasoning_effort = gufo::ReasoningEffort::kLow;
+  options.reasoning_effort = mbufo::ReasoningEffort::kLow;
   CheckDeepSeekCase(fixture, "thinking_low", model, base, {}, options);
-  options.reasoning_effort = gufo::ReasoningEffort::kHigh;
+  options.reasoning_effort = mbufo::ReasoningEffort::kHigh;
   CheckDeepSeekCase(fixture, "thinking_high", model, base, {}, options);
-  options.reasoning_effort = gufo::ReasoningEffort::kMax;
+  options.reasoning_effort = mbufo::ReasoningEffort::kMax;
   CheckDeepSeekCase(fixture, "thinking_max", model, base, {}, options);
 
-  options.reasoning_effort = gufo::ReasoningEffort::kLow;
+  options.reasoning_effort = mbufo::ReasoningEffort::kLow;
   options.preserve_thinking = false;
   CheckDeepSeekCase(fixture, "history_drop", model, history, {}, options);
   options.preserve_thinking = true;
@@ -129,4 +129,4 @@ void CheckTokenGoldens(const ds4::Model& model) {
   CheckDeepSeekCase(fixture, "parallel_tools", model, reversed, {}, {});
 }
 
-}  // namespace gufo::testing::ds4
+}  // namespace mbufo::testing::ds4

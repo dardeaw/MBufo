@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_JSON_CONSTRAINT_HPP_
-#define GUFO_CORE_JSON_CONSTRAINT_HPP_
+#ifndef MBUFO_CORE_JSON_CONSTRAINT_HPP_
+#define MBUFO_CORE_JSON_CONSTRAINT_HPP_
 
 #include <bitset>
 #include <cstdint>
@@ -14,7 +14,7 @@
 #include "src/core/json.hpp"
 #include "src/core/json_schema_lexeme.hpp"
 
-namespace gufo::sampling {
+namespace mbufo::sampling {
 
 // Byte grammar: token boundaries may split UTF-8 characters and JSON escapes.
 // Programs and vocabulary tries are immutable and shared; stacks belong to a
@@ -143,6 +143,6 @@ private:
       masks_;
 };
 
-}  // namespace gufo::sampling
+}  // namespace mbufo::sampling
 
 #endif

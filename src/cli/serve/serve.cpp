@@ -47,7 +47,7 @@
 #include "src/cli/video/video.hpp"
 #include "src/models/qwen3_tts/audio.hpp"
 
-namespace gufo::cli {
+namespace mbufo::cli {
 namespace {
 
 class ModelLoadLog {
@@ -221,8 +221,8 @@ std::optional<ReasoningEffort> ParseReasoningEffort(std::string_view value) {
 }
 
 // Server-level options are accepted on either side of the modality
-// subcommand. Registering them from one place keeps `gufo serve --help`, every
-// `gufo serve <modality> --help`, and the parser that actually consumes them
+// subcommand. Registering them from one place keeps `mbufo serve --help`, every
+// `mbufo serve <modality> --help`, and the parser that actually consumes them
 // from drifting apart.
 
 /// `--log-level` and its `-v/--verbose` shorthand share one sink. `level`
@@ -233,7 +233,7 @@ struct ServerLogOptions {
   std::optional<server::LogLevel> level;
 };
 
-// Verbosity help text. `gufo serve --help` lists these options by hand while
+// Verbosity help text. `mbufo serve --help` lists these options by hand while
 // every modality help registers them through the parser, so both readings share
 // one source for the wording.
 constexpr std::string_view kLogLevelHelp =
@@ -243,7 +243,7 @@ constexpr std::string_view kTraceHelp =
     "Append text request bodies, rendered prompts, generated text and replies "
     "to PATH as JSON Lines; the file holds client content";
 
-void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
+void AddServerOptions(mbufo::cli::ArgParser& parser, std::string* host,
                       int* port, std::size_t* session_count,
                       std::size_t* max_connections,
                       std::size_t* max_request_body_bytes, std::string* api_key,
@@ -276,7 +276,7 @@ void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
 }
 
 // Help-only sinks for AddServerOptions, so subcommand help can list the
-// server options it shares with `gufo serve` without parsing into them.
+// server options it shares with `mbufo serve` without parsing into them.
 struct ServerOptionHelpTargets {
   std::string host = "127.0.0.1";
   int port = 8080;
@@ -288,7 +288,7 @@ struct ServerOptionHelpTargets {
   ServerLogOptions log;
 };
 
-void AddServerOptionsForHelp(gufo::cli::ArgParser& parser,
+void AddServerOptionsForHelp(mbufo::cli::ArgParser& parser,
                              ServerOptionHelpTargets* targets,
                              bool include_sessions = true) {
   AddServerOptions(parser, &targets->host, &targets->port,
@@ -545,7 +545,7 @@ void PrintServeHelp(std::string_view program_name,
     std::filesystem::path video_manifest = DefaultH3SourceManifest();
     std::uint64_t video_ttl_seconds = 3600;
 
-    gufo::cli::ArgParser parser(
+    mbufo::cli::ArgParser parser(
         std::string(program_name) + " serve video",
         "Start the MiniMax H3 text-to-video HTTP generation server.");
     parser.AddOption("-m", "--model", "DIR",
@@ -618,7 +618,7 @@ void PrintServeHelp(std::string_view program_name,
     bool enable_yarn = false;
     std::string trace_path;
 
-    gufo::cli::ArgParser parser(
+    mbufo::cli::ArgParser parser(
         std::string(program_name) + " serve llm",
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
 
@@ -807,7 +807,7 @@ int RunServe(std::span<const char* const> args) {
   if (const char* env_host = std::getenv("HOST");
       env_host != nullptr && *env_host != '\0') {
     host = env_host;
-  } else if (const char* env_strix_host = std::getenv("GUFO_HOST");
+  } else if (const char* env_strix_host = std::getenv("MBUFO_HOST");
              env_strix_host != nullptr && *env_strix_host != '\0') {
     host = env_strix_host;
   }
@@ -822,7 +822,7 @@ int RunServe(std::span<const char* const> args) {
     if (ec == std::errc{} && ptr == sv.data() + sv.size()) {
       port = parsed_port;
     }
-  } else if (const char* env_strix_port = std::getenv("GUFO_PORT");
+  } else if (const char* env_strix_port = std::getenv("MBUFO_PORT");
              env_strix_port != nullptr && *env_strix_port != '\0') {
     const std::string_view sv(env_strix_port);
     int parsed_port = 0;
@@ -843,7 +843,7 @@ int RunServe(std::span<const char* const> args) {
   // Identify the modality only after leading server options. The selected
   // parser consumes every option together, so --served-model-name -v and
   // --model audio cannot be mistaken for server flags or subcommands.
-  ArgParser server_parser("gufo serve");
+  ArgParser server_parser("mbufo serve");
   const auto add_server_options = [&](ArgParser& parser,
                                       bool include_sessions = true) {
     AddServerOptions(
@@ -875,7 +875,7 @@ int RunServe(std::span<const char* const> args) {
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
-      PrintServeHelp("gufo", topic);
+      PrintServeHelp("mbufo", topic);
       return 0;
     }
     break;
@@ -888,7 +888,7 @@ int RunServe(std::span<const char* const> args) {
   // and returns before that point.
 
   const auto prepare_server_options = [&] {
-    if (!gufo::server::IsListenAddress(host)) {
+    if (!mbufo::server::IsListenAddress(host)) {
       std::cerr << "Error: --host must be an IPv4 or IPv6 address\n";
       return false;
     }
@@ -961,7 +961,7 @@ int RunServe(std::span<const char* const> args) {
   if (subcommand == "image") {
     std::filesystem::path model;
     std::string name = "Qwen-Image-2.1";
-    ArgParser parser("gufo serve image",
+    ArgParser parser("mbufo serve image",
                      "Serve Qwen-Image-2.1 generation and editing.");
     parser.AddOption("-m", "--model", "DIR",
                      "Qwen-Image-2.1 safetensors directory", "Model", &model);
@@ -973,7 +973,7 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     if (parser.IsHelpRequested()) {
-      PrintServeHelp("gufo", "image");
+      PrintServeHelp("mbufo", "image");
       return 0;
     }
     if (!prepare_server_options())
@@ -996,8 +996,8 @@ int RunServe(std::span<const char* const> args) {
     std::filesystem::path video_manifest = DefaultH3SourceManifest();
     std::uint64_t video_ttl_seconds = 3600;
 
-    gufo::cli::ArgParser video_parser(
-        "gufo serve video", "Start the MiniMax H3 video generation server.");
+    mbufo::cli::ArgParser video_parser(
+        "mbufo serve video", "Start the MiniMax H3 video generation server.");
     video_parser.AddOption("-m", "--model", "DIR",
                            "Operator-supplied MiniMax H3 directory", "Model",
                            &video_model);
@@ -1014,11 +1014,11 @@ int RunServe(std::span<const char* const> args) {
     add_server_options(video_parser);
     if (!video_parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << "\n";
-      PrintServeHelp("gufo", "video");
+      PrintServeHelp("mbufo", "video");
       return 2;
     }
     if (video_parser.IsHelpRequested()) {
-      PrintServeHelp("gufo", "video");
+      PrintServeHelp("mbufo", "video");
       return 0;
     }
     if (!prepare_server_options()) {
@@ -1034,7 +1034,7 @@ int RunServe(std::span<const char* const> args) {
 
     if (video_model.empty()) {
       std::cerr << "Error: --model <DIR> is required for video server\n";
-      PrintServeHelp("gufo", "video");
+      PrintServeHelp("mbufo", "video");
       return 2;
     }
 
@@ -1062,7 +1062,7 @@ int RunServe(std::span<const char* const> args) {
   } else if (subcommand == "tts" || subcommand == "asr") {
     const bool is_tts = subcommand == "tts";
     SpeechOptions options{.context = is_tts ? 4096U : 1024U};
-    ArgParser parser("gufo serve " + subcommand,
+    ArgParser parser("mbufo serve " + subcommand,
                      is_tts ? "Serve Qwen3-TTS speech synthesis."
                             : "Serve Qwen3-ASR transcription.");
     AddSpeechOptions(parser, is_tts, &options);
@@ -1072,7 +1072,7 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     if (parser.IsHelpRequested()) {
-      PrintServeHelp("gufo", subcommand);
+      PrintServeHelp("mbufo", subcommand);
       return 0;
     }
     if (!prepare_server_options())
@@ -1185,8 +1185,8 @@ int RunServe(std::span<const char* const> args) {
     bool multi_model = false;
     std::string trace_path;
 
-    gufo::cli::ArgParser llm_parser(
-        "gufo serve llm",
+    mbufo::cli::ArgParser llm_parser(
+        "mbufo serve llm",
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
     llm_parser.AddOption("-m", "--model", "PATH",
                          "Path to GGUF model file (required)", "Model", &model);
@@ -1338,11 +1338,11 @@ int RunServe(std::span<const char* const> args) {
     add_server_options(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << "\n";
-      PrintServeHelp("gufo", "llm");
+      PrintServeHelp("mbufo", "llm");
       return 2;
     }
     if (llm_parser.IsHelpRequested()) {
-      PrintServeHelp("gufo", "llm");
+      PrintServeHelp("mbufo", "llm");
       return 0;
     }
     if (!llm_parser.WasSupplied("--max-pending-per-client")) {
@@ -1518,9 +1518,9 @@ int RunServe(std::span<const char* const> args) {
         return 1;
       }
       backend->set_model_ids(std::move(served_model_names));
-      // As `gufo --version` prints it; CMake defines both for this target.
+      // As `mbufo --version` prints it; CMake defines both for this target.
       backend->set_served_artifact(model,
-                                   GUFO_RELEASE_VERSION " (" GUFO_REVISION ")");
+                                   MBUFO_RELEASE_VERSION " (" MBUFO_REVISION ")");
       backend->set_sampling_defaults(
           max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
           sampling_config, SamplingOptionsSupplied(llm_parser));
@@ -1595,24 +1595,30 @@ int RunServe(std::span<const char* const> args) {
            request_timeout_ms, stall_timeout_ms, log_progress,
            cache_disk_directory, cache_disk_bytes,
            cache_disk_staging_bytes, cache_ram_bytes, max_tokens,
-           sampling_config, reasoning_defaults,
-           build_artifact = std::string(GUFO_RELEASE_VERSION " (" GUFO_REVISION ")")](
+           sampling_config, reasoning_defaults, draft_tokens,
+           build_artifact = std::string(MBUFO_RELEASE_VERSION " (" MBUFO_REVISION ")")](
               const server::AdminLoadRequest& spec,
               std::string* error)
               -> std::shared_ptr<server::TextGenerationBackend> {
         server::TextSpeculativeConfig req_spec{};
+        // An omitted/zero max_draft_tokens means "the serve default" (--draft-tokens), not "propose nothing": a zero
+        // limit made a dflash2 /admin/load run every round with an empty draft and no speedup.
+        const std::uint32_t draft_limit =
+            spec.max_draft_tokens != 0
+                ? static_cast<std::uint32_t>(spec.max_draft_tokens)
+                : static_cast<std::uint32_t>(draft_tokens);
         if (spec.speculative == "mtp") {
           req_spec.backend = server::TextSpeculativeBackend::kMtp;
           req_spec.draft_model_path = spec.draft_model_path;
-          req_spec.max_draft_tokens = spec.max_draft_tokens;
+          req_spec.max_draft_tokens = draft_limit;
         } else if (spec.speculative == "dflash2") {
           req_spec.backend = server::TextSpeculativeBackend::kDFlash;
           req_spec.draft_model_path = spec.draft_model_path;
-          req_spec.max_draft_tokens = spec.max_draft_tokens;
+          req_spec.max_draft_tokens = draft_limit;
         } else if (spec.speculative == "dspark") {
           req_spec.backend = server::TextSpeculativeBackend::kDSpark;
           req_spec.draft_model_path = spec.draft_model_path;
-          req_spec.max_draft_tokens = spec.max_draft_tokens;
+          req_spec.max_draft_tokens = draft_limit;
         } else {
           req_spec.backend = server::TextSpeculativeBackend::kDisabled;
         }
@@ -1738,4 +1744,4 @@ int RunServe(std::span<const char* const> args) {
   return 0;
 }
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real Claude Code agent regression for #417; executes generated code in disposable fixtures.
 
-Requires the Claude Code CLI (`claude`) and an already-running local Gufo server.
+Requires the Claude Code CLI (`claude`) and an already-running local MBufo server.
 Claude Code talks to `/v1/messages` through the recording proxy from `pi_agent.py`,
 so the exact HTTP bodies/SSE, the CLI's stream-json transcript, task files and
 individual request/task timings are retained.
@@ -23,7 +23,7 @@ import urllib.parse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 
-from gufo.control_tokens import kImEnd, kImStart  # noqa: E402
+from mbufo.control_tokens import kImEnd, kImStart  # noqa: E402
 
 from pi_agent import Recorder, save
 
@@ -238,7 +238,7 @@ def main():
     parser.add_argument("--claude", type=Path, required=True, help="Claude Code CLI executable")
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--server-log", type=Path, required=True, help="Gufo informational log for request timing correlation")
+    parser.add_argument("--server-log", type=Path, required=True, help="MBufo informational log for request timing correlation")
     parser.add_argument("--passes", type=int, default=1)
     parser.add_argument("--case", action="append", choices=tuple(PROMPTS),
                         help="Select affected tasks explicitly; repeat to select more than one")
@@ -246,7 +246,7 @@ def main():
     parser.add_argument("--max-turns", type=int, default=30)
     args = parser.parse_args()
     upstream = urllib.parse.urlsplit(args.base_url)
-    assert upstream.scheme == "http" and upstream.hostname in {"127.0.0.1", "localhost", "::1"}, "Loopback Gufo only"
+    assert upstream.scheme == "http" and upstream.hostname in {"127.0.0.1", "localhost", "::1"}, "Loopback MBufo only"
     assert not args.output.exists(), "Use a fresh output directory; preserve previous evidence"
     args.output.mkdir(parents=True)
     args.output = args.output.resolve()

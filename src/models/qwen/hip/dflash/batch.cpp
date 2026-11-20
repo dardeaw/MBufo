@@ -16,7 +16,7 @@
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 struct BatchCompletion {
@@ -535,5 +535,5 @@ QwenDFlashGpuExecutor::ForwardBlockBatch(
   return proposals;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif

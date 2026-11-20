@@ -19,7 +19,7 @@
 
 namespace {
 
-namespace h3 = gufo::minimax_h3;
+namespace h3 = mbufo::minimax_h3;
 
 [[noreturn]] void Fail(const std::string& message) {
   std::cerr << "FAIL minimax_h3_generation_test: " << message << '\n';
@@ -125,7 +125,7 @@ bool HasPartial(const std::filesystem::path& target) {
   const std::filesystem::path parent = target.parent_path().empty()
                                            ? std::filesystem::path(".")
                                            : target.parent_path();
-  const std::string prefix = target.filename().string() + ".gufo-partial-";
+  const std::string prefix = target.filename().string() + ".mbufo-partial-";
   for (const auto& entry : std::filesystem::directory_iterator(parent)) {
     if (entry.path().filename().string().starts_with(prefix)) {
       return true;
@@ -187,7 +187,7 @@ void TestPresetsAndReports() {
   const std::string report = h3::GenerationParametersJson(
       *fast, 42,
       "df0ff96bcdb3a350f115cc39daaf0d7523814258890aa90c06fa784e3ad06169");
-  Check(report.find("gufo.minimax-h3-text-generation.v1") != std::string::npos,
+  Check(report.find("mbufo.minimax-h3-text-generation.v1") != std::string::npos,
         "parameter schema is versioned");
   Check(report.find("\"token_reduction\": false") != std::string::npos,
         "token reduction is frozen off");
@@ -253,7 +253,7 @@ void TestPresetsAndReports() {
 void TestAtomicFrames() {
   const std::filesystem::path root =
       std::filesystem::temp_directory_path() /
-      ("gufo-h3-generation-test-" + std::to_string(getpid()));
+      ("mbufo-h3-generation-test-" + std::to_string(getpid()));
   const std::filesystem::path target = root / "frames";
   std::error_code ignored;
   std::filesystem::remove_all(root, ignored);
@@ -306,7 +306,7 @@ void TestAtomicFrames() {
 void TestAtomicLatents() {
   const std::filesystem::path root =
       std::filesystem::temp_directory_path() /
-      ("gufo-h3-latent-test-" + std::to_string(getpid()));
+      ("mbufo-h3-latent-test-" + std::to_string(getpid()));
   const std::filesystem::path target = root / "latents";
   std::error_code ignored;
   std::filesystem::remove_all(root, ignored);
@@ -347,7 +347,7 @@ void TestAtomicLatents() {
   const std::string manifest((std::istreambuf_iterator<char>(manifest_stream)),
                              std::istreambuf_iterator<char>());
   Check(h3::json::Parse(manifest).IsObject(), "latent manifest is valid JSON");
-  Check(manifest.find("gufo.minimax-h3-final-latents.v1") != std::string::npos,
+  Check(manifest.find("mbufo.minimax-h3-final-latents.v1") != std::string::npos,
         "latent manifest is versioned");
   Check(!h3::WriteDiagnosticLatents(target, *geometry, video, audio, nullptr,
                                     &error),

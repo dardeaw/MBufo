@@ -11,7 +11,7 @@
 #endif
 
 void TestHardwareAcceptanceAccounting() {
-  gufo::core::ModelConfig config;
+  mbufo::core::ModelConfig config;
   config.architecture = "qwen35";
   config.num_layers = 32;
   config.hidden_size = 2560;

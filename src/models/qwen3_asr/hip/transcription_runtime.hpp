@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_HIP_TRANSCRIPTION_RUNTIME_HPP_
-#define GUFO_MODELS_QWEN3_ASR_HIP_TRANSCRIPTION_RUNTIME_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_HIP_TRANSCRIPTION_RUNTIME_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_HIP_TRANSCRIPTION_RUNTIME_HPP_
 
 #include <cstddef>
 #include <memory>
@@ -7,7 +7,7 @@
 
 #include "src/models/qwen3_asr/transcription.hpp"
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 
 /// End-to-end native HIP transcription for Qwen3-ASR-1.7B.
 class TranscriptionHipRuntime {
@@ -34,6 +34,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
-#endif  // GUFO_MODELS_QWEN3_ASR_HIP_TRANSCRIPTION_RUNTIME_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_HIP_TRANSCRIPTION_RUNTIME_HPP_

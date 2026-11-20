@@ -1,5 +1,5 @@
 {
-  "schema": "gufo-model-bench/1",
+  "schema": "mbufo-model-bench/1",
   "category": "llm",
   "model": {
     "id": "<Model name>",
@@ -25,7 +25,7 @@
   "speculative": {
     "mode": "<spec>",
     "label": "<SPEC>",
-    "gufo_args": [
+    "mbufo_args": [
       "--speculative",
       "<spec>",
       "--<role>-model",
@@ -197,7 +197,7 @@
       "mode": "ar"
     }
   },
-  "gufo": {
+  "mbufo": {
     "serve": [],
     "llm": [
       "--think",

@@ -28,7 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::fused_fa_gqa128 {
+namespace mbufo::core::compute::fused_fa_gqa128 {
 namespace {
 
 using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
@@ -443,6 +443,6 @@ bool LaunchFusedFaGqa128(
   return true;
 }
 
-}  // namespace gufo::core::compute::fused_fa_gqa128
+}  // namespace mbufo::core::compute::fused_fa_gqa128
 
 #endif  // defined(ENGINE_ENABLE_HIP)

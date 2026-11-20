@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_DEVICE_MODEL_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_DEVICE_MODEL_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_DEVICE_MODEL_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_DEVICE_MODEL_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace mbufo::models::qwen38_flash_next::rocm {
 
 /// One weight resident in device memory, still in its GGUF encoding.
 struct DeviceTensor {
@@ -20,7 +20,7 @@ struct DeviceTensor {
   std::uint32_t cols{0};
   std::uint32_t rows{0};
   std::uint32_t experts{1};
-  /// A Q4_1 (or Q5_1 when GUFO_DECODE_Q4=0) re-encoding of a large Q8_0
+  /// A Q4_1 (or Q5_1 when MBUFO_DECODE_Q4=0) re-encoding of a large Q8_0
   /// matrix that the decode GEMV reads in place of `data` (prefill keeps the
   /// Q8_0 rows); null when there is none.
   void* decode_data{nullptr};
@@ -136,6 +136,6 @@ private:
   std::size_t max_q8_cols_{32};
 };
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace mbufo::models::qwen38_flash_next::rocm
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_DEVICE_MODEL_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_DEVICE_MODEL_HPP_

@@ -3,7 +3,7 @@
 #include <string>
 #include <unordered_set>
 
-namespace gufo::models::llama {
+namespace mbufo::models::llama {
 namespace {
 
 struct Binder {
@@ -152,4 +152,4 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   return w;
 }
 
-}  // namespace gufo::models::llama
+}  // namespace mbufo::models::llama

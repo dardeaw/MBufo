@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::sampling {
+namespace mbufo::sampling {
 namespace {
 using Id = std::uint32_t;
 constexpr Id kDead = JsonSchemaRegex::kDead;
@@ -815,4 +815,4 @@ bool JsonSchemaRegex::CanAdvance(Id state, Id first, Id last, Id minimum,
   return false;
 }
 
-}  // namespace gufo::sampling
+}  // namespace mbufo::sampling

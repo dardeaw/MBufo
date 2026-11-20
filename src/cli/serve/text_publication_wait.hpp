@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_TEXT_PUBLICATION_WAIT_HPP_
-#define GUFO_SERVER_TEXT_PUBLICATION_WAIT_HPP_
+#ifndef MBUFO_SERVER_TEXT_PUBLICATION_WAIT_HPP_
+#define MBUFO_SERVER_TEXT_PUBLICATION_WAIT_HPP_
 
 #include <algorithm>
 #include <array>
@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <optional>
 
-namespace gufo::server {
+namespace mbufo::server {
 
 struct TextPendingPublication {
   static constexpr std::size_t kMinimumGainTokens = 4096;
@@ -60,6 +60,6 @@ private:
 };
 
 }  // namespace detail
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_TEXT_PUBLICATION_WAIT_HPP_
+#endif  // MBUFO_SERVER_TEXT_PUBLICATION_WAIT_HPP_

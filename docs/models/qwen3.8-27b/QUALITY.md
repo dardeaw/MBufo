@@ -72,7 +72,7 @@ limitations below remain unresolved; no stall-free claim is made.
 Standard mixed d0/32K pp2048/tg128 controls preserve original main's complete
 output and prompt/cache/draft counts. Q8 serving and full benchmark sweeps
 were not repeated. Reports, commands, inputs and rejected experiments remain
-under `/tmp/gufo-qwen27b-dflash2-20261021` on the development host.
+under `/tmp/mbufo-qwen27b-dflash2-20261021` on the development host.
 
 ## October 21 prefill and sampling review
 
@@ -165,7 +165,7 @@ the required final newline. Literal thinking/tool tags are preserved. The
 fixture remains strict; its subsequent edit/thinking loop is not qualified.
 
 Raw profiles, binaries and all observations are retained outside Git under
-`/tmp/gufo-qwen27b-dflash2-20261021` on the test host, with reports copied to
+`/tmp/mbufo-qwen27b-dflash2-20261021` on the test host, with reports copied to
 the editing host's `qwen27b-dflash2-20261021` directory. The principal records
 are `bench-main-q4`, `bench-v3-q4`, `bench-v7-final-q4`, `bench-v8-q4`,
 `acceptance-d32767.json`, `long-control-v3`, `long-control-v7`,
@@ -184,7 +184,7 @@ Single-row outputs from main `23fd87dc` and the candidate are byte-identical
 in the production 24/4-head shape (fp32 and fp16 caches, gated and plain,
 starts 0–65,536), and verification rows 2–8 match those single rows. Every
 Q4/Q8 DFlash2 single-user completion from 0 to 128K matches the earlier
-October 19 rows; all concurrency completions match Gufo AR. The Q4 DFlash2
+October 19 rows; all concurrency completions match MBufo AR. The Q4 DFlash2
 functional `batch`, `long-context`, `conversation`, `state-edges`,
 `cache-concurrency` and `cache` suites pass against main with no output
 change; 2,239 of 2,246 timings pass and 7 are inconclusive.
@@ -214,7 +214,7 @@ original date; these new checks establish consistency with current main.
 
 ## Quantization comparison
 
-September 24, 2026: short teacher-forced comparison against **Gufo's BF16 target**, with identical
+September 24, 2026: short teacher-forced comparison against **MBufo's BF16 target**, with identical
 prefixes: three prose/code fixtures, nine logit rows each, full 248,320-token
 vocabulary, temperature 1 without filtering. This measures quantization and
 native arithmetic together; BF16 here is not an independent upstream oracle.
@@ -266,7 +266,7 @@ those focused image checks use production FP16 KV.
 
 Production FP16 probes at 32K and 100K also match every restored byte and
 sixteen continuation logit rows/token decisions after transfer to another slot.
-These are Gufo execution-consistency checks. They do not extend upstream or
+These are MBufo execution-consistency checks. They do not extend upstream or
 weight-conversion parity, qualify alternate BF16 recurrence, or qualify the
 common checkpoint allocator. The [adapter inventory and commands](CONTINUATION-ADAPTER.md)
 and [card 15 results](../../cache-redesign/cards/15-qwen27b-ar-adapter.md)
@@ -288,7 +288,7 @@ and Q8 FP32 at 32K. Every restored component byte and sixteen continued
 full-logit/token checks match. The user stopped the Q8 FP32 100K probe and
 skipped further long-capacity probes for both KV precisions. That case has no
 qualification result. Matched-main timing flags remain open. All original aborts and diagnostics remain retained in
-`/home/mixer/gufo-qualification/qwen27b-component-2026-10-13`.
+`/home/mixer/mbufo-qualification/qwen27b-component-2026-10-13`.
 
 ## Reproduce
 
@@ -310,14 +310,14 @@ Full logits stay outside Git. A missing-weight skip is not a pass.
 
 ## Meaning of exact
 
-Matching Gufo AR/speculative tokens or completion hashes tests consistency.
+Matching MBufo AR/speculative tokens or completion hashes tests consistency.
 Matching llama.cpp hashes also does not establish original-model accuracy;
 quantized implementations can disagree. Keep the reference, weights and history
 fixed before interpreting any numerical difference.
 
 ## Benchmark method
 
-All Gufo rows refreshed October 19, 2026 on `11813e51` (#660, rebased on
+All MBufo rows refreshed October 19, 2026 on `11813e51` (#660, rebased on
 `23fd87dc`); llama.cpp retains September 23 measurements. One warmed sample per
 point, greedy, thinking off, `performance` platform profile.
 Single-user rows use pp2048/tg128 and cached depths 0–128K. Each mode creates

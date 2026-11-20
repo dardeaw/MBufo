@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_HIP_BLAS_HPP_
-#define GUFO_MODELS_QWEN3_ASR_HIP_BLAS_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_HIP_BLAS_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_HIP_BLAS_HPP_
 
 #include <cstddef>
 #include <memory>
@@ -8,7 +8,7 @@
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 
 /// Multi-token BF16 projection: `Y[batch, m] = X_bf16[batch, k] *
 /// A_bf16[m, k]^T` with a float32 result.
@@ -47,7 +47,7 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 #endif
 
-#endif  // GUFO_MODELS_QWEN3_ASR_HIP_BLAS_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_HIP_BLAS_HPP_

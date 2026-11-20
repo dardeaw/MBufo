@@ -14,18 +14,18 @@
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 
-using gufo::tokenization::kImagePad;
-using gufo::tokenization::kImEnd;
-using gufo::tokenization::kImStart;
-using gufo::tokenization::kVisionEnd;
-using gufo::tokenization::kVisionStart;
+using mbufo::tokenization::kImagePad;
+using mbufo::tokenization::kImEnd;
+using mbufo::tokenization::kImStart;
+using mbufo::tokenization::kVisionEnd;
+using mbufo::tokenization::kVisionStart;
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/qwen/vision/encoder.hpp"
 #endif
 
 namespace {
-using namespace gufo::models::qwen::vision;
+using namespace mbufo::models::qwen::vision;
 
 void TestPositionLayout() {
   const RopeLayout layout{{{5, 2, 3}, {15, 3, 2}}};
@@ -86,7 +86,7 @@ void TestPositionLayout() {
 }
 
 void TestPreprocessing() {
-  gufo::core::Image input{48, 32, std::vector<std::uint8_t>(48 * 32 * 3, 123)};
+  mbufo::core::Image input{48, 32, std::vector<std::uint8_t>(48 * 32 * 3, 123)};
   const auto result = ResizeImage(input);
   assert(result.width == 320 && result.height == 224);
   assert(std::all_of(result.pixels.begin(), result.pixels.end(),
@@ -98,8 +98,8 @@ void TestPreprocessing() {
        {"data:image/jpeg;base64,/9gAAQI=", "data:image/jpg;base64,/9gAAQI=",
         "data:IMAGE/JPEG;BASE64,/9gAAQI=",
         "data:image/jpeg;name=photo.jpg;base64,/9gAAQI="})
-    assert(gufo::core::ReadImageUrl(accepted) == payload);
-  assert(gufo::core::ReadImageUrl("data:image/webp;base64,/9gAAQI=") ==
+    assert(mbufo::core::ReadImageUrl(accepted) == payload);
+  assert(mbufo::core::ReadImageUrl("data:image/webp;base64,/9gAAQI=") ==
          payload);
   for (const auto* invalid :
        {"data:image/png;base64,A===", "data:image/png;base64,AB==",
@@ -108,7 +108,7 @@ void TestPreprocessing() {
         "data:image/png;base64"}) {
     bool rejected = false;
     try {
-      (void)gufo::core::ReadImageUrl(invalid);
+      (void)mbufo::core::ReadImageUrl(invalid);
     } catch (const std::invalid_argument&) {
       rejected = true;
     }
@@ -125,7 +125,7 @@ void TestWebpDecoding() {
   assert(size > 0);
   const std::vector<std::uint8_t> bytes(encoded, encoded + size);
   WebPFree(encoded);
-  const auto image = gufo::core::DecodeImage(bytes);
+  const auto image = mbufo::core::DecodeImage(bytes);
   assert(image.width == 3 && image.height == 2 && image.pixels == rgb);
 
   // Dropping alpha must retain RGB, not blend it onto a background.
@@ -139,13 +139,13 @@ void TestWebpDecoding() {
   assert(alpha_size > 0);
   const std::vector<std::uint8_t> alpha_bytes(encoded, encoded + alpha_size);
   WebPFree(encoded);
-  assert(gufo::core::DecodeImage(alpha_bytes).pixels == rgb);
+  assert(mbufo::core::DecodeImage(alpha_bytes).pixels == rgb);
 
   const auto rejects = [](const std::vector<std::uint8_t>& input,
                           std::string_view message) {
     bool rejected = false;
     try {
-      (void)gufo::core::DecodeImage(input);
+      (void)mbufo::core::DecodeImage(input);
     } catch (const std::invalid_argument& error) {
       rejected = std::string_view(error.what()).find(message) !=
                  std::string_view::npos;
@@ -174,26 +174,26 @@ void TestImageTransportLimits() {
     const bool v4 =
         std::string_view(address).find(':') == std::string_view::npos;
     assert(inet_pton(v4 ? AF_INET : AF_INET6, address, bytes.data()) == 1);
-    assert(!gufo::core::IsPublicImageAddress({bytes.data(), v4 ? 4U : 16U}));
+    assert(!mbufo::core::IsPublicImageAddress({bytes.data(), v4 ? 4U : 16U}));
   }
   for (const auto* address : {"1.1.1.1", "8.8.8.8", "2001:4860:4860::8888"}) {
     std::array<std::uint8_t, 16> bytes{};
     const bool v4 =
         std::string_view(address).find(':') == std::string_view::npos;
     assert(inet_pton(v4 ? AF_INET : AF_INET6, address, bytes.data()) == 1);
-    assert(gufo::core::IsPublicImageAddress({bytes.data(), v4 ? 4U : 16U}));
+    assert(mbufo::core::IsPublicImageAddress({bytes.data(), v4 ? 4U : 16U}));
   }
   const auto rejects = [](std::string_view url,
-                          gufo::core::ImageReadBudget& budget) {
+                          mbufo::core::ImageReadBudget& budget) {
     bool failed = false;
     try {
-      (void)gufo::core::ReadImageUrl(url, budget);
+      (void)mbufo::core::ReadImageUrl(url, budget);
     } catch (const std::invalid_argument&) {
       failed = true;
     }
     assert(failed);
   };
-  gufo::core::ImageReadBudget budget;
+  mbufo::core::ImageReadBudget budget;
   for (const auto* url :
        {"https://127.0.0.1:1/image.png", "https://[::1]:1/image.png",
         "https://2130706433:1/image.png", "https://localhost:1/image.png"})
@@ -201,7 +201,7 @@ void TestImageTransportLimits() {
   budget = {};
   budget.remaining_bytes = 3;
   assert(
-      gufo::core::ReadImageUrl("data:image/png;base64,AQID", budget).size() ==
+      mbufo::core::ReadImageUrl("data:image/png;base64,AQID", budget).size() ==
       3);
   rejects("data:image/png;base64,AQID", budget);
   budget = {};
@@ -211,14 +211,14 @@ void TestImageTransportLimits() {
   budget.remaining_bytes = 17 * 3;
   for (unsigned i = 0; i < 17; ++i)
     assert(
-        gufo::core::ReadImageUrl("data:image/png;base64,AQID", budget).size() ==
+        mbufo::core::ReadImageUrl("data:image/png;base64,AQID", budget).size() ==
         3);
   assert(budget.remaining_bytes == 0);
   rejects("data:image/png;base64,AQID", budget);
 }
 
 void TestRendering() {
-  using namespace gufo::tokenization;
+  using namespace mbufo::tokenization;
   ChatMessage message{ChatRole::kUser, "beforeafter"};
   message.images.push_back(
       {6, std::make_shared<const std::vector<std::uint8_t>>(1, 0)});
@@ -236,7 +236,7 @@ void TestRendering() {
 }
 
 void TestToolReasoningCheckpoint() {
-  using namespace gufo::tokenization;
+  using namespace mbufo::tokenization;
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i)
     vocab.emplace_back(1, static_cast<char>(i));
@@ -250,7 +250,7 @@ void TestToolReasoningCheckpoint() {
       QwenTokenizer::CreateFromVocabulary(vocab, {}, specials);
   assert(tokenizer);
   const auto pixels = std::make_shared<
-      const std::vector<std::uint8_t>>(gufo::core::ReadImageUrl(
+      const std::vector<std::uint8_t>>(mbufo::core::ReadImageUrl(
       "data:image/png;base64,"
       "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAYklEQVR4nO3PMQ0AIADAMEAD"
       "/jUiAREcDcmqYJtn7/GzpQNeNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWg"
@@ -322,7 +322,7 @@ int main(int argc, char** argv) {
           "usage: qwen27b_vision_test MMPROJ IMAGE OUTPUT_DIR OUTPUT_WIDTH\n"
           "       qwen27b_vision_test --preprocess IMAGE OUTPUT_DIR");
     const auto image = ResizeImage(
-        gufo::core::DecodeImage(gufo::core::ReadImageFile(argv[2])));
+        mbufo::core::DecodeImage(mbufo::core::ReadImageFile(argv[2])));
     const std::filesystem::path directory(argv[3]);
     std::filesystem::create_directories(directory);
     {

@@ -7,7 +7,7 @@
 #include <hip/hip_runtime.h>
 #endif
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 namespace {
 
@@ -216,4 +216,4 @@ std::string SystemInventory::ToHuman() const {
   return oss.str();
 }
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

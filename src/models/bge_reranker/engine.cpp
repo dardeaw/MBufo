@@ -10,7 +10,7 @@
 
 #include "src/core/rerank_score.hpp"
 
-namespace gufo::models::bge_reranker {
+namespace mbufo::models::bge_reranker {
 
 namespace {
 
@@ -194,13 +194,13 @@ std::optional<std::vector<float>> EngineSession::ScoreBatch(
   }
   // Padded multi-sequence fast path: one encoder forward over the [B, Lmax]
   // batch with an exact key mask, then the shared head per CLS row. The
-  // request-level A/B switch is GUFO_BGE_BATCH=0 (legacy per-pair loop).
+  // request-level A/B switch is MBUFO_BGE_BATCH=0 (legacy per-pair loop).
   // Capacity gate: B * Lmax must fit the scorer arenas (device: the HIP
   // max_seq rows; host: scratch_.max_seq); over-long batches keep the legacy
   // loop, never grow buffers mid-request. A selected batch that fails on
   // device/host is an explicit refusal, never a silent fallback.
   const bool batch_disabled = [] {
-    const char* env = std::getenv("GUFO_BGE_BATCH");
+    const char* env = std::getenv("MBUFO_BGE_BATCH");
     return env != nullptr && env[0] == '0';
   }();
   std::size_t lmax = 0;
@@ -328,4 +328,4 @@ std::unique_ptr<EngineModel> ModelRegistry::Create(
   return it->second(model_path, error_msg);
 }
 
-}  // namespace gufo::models::bge_reranker
+}  // namespace mbufo::models::bge_reranker

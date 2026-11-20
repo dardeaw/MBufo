@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_OPS_NORM_RESIDUAL_HPP_
-#define GUFO_MODELS_QWEN_HIP_OPS_NORM_RESIDUAL_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_OPS_NORM_RESIDUAL_HPP_
+#define MBUFO_MODELS_QWEN_HIP_OPS_NORM_RESIDUAL_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 /// Computes RMSNorm on GPU: out = (x / sqrt(mean(x^2) + eps)) * weight
 void LaunchRMSNorm(const float* x, const float* weight, float* out,
@@ -41,8 +41,8 @@ void LaunchBatchedResidualAdd(const float* a, const float* b, float* out,
                               std::size_t batch_size, std::size_t dim,
                               hipStream_t stream = nullptr);
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_OPS_NORM_RESIDUAL_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_OPS_NORM_RESIDUAL_HPP_

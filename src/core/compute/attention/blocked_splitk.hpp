@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_SPLITK_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_SPLITK_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_BLOCKED_SPLITK_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_BLOCKED_SPLITK_HPP_
 
 // Blocked-Q8 Split-K decode attention for d == 256 (SWA) and d == 128
 // (dense) layers: the same
@@ -24,7 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::blocked_splitk {
+namespace mbufo::core::compute::blocked_splitk {
 
 // Element codec tag of the shared blocked Q8 KV layout: symmetric INT8 over
 // amax/127 with a per-32-block f16 scale (34 bytes per block).
@@ -69,7 +69,7 @@ AttentionBlockedSplitKScratchBytes() noexcept {
 /// each chunk to its own device-side `*start_pos + t + 1`. `score_scale`
 /// multiplies the QK scores (gemma4 passes 1.0, its f_attention_scale).
 /// `key_block_bytes` / `value_block_bytes` select each side's block layout
-/// (34 = 8-bit codes, 18 = packed 4-bit codes for the GUFO_KV_Q4/V4 grids).
+/// (34 = 8-bit codes, 18 = packed 4-bit codes for the MBUFO_KV_Q4/V4 grids).
 /// `partials` is caller-owned device scratch of at least
 /// AttentionBlockedSplitKScratchBytes() (§4.2). Instantiates <KvCodecQ8, 256>
 /// and <KvCodecQ8, 128>; other shapes return false so the caller falls back
@@ -87,6 +87,55 @@ bool AttentionBlockedSplitK(const float* q, const std::uint8_t* k_cache,
                             std::uint32_t value_block_bytes, float* partials,
                             std::size_t partials_bytes);
 
-}  // namespace gufo::core::compute::blocked_splitk
+/// Row-chunk Split-K decode (GQA-grouped kernel only: heads / kv_heads in {1,2,4,8}). The split of one query row is a
+/// function of that row's own length alone: chunk = max(chunk_base, ceil(n_kv / 32) rounded up to 32) keys per split,
+/// ceil(n_kv / chunk) splits (about 32 once n_kv > 32 * chunk_base, at most 32 + 1), with n_kv = *start_pos + t + 1 read on the device. A row's result therefore does
+/// not depend on the batch it is computed in, on `kv_len`, or on the grid: a speculative-verify row equals the same row
+/// decoded on its own, and one graph captured at a short length replays correctly while every row still fits in one chunk
+/// (n_kv <= chunk_base). `kv_len` is the host-visible length of the LAST row (start + n_tokens); `partials` needs
+/// n_tokens x heads x splits x (d + 2) floats (RowChunkPartialBytes). No minimum length (a short row is one chunk).
+inline constexpr std::uint32_t kRowChunkTargetSplits = 32;  // measured optimum at 6K..30K (bench: tools/bench/attn_check)
+[[nodiscard]] inline constexpr std::uint32_t RowChunkKeys(std::uint32_t n_kv, std::uint32_t chunk_base) noexcept {
+  const std::uint32_t c = ((n_kv + kRowChunkTargetSplits - 1u) / kRowChunkTargetSplits + 31u) / 32u * 32u;
+  return c > chunk_base ? c : chunk_base;
+}
+[[nodiscard]] inline constexpr std::uint32_t RowChunkSplits(std::uint32_t n_kv, std::uint32_t chunk_base) noexcept {
+  const std::uint32_t c = RowChunkKeys(n_kv, chunk_base);
+  return (n_kv + c - 1u) / c;
+}
+/// Largest split count over the rows `kv_len - n_tokens + 1 .. kv_len` (the grid depth of one launch).
+[[nodiscard]] inline constexpr std::uint32_t RowChunkGridSplits(std::uint32_t kv_len, std::uint32_t n_tokens,
+                                                                 std::uint32_t chunk_base) noexcept {
+  std::uint32_t z = 1;
+  for (std::uint32_t t = 0; t < n_tokens && t < kv_len; ++t) {
+    const std::uint32_t sp = RowChunkSplits(kv_len - t, chunk_base);
+    if (sp > z) z = sp;
+  }
+  return z;
+}
+[[nodiscard]] inline constexpr std::size_t RowChunkPartialBytes(std::uint32_t n_tokens, std::uint32_t heads,
+                                                                 std::uint32_t splits, std::uint32_t d) noexcept {
+  return static_cast<std::size_t>(n_tokens) * heads * splits * (d + 2u) * sizeof(float);
+}
+template <typename Codec, std::uint32_t kHeadDim>
+bool AttentionBlockedSplitKRowChunk(const float* q, const std::uint8_t* k_cache, const std::uint8_t* v_cache, float* out,
+                                    std::uint32_t n_tokens, const std::uint32_t* start_pos, std::uint32_t kv_len,
+                                    std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d, hipStream_t stream,
+                                    float score_scale, std::uint32_t key_block_bytes, std::uint32_t value_block_bytes,
+                                    float* partials, std::size_t partials_bytes, std::uint32_t chunk_base);
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_SPLITK_HPP_
+/// Row-chunk decode with an attention sink and an optional sliding window, reading the blocked Q8 cache directly (gpt-oss:
+/// d == 64, 64 heads / 8 kv heads, window 128 on half of the layers; d == 128 also instantiated). `sinks` is [heads] F32 and
+/// may be null (no sink term); the row's visible span is [max(0, n_kv - window), n_kv) with n_kv = start_pos + t + 1 (window
+/// 0 = dense causal) and its split depends only on the span length (RowChunkKeys), so rows do not depend on the batch.
+/// `partials` needs RowChunkPartialBytes(n_tokens, heads, splits, d) bytes. Returns false (nothing launched) outside the
+/// contract (heads / kv_heads in {1,2,4,8}, n_tokens <= 8).
+template <typename Codec, std::uint32_t kHeadDim>
+bool AttentionBlockedSinkRowChunk(const float* q, const std::uint8_t* k_cache, const std::uint8_t* v_cache, const float* sinks,
+                                  float* out, std::uint32_t n_tokens, std::uint32_t start_pos, std::uint32_t heads,
+                                  std::uint32_t kv_heads, std::uint32_t d, std::uint32_t window, hipStream_t stream,
+                                  float score_scale, float* partials, std::size_t partials_bytes, std::uint32_t chunk_base);
+
+}  // namespace mbufo::core::compute::blocked_splitk
+
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_BLOCKED_SPLITK_HPP_

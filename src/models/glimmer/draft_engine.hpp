@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GLIMMER_DRAFT_ENGINE_HPP_
-#define GUFO_MODELS_GLIMMER_DRAFT_ENGINE_HPP_
+#ifndef MBUFO_MODELS_GLIMMER_DRAFT_ENGINE_HPP_
+#define MBUFO_MODELS_GLIMMER_DRAFT_ENGINE_HPP_
 
 // DFlash draft runtime (muse-glimmer companion draft, e.g. dflash-kquant):
 // a block-diffusion feature draft. A depth-pruned dense decoder (5 layers,
@@ -31,7 +31,7 @@
 #include "src/models/glimmer/draft_model.hpp"
 #include "src/models/glimmer/weights.hpp"
 
-namespace gufo::models::glimmer::draft {
+namespace mbufo::models::glimmer::draft {
 
 struct DraftModelOptions {
   std::uint32_t max_context = 32768;
@@ -166,6 +166,6 @@ class DraftSession final {
   friend class DraftModel;
 };
 
-}  // namespace gufo::models::glimmer::draft
+}  // namespace mbufo::models::glimmer::draft
 
-#endif  // GUFO_MODELS_GLIMMER_DRAFT_ENGINE_HPP_
+#endif  // MBUFO_MODELS_GLIMMER_DRAFT_ENGINE_HPP_

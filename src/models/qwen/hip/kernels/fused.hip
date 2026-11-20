@@ -14,7 +14,7 @@
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 __launch_bounds__(256, 4) __global__ void FusedQKNormRoPEKvWriteKernel(
@@ -185,5 +185,5 @@ void LaunchFusedQKNormRoPEKvWrite(
       rotary_dim, rope_theta, eps, rope);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

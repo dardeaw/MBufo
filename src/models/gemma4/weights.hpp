@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GEMMA4_WEIGHTS_HPP_
-#define GUFO_MODELS_GEMMA4_WEIGHTS_HPP_
+#ifndef MBUFO_MODELS_GEMMA4_WEIGHTS_HPP_
+#define MBUFO_MODELS_GEMMA4_WEIGHTS_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -9,7 +9,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/gemma4/config.hpp"
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 
 /// Non-owning view of one GGUF tensor (same convention as the Flash-Next
 /// runtime: cols = ne[0] contiguous reduction, rows = ne[1], experts = ne[2]).
@@ -73,6 +73,10 @@ struct LayerWeights {
   TensorRef ffn_up;             ///< [hidden -> shared_ff]
   TensorRef ffn_down;           ///< [shared_ff -> hidden]
   TensorRef ffn_post_norm;      ///< [hidden] blk.N.post_ffw_norm
+  // Per-layer embedding block (Gemma 4 E2B/E4B): gelu(inp_gate(h)) * ple_input -> proj -> post_norm, added to h.
+  TensorRef ple_inp_gate;       ///< [hidden -> ple_dim] blk.N.inp_gate
+  TensorRef ple_proj;           ///< [ple_dim -> hidden] blk.N.proj
+  TensorRef ple_post_norm;      ///< [hidden] blk.N.post_norm
 
   TensorRef router;             ///< [hidden -> experts] (ffn_gate_inp)
   TensorRef router_scale;       ///< [hidden] f32 (ffn_gate_inp.scale)
@@ -100,6 +104,11 @@ struct ModelWeights {
   TensorRef token_embd;   ///< [hidden -> vocab]
   TensorRef output_norm;  ///< [hidden]
   TensorRef output;       ///< [hidden -> vocab], tied to token_embd when empty
+  // Per-layer embeddings (ple_dim > 0): a vocab-wide table of layers * ple_dim values per token, a projection of the
+  // scaled input embedding to the same width, and the RMS gain of that projection.
+  TensorRef per_layer_token_embd;   ///< [layers * ple_dim -> vocab]
+  TensorRef per_layer_model_proj;   ///< [hidden -> layers * ple_dim]
+  TensorRef per_layer_proj_norm;    ///< [ple_dim] f32
 
   /// KV-producing layer for each attention layer (SWA layers reuse the
   /// preceding full-attention layer's cache).
@@ -112,6 +121,6 @@ struct ModelWeights {
       const core::GgufReader& reader, std::string* error_msg = nullptr);
 };
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4
 
-#endif  // GUFO_MODELS_GEMMA4_WEIGHTS_HPP_
+#endif  // MBUFO_MODELS_GEMMA4_WEIGHTS_HPP_

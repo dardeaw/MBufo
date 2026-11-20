@@ -35,7 +35,7 @@ Git first: flakes only see tracked files.
 
 ```sh
 nix build                              # production package, no tests or tools
-./result/bin/gufo diagnose
+./result/bin/mbufo diagnose
 nix build .#checks.x86_64-linux.pr     # hosted CPU/repository checks
 nix develop                            # GPU development, profilers, reference tools
 ```
@@ -54,7 +54,7 @@ cmake --build --preset release --parallel 4
 
 CMake compiles C and C++ through `ccache` when it is on `PATH`, so reconfigured
 builds and header changes reuse cached objects; the configure log reports either
-`gufo: compiling C and CXX through ...` or `gufo: ccache not found`. HIP kernels
+`mbufo: compiling C and CXX through ...` or `mbufo: ccache not found`. HIP kernels
 are not launched through the cache.
 
 ### Presets
@@ -78,12 +78,12 @@ tree), `deepseek-gpu` and `qwen-gpu-kernel-oracle`. Definitions live in
 | --- | --- | --- |
 | `ENGINE_ENABLE_HIP` | `ON` | Build the gfx1151 HIP backend; only `gfx1151` is accepted |
 | `BUILD_TESTING` | `OFF` | Build correctness tests |
-| `GUFO_BUILD_TOOLS` | `OFF` | Build kernel benchmarks and tuning executables |
-| `GUFO_ENABLE_WARNINGS` | `ON` | Compiler warnings |
-| `GUFO_ENABLE_SANITIZERS` | `OFF` | AddressSanitizer and UndefinedBehaviorSanitizer |
-| `GUFO_RELEASE_VERSION` | `development` | Reported semantic release version |
-| `GUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
-| `GUFO_FFMPEG_EXECUTABLE`, `GUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
+| `MBUFO_BUILD_TOOLS` | `OFF` | Build kernel benchmarks and tuning executables |
+| `MBUFO_ENABLE_WARNINGS` | `ON` | Compiler warnings |
+| `MBUFO_ENABLE_SANITIZERS` | `OFF` | AddressSanitizer and UndefinedBehaviorSanitizer |
+| `MBUFO_RELEASE_VERSION` | `development` | Reported semantic release version |
+| `MBUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
+| `MBUFO_FFMPEG_EXECUTABLE`, `MBUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
 
 C++20 is required; HIP kernels compile from the same tree, and the adapted
 llama.cpp quantized kernels keep their own C++17 dialect in isolation.
@@ -91,7 +91,7 @@ llama.cpp quantized kernels keep their own C++17 dialect in isolation.
 ## Development loop
 
 Run the smallest check that covers the change. Formatting and the Python
-repository checks need no GPU and no Gufo build.
+repository checks need no GPU and no MBufo build.
 
 ```sh
 nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
@@ -123,12 +123,12 @@ edits; a skip caused by a missing model or device is not a quality pass.
 **A test.** Declare the executable and `add_test` in the root
 `CMakeLists.txt` (or the model's `tests/models/<model>` subdirectory), and give
 it labels — `cpu` for host-only checks, plus model, subsystem and cost labels
-such as `slow` or `external-model`. Add cheap host contracts to `gufo_pr_targets`
+such as `slow` or `external-model`. Add cheap host contracts to `mbufo_pr_targets`
 in [cmake/Checks.cmake](../cmake/Checks.cmake) only when they belong in every PR;
 model oracles stay out of the hosted set.
 
 **A model.** Create `src/models/<model>` with its own `CMakeLists.txt` exporting
-a `gufo_<model>` library, attach it with `add_subdirectory`, keep kernels under
+a `mbufo_<model>` library, attach it with `add_subdirectory`, keep kernels under
 `kernels/` and the CPU reference behind `EXCLUDE_FROM_ALL`. Add tests under
 `tests/models/<model>`, a row in [the model index](models/README.md), and the
 four required documents `README.md`, `BENCHMARKS.md`, `QUALITY.md` and
@@ -145,7 +145,7 @@ documentation-only changes.
 
 ## Performance work
 
-Measure with `result/bin/gufo` from `nix build` or a `release` build, keeping
+Measure with `result/bin/mbufo` from `nix build` or a `release` build, keeping
 compiler and dependency versions fixed across compared runs. Follow
 [performance engineering](PERFORMANCE.md) and the
 [kernel optimization skill](../.agents/skills/optimize-kernel/SKILL.md). Use

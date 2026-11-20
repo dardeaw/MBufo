@@ -20,7 +20,7 @@ void Expect(bool condition, std::string_view message) {
 
 void TestStatistics() {
   const auto statistics =
-      gufo::bench::ComputeKernelBenchStatistics({50, 10, 40, 20, 30});
+      mbufo::bench::ComputeKernelBenchStatistics({50, 10, 40, 20, 30});
   Expect(std::abs(statistics.mean_us - 30.0) < 1e-9, "mean");
   Expect(std::abs(statistics.median_us - 30.0) < 1e-9, "median");
   Expect(std::abs(statistics.p10_us - 14.0) < 1e-9, "p10");
@@ -32,7 +32,7 @@ void TestStatistics() {
 void TestEmptyStatisticsFail() {
   bool threw = false;
   try {
-    (void)gufo::bench::ComputeKernelBenchStatistics({});
+    (void)mbufo::bench::ComputeKernelBenchStatistics({});
   } catch (const std::invalid_argument&) {
     threw = true;
   }
@@ -40,7 +40,7 @@ void TestEmptyStatisticsFail() {
 }
 
 void TestJsonReport() {
-  gufo::bench::KernelBenchReport report;
+  mbufo::bench::KernelBenchReport report;
   report.fingerprint_id = std::string(64, 'a');
   report.engine_revision = "test";
   report.device_name = "AMD Radeon 8060S Graphics";
@@ -48,7 +48,7 @@ void TestJsonReport() {
   report.compute_units = 40;
   report.total_memory_bytes = 1024;
   report.options = {.warmup = 2, .repetitions = 3};
-  gufo::bench::KernelBenchResult result;
+  mbufo::bench::KernelBenchResult result;
   result.kernel = "decode_attention";
   result.backend = "online_fp32";
   result.marker = "decode_attention/context=4096";

@@ -23,7 +23,7 @@
 
 #include "src/core/compute/gemm/gemm.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 namespace {
 
 struct XBlock {  // block_q8_1
@@ -191,6 +191,6 @@ bool LaunchNarrowQ4KRowAdd(const void* w, const void* x_q8_1, const float* bias,
   return true;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // ENGINE_ENABLE_HIP

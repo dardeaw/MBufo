@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_FORWARD_HPP_
-#define GUFO_MODELS_QWEN_FORWARD_HPP_
+#ifndef MBUFO_MODELS_QWEN_FORWARD_HPP_
+#define MBUFO_MODELS_QWEN_FORWARD_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include "src/models/qwen/ssm.hpp"
 #include "src/models/qwen/state.hpp"
 
-namespace gufo::models {
+namespace mbufo::models {
 
 /// Performs GEMV: y = A @ x supporting both F32 and BF16 weights.
 void TensorGEMV(const QwenTensorRef& A, std::span<const float> x, std::size_t M,
@@ -65,6 +65,6 @@ void ForwardModel(std::uint32_t token_id, std::uint32_t pos,
 [[nodiscard]] std::uint32_t GreedyArgmax(
     std::span<const float> logits) noexcept;
 
-}  // namespace gufo::models
+}  // namespace mbufo::models
 
-#endif  // GUFO_MODELS_QWEN_FORWARD_HPP_
+#endif  // MBUFO_MODELS_QWEN_FORWARD_HPP_

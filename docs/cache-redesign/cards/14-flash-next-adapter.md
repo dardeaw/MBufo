@@ -240,7 +240,7 @@ build/gpu-test/tests/models/qwen38_flash_next/qwen38_flash_next_continuation_ada
   --model /persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
   --mtp-model /persist/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
 
-nix develop -c cmake --preset release -DGUFO_BUILD_TOOLS=ON
+nix develop -c cmake --preset release -DMBUFO_BUILD_TOOLS=ON
 nix develop -c cmake --build --preset release \
   --target qwen38_flash_next_continuation_probe
 build/release/src/models/qwen38_flash_next/qwen38_flash_next_continuation_probe \
@@ -250,8 +250,8 @@ build/release/src/models/qwen38_flash_next/qwen38_flash_next_continuation_probe 
 ```
 
 Raw logs, commands, JSON request measurements and failed/inconclusive runs are
-retained outside the repository under `/tmp/gufo-card14-*` and copied to
-`/home/mixer/gufo-qualification/cache-card14-2026-10-10/`, excluding generated
+retained outside the repository under `/tmp/mbufo-card14-*` and copied to
+`/home/mixer/mbufo-qualification/cache-card14-2026-10-10/`, excluding generated
 disk-cache payloads. Benchmark `source`
 metadata identifies the harness checkout, so binary hashes and the clean main
 workspace/source patch are recorded separately. No standalone measurement JSON

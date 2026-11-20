@@ -1,12 +1,12 @@
-#ifndef GUFO_MODELS_QWEN3_TTS_SAMPLING_HPP_
-#define GUFO_MODELS_QWEN3_TTS_SAMPLING_HPP_
+#ifndef MBUFO_MODELS_QWEN3_TTS_SAMPLING_HPP_
+#define MBUFO_MODELS_QWEN3_TTS_SAMPLING_HPP_
 
 #include <cstddef>
 #include <cstdint>
 #include <random>
 #include <vector>
 
-namespace gufo::models::qwen3_tts {
+namespace mbufo::models::qwen3_tts {
 
 struct SamplingOptions {
   bool sample{true};
@@ -35,6 +35,6 @@ std::uint32_t SampleCodec(std::vector<TokenScore>& candidates,
                           std::size_t top_k, float top_p, float temperature,
                           std::mt19937* random);
 
-}  // namespace gufo::models::qwen3_tts
+}  // namespace mbufo::models::qwen3_tts
 
-#endif  // GUFO_MODELS_QWEN3_TTS_SAMPLING_HPP_
+#endif  // MBUFO_MODELS_QWEN3_TTS_SAMPLING_HPP_

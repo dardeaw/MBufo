@@ -13,7 +13,7 @@
 #include "src/core/hip/staging.hpp"
 #include "src/core/hip/transfer_pool.hpp"
 
-using namespace gufo;
+using namespace mbufo;
 namespace {
 using Clock = std::chrono::steady_clock;
 void Check(hipError_t status) {
@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
     throw std::invalid_argument(
         "positive bytes and eight-byte-aligned piece required");
   const auto parent = argc > 3 ? std::filesystem::path(argv[3]) : "/tmp";
-  auto pattern = (parent / "gufo-streaming-bench-XXXXXX").string();
+  auto pattern = (parent / "mbufo-streaming-bench-XXXXXX").string();
   auto* name = mkdtemp(pattern.data());
   if (!name)
     throw std::runtime_error("mkdtemp failed");

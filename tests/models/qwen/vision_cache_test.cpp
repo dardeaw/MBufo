@@ -16,7 +16,7 @@
 #include "src/models/qwen/vision/prompt.hpp"
 
 namespace {
-using namespace gufo::models::qwen::vision;
+using namespace mbufo::models::qwen::vision;
 
 std::shared_ptr<const std::vector<std::uint8_t>> Encoded(
     std::uint8_t value, std::uint32_t width = 256, std::uint32_t height = 256) {
@@ -90,7 +90,7 @@ void TestReuseAndEviction() {
 void TestConcurrentMisses() {
   ImageCache cache;
   const auto bytes = Encoded(57);
-  std::array<std::shared_ptr<const gufo::core::Image>, 8> results;
+  std::array<std::shared_ptr<const mbufo::core::Image>, 8> results;
   std::barrier start(8);
   std::vector<std::thread> workers;
   for (std::size_t i = 0; i < results.size(); ++i) {
@@ -125,7 +125,7 @@ void EqualPrompts(const Prompt& a, const Prompt& b) {
 }
 
 void TestPromptIdentities() {
-  using namespace gufo::tokenization;
+  using namespace mbufo::tokenization;
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i)
     vocab.emplace_back(1, static_cast<char>(i));

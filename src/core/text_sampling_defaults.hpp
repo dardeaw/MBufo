@@ -1,12 +1,12 @@
-#ifndef GUFO_CORE_TEXT_SAMPLING_DEFAULTS_HPP_
-#define GUFO_CORE_TEXT_SAMPLING_DEFAULTS_HPP_
+#ifndef MBUFO_CORE_TEXT_SAMPLING_DEFAULTS_HPP_
+#define MBUFO_CORE_TEXT_SAMPLING_DEFAULTS_HPP_
 
 #include <optional>
 
 #include "src/core/model_config.hpp"
 #include "src/core/sampling.hpp"
 
-namespace gufo::sampling {
+namespace mbufo::sampling {
 
 enum class TextModelPreset { kUnspecified, kQwen38, kDeepSeekV4Flash };
 
@@ -80,6 +80,6 @@ inline SamplingConfig ResolveTextSampling(TextModelPreset model,
   return result;
 }
 
-}  // namespace gufo::sampling
+}  // namespace mbufo::sampling
 
 #endif

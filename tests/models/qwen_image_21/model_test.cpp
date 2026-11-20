@@ -11,7 +11,7 @@
 #include "src/models/qwen_image_21/tokenizer.hpp"
 
 int main(int argc, char** argv) {
-  using namespace gufo::models::qwen_image_21;
+  using namespace mbufo::models::qwen_image_21;
   if (argc > 2)
     return 2;
   if (argc == 2) {
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     assert(rejected);
   }
   int calls = 0;
-  gufo::server::ImageService service(
+  mbufo::server::ImageService service(
       {}, "image-test", [&](const Request& request, const CancellationCheck&) {
         ++calls;
         assert(request.prompt == "a red cube");
@@ -107,15 +107,15 @@ int main(int argc, char** argv) {
         assert(request.seed == static_cast<std::uint64_t>(calls + 40));
         return Result{.image = image};
       });
-  gufo::server::HttpRequest http;
+  mbufo::server::HttpRequest http;
   http.method = "POST";
   http.path = "/v1/images/generations";
   http.headers = {{"Content-Type", "application/json"}};
   http.body =
       R"({"model":"image-test","prompt":"a red cube","size":"256x256","n":2,"seed":41})";
-  const auto response = gufo::server::HandleImageApiRequest(http, service);
+  const auto response = mbufo::server::HandleImageApiRequest(http, service);
   assert(response.status == 200 && calls == 2);
-  const auto json = gufo::json::parse(response.body);
+  const auto json = mbufo::json::parse(response.body);
   assert(json.find("data")->size() == 2);
   for (const auto body :
        {R"({"prompt":)", R"({"prompt":"a red cube","seed":-1})",
@@ -126,10 +126,10 @@ int main(int argc, char** argv) {
         R"({"prompt":"a red cube","size":"256x256junk"})",
         R"({"prompt":"a red cube","unknown":true})"}) {
     http.body = body;
-    assert(gufo::server::HandleImageApiRequest(http, service).status == 400);
+    assert(mbufo::server::HandleImageApiRequest(http, service).status == 400);
   }
   http.body = R"({"prompt":"a red cube","model":"unknown"})";
-  assert(gufo::server::HandleImageApiRequest(http, service).status == 404);
+  assert(mbufo::server::HandleImageApiRequest(http, service).status == 404);
   http.path = "/v1/images/edits";
   http.headers = {
       {"Content-Type", "multipart/form-data; boundary=\"boundary\""}};
@@ -146,9 +146,9 @@ int main(int argc, char** argv) {
     http.body += "\r\n--boundary\r\nContent-Disposition: form-data; name=\"" +
                  std::string(name) + "\"\r\n\r\n" + value;
   http.body += "\r\n--boundary--\r\n";
-  assert(gufo::server::HandleImageApiRequest(http, service).status == 200 &&
+  assert(mbufo::server::HandleImageApiRequest(http, service).status == 200 &&
          calls == 3);
   http.body.resize(http.body.size() - 8);
-  assert(gufo::server::HandleImageApiRequest(http, service).status == 400);
+  assert(mbufo::server::HandleImageApiRequest(http, service).status == 400);
   std::cout << "Qwen-Image image and schedule contracts passed\n";
 }

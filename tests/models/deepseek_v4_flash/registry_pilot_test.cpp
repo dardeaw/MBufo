@@ -14,8 +14,8 @@
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/deepseek_v4_flash/engine_adapter.hpp"
 
-namespace d = gufo::models::deepseek_v4_flash;
-namespace e = gufo::core::engine;
+namespace d = mbufo::models::deepseek_v4_flash;
+namespace e = mbufo::core::engine;
 
 namespace {
 
@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
   {
     auto model = d::Model::Load(model_path, options, &error);
     if (!model) return Fail("native load: " + error);
-    auto session = model->CreateSession(gufo::core::SessionMode::kAutoregressive, options.max_context, &error);
+    auto session = model->CreateSession(mbufo::core::SessionMode::kAutoregressive, options.max_context, &error);
     if (!session) return Fail("native session: " + error);
     if (!session->Sync(prompt, &error)) return Fail("native sync: " + error);
     std::uint64_t rng = 0;

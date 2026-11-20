@@ -15,8 +15,8 @@
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/gemma4/engine_adapter.hpp"
 
-namespace g = gufo::models::gemma4;
-namespace e = gufo::core::engine;
+namespace g = mbufo::models::gemma4;
+namespace e = mbufo::core::engine;
 
 namespace {
 

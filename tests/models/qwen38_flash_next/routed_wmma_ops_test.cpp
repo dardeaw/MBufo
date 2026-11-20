@@ -15,7 +15,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
-namespace q = gufo::models::qwen38_flash_next::rocm;
+namespace q = mbufo::models::qwen38_flash_next::rocm;
 namespace {
 
 void CheckHip(hipError_t error, const char* operation) {

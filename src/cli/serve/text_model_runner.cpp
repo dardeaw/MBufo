@@ -16,7 +16,7 @@
 #include "src/core/json.hpp"
 #include "src/core/platform/os_info.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
@@ -2595,4 +2595,4 @@ std::size_t TextRunnerPool::CachedPrefixTokens(
                                           context->cache_prefixes);
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

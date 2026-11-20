@@ -5,7 +5,7 @@
 
 #include "src/models/minimax_h3/attention.hip.hpp"
 
-namespace gufo::minimax_h3::dit_ops {
+namespace mbufo::minimax_h3::dit_ops {
 using BufferResource = __attribute__((ext_vector_type(4))) unsigned;
 __device__ BufferResource
 LoadBuffer(BufferResource, unsigned, unsigned,
@@ -370,4 +370,4 @@ void LaunchProjectionAttention(const std::uint16_t* query,
       query, key, packed_values, output, rows, heads);
 }
 
-}  // namespace gufo::minimax_h3::dit_ops
+}  // namespace mbufo::minimax_h3::dit_ops

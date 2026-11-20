@@ -16,7 +16,7 @@
 #include "src/core/json.hpp"
 #include "src/models/qwen3_tts/audio.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 constexpr std::string_view kSpeechPath = "/v1/audio/speech";
@@ -414,7 +414,7 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
     response.headers = {
         {"Content-Type", sse ? "text/event-stream" : "audio/pcm"},
         {"Cache-Control", "no-cache"},
-        {"X-Gufo-TTS-Backend", service.backend_name()}};
+        {"X-MBufo-TTS-Backend", service.backend_name()}};
     response.stream_log = log;
     response
         .streaming_body = [&service, synthesis = std::move(synthesis),
@@ -499,9 +499,9 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
       .headers =
           {
               {"Content-Type", "audio/wav"},
-              {"X-Gufo-Schema", std::string(kAudioTtsApiSchema)},
-              {"X-Gufo-TTS-Backend", service.backend_name()},
-              {"X-Gufo-Codec-Steps",
+              {"X-MBufo-Schema", std::string(kAudioTtsApiSchema)},
+              {"X-MBufo-TTS-Backend", service.backend_name()},
+              {"X-MBufo-Codec-Steps",
                std::to_string(result.codes.size() /
                               std::max<std::uint32_t>(1, result.code_groups))},
           },
@@ -544,4 +544,4 @@ HttpResponse HandleAudioTtsApiRequest(const HttpRequest& request,
                "method_not_allowed");
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

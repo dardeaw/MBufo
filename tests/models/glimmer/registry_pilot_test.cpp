@@ -14,8 +14,8 @@
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/glimmer/engine_adapter.hpp"
 
-namespace g = gufo::models::glimmer;
-namespace e = gufo::core::engine;
+namespace g = mbufo::models::glimmer;
+namespace e = mbufo::core::engine;
 
 namespace {
 

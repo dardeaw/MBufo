@@ -25,7 +25,7 @@
 #include "src/models/qwen3_asr/prompt.hpp"
 #include "src/models/qwen3_asr/tokenizer.hpp"
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -342,11 +342,11 @@ bool TranscriptionHipRuntime::Transcribe(const TranscriptionRequest& request,
   return impl_->Transcribe(request, is_cancelled, result, error);
 }
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
 #else
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 
 struct TranscriptionHipRuntime::Impl {};
 
@@ -376,6 +376,6 @@ bool TranscriptionHipRuntime::Transcribe(const TranscriptionRequest&,
   return false;
 }
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
 #endif

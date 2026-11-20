@@ -12,7 +12,7 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "tools" / "gufo" / "h3_latent_quality.py"
+MODULE_PATH = ROOT / "tools" / "mbufo" / "h3_latent_quality.py"
 sys.path.insert(0, str(MODULE_PATH.parents[1]))
 SPEC = importlib.util.spec_from_file_location("h3_latent_quality", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory() as directory:
         audio.tofile(target / "audio_final.f32")
     conditioning.tofile(teacher / "conditioning.bf16")
     teacher_metadata = {
-        "schema": "gufo.minimax-h3-denoiser-golden.v1",
+        "schema": "mbufo.minimax-h3-denoiser-golden.v1",
         "model_revision": MODULE.MODEL_REVISION,
         "reference_revision": MODULE.REFERENCE_REVISION,
         "geometry": {"width": 32, "height": 32, "frames": 22},
@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory() as directory:
     }
     (teacher / "metadata.json").write_text(json.dumps(teacher_metadata))
     native_manifest = {
-        "schema": "gufo.minimax-h3-final-latents.v1",
+        "schema": "mbufo.minimax-h3-final-latents.v1",
         "model_revision": MODULE.MODEL_REVISION,
         "reference_revision": MODULE.REFERENCE_REVISION,
         "seed": 42,

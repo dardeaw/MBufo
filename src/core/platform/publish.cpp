@@ -16,7 +16,7 @@
 #include <unistd.h>
 #endif
 
-namespace gufo::platform {
+namespace mbufo::platform {
 namespace {
 
 #if defined(_WIN32)
@@ -240,4 +240,4 @@ bool AtomicPublishedFile::Commit(const std::filesystem::path& final_path,
 #endif
 }
 
-}  // namespace gufo::platform
+}  // namespace mbufo::platform

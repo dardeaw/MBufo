@@ -137,7 +137,7 @@ struct qfn_stack_pool : public ggml_hip_pool {
         if (base) (void)hipFree(base);
         size_t next = capacity ? capacity : (size_t) 256 << 20;
         while (next < bytes) next *= 2;
-        HIP_CHECK(gufo::hip::AllocateDevice(&base, next));
+        HIP_CHECK(mbufo::hip::AllocateDevice(&base, next));
         capacity = next;
     }
 

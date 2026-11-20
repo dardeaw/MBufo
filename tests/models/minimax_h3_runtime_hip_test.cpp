@@ -16,17 +16,17 @@ double Seconds(const std::chrono::steady_clock::time_point& start) {
 }  // namespace
 
 int main() {
-  const char* model_root = std::getenv("GUFO_H3_MODEL_ROOT");
-  const char* manifest = std::getenv("GUFO_H3_SOURCE_MANIFEST");
+  const char* model_root = std::getenv("MBUFO_H3_MODEL_ROOT");
+  const char* manifest = std::getenv("MBUFO_H3_SOURCE_MANIFEST");
   if (model_root == nullptr || manifest == nullptr) {
-    std::cerr << "SKIP: set GUFO_H3_MODEL_ROOT and "
-                 "GUFO_H3_SOURCE_MANIFEST\n";
+    std::cerr << "SKIP: set MBUFO_H3_MODEL_ROOT and "
+                 "MBUFO_H3_SOURCE_MANIFEST\n";
     return 77;
   }
   std::string error;
   const auto inspection_start = std::chrono::steady_clock::now();
   auto inventory =
-      gufo::minimax_h3::ModelInventory::Inspect(model_root, manifest, &error);
+      mbufo::minimax_h3::ModelInventory::Inspect(model_root, manifest, &error);
   if (!inventory.has_value()) {
     std::cerr << error << '\n';
     return 1;
@@ -38,24 +38,24 @@ int main() {
     std::cerr << "metadata inspection touched weight payload residency\n";
     return 1;
   }
-  auto backend = gufo::minimax_h3::CreateHipResidencyBackend(&error);
+  auto backend = mbufo::minimax_h3::CreateHipResidencyBackend(&error);
   if (!backend) {
     std::cerr << error << '\n';
     return 1;
   }
 
-  const auto load = [&](gufo::minimax_h3::ResidencyMode mode) {
+  const auto load = [&](mbufo::minimax_h3::ResidencyMode mode) {
     const auto start = std::chrono::steady_clock::now();
-    auto session = gufo::minimax_h3::PhaseSession::Load(
-        *inventory, gufo::minimax_h3::Phase::kAudioVae,
-        gufo::minimax_h3::LoadOptions{mode, 16U << 20U, 16U << 20U, true},
+    auto session = mbufo::minimax_h3::PhaseSession::Load(
+        *inventory, mbufo::minimax_h3::Phase::kAudioVae,
+        mbufo::minimax_h3::LoadOptions{mode, 16U << 20U, 16U << 20U, true},
         *backend, nullptr, nullptr, &error);
     const double elapsed = Seconds(start);
     if (!session.has_value()) {
       std::cerr << error << '\n';
       std::exit(1);
     }
-    std::cout << gufo::minimax_h3::ToString(mode) << ": " << elapsed
+    std::cout << mbufo::minimax_h3::ToString(mode) << ": " << elapsed
               << " s, file-backed " << session->telemetry().file_backed_bytes
               << ", registered " << session->telemetry().registered_host_bytes
               << ", device " << session->telemetry().device_weight_bytes
@@ -63,8 +63,8 @@ int main() {
     return elapsed;
   };
 
-  const double mapped = load(gufo::minimax_h3::ResidencyMode::kMappedReadOnly);
-  const double copied = load(gufo::minimax_h3::ResidencyMode::kDeviceCopy);
+  const double mapped = load(mbufo::minimax_h3::ResidencyMode::kMappedReadOnly);
+  const double copied = load(mbufo::minimax_h3::ResidencyMode::kDeviceCopy);
   std::cout << "inspection: " << inspection_seconds
             << " s; audio-VAE mapped/device-copy load ratio: "
             << mapped / copied << '\n';

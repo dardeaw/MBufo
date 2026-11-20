@@ -76,7 +76,7 @@ def retain_response(out, label, messages, result, elapsed):
     }, indent=2) + '\n')
     if not isinstance(content, str):
         raise RuntimeError('Missing text completion; raw response retained')
-    metrics = result['usage']['gufo']
+    metrics = result['usage']['mbufo']
     for phase in ['prefill_ms', 'decode_ms']:
         value = metrics.get(phase)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
@@ -176,7 +176,7 @@ class OwnedRunCleanup:
 def assert_checkpoint_selection(out, label, result, *, restart=False, minimum=1):
     """Assert reported selection, retaining failures independently of raw responses."""
     usage = result['usage']
-    metrics = usage.get('gufo', {}).get('component_cache')
+    metrics = usage.get('mbufo', {}).get('component_cache')
     checks = []
     def check(name, passed, actual):
         checks.append({'name': name, 'passed': bool(passed), 'actual': actual})
@@ -225,7 +225,7 @@ def assert_cancelled_frontier(out, label, result, observation, *, component):
     usage = result['usage']
     frontier = usage['prompt_tokens'] - observation['total'] + observation['processed']
     cached = usage.get('prompt_tokens_details', {}).get('cached_tokens')
-    metrics = usage.get('gufo', {}).get('component_cache', {})
+    metrics = usage.get('mbufo', {}).get('component_cache', {})
     passed = type(cached) is int and 0 < frontier <= cached <= usage['prompt_tokens']
     if component:
         passed = passed and metrics.get('reuse') == 'live' and metrics.get('selected_tokens') == cached
@@ -362,7 +362,7 @@ def response_signature(result):
 
 def assert_cold_control(out, label, cached, cold):
     # Store every observation before asserting; failure is evidence too.
-    metrics = cold['usage']['gufo']
+    metrics = cold['usage']['mbufo']
     cached_tokens = cold['usage'].get('prompt_tokens_details', {}).get('cached_tokens')
     record = {
         'cached_signature': response_signature(cached),
@@ -454,7 +454,7 @@ def assert_publication_wait(out, label, segment, result):
                 str(checkpoint) + r'\b', between)]
         record['waits'].append(row)
     cached = result['usage'].get('prompt_tokens_details', {}).get('cached_tokens')
-    metrics = result['usage'].get('gufo', {}).get('component_cache', {})
+    metrics = result['usage'].get('mbufo', {}).get('component_cache', {})
     record['response_cached_tokens'] = cached
     record['response_component_cache'] = metrics
     valid = len(record['waits']) == 1

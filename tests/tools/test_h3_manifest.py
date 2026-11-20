@@ -15,7 +15,7 @@ from unittest import mock
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
 
-from gufo import control_tokens, h3_manifest, safetensors  # noqa: E402
+from mbufo import control_tokens, h3_manifest, safetensors  # noqa: E402
 
 
 def write_json(path: Path, value) -> None:

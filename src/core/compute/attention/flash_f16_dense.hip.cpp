@@ -23,7 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::flash_f16 {
+namespace mbufo::core::compute::flash_f16 {
 namespace {
 
 using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
@@ -268,6 +268,6 @@ bool FlashF16DenseMha(const float* q, const float* k, const float* v,
   return true;
 }
 
-}  // namespace gufo::core::compute::flash_f16
+}  // namespace mbufo::core::compute::flash_f16
 
 #endif  // defined(ENGINE_ENABLE_HIP)

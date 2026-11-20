@@ -1,5 +1,5 @@
-#ifndef GUFO_EVAL_DATASET_HPP_
-#define GUFO_EVAL_DATASET_HPP_
+#ifndef MBUFO_EVAL_DATASET_HPP_
+#define MBUFO_EVAL_DATASET_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace gufo::eval {
+namespace mbufo::eval {
 
 enum class AnswerKind : std::uint8_t {
   kMultipleChoice,
@@ -50,6 +50,6 @@ struct EvalSuite {
 
 [[nodiscard]] std::string_view AnswerKindName(AnswerKind kind) noexcept;
 
-}  // namespace gufo::eval
+}  // namespace mbufo::eval
 
-#endif  // GUFO_EVAL_DATASET_HPP_
+#endif  // MBUFO_EVAL_DATASET_HPP_

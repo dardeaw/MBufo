@@ -141,7 +141,7 @@ both conversations still restore (removing the wait for reclamation fails
 allocates no slot. The `disk_over_budget` warning has no test: once
 reclamation finishes, startup can always retire unpinned entries.
 
-Production-build smoke runs (release `gufo serve llm`, one session, context
+Production-build smoke runs (release `mbufo serve llm`, one session, context
 16384) check the startup paths on gfx1151. In AR, the first server published
 two unrelated 4,741-token prompts as 251,663,008-byte checkpoints (503,415,538
 managed bytes) and reported `capacity_bytes` and `automatic_bytes`
@@ -164,7 +164,7 @@ eight cases, including the disk variants.
 These are startup and correctness observations, not timing qualification;
 the request path is unchanged.
 
-Evidence: `/home/mixer/gufo-qualification/d4-options-2026-10-12` (`smoke.py`,
+Evidence: `/home/mixer/mbufo-qualification/d4-options-2026-10-12` (`smoke.py`,
 `run-gpu.sh`, server logs, `results.json`, candidate binary and SHA-256).
 
 ## Revision: pages on demand (2026-10-12)
@@ -232,6 +232,6 @@ unchanged-base control run showed no cache-work changes. Per-suite totals
 match the control except `cache-growth` capture time, +240 ms for the eight
 growth steps. A first base run was faster across every suite (run-order drift).
 
-Evidence: `/home/mixer/gufo-qualification/issue562-2026-10-12`
+Evidence: `/home/mixer/mbufo-qualification/issue562-2026-10-12`
 (`restore_probe.py`, `prefetch_bench.py`, `parallel_prefetch_bench.py`,
 `lazy3_qual.sh`, `control_check.py`, reports, logs, binaries and SHA-256).

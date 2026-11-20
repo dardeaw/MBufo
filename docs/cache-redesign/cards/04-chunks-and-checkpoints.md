@@ -52,7 +52,7 @@ With the fake adapter:
 [`src/cache/checkpoint.hpp`](../../../src/cache/checkpoint.hpp) and
 [`checkpoint.cpp`](../../../src/cache/checkpoint.cpp) add immutable checkpoint
 records, full-chunk references, checkpoint-private state/tails and execution
-history. `gufo_cache` remains independent of serving; this changes no runtime
+history. `mbufo_cache` remains independent of serving; this changes no runtime
 behavior. Prefix lookup, slot protection, preservation/materialization and the
 physical backing pool remain with cards 05, 06 and 08.
 
@@ -135,7 +135,7 @@ cmake --preset cpu-sanitizer
 cmake --build --preset cpu-sanitizer --target cache_checkpoint_test cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test --parallel 4
 ctest --preset cpu-sanitizer -R '^cache_(checkpoint|adapter|adapter_lifecycle|ledger|boundary)_test$' --output-on-failure
 cmake --preset release
-cmake --build --preset release --target gufo_cache --parallel 4
+cmake --build --preset release --target mbufo_cache --parallel 4
 cmake --build --preset pr --parallel 4
 build/cpu-test/tests/cache/cache_checkpoint_test
 ```

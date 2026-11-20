@@ -1,6 +1,6 @@
 #include "src/models/minimax_h3/prompt_encoder.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 #if !defined(ENGINE_ENABLE_HIP)
 bool EncodePromptLayer50(const ModelInventory&, std::span<const std::uint32_t>,
@@ -18,4 +18,4 @@ std::uint64_t PromptEncoderLiveRegisteredHostBytes() noexcept {
 }
 #endif
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3

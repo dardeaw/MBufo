@@ -11,8 +11,8 @@
 #include "src/core/hip/committed_backing.hpp"
 #include "src/models/qwen/continuation_adapter.hpp"
 
-namespace cache = gufo::cache;
-namespace qwen = gufo::models::qwen;
+namespace cache = mbufo::cache;
+namespace qwen = mbufo::models::qwen;
 namespace {
 using Clock = std::chrono::steady_clock;
 void Require(bool ok, const std::string& error) {
@@ -46,10 +46,10 @@ int main(int argc, char** argv) {
     const auto depth = static_cast<std::uint32_t>(std::stoul(argv[2]));
     Require(depth == 32768 || depth == 100000, "depth must be 32768 or 100000");
     std::string error;
-    auto reader = gufo::core::GgufReader::OpenFile(argv[1], &error);
+    auto reader = mbufo::core::GgufReader::OpenFile(argv[1], &error);
     Require(bool(reader), error);
-    auto model = gufo::hip::QwenGpuModel::CreateFromGguf(
-        std::shared_ptr<const gufo::core::GgufReader>(std::move(reader)),
+    auto model = mbufo::hip::QwenGpuModel::CreateFromGguf(
+        std::shared_ptr<const mbufo::core::GgufReader>(std::move(reader)),
         &error);
     Require(bool(model), error);
     qwen::ContinuationAdapter adapter(model, depth + 128,
@@ -63,9 +63,9 @@ int main(int argc, char** argv) {
     cache::ResourceLedger ledger(
         {capacity + metadata, capacity + metadata, 0, capacity});
     const auto commit_start = Clock::now();
-    gufo::hip::CommittedBackingPool backing(
+    mbufo::hip::CommittedBackingPool backing(
         ledger, {capacity + metadata, block_bytes, metadata});
-    gufo::hip::TransferPool streams(2);
+    mbufo::hip::TransferPool streams(2);
     const auto a_usage = adapter.GetExecutor(*slots[0]).GetMemoryUsage();
     const auto b_usage = adapter.GetExecutor(*slots[1]).GetMemoryUsage();
     std::cout << "capacity,AR,context," << depth + 128
@@ -81,13 +81,13 @@ int main(int argc, char** argv) {
         "The quick brown fox jumps over the lazy dog. Strix Halo executes this "
         "deterministic benchmark sequence. ");
     Require(!pattern.empty(), "empty token fixture");
-    std::vector<gufo::tokenization::TokenId> prompt(depth);
+    std::vector<mbufo::tokenization::TokenId> prompt(depth);
     for (std::size_t i = 0; i < prompt.size(); ++i)
       prompt[i] = pattern[i % pattern.size()];
     auto& source = adapter.GetExecutor(*slots[0]);
     (void)source.ForwardPromptBatch(prompt);
     const auto positions = adapter.Positions(*slots[0]);
-    std::vector<gufo::hip::BackingBlock> blocks;
+    std::vector<mbufo::hip::BackingBlock> blocks;
     std::vector<Piece> pieces;
     std::size_t cursor = block_bytes;
     std::size_t private_bytes = 0, row_bytes = 0;
@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
                   std::memcmp(logits.data(), other.data(),
                               logits.size_bytes()) == 0,
               "continuation logits differ");
-      const auto token = static_cast<gufo::tokenization::TokenId>(
+      const auto token = static_cast<mbufo::tokenization::TokenId>(
           std::ranges::max_element(logits) - logits.begin());
       Require(source.ForwardToken(token, depth + i) ==
                   destination.ForwardToken(token, depth + i),

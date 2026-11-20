@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_DIAGNOSTICS_BANDWIDTH_RUN_HPP_
-#define GUFO_CORE_DIAGNOSTICS_BANDWIDTH_RUN_HPP_
+#ifndef MBUFO_CORE_DIAGNOSTICS_BANDWIDTH_RUN_HPP_
+#define MBUFO_CORE_DIAGNOSTICS_BANDWIDTH_RUN_HPP_
 
 #include <algorithm>
 #include <chrono>
@@ -7,7 +7,7 @@
 
 #include "src/core/diagnostics/bandwidth.h"
 
-namespace gufo::diagnostics::detail {
+namespace mbufo::diagnostics::detail {
 
 // Construct after warmup. Each path runs for both the requested duration
 // and minimum iteration count; allocation and warmup are outside the budget.
@@ -44,6 +44,6 @@ private:
   Clock::time_point started_;
 };
 
-}  // namespace gufo::diagnostics::detail
+}  // namespace mbufo::diagnostics::detail
 
-#endif  // GUFO_CORE_DIAGNOSTICS_BANDWIDTH_RUN_HPP_
+#endif  // MBUFO_CORE_DIAGNOSTICS_BANDWIDTH_RUN_HPP_

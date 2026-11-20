@@ -29,7 +29,7 @@ std::string Read(const std::filesystem::path& path) {
 
 void Publish(const std::filesystem::path& path, std::string_view bytes) {
   std::string error;
-  auto file = gufo::platform::AtomicPublishedFile::Create(path, &error);
+  auto file = mbufo::platform::AtomicPublishedFile::Create(path, &error);
   assert(file.valid());
   assert(file.Write(bytes.data(), bytes.size(), &error));
   assert(file.Commit(path, &error));
@@ -42,7 +42,7 @@ void DescriptorZero(const std::filesystem::path& root) {
   ::close(STDIN_FILENO);
   const auto lock_path = (root / "lock").string();
   {
-    auto lock = gufo::platform::FileLock::Acquire(lock_path);
+    auto lock = mbufo::platform::FileLock::Acquire(lock_path);
     auto moved = std::move(lock);
     lock = std::move(moved);
   }
@@ -58,7 +58,7 @@ void DescriptorZero(const std::filesystem::path& root) {
   assert(::fcntl(STDIN_FILENO, F_GETFD) == -1 && errno == EBADF);
   {
     std::string error;
-    auto file = gufo::platform::AtomicPublishedFile::Create(path, &error);
+    auto file = mbufo::platform::AtomicPublishedFile::Create(path, &error);
     assert(file.valid());
     auto moved = std::move(file);
     file = std::move(moved);
@@ -91,7 +91,7 @@ extern "C" int __wrap_fsync(int fd) {
 int main() {
   const auto root =
       std::filesystem::temp_directory_path() /
-      ("gufo-platform-publish-" +
+      ("mbufo-platform-publish-" +
        std::to_string(std::filesystem::file_time_type::clock::now()
                           .time_since_epoch()
                           .count()));
@@ -109,7 +109,7 @@ int main() {
   assert(directory_flushes == before + 1);
   std::string error;
   auto file =
-      gufo::platform::AtomicPublishedFile::Create("relative.bin", &error);
+      mbufo::platform::AtomicPublishedFile::Create("relative.bin", &error);
   assert(file.valid() && file.Write("updated", 7, &error));
   fail_directory_flush = true;
   assert(!file.Commit("relative.bin", &error));

@@ -1,5 +1,5 @@
 {
-  "schema": "gufo.qwen3-tts-reference-contract.v1",
+  "schema": "mbufo.qwen3-tts-reference-contract.v1",
   "reference_commit": "022e286b98fbec7e1e916cb940cdf532cd9f488e",
   "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
   "speaker": "vivian",

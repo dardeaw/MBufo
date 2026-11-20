@@ -26,14 +26,14 @@ def chat(url, model, messages):
     result = continuation.call(url, body)
     usage = result["usage"]
     total, cached, prefill = (usage["prompt_tokens"], usage["cached_tokens"],
-                              usage["gufo"]["prefill_tokens"])
+                              usage["mbufo"]["prefill_tokens"])
     assert cached + prefill == total, usage
     message = result["choices"][0]["message"]
-    component = usage["gufo"].get("component_cache", {})
+    component = usage["mbufo"].get("component_cache", {})
     provenance = ({"checkpoint_ids": component["captured_checkpoint_ids"]}
                   if "captured_checkpoint_ids" in component else {})
     return body, result, {**provenance, "total": total, "cached": cached, "prefill": prefill,
-                          "disk": usage["gufo"]["cache_disk_hit"],
+                          "disk": usage["mbufo"]["cache_disk_hit"],
                           "text": message["content"].strip(),
                           "sha256": continuation.digest(result)}
 

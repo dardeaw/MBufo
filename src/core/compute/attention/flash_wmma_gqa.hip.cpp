@@ -25,7 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::flash_wmma_gqa {
+namespace mbufo::core::compute::flash_wmma_gqa {
 namespace {
 
 using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
@@ -276,6 +276,6 @@ bool FlashWmmaPrefill(const float* q, const __half* k_cache, const __half* v_cac
   return true;
 }
 
-}  // namespace gufo::core::compute::flash_wmma_gqa
+}  // namespace mbufo::core::compute::flash_wmma_gqa
 
 #endif  // defined(ENGINE_ENABLE_HIP)

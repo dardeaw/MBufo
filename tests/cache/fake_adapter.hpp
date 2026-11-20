@@ -1,5 +1,5 @@
-#ifndef GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
-#define GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
+#ifndef MBUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
+#define MBUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 
 #include <array>
 #include <atomic>
@@ -11,7 +11,7 @@
 
 #include "src/cache/adapter.hpp"
 
-namespace gufo::cache::testing {
+namespace mbufo::cache::testing {
 
 struct FakeTransfer;
 struct FakeStreamState;
@@ -111,6 +111,6 @@ private:
   Rows prefill_pass_rows_{2048};
 };
 
-}  // namespace gufo::cache::testing
+}  // namespace mbufo::cache::testing
 
 #endif

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_OPS_SWIGLU_HPP_
-#define GUFO_MODELS_QWEN_HIP_OPS_SWIGLU_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_OPS_SWIGLU_HPP_
+#define MBUFO_MODELS_QWEN_HIP_OPS_SWIGLU_HPP_
 
 #include <cstddef>
 
@@ -8,7 +8,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 /// Computes Fused SwiGLU GEMV: out = SiLU(W_gate * x) * (W_up * x)
 void LaunchFusedSwiGLUGEMV(const void* gate_w, core::GgmlType gate_type,
@@ -40,8 +40,8 @@ bool TryLaunchPackedQuantSwiGLUFp32(core::GgmlType type, const void* gate_up,
                                     std::size_t hidden_size,
                                     hipStream_t stream = nullptr);
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_OPS_SWIGLU_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_OPS_SWIGLU_HPP_

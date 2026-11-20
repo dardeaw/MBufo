@@ -121,7 +121,7 @@
         "failures": []
       },
       "visual_check": "Blue teapot, steaming cup and saucer; source scene retained in native and official images.",
-      "diagnosis": "Original same-noise 1024 edit also reproduces the posterization in the official pipeline; changing seed to 43 restores the edit on unmodified Gufo.",
+      "diagnosis": "Original same-noise 1024 edit also reproduces the posterization in the official pipeline; changing seed to 43 restores the edit on unmodified MBufo.",
       "serving": {
         "build": "Nix production",
         "openai_sdk": "2.41.1",

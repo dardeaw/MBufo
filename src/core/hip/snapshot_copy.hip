@@ -3,7 +3,7 @@
 
 #include "src/core/hip/snapshot_copy.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 __global__ void CopyAlignedSnapshot(unsigned char* destination,
                                     const unsigned char* source,
@@ -60,4 +60,4 @@ hipError_t CopySnapshotToDevice(void* destination, const void* source,
   return CopySnapshot(destination, source, bytes, stream, false);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip

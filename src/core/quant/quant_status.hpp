@@ -1,7 +1,7 @@
-#ifndef GUFO_CORE_QUANT_QUANT_STATUS_HPP_
-#define GUFO_CORE_QUANT_QUANT_STATUS_HPP_
+#ifndef MBUFO_CORE_QUANT_QUANT_STATUS_HPP_
+#define MBUFO_CORE_QUANT_QUANT_STATUS_HPP_
 
-namespace gufo::core::quant {
+namespace mbufo::core::quant {
 
 /// Result of a type-dispatched core operation. Callers must look at it: an unsupported format or
 /// shape is reported, never decoded as some other format.
@@ -12,6 +12,6 @@ enum class Status : int {
   kScratchTooSmall,  ///< caller scratch smaller than the operation needs
 };
 
-}  // namespace gufo::core::quant
+}  // namespace mbufo::core::quant
 
-#endif  // GUFO_CORE_QUANT_QUANT_STATUS_HPP_
+#endif  // MBUFO_CORE_QUANT_QUANT_STATUS_HPP_

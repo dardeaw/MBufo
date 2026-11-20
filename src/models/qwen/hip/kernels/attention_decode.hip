@@ -13,7 +13,7 @@
 #include "src/models/qwen/hip/kernels/attention_decode_verify_wave64.hpp"
 #include "src/models/qwen/hip/ops/attention.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 __global__ void WriteKVCacheKernel(
     const float* __restrict__ k, const float* __restrict__ v,
@@ -1132,7 +1132,7 @@ void LaunchCausalDecodeAttention(
   // rows and heads (8:1 GQA, f16 KV). Falls back per row for short or
   // partial groups and non-8:1 shapes.
   const bool qtile_allowed = [] {
-    const char* e = std::getenv("GUFO_QWEN_SPLITK_QTILE");
+    const char* e = std::getenv("MBUFO_QWEN_SPLITK_QTILE");
     return e == nullptr || !(e[0] == '0' && e[1] == '\0');
   }();
   const bool qtile_shape =
@@ -1176,5 +1176,5 @@ void LaunchCausalDecodeAttention(
   }
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

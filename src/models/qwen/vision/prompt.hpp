@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_VISION_PROMPT_HPP_
-#define GUFO_MODELS_QWEN_VISION_PROMPT_HPP_
+#ifndef MBUFO_MODELS_QWEN_VISION_PROMPT_HPP_
+#define MBUFO_MODELS_QWEN_VISION_PROMPT_HPP_
 
 #include <array>
 #include <cstdint>
@@ -11,7 +11,7 @@
 #include "src/core/image.hpp"
 #include "src/models/qwen/chat_template.hpp"
 
-namespace gufo::models::qwen::vision {
+namespace mbufo::models::qwen::vision {
 
 class ImageCache;
 
@@ -70,5 +70,5 @@ struct Prompt {
     std::string_view encoder_identity, std::uint32_t max_context,
     ImageCache* image_cache = nullptr);
 
-}  // namespace gufo::models::qwen::vision
+}  // namespace mbufo::models::qwen::vision
 #endif

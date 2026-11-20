@@ -10,7 +10,7 @@ opencode's built-ins and checks that every turn stays native: framing never
 reaches content, MCP arguments keep their JSON types, tasks complete and each
 next request reuses the previous one from cache.
 
-Requires opencode and an already-running local Gufo server. Keeps exact HTTP
+Requires opencode and an already-running local MBufo server. Keeps exact HTTP
 bodies/SSE, opencode JSON events, MCP calls and per-request timings.
 """
 
@@ -81,7 +81,7 @@ def serve_mcp(log):
         if method == "initialize":
             result = {"protocolVersion": message["params"].get("protocolVersion", "2025-06-18"),
                       "capabilities": {"tools": {}},
-                      "serverInfo": {"name": "gufo-catalog", "version": "1.0.0"}}
+                      "serverInfo": {"name": "mbufo-catalog", "version": "1.0.0"}}
         elif method == "tools/list":
             result = {"tools": MCP_TOOLS}
         elif method == "tools/call":
@@ -194,8 +194,8 @@ def run_case(args, recorder, index, name):
     config = {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
-        "provider": {"gufo": {
-            "npm": "@ai-sdk/openai-compatible", "name": "gufo",
+        "provider": {"mbufo": {
+            "npm": "@ai-sdk/openai-compatible", "name": "mbufo",
             "options": {"baseURL": f"http://127.0.0.1:{recorder.server_port}/v1"},
             "models": {args.model: {"name": args.model, "tool_call": True,
                                     "reasoning": args.thinking,
@@ -210,7 +210,7 @@ def run_case(args, recorder, index, name):
            "XDG_CONFIG_HOME": str(case / "xdg-config"), "XDG_DATA_HOME": str(case / "xdg-data"),
            "XDG_STATE_HOME": str(case / "xdg-state"), "XDG_CACHE_HOME": str(case / "xdg-cache")}
     command = [args.opencode, "run", "--pure", "--auto", "--format", "json",
-               "-m", f"gufo/{args.model}", PROMPTS[name]]
+               "-m", f"mbufo/{args.model}", PROMPTS[name]]
     save(case / "command.json", command)
     recorder.case = case.name
     row = {"case": case.name, "start_request": len(recorder.requests)}

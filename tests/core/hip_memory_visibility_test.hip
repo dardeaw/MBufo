@@ -49,11 +49,11 @@ int main(int argc, char** argv) {
       expected[i] = input[i] * 1664525U + 1013904223U;
     }
     for (int kind = 0; kind < 5; ++kind) {
-      gufo::hip::HostAllocations host;
+      mbufo::hip::HostAllocations host;
       void* memory{};
       switch (kind) {
         case 0:
-          Check(gufo::hip::AllocateManaged(&memory, bytes));
+          Check(mbufo::hip::AllocateManaged(&memory, bytes));
           break;
         case 1:
           Check(hipHostMalloc(&memory, bytes));
@@ -65,7 +65,7 @@ int main(int argc, char** argv) {
           Check(hipHostRegister(memory, bytes, hipHostRegisterDefault));
           break;
         case 3:
-          Check(gufo::hip::AllocateDevice(&memory, bytes));
+          Check(mbufo::hip::AllocateDevice(&memory, bytes));
           break;
         default:
           Check(host.Allocate(&memory, bytes, hipHostMallocCoherent));

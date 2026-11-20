@@ -161,7 +161,7 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
 
   // Reference: the tiled kernel, which also packs the FP16 cache.
   HIP_CHECK(hipMemset(d_out_ref, 0, q_elements * sizeof(float)));
-  if (!gufo::hip::LaunchBatchedAttentionTile(
+  if (!mbufo::hip::LaunchBatchedAttentionTile(
           d_q, d_k, d_v, d_gate, d_cache, v_cache, d_cache_f16, cache_f16_v,
           d_out_ref, /*layer_idx=*/0, start_pos, batch_size, kMaxContext,
           kNumHeads, kNumKvHeads, kHeadDim, nullptr, lse_ref, key_begin,
@@ -173,7 +173,7 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
   // Candidate: the WMMA kernel over the same range. The cache is already
   // packed, so suppress the write and prove it reads the same bytes.
   HIP_CHECK(hipMemset(d_out_new, 0, q_elements * sizeof(float)));
-  if (!gufo::hip::LaunchQwenWmmaAttention(
+  if (!mbufo::hip::LaunchQwenWmmaAttention(
           d_q, d_k, d_v, d_gate, d_cache, v_cache, d_cache_f16, cache_f16_v,
           d_out_new, /*layer_idx=*/0, start_pos, batch_size, kMaxContext,
           kNumHeads, kNumKvHeads, kHeadDim, nullptr, lse_new, key_begin,
@@ -235,7 +235,7 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
   // Same launch again: the prefetch must not let a register from one tile reach
   // another, which would show up here as run-to-run drift.
   HIP_CHECK(hipMemset(d_out_new, 0, q_elements * sizeof(float)));
-  if (!gufo::hip::LaunchQwenWmmaAttention(
+  if (!mbufo::hip::LaunchQwenWmmaAttention(
           d_q, d_k, d_v, d_gate, d_cache, v_cache, d_cache_f16, cache_f16_v,
           d_out_new, /*layer_idx=*/0, start_pos, batch_size, kMaxContext,
           kNumHeads, kNumKvHeads, kHeadDim, nullptr, lse_new, key_begin,
@@ -264,7 +264,7 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
     for (const std::size_t budget : {std::size_t{31}, std::size_t{512}}) {
       for (std::size_t offset = 0; offset < batch_size; offset += budget) {
         const auto count = std::min(budget, batch_size - offset);
-        if (!gufo::hip::LaunchQwenWmmaAttention(
+        if (!mbufo::hip::LaunchQwenWmmaAttention(
                 d_q + offset * attention_size, d_k, d_v,
                 d_gate + offset * attention_size, d_cache, v_cache, d_cache_f16,
                 cache_f16_v, d_out_new + offset * attention_size, 0,
@@ -321,7 +321,7 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
                       : words[1] / kNumKvHeads - 1};
       const auto k_work = work[0].first(sizes[0]);
       const auto v_work = work[1].first(sizes[1]);
-      if (!gufo::hip::LaunchQwenWmmaAttention(
+      if (!mbufo::hip::LaunchQwenWmmaAttention(
               d_q, d_k, d_v, d_gate, d_cache, v_cache, d_cache_f16, cache_f16_v,
               d_out_new, 0, start_pos, batch_size, kMaxContext, kNumHeads,
               kNumKvHeads, kHeadDim, nullptr, lse_new, key_begin, true, k_work,
@@ -349,7 +349,7 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
         const std::size_t first_query = (batch_size - 1) / 32 * 32;
         HIP_CHECK(hipMemset(d_out_new, 0xA5, q_elements * sizeof(float)));
         HIP_CHECK(hipMemset(d_lse_new, 0xA5, lse_elements * sizeof(float)));
-        if (!gufo::hip::LaunchQwenWmmaAttention(
+        if (!mbufo::hip::LaunchQwenWmmaAttention(
                 d_q, d_k, d_v, d_gate, d_cache, v_cache, d_cache_f16,
                 cache_f16_v, d_out_new, 0, start_pos, batch_size, kMaxContext,
                 kNumHeads, kNumKvHeads, kHeadDim, nullptr, lse_new, key_begin,
@@ -440,9 +440,9 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen WMMA prefill attention ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

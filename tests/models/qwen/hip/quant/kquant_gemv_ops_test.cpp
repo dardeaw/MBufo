@@ -36,7 +36,7 @@ void TestQ5KBlockGEMVEquivalence() {
   constexpr std::size_t K = 256;  // K % 256 == 0 required by the kernel
   constexpr std::size_t num_blocks = K / QK;
 
-  using Q5KBlockTest = gufo::quant::block_q5_K;
+  using Q5KBlockTest = mbufo::quant::block_q5_K;
   static_assert(sizeof(Q5KBlockTest) == 176, "Q5_K block must be 176 bytes");
 
   auto float_to_half_bits = [](float f) -> std::uint16_t {
@@ -95,7 +95,7 @@ void TestQ5KBlockGEMVEquivalence() {
   HIP_CHECK(
       hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchQ8KBlockGEMV(d_A, gufo::core::GgmlType::kQ5_K, d_x, d_y, M,
+  mbufo::hip::LaunchQ8KBlockGEMV(d_A, mbufo::core::GgmlType::kQ5_K, d_x, d_y, M,
                                 K, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -106,7 +106,7 @@ void TestQ5KBlockGEMVEquivalence() {
   // CPU oracle: exact fp dequant + dot (no activation quantization).
   std::vector<float> y_ref(M, 0.0F);
   for (std::size_t m = 0; m < M; ++m) {
-    y_ref[m] = gufo::quant::DotProductQ5_K(
+    y_ref[m] = mbufo::quant::DotProductQ5_K(
         &h_A[m * num_blocks], std::span<const float>(h_x.data(), K), K);
   }
 
@@ -139,7 +139,7 @@ void TestQ6KBlockGEMVEquivalence() {
   constexpr std::size_t K = 256;  // K % 256 == 0 required by the kernel
   constexpr std::size_t num_blocks = K / QK;
 
-  using Q6KBlockTest = gufo::quant::block_q6_K;
+  using Q6KBlockTest = mbufo::quant::block_q6_K;
   static_assert(sizeof(Q6KBlockTest) == 210, "Q6_K block must be 210 bytes");
 
   auto float_to_half_bits = [](float f) -> std::uint16_t {
@@ -194,7 +194,7 @@ void TestQ6KBlockGEMVEquivalence() {
   HIP_CHECK(
       hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchQ8KBlockGEMV(d_A, gufo::core::GgmlType::kQ6_K, d_x, d_y, M,
+  mbufo::hip::LaunchQ8KBlockGEMV(d_A, mbufo::core::GgmlType::kQ6_K, d_x, d_y, M,
                                 K, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -205,7 +205,7 @@ void TestQ6KBlockGEMVEquivalence() {
   // CPU oracle: exact fp dequant + dot (no activation quantization).
   std::vector<float> y_ref(M, 0.0F);
   for (std::size_t m = 0; m < M; ++m) {
-    y_ref[m] = gufo::quant::DotProductQ6_K(
+    y_ref[m] = mbufo::quant::DotProductQ6_K(
         &h_A[m * num_blocks], std::span<const float>(h_x.data(), K), K);
   }
 
@@ -242,7 +242,7 @@ void TestQ6KBlockGEMVEquivalence() {
 // exists to pin. The Unsloth Q8 shard carries Q6_K in `attn_qkv` on some
 // layers and Q8_0 on others, so both reach this code on one model.
 template<typename FillWeight>
-void TestFusedSSMInputProjectionMatchesGemv(gufo::core::GgmlType type,
+void TestFusedSSMInputProjectionMatchesGemv(mbufo::core::GgmlType type,
                                             const char* label,
                                             FillWeight fill) {
   // Production dimensions. The shard's SSM layers are hidden 5120 with a
@@ -253,8 +253,8 @@ void TestFusedSSMInputProjectionMatchesGemv(gufo::core::GgmlType type,
   constexpr std::size_t kInnerSize = 6144;
   constexpr std::size_t kTimeStepRank = 48;
 
-  const std::size_t row_bytes = gufo::quant::QuantizedRowBytes(type, kHidden);
-  gufo::test::Expect(row_bytes != 0, "row bytes for the tested format");
+  const std::size_t row_bytes = mbufo::quant::QuantizedRowBytes(type, kHidden);
+  mbufo::test::Expect(row_bytes != 0, "row bytes for the tested format");
 
   std::uint32_t seed = 991U;
   auto next = [&seed]() -> std::uint32_t {
@@ -305,7 +305,7 @@ void TestFusedSSMInputProjectionMatchesGemv(gufo::core::GgmlType type,
   float* const fused_gate = fused_qkv + kQkvSize;
   float* const fused_alpha = fused_gate + kInnerSize;
   float* const fused_beta = fused_alpha + kTimeStepRank;
-  gufo::hip::LaunchFusedSSMInputProjections(
+  mbufo::hip::LaunchFusedSSMInputProjections(
       d_qkv, type, d_gate, type, d_alpha, type, d_beta, type, d_x, fused_qkv,
       fused_gate, fused_alpha, fused_beta, kHidden, kQkvSize, kInnerSize,
       kTimeStepRank, nullptr);
@@ -314,14 +314,14 @@ void TestFusedSSMInputProjectionMatchesGemv(gufo::core::GgmlType type,
   float* const split_gate = split_qkv + kQkvSize;
   float* const split_alpha = split_gate + kInnerSize;
   float* const split_beta = split_alpha + kTimeStepRank;
-  const auto mode = gufo::models::qwen::QwenGemmMode::kHipDecode;
-  gufo::hip::LaunchGEMV(d_qkv, type, d_x, split_qkv, kQkvSize, kHidden, nullptr, nullptr, 0,
+  const auto mode = mbufo::models::qwen::QwenGemmMode::kHipDecode;
+  mbufo::hip::LaunchGEMV(d_qkv, type, d_x, split_qkv, kQkvSize, kHidden, nullptr, nullptr, 0,
                         mode);
-  gufo::hip::LaunchGEMV(d_gate, type, d_x, split_gate, kInnerSize, kHidden,
+  mbufo::hip::LaunchGEMV(d_gate, type, d_x, split_gate, kInnerSize, kHidden,
                         nullptr, nullptr, 0, mode);
-  gufo::hip::LaunchGEMV(d_alpha, type, d_x, split_alpha, kTimeStepRank, kHidden,
+  mbufo::hip::LaunchGEMV(d_alpha, type, d_x, split_alpha, kTimeStepRank, kHidden,
                         nullptr, nullptr, 0, mode);
-  gufo::hip::LaunchGEMV(d_beta, type, d_x, split_beta, kTimeStepRank, kHidden,
+  mbufo::hip::LaunchGEMV(d_beta, type, d_x, split_beta, kTimeStepRank, kHidden,
                         nullptr, nullptr, 0, mode);
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -344,7 +344,7 @@ void TestFusedSSMInputProjectionMatchesGemv(gufo::core::GgmlType type,
                       hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(d_x2 + kHidden, x.data(), x.size() * sizeof(float),
                       hipMemcpyHostToDevice));
-  gufo::hip::LaunchBatchedQuantGEMMFp32(type, d_qkv, d_x2, d_batched, 2,
+  mbufo::hip::LaunchBatchedQuantGEMMFp32(type, d_qkv, d_x2, d_batched, 2,
                                         kQkvSize, kHidden, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
   std::vector<float> batched(kQkvSize);
@@ -378,8 +378,8 @@ void TestFusedSSMInputProjectionMatchesGemv(gufo::core::GgmlType type,
             << " ] fused SSM input projections vs decode GEMV " << label << ": "
             << mismatches << " of " << total << " rows differ, max abs "
             << worst << std::endl;
-  gufo::test::Expect(finite, "fused and split SSM projections must be finite");
-  gufo::test::Expect(mismatches == 0,
+  mbufo::test::Expect(finite, "fused and split SSM projections must be finite");
+  mbufo::test::Expect(mismatches == 0,
                      "fused SSM input projections must reproduce the decode "
                      "GEMV bit for bit");
 
@@ -409,9 +409,9 @@ constexpr std::uint16_t kTestScaleHalves[4] = {0x3555U, 0x2E67U, 0x39ABU,
 void FillQ8_0(std::vector<std::uint8_t>& bytes, std::size_t rows,
               std::size_t row_bytes, auto&& next) {
   for (std::size_t row = 0; row < rows; ++row) {
-    auto* blocks = reinterpret_cast<gufo::quant::block_q8_0*>(
+    auto* blocks = reinterpret_cast<mbufo::quant::block_q8_0*>(
         bytes.data() + (row * row_bytes));
-    const std::size_t count = row_bytes / sizeof(gufo::quant::block_q8_0);
+    const std::size_t count = row_bytes / sizeof(mbufo::quant::block_q8_0);
     for (std::size_t b = 0; b < count; ++b) {
       blocks[b].d = TestScaleHalf(b);
       for (auto& value : blocks[b].qs) {
@@ -424,9 +424,9 @@ void FillQ8_0(std::vector<std::uint8_t>& bytes, std::size_t rows,
 void FillQ6_K(std::vector<std::uint8_t>& bytes, std::size_t rows,
               std::size_t row_bytes, auto&& next) {
   for (std::size_t row = 0; row < rows; ++row) {
-    auto* blocks = reinterpret_cast<gufo::quant::block_q6_K*>(
+    auto* blocks = reinterpret_cast<mbufo::quant::block_q6_K*>(
         bytes.data() + (row * row_bytes));
-    const std::size_t count = row_bytes / sizeof(gufo::quant::block_q6_K);
+    const std::size_t count = row_bytes / sizeof(mbufo::quant::block_q6_K);
     for (std::size_t b = 0; b < count; ++b) {
       blocks[b].d = TestScaleHalf(b);
       for (auto& value : blocks[b].ql) {
@@ -448,11 +448,11 @@ void FillQ6_K(std::vector<std::uint8_t>& bytes, std::size_t rows,
 /// Unsloth Q8 shard carries `ffn_down` as Q6_K on some layers, and that tensor
 /// is 5120x17408 -- a K far longer than any other projection in the model, and
 /// the one shape where the two routes were never compared.
-void TestBatchedFfnDownMatchesGemv(gufo::core::GgmlType type, const char* label,
+void TestBatchedFfnDownMatchesGemv(mbufo::core::GgmlType type, const char* label,
                                    std::size_t rows, std::size_t columns,
                                    auto&& fill) {
-  const std::size_t row_bytes = gufo::quant::QuantizedRowBytes(type, columns);
-  gufo::test::Expect(row_bytes != 0, "row bytes for the tested format");
+  const std::size_t row_bytes = mbufo::quant::QuantizedRowBytes(type, columns);
+  mbufo::test::Expect(row_bytes != 0, "row bytes for the tested format");
 
   std::uint32_t seed = 4242U;
   auto next = [&seed]() -> std::uint32_t {
@@ -486,8 +486,8 @@ void TestBatchedFfnDownMatchesGemv(gufo::core::GgmlType type, const char* label,
   HIP_CHECK(
       hipMemcpy(d_x, x.data(), columns * sizeof(float), hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchGEMV(d_w, type, d_x, d_reference, rows, columns, nullptr, nullptr, 0,
-                        gufo::models::qwen::QwenGemmMode::kHipDecode);
+  mbufo::hip::LaunchGEMV(d_w, type, d_x, d_reference, rows, columns, nullptr, nullptr, 0,
+                        mbufo::models::qwen::QwenGemmMode::kHipDecode);
   HIP_CHECK(hipDeviceSynchronize());
   std::vector<float> reference(rows);
   HIP_CHECK(hipMemcpy(reference.data(), d_reference, rows * sizeof(float),
@@ -513,8 +513,8 @@ void TestBatchedFfnDownMatchesGemv(gufo::core::GgmlType type, const char* label,
                         columns * sizeof(float), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(d_x, batch_x[row].data(), columns * sizeof(float),
                         hipMemcpyHostToDevice));
-    gufo::hip::LaunchGEMV(d_w, type, d_x, d_reference, rows, columns, nullptr, nullptr, 0,
-                          gufo::models::qwen::QwenGemmMode::kHipDecode);
+    mbufo::hip::LaunchGEMV(d_w, type, d_x, d_reference, rows, columns, nullptr, nullptr, 0,
+                          mbufo::models::qwen::QwenGemmMode::kHipDecode);
     HIP_CHECK(hipDeviceSynchronize());
     batch_reference[row].resize(rows);
     HIP_CHECK(hipMemcpy(batch_reference[row].data(), d_reference,
@@ -523,7 +523,7 @@ void TestBatchedFfnDownMatchesGemv(gufo::core::GgmlType type, const char* label,
 
   for (std::size_t batch = 2; batch <= 8; ++batch) {
     HIP_CHECK(hipMemset(d_batched, 0, 8 * rows * sizeof(float)));
-    gufo::hip::LaunchBatchedQuantGEMMFp32(type, d_w, d_batched_x, d_batched,
+    mbufo::hip::LaunchBatchedQuantGEMMFp32(type, d_w, d_batched_x, d_batched,
                                           batch, rows, columns, nullptr);
     HIP_CHECK(hipDeviceSynchronize());
     std::vector<float> batched(batch * rows);
@@ -541,7 +541,7 @@ void TestBatchedFfnDownMatchesGemv(gufo::core::GgmlType type, const char* label,
               << " " << rows << "x" << columns << " batch " << batch << ": "
               << mismatches << " of " << (batch * rows) << " differ"
               << std::endl;
-    gufo::test::Expect(mismatches == 0,
+    mbufo::test::Expect(mismatches == 0,
                        "batched projection must reproduce the decode GEMV");
   }
 
@@ -557,26 +557,26 @@ void TestBatchedFfnDownMatchesGemv(gufo::core::GgmlType type, const char* label,
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen K-quant GEMV ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 
   TestQ5KBlockGEMVEquivalence();
   TestQ6KBlockGEMVEquivalence();
   TestFusedSSMInputProjectionMatchesGemv(
-      gufo::core::GgmlType::kQ8_0, "Q8_0",
+      mbufo::core::GgmlType::kQ8_0, "Q8_0",
       [](std::vector<std::uint8_t>& bytes, std::size_t rows,
          std::size_t row_bytes,
          auto&& next) { FillQ8_0(bytes, rows, row_bytes, next); });
   TestFusedSSMInputProjectionMatchesGemv(
-      gufo::core::GgmlType::kQ6_K, "Q6_K",
+      mbufo::core::GgmlType::kQ6_K, "Q6_K",
       [](std::vector<std::uint8_t>& bytes, std::size_t rows,
          std::size_t row_bytes,
          auto&& next) { FillQ6_K(bytes, rows, row_bytes, next); });
   TestBatchedFfnDownMatchesGemv(
-      gufo::core::GgmlType::kQ6_K, "Q6_K ffn_down", 5120, 17408,
+      mbufo::core::GgmlType::kQ6_K, "Q6_K ffn_down", 5120, 17408,
       [](std::vector<std::uint8_t>& bytes, std::size_t rows,
          std::size_t row_bytes,
          auto&& next) { FillQ6_K(bytes, rows, row_bytes, next); });

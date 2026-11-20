@@ -1,5 +1,5 @@
-#ifndef GUFO_CACHE_IDENTITY_HPP_
-#define GUFO_CACHE_IDENTITY_HPP_
+#ifndef MBUFO_CACHE_IDENTITY_HPP_
+#define MBUFO_CACHE_IDENTITY_HPP_
 
 #include <cstdint>
 #include <span>
@@ -7,7 +7,7 @@
 
 #include "src/cache/types.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 
 // Compatibility identities are canonical opaque bytes supplied by adapters.
 // They cover weights, tokenizer/template, state ABI/precision, context policy,
@@ -44,6 +44,6 @@ private:
   std::vector<InputPrefix> prefixes_;
 };
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 
 #endif

@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_INFERENCE_BACKEND_HPP_
-#define GUFO_SERVER_INFERENCE_BACKEND_HPP_
+#ifndef MBUFO_SERVER_INFERENCE_BACKEND_HPP_
+#define MBUFO_SERVER_INFERENCE_BACKEND_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -14,39 +14,39 @@
 #include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/models/qwen/dflash_policy.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 class QwenGpuModel;
 }
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 class Model;
 }
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 class Model;
 }
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 class Model;
 }
 
-namespace gufo::models::gptoss {
+namespace mbufo::models::gptoss {
 class Model;
 }
 
-namespace gufo::models::llama {
+namespace mbufo::models::llama {
 class Model;
 }
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 class Model;
 }
 
-namespace gufo::tokenization {
+namespace mbufo::tokenization {
 class QwenTokenizer;
 }
 
-namespace gufo::server {
+namespace mbufo::server {
 
 enum class TextSpeculativeBackend : std::uint8_t {
   kDisabled,
@@ -273,6 +273,6 @@ public:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_INFERENCE_BACKEND_HPP_
+#endif  // MBUFO_SERVER_INFERENCE_BACKEND_HPP_

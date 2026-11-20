@@ -16,7 +16,7 @@ TOOLS = [{"type": "function", "function": {
 def work(result):
     usage = result["usage"]
     total, cached, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
-                                usage["gufo"]["prefill_tokens"])
+                                usage["mbufo"]["prefill_tokens"])
     assert all(type(n) is int and n >= 0 for n in (total, cached, prefilled)), usage
     assert cached + prefilled == total, usage
     return total, cached, prefilled
@@ -158,7 +158,7 @@ def fill_budget(run, label, capacity):
     published = 0
     for index in range(48):
         result = run.chat(f"{label}_fill_{index:02d}", history(f"{label}_fill_{index}", 8))
-        published += result["usage"]["gufo"]["cache_snapshot_bytes"]
+        published += result["usage"]["mbufo"]["cache_snapshot_bytes"]
         if published >= 2 * capacity:
             run.checks[label + "_pressure"] = {"capacity_bytes": capacity,
                                                "published_bytes": published,

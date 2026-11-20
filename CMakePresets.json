@@ -13,7 +13,7 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "GUFO_ENABLE_WARNINGS": "ON"
+        "MBUFO_ENABLE_WARNINGS": "ON"
       }
     },
     {
@@ -35,7 +35,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "BUILD_TESTING": "ON",
-        "GUFO_ENABLE_SANITIZERS": "ON",
+        "MBUFO_ENABLE_SANITIZERS": "ON",
         "ENGINE_ENABLE_HIP": "OFF"
       }
     },
@@ -59,7 +59,7 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "BUILD_TESTING": "ON",
         "ENGINE_ENABLE_HIP": "ON",
-        "GUFO_BUILD_TOOLS": "ON"
+        "MBUFO_BUILD_TOOLS": "ON"
       }
     }
   ],

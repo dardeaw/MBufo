@@ -3,8 +3,8 @@
 
 #include "src/cache/slot.hpp"
 #include "tests/cache/fake_adapter.hpp"
-using namespace gufo::cache;
-using namespace gufo::cache::testing;
+using namespace mbufo::cache;
+using namespace mbufo::cache::testing;
 int main() {
   ResourceLedger ledger({1 << 20, 1 << 20, 0, 0});
   FakeAdapter adapter;

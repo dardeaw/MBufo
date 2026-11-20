@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GPTOSS_CONFIG_HPP_
-#define GUFO_MODELS_GPTOSS_CONFIG_HPP_
+#ifndef MBUFO_MODELS_GPTOSS_CONFIG_HPP_
+#define MBUFO_MODELS_GPTOSS_CONFIG_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -7,7 +7,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::gptoss {
+namespace mbufo::models::gptoss {
 
 // Architecture parameters of a `gpt-oss` GGUF artifact (OpenAI GPT-OSS MoE:
 // 20B = 24 layers, hidden 2880, 64 q-heads x dim 64, 8 kv-heads, 32 experts
@@ -55,6 +55,6 @@ struct Config {
       const core::GgufReader& gguf, std::string* error_msg = nullptr);
 };
 
-}  // namespace gufo::models::gptoss
+}  // namespace mbufo::models::gptoss
 
-#endif  // GUFO_MODELS_GPTOSS_CONFIG_HPP_
+#endif  // MBUFO_MODELS_GPTOSS_CONFIG_HPP_

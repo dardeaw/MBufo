@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_VISION_IMAGE_CACHE_HPP_
-#define GUFO_MODELS_QWEN_VISION_IMAGE_CACHE_HPP_
+#ifndef MBUFO_MODELS_QWEN_VISION_IMAGE_CACHE_HPP_
+#define MBUFO_MODELS_QWEN_VISION_IMAGE_CACHE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@
 
 #include "src/core/image.hpp"
 
-namespace gufo::models::qwen::vision {
+namespace mbufo::models::qwen::vision {
 
 inline constexpr std::string_view kImagePreprocessingVersion =
     "qwen38-image-bicubic-rgb8-bf16-v1";
@@ -57,5 +57,5 @@ private:
   Stats stats_;
 };
 
-}  // namespace gufo::models::qwen::vision
+}  // namespace mbufo::models::qwen::vision
 #endif

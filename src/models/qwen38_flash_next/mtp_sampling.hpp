@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_SAMPLING_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_SAMPLING_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_MTP_SAMPLING_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_MTP_SAMPLING_HPP_
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,7 @@
 
 #include "src/core/sampling.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 enum class DraftDecision { kAccept, kReject, kStop };
 
@@ -161,6 +161,6 @@ DraftDecision VerifyDraft(std::span<const float> logits, std::int32_t draft,
   return DraftDecision::kAccept;
 }
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 
 #endif

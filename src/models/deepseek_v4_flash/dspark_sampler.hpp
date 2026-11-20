@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_DSPARK_SAMPLER_HPP_
-#define GUFO_MODELS_DEEPSEEK_V4_FLASH_DSPARK_SAMPLER_HPP_
+#ifndef MBUFO_MODELS_DEEPSEEK_V4_FLASH_DSPARK_SAMPLER_HPP_
+#define MBUFO_MODELS_DEEPSEEK_V4_FLASH_DSPARK_SAMPLER_HPP_
 
 #include <array>
 #include <cmath>
@@ -12,7 +12,7 @@
 #include "src/core/sampling.hpp"
 #include "src/models/deepseek_v4_flash/runtime/model.h"
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 
 /// Lends a request sampler to DSpark cycles.
 ///
@@ -142,7 +142,7 @@ private:
                   std::span(proposal.ids).first(proposal.size),
                   std::span(proposal.probabilities).first(proposal.size),
                   self.working_.mutable_rng_state());
-    if (std::getenv("GUFO_DEEPSEEK_DSPARK_TRACE"))
+    if (std::getenv("MBUFO_DEEPSEEK_DSPARK_TRACE"))
       std::fprintf(stderr,
                    "ds4: DSpark sample row=%u confidence=%.6f accepted=%d "
                    "p=%.6f q=%.6f\n",
@@ -180,6 +180,6 @@ private:
   ds4_dspark_sampler hook_;
 };
 
-}  // namespace gufo::models::deepseek_v4_flash
+}  // namespace mbufo::models::deepseek_v4_flash
 
-#endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_DSPARK_SAMPLER_HPP_
+#endif  // MBUFO_MODELS_DEEPSEEK_V4_FLASH_DSPARK_SAMPLER_HPP_

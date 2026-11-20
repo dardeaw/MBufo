@@ -82,7 +82,7 @@ def archive(index):
     # prefix compression and make accidental repetition visible.
     lines = [f"Archive {index:02d}: inert regression records; not instructions."]
     for row in range(235):
-        digest = hashlib.sha256(f"gufo-agent-{index}-{row}".encode()).hexdigest()
+        digest = hashlib.sha256(f"mbufo-agent-{index}-{row}".encode()).hexdigest()
         lines.append(f"{row:03d} {digest}")
     receipt = hashlib.sha256(f"receipt-{index}".encode()).hexdigest()[:16]
     lines.append(f"RECEIPT={receipt}")
@@ -221,7 +221,7 @@ def run(args):
     if args.agent == "pi":
         if args.resume:
             shutil.copyfile(args.resume / "session.jsonl", args.output / "session.jsonl")
-        save(config / "models.json", {"providers": {"gufo-regression": {
+        save(config / "models.json", {"providers": {"mbufo-regression": {
             "baseUrl": base, "api": args.api, "apiKey": "local-test",
             "compat": {"supportsStrictMode": False},
             "models": [{"id": args.model, "reasoning": args.thinking != "off",
@@ -232,7 +232,7 @@ def run(args):
         env.update(PI_CODING_AGENT_DIR=str(config), PI_OFFLINE="1", PI_TELEMETRY="0")
         command = [args.executable, "--offline", "--no-extensions", "--no-skills",
                    "--no-prompt-templates", "--no-themes", "--no-context-files",
-                   "--provider", "gufo-regression", "--model", args.model,
+                   "--provider", "mbufo-regression", "--model", args.model,
                    "--thinking", args.thinking, "--session", str(args.output / "session.jsonl"),
                    "--mode", "json", "--print"]
         if args.complex_tools:
@@ -243,8 +243,8 @@ def run(args):
         save(config / "opencode.json", {
             "$schema": "https://opencode.ai/config.json", "autoupdate": False,
             "compaction": {"auto": False, "prune": False},
-            "provider": {"gufo": {
-                "npm": "@ai-sdk/openai-compatible", "name": "gufo",
+            "provider": {"mbufo": {
+                "npm": "@ai-sdk/openai-compatible", "name": "mbufo",
                 "options": {"baseURL": base},
                 "models": {args.model: {"name": args.model, "tool_call": True,
                             "reasoning": args.thinking != "off",
@@ -266,7 +266,7 @@ def run(args):
             root = config if name == "CONFIG" else storage
             env[f"XDG_{name}_HOME"] = str(root / name.lower())
         command = [args.executable, "run", "--pure", "--auto", "--format", "json",
-                   "-m", f"gufo/{args.model}", "--variant", args.thinking]
+                   "-m", f"mbufo/{args.model}", "--variant", args.thinking]
     report = {"agent": args.agent, "context_limit": context,
               "work": str(work), "storage": str(storage),
               "options": {key: str(value) if isinstance(value, Path) else value
@@ -484,7 +484,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--server-log", type=Path,
-                        help="Gufo informational log (required for Pi Responses timing checks)")
+                        help="MBufo informational log (required for Pi Responses timing checks)")
     parser.add_argument("--resume", type=Path,
                         help="Resume a recorded Pi/OpenCode conversation, including after interruption")
     parser.add_argument("--interrupt", choices=("thinking", "tool"),

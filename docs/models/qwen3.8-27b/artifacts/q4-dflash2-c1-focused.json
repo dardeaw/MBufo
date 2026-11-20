@@ -299,7 +299,7 @@
     "temperature": 0,
     "seed": 1,
     "messages_sha256": "1f31e9cab9f2413f4c93a9226a0d7e2c0cfc91111bc7121655049b1c0ce5e891",
-    "same_messages_as_gufo": true,
+    "same_messages_as_mbufo": true,
     "nominal_depth": 0,
     "draft_proposals_limit": 3,
     "runs": {
@@ -407,8 +407,8 @@
     "seed": 1,
     "draft_proposals_limit": 3,
     "messages_sha256": "a5fcef8fc3147207cc7081ada0c24237dff26444ae9233b207b3aae3e1491ef8",
-    "messages_hash_encoding": "Exact UTF-8 bytes of json.dumps(messages, ensure_ascii=False); checked with cmp against Gufo input.",
-    "same_messages_as_gufo": true,
+    "messages_hash_encoding": "Exact UTF-8 bytes of json.dumps(messages, ensure_ascii=False); checked with cmp against MBufo input.",
+    "same_messages_as_mbufo": true,
     "autoregressive_reference_run": false,
     "prompt_tokens": 67152,
     "cached_prompt_tokens": 65111,
@@ -445,11 +445,11 @@
       "huge-dflash-d0": {
         "source": {
           "revision": "f7a6effc8fef2d26753b7b6e86028280e4d9a6fd",
-          "binary_path": "/nix/store/fiynhkji5j5kwg7135v5lgjhfh89ljfb-gufo-9b23369-dirty/bin/gufo",
+          "binary_path": "/nix/store/fiynhkji5j5kwg7135v5lgjhfh89ljfb-mbufo-9b23369-dirty/bin/mbufo",
           "binary_sha256": "00e3940504b2e77dc1864c15fdb4c7e7c27d0f835c894a3acd31043346f1274b",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "dflash2",
         "depth": 0,
@@ -484,7 +484,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": false,
           "draft_tokens": 186,
           "draft_accepted_tokens": 88,
@@ -499,11 +499,11 @@
       "huge-dflash-d32": {
         "source": {
           "revision": "f7a6effc8fef2d26753b7b6e86028280e4d9a6fd",
-          "binary_path": "/nix/store/fiynhkji5j5kwg7135v5lgjhfh89ljfb-gufo-9b23369-dirty/bin/gufo",
+          "binary_path": "/nix/store/fiynhkji5j5kwg7135v5lgjhfh89ljfb-mbufo-9b23369-dirty/bin/mbufo",
           "binary_sha256": "00e3940504b2e77dc1864c15fdb4c7e7c27d0f835c894a3acd31043346f1274b",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "dflash2",
         "depth": 32768,
@@ -538,7 +538,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": true,
           "draft_tokens": 186,
           "draft_accepted_tokens": 82,
@@ -553,11 +553,11 @@
       "cached-batch-norm-dflash-d0": {
         "source": {
           "revision": "f7a6eff-dirty",
-          "binary_path": "/nix/store/rqlr2b6abwmxzvzk2ic8zlcr1nz3jang-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_path": "/nix/store/rqlr2b6abwmxzvzk2ic8zlcr1nz3jang-mbufo-f7a6eff-dirty/bin/mbufo",
           "binary_sha256": "0690c467d631874cad73b938e04776bdd4ecbe09b8b8a8266123e057ffc22e5d",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "dflash2",
         "depth": 0,
@@ -592,7 +592,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": false,
           "draft_tokens": 186,
           "draft_accepted_tokens": 88,
@@ -607,11 +607,11 @@
       "reductions-dflash-d0": {
         "source": {
           "revision": "f7a6eff-dirty",
-          "binary_path": "/nix/store/fx9bvv4basxdygr28dj3zfm23lvsg1a8-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_path": "/nix/store/fx9bvv4basxdygr28dj3zfm23lvsg1a8-mbufo-f7a6eff-dirty/bin/mbufo",
           "binary_sha256": "eb807a7b10e42fd466786384dc045b7fe7d14a4bb685cf696b05450cc97f5627",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "dflash2",
         "depth": 0,
@@ -646,7 +646,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": false,
           "draft_tokens": 186,
           "draft_accepted_tokens": 88,
@@ -661,11 +661,11 @@
       "reductions-dflash-d32": {
         "source": {
           "revision": "f7a6eff-dirty",
-          "binary_path": "/nix/store/fx9bvv4basxdygr28dj3zfm23lvsg1a8-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_path": "/nix/store/fx9bvv4basxdygr28dj3zfm23lvsg1a8-mbufo-f7a6eff-dirty/bin/mbufo",
           "binary_sha256": "eb807a7b10e42fd466786384dc045b7fe7d14a4bb685cf696b05450cc97f5627",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "dflash2",
         "depth": 32768,
@@ -700,7 +700,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": true,
           "draft_tokens": 186,
           "draft_accepted_tokens": 82,
@@ -715,11 +715,11 @@
       "final-reductions-dflash-d0": {
         "source": {
           "revision": "f7a6eff-dirty",
-          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-mbufo-f7a6eff-dirty/bin/mbufo",
           "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "dflash2",
         "depth": 0,
@@ -754,7 +754,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": false,
           "draft_tokens": 186,
           "draft_accepted_tokens": 88,
@@ -769,11 +769,11 @@
       "final-reductions-dflash-d32": {
         "source": {
           "revision": "f7a6eff-dirty",
-          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-mbufo-f7a6eff-dirty/bin/mbufo",
           "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
           "buildMode": "nix-release"
         },
-        "implementation": "gufo",
+        "implementation": "mbufo",
         "variant": "Q4_K_XL",
         "mode": "dflash2",
         "depth": 32768,
@@ -808,7 +808,7 @@
           "requested_logical_concurrency": 1,
           "physical_execution_width": 1,
           "execution_plan": "serial-c1",
-          "metrics_source": "gufo",
+          "metrics_source": "mbufo",
           "cache_hit": true,
           "draft_tokens": 186,
           "draft_accepted_tokens": 82,
@@ -918,7 +918,7 @@
     "sampled_replay": {
       "source": {
         "revision": "f7a6eff-dirty",
-        "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+        "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-mbufo-f7a6eff-dirty/bin/mbufo",
         "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
         "buildMode": "nix-release"
       },
@@ -959,18 +959,18 @@
   "retained_exactness_audit": {
     "date": "2026-09-23",
     "scope": "Audit of retained September 21 mixed-corpus hashes. Q8 here is the historical Q8_K_L artifact, not a new Q8_K_XL qualification.",
-    "definition": "Exact in BENCHMARKS.md compares llama.cpp AR completions with Gufo C1 AR. It does not measure agreement against the official model.",
+    "definition": "Exact in BENCHMARKS.md compares llama.cpp AR completions with MBufo C1 AR. It does not measure agreement against the official model.",
     "targets": {
       "q4": {
         "source_artifacts_sha256": {
-          "multi-mixed-q4-gufo-ar.json": "ed6fccf7944fa1893bfaf01340f8ce3ed395dc71839463f112653c576f0710b2",
-          "multi-mixed-q4-gufo-dflash2.json": "8a31e0f3438d3dfeee3f2e1ed55a47cf4eaedaa40de9eaa177e9c4d344bb199c",
+          "multi-mixed-q4-mbufo-ar.json": "ed6fccf7944fa1893bfaf01340f8ce3ed395dc71839463f112653c576f0710b2",
+          "multi-mixed-q4-mbufo-dflash2.json": "8a31e0f3438d3dfeee3f2e1ed55a47cf4eaedaa40de9eaa177e9c4d344bb199c",
           "multi-mixed-q4-reference.json": "f70e94b2c169f144bd16cae312017b585d05f6e748631603d872d2dde829ab87",
           "multi-mixed-q4-reference-dflash2.json": "7e85564d5cc895b0ba775178a57be613a2b5eb850c0cc86aee857f7c7396f624"
         },
         "c1_cases": 9,
         "own_ar_speculative_exact": {
-          "gufo-ar": 9,
+          "mbufo-ar": 9,
           "reference": 9
         },
         "cross_engine_c1_mismatches": [
@@ -1002,14 +1002,14 @@
       },
       "q8": {
         "source_artifacts_sha256": {
-          "multi-mixed-q8-gufo-ar.json": "ebf7de0e4b897ba3bbda8d920a4128127e7a0104d3009867fe66f33ed2a364b1",
-          "multi-mixed-q8-gufo-dflash2.json": "9c0d97002936cc0157a99e35f2da3959adf4077871438867609bcadac2a48721",
+          "multi-mixed-q8-mbufo-ar.json": "ebf7de0e4b897ba3bbda8d920a4128127e7a0104d3009867fe66f33ed2a364b1",
+          "multi-mixed-q8-mbufo-dflash2.json": "9c0d97002936cc0157a99e35f2da3959adf4077871438867609bcadac2a48721",
           "multi-mixed-q8-reference.json": "af2d610afd133aeac1685a24c9fe24944a14b25f82db1eeb9db2ae253cb75711",
           "multi-mixed-q8-reference-dflash2.json": "ac69833807dbc3a2b2286fe2716af4ef447b0156bac5ed6aff44ab77b766795b"
         },
         "c1_cases": 9,
         "own_ar_speculative_exact": {
-          "gufo-ar": 9,
+          "mbufo-ar": 9,
           "reference": 9
         },
         "cross_engine_c1_mismatches": [

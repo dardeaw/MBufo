@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_GEMM_HIPBLASLT_RUNNER_HPP_
-#define GUFO_CORE_COMPUTE_GEMM_HIPBLASLT_RUNNER_HPP_
+#ifndef MBUFO_CORE_COMPUTE_GEMM_HIPBLASLT_RUNNER_HPP_
+#define MBUFO_CORE_COMPUTE_GEMM_HIPBLASLT_RUNNER_HPP_
 
 // Shared hipBLASLt plan-cache runner for dense F16/BF16 prefill projections
 // (Phase B-3, staged). Mechanical搬入 of flash-next BlasLt (qwen38_flash_next
@@ -22,7 +22,7 @@
 #include <memory>
 #include <string>
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 
 // Fallback for an own-kernel shape: (weights, input, out, m, n, k).
 // input is the model-owned staging buffer (F16 or BF16 rows).
@@ -77,6 +77,6 @@ class HipBlasLtRunner {
   std::map<std::array<int, 4>, std::unique_ptr<Plan>> plans_;
 };
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
-#endif  // GUFO_CORE_COMPUTE_GEMM_HIPBLASLT_RUNNER_HPP_
+#endif  // MBUFO_CORE_COMPUTE_GEMM_HIPBLASLT_RUNNER_HPP_

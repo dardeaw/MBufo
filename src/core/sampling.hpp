@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_SAMPLING_HPP_
-#define GUFO_CORE_SAMPLING_HPP_
+#ifndef MBUFO_CORE_SAMPLING_HPP_
+#define MBUFO_CORE_SAMPLING_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@
 
 #include "src/core/json_constraint.hpp"
 
-namespace gufo::sampling {
+namespace mbufo::sampling {
 
 using TokenId = std::uint32_t;
 
@@ -20,7 +20,7 @@ using TokenId = std::uint32_t;
 /// reasoning text already in the prompt. Once the budget is spent, and the
 /// last token completed its UTF-8 character, `forced` is emitted token by
 /// token. Any token in `ends` closes reasoning early. Later tokens are answer
-/// content, including literal reasoning tags, as in Gufo's response framing.
+/// content, including literal reasoning tags, as in MBufo's response framing.
 struct ReasoningBudget {
   std::size_t tokens{0};
   std::vector<TokenId> forced;
@@ -33,7 +33,7 @@ struct ReasoningBudget {
 /// Model-independent controls for selecting a token from a logit row.
 ///
 /// Filters run in this order: penalties, temperature, top-k, top-p, min-p.
-/// The defaults preserve Gufo's existing greedy decoding behavior.
+/// The defaults preserve MBufo's existing greedy decoding behavior.
 struct SamplingConfig {
   float temperature{0.0F};
   std::int32_t top_k{0};
@@ -231,6 +231,6 @@ private:
     std::span<const TokenId> candidate_ids,
     std::span<const float> candidate_probabilities, std::uint64_t* rng_state);
 
-}  // namespace gufo::sampling
+}  // namespace mbufo::sampling
 
-#endif  // GUFO_CORE_SAMPLING_HPP_
+#endif  // MBUFO_CORE_SAMPLING_HPP_

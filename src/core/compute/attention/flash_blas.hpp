@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_FLASH_BLAS_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_FLASH_BLAS_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_FLASH_BLAS_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_FLASH_BLAS_HPP_
 
 // rocBLAS batched-GEMM flash attention with per-head sinks (head_dim == 64).
 // QK^T and P*V ride tensor-core batched GEMMs; a fused online-softmax kernel
@@ -25,7 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::flash_blas {
+namespace mbufo::core::compute::flash_blas {
 
 /// Maximum prefill tokens per call (session chunk ceiling).
 inline constexpr std::uint32_t kFlashBlasMaxTok = 256;
@@ -54,6 +54,6 @@ bool FlashBlasPrefill(const float* q, const __half* k_cache,
                       hipStream_t stream, hipblasHandle_t handle,
                       void* scratch, std::size_t scratch_bytes);
 
-}  // namespace gufo::core::compute::flash_blas
+}  // namespace mbufo::core::compute::flash_blas
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_FLASH_BLAS_HPP_
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_FLASH_BLAS_HPP_

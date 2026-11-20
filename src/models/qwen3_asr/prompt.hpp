@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_PROMPT_HPP_
-#define GUFO_MODELS_QWEN3_ASR_PROMPT_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_PROMPT_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_PROMPT_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 
 class Tokenizer;
 
@@ -30,6 +30,6 @@ struct Transcription {
     std::string_view decoded,
     const std::optional<std::string>& forced_language);
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr
 
-#endif  // GUFO_MODELS_QWEN3_ASR_PROMPT_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_PROMPT_HPP_

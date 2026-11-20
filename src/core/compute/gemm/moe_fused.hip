@@ -13,9 +13,10 @@
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/compute/gemm/gemm_device.cuh"
 #include "src/core/gguf_reader.hpp"
+#include "src/core/quant/row_dot_traits.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 using device::Dot4S8S8;
 using device::Dot4U4S8;
 using device::GeluTanhOne;
@@ -435,7 +436,8 @@ __global__ void __launch_bounds__(256) MoeGroupedDownKernel(
   }
 }
 
-__global__ void __launch_bounds__(256) MoeGroupedGateUpSwigluQ8Kernel(
+template <class R>
+__global__ void __launch_bounds__(256) MoeGroupedGateUpSwigluQKernel(
     const std::uint8_t* __restrict__ gate_up, std::uint64_t row_bytes,
     std::uint64_t expert_stride_bytes, const BlockQ8_1* __restrict__ x_q8,
     const std::uint32_t* __restrict__ u_cnt,
@@ -457,8 +459,8 @@ __global__ void __launch_bounds__(256) MoeGroupedGateUpSwigluQ8Kernel(
 
   const std::uint32_t warp_id = threadIdx.x >> 5;
   const std::uint32_t lane = threadIdx.x & 31u;
-  const std::uint32_t b_grp = lane >> 2;
-  const std::uint32_t sub = lane & 3u;
+  const std::uint32_t b_grp = lane >> R::kQLaneShift;
+  const std::uint32_t sub = lane & R::kQLaneMask;
   const std::uint32_t out_row = blockIdx.x * 8u + warp_id;
 
   const std::uint8_t* ebase =
@@ -490,38 +492,22 @@ __global__ void __launch_bounds__(256) MoeGroupedGateUpSwigluQ8Kernel(
     __syncthreads();
 
     if (out_row < ff) {
-      const std::size_t boff = static_cast<std::size_t>(b_off) * 18u;
+      const std::size_t boff = static_cast<std::size_t>(b_off) * R::kBlockBytes;
       const std::uint8_t* gbase = grow + boff;
       const std::uint8_t* ubase = urow + boff;
-      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += 8u) {
+      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += R::kQBlocksPerStep) {
         const std::uint32_t b = b0 + b_grp;
         if (b < tk_blk) {
-          const auto* gbp =
-              reinterpret_cast<const std::uint16_t*>(gbase + b * 18u);
-          const float gd4 = __half2float(*reinterpret_cast<const __half*>(gbp));
-          const int gv32 = static_cast<int>(gbp[1u + 2u * sub]) |
-                           (static_cast<int>(gbp[2u + 2u * sub]) << 16);
-          const int gvi0 = gv32 & 0x0F0F0F0F;
-          const int gvi1 = (gv32 >> 4) & 0x0F0F0F0F;
-
-          const auto* ubp =
-              reinterpret_cast<const std::uint16_t*>(ubase + b * 18u);
-          const float ud4 = __half2float(*reinterpret_cast<const __half*>(ubp));
-          const int uv32 = static_cast<int>(ubp[1u + 2u * sub]) |
-                           (static_cast<int>(ubp[2u + 2u * sub]) << 16);
-          const int uvi0 = uv32 & 0x0F0F0F0F;
-          const int uvi1 = (uv32 >> 4) & 0x0F0F0F0F;
+          typename R::QLane gl, ul;
+          R::LoadQLane(gbase + b * R::kBlockBytes, sub, gl);
+          R::LoadQLane(ubase + b * R::kBlockBytes, sub, ul);
 
           for (std::uint32_t m = 0; m < cnt; ++m) {
             const BlockQ8_1& xblk = sx[m * tile_blk + b];
-            const int xlo = xblk.qs[sub];
-            const int xhi = xblk.qs[4u + sub];
-            int gdot = Dot4U4S8(gvi0, xlo, 0);
-            gdot = Dot4U4S8(gvi1, xhi, gdot);
-            int udot = Dot4U4S8(uvi0, xlo, 0);
-            udot = Dot4U4S8(uvi1, xhi, udot);
-            sg[m] += gd4 * (xblk.d * static_cast<float>(gdot) - 2.0F * xblk.s);
-            su[m] += ud4 * (xblk.d * static_cast<float>(udot) - 2.0F * xblk.s);
+            const int gdot = R::QIntDot(gl, xblk, sub);
+            const int udot = R::QIntDot(ul, xblk, sub);
+            sg[m] += R::QTail(gl, xblk, gdot);
+            su[m] += R::QTail(ul, xblk, udot);
           }
         }
       }
@@ -541,7 +527,8 @@ __global__ void __launch_bounds__(256) MoeGroupedGateUpSwigluQ8Kernel(
   }
 }
 
-__global__ void __launch_bounds__(256) MoeGroupedDownQ8Kernel(
+template <class R>
+__global__ void __launch_bounds__(256) MoeGroupedDownQKernel(
     const std::uint8_t* __restrict__ down, std::uint64_t row_bytes,
     std::uint64_t expert_stride_bytes, const BlockQ8_1* __restrict__ act_q8,
     const std::uint32_t* __restrict__ u_cnt,
@@ -563,8 +550,8 @@ __global__ void __launch_bounds__(256) MoeGroupedDownQ8Kernel(
 
   const std::uint32_t warp_id = threadIdx.x >> 5;
   const std::uint32_t lane = threadIdx.x & 31u;
-  const std::uint32_t b_grp = lane >> 2;
-  const std::uint32_t sub = lane & 3u;
+  const std::uint32_t b_grp = lane >> R::kQLaneShift;
+  const std::uint32_t sub = lane & R::kQLaneMask;
   const std::uint32_t h = blockIdx.x * 8u + warp_id;
 
   const std::uint8_t* wrow =
@@ -588,22 +575,16 @@ __global__ void __launch_bounds__(256) MoeGroupedDownQ8Kernel(
     __syncthreads();
 
     if (h < hidden) {
-      const std::uint8_t* wbase = wrow + static_cast<std::size_t>(b_off) * 18u;
-      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += 8u) {
+      const std::uint8_t* wbase = wrow + static_cast<std::size_t>(b_off) * R::kBlockBytes;
+      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += R::kQBlocksPerStep) {
         const std::uint32_t b = b0 + b_grp;
         if (b < tk_blk) {
-          const auto* bp =
-              reinterpret_cast<const std::uint16_t*>(wbase + b * 18u);
-          const float d4 = __half2float(*reinterpret_cast<const __half*>(bp));
-          const int v32 = static_cast<int>(bp[1u + 2u * sub]) |
-                          (static_cast<int>(bp[2u + 2u * sub]) << 16);
-          const int vi0 = v32 & 0x0F0F0F0F;
-          const int vi1 = (v32 >> 4) & 0x0F0F0F0F;
+          typename R::QLane wl;
+          R::LoadQLane(wbase + b * R::kBlockBytes, sub, wl);
           for (std::uint32_t m = 0; m < cnt; ++m) {
             const BlockQ8_1& ablk = sa[m * tile_blk + b];
-            int dot = Dot4U4S8(vi0, ablk.qs[sub], 0);
-            dot = Dot4U4S8(vi1, ablk.qs[4u + sub], dot);
-            sum[m] += d4 * (ablk.d * static_cast<float>(dot) - 2.0F * ablk.s);
+            const int dot = R::QIntDot(wl, ablk, sub);
+            sum[m] += R::QTail(wl, ablk, dot);
           }
         }
       }
@@ -789,7 +770,7 @@ void MoeVecGateUpSwiglu(const void* gate_up_dev, std::uint64_t row_bytes,
         const std::size_t smem =
             static_cast<std::size_t>(max_m) * tile_blk * sizeof(BlockQ8_1);
         hipLaunchKernelGGL(
-            MoeGroupedGateUpSwigluQ8Kernel, dim3((ff + 7u) / 8u, slots),
+            (MoeGroupedGateUpSwigluQKernel<::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>>), dim3((ff + 7u) / 8u, slots),
             dim3(256), smem, stream,
             static_cast<const std::uint8_t*>(gate_up_dev), row_bytes,
             expert_stride_bytes, x_q8, g_moe_u_cnt, g_moe_u_exp, g_moe_u_len,
@@ -839,21 +820,13 @@ void MoeSlotEpilogueOverwrite(const float* slot_down, const std::int32_t* ids,
 // 16 value bytes = 17 bytes/block). Low nibbles give elements 0..15, high
 // nibbles 16..31. The codebook is 2xE2M1 with a halved scale, matching
 // llama.cpp (kvalues_mxfp4 x GGML_E8M0_TO_FP32_HALF) bit-for-bit.
-__constant__ std::int8_t kMxfp4VecValues[16] = {0, 1, 2,  3,  4,  6,  8,  12,
-                                                0, -1, -2, -3, -4, -6, -8, -12};
+// The MXFP4 block math (codebook, e8m0 scale, both accumulation orders) lives in core/quant/row_dot_traits.hpp.
+using Mxfp4Row = ::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kMXFP4>;
 
 // One MXFP4 block (17 bytes) dotted with 32 F32 activations.
 __device__ __forceinline__ float Mxfp4BlockDot(
     const std::uint8_t* __restrict__ blk, const float* __restrict__ xv) {
-  const float d = exp2f(static_cast<float>(blk[0]) - 128.0F);
-  float sum = 0.0F;
-#pragma unroll
-  for (int j = 0; j < 16; ++j) {
-    const std::uint8_t b = blk[1 + j];
-    sum += static_cast<float>(kMxfp4VecValues[b & 0x0F]) * xv[j];
-    sum += static_cast<float>(kMxfp4VecValues[b >> 4]) * xv[j + 16];
-  }
-  return d * sum;
+  return Mxfp4Row::BlockDot(blk, xv);
 }
 
 __global__ void MoeVecGateUpMxfp4Kernel(
@@ -966,7 +939,7 @@ void GemvQSlot(const void* down_dev, std::uint64_t row_bytes,
         const std::size_t smem =
             static_cast<std::size_t>(max_m) * tile_blk * sizeof(BlockQ8_1);
         hipLaunchKernelGGL(
-            MoeGroupedDownQ8Kernel, dim3((hidden + 7u) / 8u, slots), dim3(256),
+            (MoeGroupedDownQKernel<::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>>), dim3((hidden + 7u) / 8u, slots), dim3(256),
             smem, stream, static_cast<const std::uint8_t*>(down_dev), row_bytes,
             expert_stride_bytes, act_q8, g_moe_u_cnt, g_moe_u_exp, g_moe_u_len,
             g_moe_u_slots, out, hidden, total_blk, tile_blk, max_m);
@@ -1271,9 +1244,9 @@ __global__ void FastFusedSwiGLUGEMVBlockKernel(const void* __restrict__ gate_w,
       }
     } else if (gate_type != core::GgmlType::kF32) {
       // Quantized weight (Q8_K now; Q8_0/Q5_K/Q6_K wired later via
-      // ::gufo::hip::QuantWarpBlockDot). All lanes cooperate; lane 0 returns this warp's
+      // ::mbufo::hip::QuantWarpBlockDot). All lanes cooperate; lane 0 returns this warp's
       // partial row-dot and the block reduction below combines the warps.
-      dot_gate = ::gufo::hip::QuantWarpBlockDot(gate_type, gate_w, m, x, K, lane_id, warp_id,
+      dot_gate = ::mbufo::hip::QuantWarpBlockDot(gate_type, gate_w, m, x, K, lane_id, warp_id,
                                    block_threads >> 5u);
     }
     // else (kF32 / legacy fp32) keeps dot_gate == 0.0, matching HEAD semantics.
@@ -1299,9 +1272,9 @@ __global__ void FastFusedSwiGLUGEMVBlockKernel(const void* __restrict__ gate_w,
       }
     } else if (up_type != core::GgmlType::kF32) {
       // Quantized weight (Q8_K now; Q8_0/Q5_K/Q6_K wired later via
-      // ::gufo::hip::QuantWarpBlockDot). All lanes cooperate; lane 0 returns this warp's
+      // ::mbufo::hip::QuantWarpBlockDot). All lanes cooperate; lane 0 returns this warp's
       // partial row-dot and the block reduction below combines the warps.
-      dot_up = ::gufo::hip::QuantWarpBlockDot(up_type, up_w, m, x, K, lane_id, warp_id,
+      dot_up = ::mbufo::hip::QuantWarpBlockDot(up_type, up_w, m, x, K, lane_id, warp_id,
                                  block_threads >> 5u);
     }
     // else (kF32 / legacy fp32) keeps dot_up == 0.0, matching HEAD semantics.
@@ -1354,8 +1327,8 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 
   const float dot_gate =
-      ::gufo::hip::QuantWarpBlockDot(gate_type, gate_w, m, x, K, lane_id, 0, 1);
-  const float dot_up = ::gufo::hip::QuantWarpBlockDot(up_type, up_w, m, x, K, lane_id, 0, 1);
+      ::mbufo::hip::QuantWarpBlockDot(gate_type, gate_w, m, x, K, lane_id, 0, 1);
+  const float dot_up = ::mbufo::hip::QuantWarpBlockDot(up_type, up_w, m, x, K, lane_id, 0, 1);
 
   if (lane_id == 0) {
     const float sig_g = 1.0F / (1.0F + expf(-dot_gate));
@@ -1391,25 +1364,25 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 
   if (gate_type == core::GgmlType::kQ8_0 && up_type == core::GgmlType::kQ8_0) {
-    const std::size_t num_blocks = K / ::gufo::hip::kQ8_0BlockSize;
+    const std::size_t num_blocks = K / ::mbufo::hip::kQ8_0BlockSize;
     const auto* g0_blocks =
-        static_cast<const ::gufo::hip::Q8_0Block*>(gate_w) + (m0 * num_blocks);
+        static_cast<const ::mbufo::hip::Q8_0Block*>(gate_w) + (m0 * num_blocks);
     const auto* u0_blocks =
-        static_cast<const ::gufo::hip::Q8_0Block*>(up_w) + (m0 * num_blocks);
+        static_cast<const ::mbufo::hip::Q8_0Block*>(up_w) + (m0 * num_blocks);
     const auto* g1_blocks =
-        (m1 < M) ? (static_cast<const ::gufo::hip::Q8_0Block*>(gate_w) + (m1 * num_blocks))
+        (m1 < M) ? (static_cast<const ::mbufo::hip::Q8_0Block*>(gate_w) + (m1 * num_blocks))
                  : nullptr;
     const auto* u1_blocks =
-        (m1 < M) ? (static_cast<const ::gufo::hip::Q8_0Block*>(up_w) + (m1 * num_blocks))
+        (m1 < M) ? (static_cast<const ::mbufo::hip::Q8_0Block*>(up_w) + (m1 * num_blocks))
                  : nullptr;
 
     float sum_g0 = 0.0F, sum_u0 = 0.0F;
     float sum_g1 = 0.0F, sum_u1 = 0.0F;
 
     for (std::size_t b = lane_id; b < num_blocks; b += 32) {
-      const float* xb = x + (b * ::gufo::hip::kQ8_0BlockSize);
-      const ::gufo::hip::Q8_0Block& gb0 = g0_blocks[b];
-      const ::gufo::hip::Q8_0Block& ub0 = u0_blocks[b];
+      const float* xb = x + (b * ::mbufo::hip::kQ8_0BlockSize);
+      const ::mbufo::hip::Q8_0Block& gb0 = g0_blocks[b];
+      const ::mbufo::hip::Q8_0Block& ub0 = u0_blocks[b];
       const float dg0 = __half2float(gb0.d);
       const float du0 = __half2float(ub0.d);
 
@@ -1423,8 +1396,8 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
       sum_u0 += du0 * blk_u0;
 
       if (g1_blocks != nullptr && u1_blocks != nullptr) {
-        const ::gufo::hip::Q8_0Block& gb1 = g1_blocks[b];
-        const ::gufo::hip::Q8_0Block& ub1 = u1_blocks[b];
+        const ::mbufo::hip::Q8_0Block& gb1 = g1_blocks[b];
+        const ::mbufo::hip::Q8_0Block& ub1 = u1_blocks[b];
         const float dg1 = __half2float(gb1.d);
         const float du1 = __half2float(ub1.d);
         float blk_g1 = 0.0F, blk_u1 = 0.0F;
@@ -1457,14 +1430,14 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 
   const float dot_g0 =
-      ::gufo::hip::QuantWarpBlockDot(gate_type, gate_w, m0, x, K, lane_id, 0, 1);
+      ::mbufo::hip::QuantWarpBlockDot(gate_type, gate_w, m0, x, K, lane_id, 0, 1);
   const float dot_u0 =
-      ::gufo::hip::QuantWarpBlockDot(up_type, up_w, m0, x, K, lane_id, 0, 1);
+      ::mbufo::hip::QuantWarpBlockDot(up_type, up_w, m0, x, K, lane_id, 0, 1);
   const float dot_g1 =
-      (m1 < M) ? ::gufo::hip::QuantWarpBlockDot(gate_type, gate_w, m1, x, K, lane_id, 0, 1)
+      (m1 < M) ? ::mbufo::hip::QuantWarpBlockDot(gate_type, gate_w, m1, x, K, lane_id, 0, 1)
                : 0.0F;
   const float dot_u1 =
-      (m1 < M) ? ::gufo::hip::QuantWarpBlockDot(up_type, up_w, m1, x, K, lane_id, 0, 1)
+      (m1 < M) ? ::mbufo::hip::QuantWarpBlockDot(up_type, up_w, m1, x, K, lane_id, 0, 1)
                : 0.0F;
 
   if (lane_id == 0) {
@@ -1682,22 +1655,7 @@ void MoeEpilogue(const float* expert_out, const float* weights,
 __device__ __forceinline__ void Mxfp4DualBlockDotAcc(
     const std::uint8_t* __restrict__ gblk, const std::uint8_t* __restrict__ ublk,
     const float* __restrict__ xv, float* sg, float* su) {
-  const float dg = exp2f(static_cast<float>(gblk[0]) - 128.0F);
-  const float du = exp2f(static_cast<float>(ublk[0]) - 128.0F);
-  float tg = 0.0F, tu = 0.0F;
-#pragma unroll
-  for (int j = 0; j < 16; ++j) {
-    const std::uint8_t gb = gblk[1 + j];
-    const std::uint8_t ub = ublk[1 + j];
-    const float x0 = xv[j];
-    const float x1 = xv[j + 16];
-    tg += static_cast<float>(kMxfp4VecValues[gb & 0x0F]) * x0 +
-          static_cast<float>(kMxfp4VecValues[gb >> 4]) * x1;
-    tu += static_cast<float>(kMxfp4VecValues[ub & 0x0F]) * x0 +
-          static_cast<float>(kMxfp4VecValues[ub >> 4]) * x1;
-  }
-  *sg += dg * tg;
-  *su += du * tu;
+  Mxfp4Row::BlockDotPairedAcc(gblk, ublk, xv, sg, su);
 }
 
 __device__ __forceinline__ float SwigluOaiScalar(float g, float u) {
@@ -1817,6 +1775,6 @@ bool MoeDecodeDownEpiMxfp4(const void* down_dev, std::uint64_t row_bytes,
   return hipGetLastError() == hipSuccess;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // defined(ENGINE_ENABLE_HIP)

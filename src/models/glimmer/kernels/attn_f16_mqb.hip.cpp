@@ -21,7 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::models::glimmer::kernels {
+namespace mbufo::models::glimmer::kernels {
 namespace {
 
 constexpr std::uint32_t kMqbQueriesPerBlock = 4;
@@ -183,4 +183,4 @@ bool AttentionF16MQB(const float* q, const __half* k_cache,
   return true;
 }
 
-}  // namespace gufo::models::glimmer::kernels
+}  // namespace mbufo::models::glimmer::kernels

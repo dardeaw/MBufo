@@ -1,6 +1,6 @@
 # Hosted CPU regression suite. Other tests remain available through CTest and
 # explicit targets; adding a model oracle must not make every PR expensive.
-set(gufo_pr_targets
+set(mbufo_pr_targets
   cache_adapter_test
   cache_adapter_lifecycle_test
   cache_ledger_test
@@ -32,23 +32,23 @@ set(gufo_pr_targets
   qwen3_tts_config_test qwen3_tts_audio_api_test
   qwen_image_21_test
   video_api_test minimax_h3_sampling_test minimax_h3_runtime_test)
-set(gufo_pr_tests ${gufo_pr_targets})
-list(REMOVE_ITEM gufo_pr_tests
+set(mbufo_pr_tests ${mbufo_pr_targets})
+list(REMOVE_ITEM mbufo_pr_tests
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   qwen38_flash_next_rope_scaling_test
   qwen38_flash_next_continuation_layout_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test)
-list(APPEND gufo_pr_tests
+list(APPEND mbufo_pr_tests
   "qwen38_flash_next\\.config" "qwen38_flash_next\\.mtp_sampling"
   "qwen38_flash_next\\.rope_scaling" "qwen38_flash_next\\.continuation_layout"
   "ds4\\.sampling" "ds4\\.template" "ds4\\.cli"
-  gufo_version gufo_help serve_cli_test eval_http_test functional_runner_test
+  mbufo_version mbufo_help serve_cli_test eval_http_test functional_runner_test
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test
   kernel_resources_parser_test check_docs_test check_pr_title_test)
-list(JOIN gufo_pr_tests "|" gufo_pr_pattern)
+list(JOIN mbufo_pr_tests "|" mbufo_pr_pattern)
 add_custom_target(check-pr
   COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --no-tests=error
-    --timeout 60 -R "^(${gufo_pr_pattern})$"
-  DEPENDS gufo ${gufo_pr_targets} cache_disk_faults
+    --timeout 60 -R "^(${mbufo_pr_pattern})$"
+  DEPENDS mbufo ${mbufo_pr_targets} cache_disk_faults
   USES_TERMINAL VERBATIM)

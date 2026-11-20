@@ -52,7 +52,7 @@ main `0c03748a` with candidate `1d3b8c68`, after rebasing onto the merged
 small-prefill changes. They use the same Nix toolchain; builds and inference
 never overlap. All observations,
 including failed prototypes and harness-only failures, remain in
-`/tmp/gufo-flash-decode-20261021` on the test host and
+`/tmp/mbufo-flash-decode-20261021` on the test host and
 `/Users/fbozzo/projects/flash-decode-20261021` on the editing host. The benchmark
 artifact's source field identifies its harness tree; the retained binary
 paths and hashes identify each measured implementation. No llama.cpp values
@@ -161,7 +161,7 @@ three copies but repeatedly added 7–9 ms to some decode phases; it was removed
 
 Production binaries, hashes, commands, all reports, failed experiments and
 interrupted attempts remain in
-`/home/mixer/gufo-qualification/issue678-2026-10-20` (`provenance.json`,
+`/home/mixer/mbufo-qualification/issue678-2026-10-20` (`provenance.json`,
 `retained-*-qualified.json`, `retained-speed-summary.json`). The benchmark's
 source field identifies the harness tree; provenance maps the measured binaries
 to their actual source revisions. A stopped Q4 DFlash2 benchmark has no completed
@@ -434,7 +434,7 @@ These focused observations do not replace the complete benchmark table or
 establish statistical language quality.
 
 llama.cpp `10b8b755` also verifies context proposals against the target, but its
-ngram path samples the target directly and compares the token. Gufo retains
+ngram path samples the target directly and compares the token. MBufo retains
 point-mass rejection sampling for copies alongside its neural p/q proposals.
 Both preserve the target distribution; identical seeded streams or a speed
 advantage over llama.cpp are not claimed. Target arithmetic and weights are
@@ -509,7 +509,7 @@ its translation is correct, but its extra grammar explanation mislabels a
 declension. Changed proposals can consume RNG differently across builds.
 These numerical, replay and functional checks establish regression evidence
 against main, not upstream unquantized-model accuracy or a statistical
-language-quality result. The Gufo benchmark refresh below retains all llama.cpp
+language-quality result. The MBufo benchmark refresh below retains all llama.cpp
 data unchanged.
 
 The cache follow-up in `fdc21849` changes storage and bookkeeping while
@@ -674,9 +674,9 @@ Older Flash-Next disk checkpoints are rejected and rebuilt once.
 
 ## Vision
 
-**One Gufo encoder comparison fails:** relative L2 **6.47%** versus official
+**One MBufo encoder comparison fails:** relative L2 **6.47%** versus official
 Transformers BF16, above the **5%** limit, on a 1024×1024 synthetic texture.
-Both use the same converted GGUF weights. Against FP32, Gufo and Transformers
+Both use the same converted GGUF weights. Against FP32, MBufo and Transformers
 BF16 differ by **7.83% / 8.10%**, respectively. This is numerical drift, not an
 image-answer score; **llama.cpp was not tested**. Optimizations retain native
 embedding bytes but do not resolve this gap. [Evidence](artifacts/vision-parity.json).
@@ -705,9 +705,9 @@ prompt (dense attention for every implementation, since it is under the
 2,048-token indexer budget): top-1 flips and KL divergence against the CPU
 oracle and llama.cpp are similar with YaRN on or off (top-1 flips 21–29 of
 1,927 positions; KL p50 ~4e-5; KL p90 ~0.01). At depth (the last 64
-positions of long prompts), gufo versus llama.cpp agreement is 61/64 top-1
+positions of long prompts), mbufo versus llama.cpp agreement is 61/64 top-1
 both at 248,487 tokens with YaRN off (KL median 0.011) and at 297,484
-tokens with YaRN 1.5625 (KL median 0.008); the divergence there is gufo's
+tokens with YaRN 1.5625 (KL median 0.008); the divergence there is mbufo's
 sparse attention versus llama.cpp's dense attention, present with YaRN off
 too.
 
@@ -749,7 +749,7 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-All Gufo tables were refreshed on October 18, 2026, with the clean production
+All MBufo tables were refreshed on October 18, 2026, with the clean production
 Nix build `fec4759d` (ELF SHA-256 prefix `1d822fb97b4639c61`).
 The pinned compiler and dependencies are unchanged; the package includes the
 qualified ROCr host-memory patch. Every single-user row reproduces the
@@ -765,7 +765,7 @@ retained samples are in [artifacts](artifacts/bench.json) and
 [model identities](artifacts/model-identities.json). Full raw requests, phase
 timings, diagnostic profiles and repeated controls are retained outside Git.
 
-The driver is `tools/bench/model-bench.py run --target gufo --fresh`.
+The driver is `tools/bench/model-bench.py run --target mbufo --fresh`.
 One warmed sample per point, HTTP, greedy, thinking off, penalties disabled;
 automatic cache RAM budget. Repetitive MTP through 64K also includes one
 focused repeat, preserving the ordered history and the initial sweep's realized

@@ -7,7 +7,7 @@
 #include <string_view>
 #include <system_error>
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 namespace {
 
 constexpr const char* kQueueCapEnvironment = "GPU_MAX_HW_QUEUES";
@@ -183,4 +183,4 @@ std::string DescribeQueuePressure(const QueuePlan& plan) {
   return message;
 }
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

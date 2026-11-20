@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a local Gufo or llama-swap image endpoint, including seeded replay."""
+"""Check a local MBufo or llama-swap image endpoint, including seeded replay."""
 
 import argparse
 import base64
@@ -34,7 +34,7 @@ def main():
     def encode(fields):
         if not args.edit:
             return json.dumps(fields).encode(), "application/json", "/v1/images/generations"
-        boundary = "gufo-" + uuid.uuid4().hex
+        boundary = "mbufo-" + uuid.uuid4().hex
         parts = []
         for name, value in fields.items():
             parts.append(

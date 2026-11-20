@@ -2,7 +2,7 @@
 
 #include <utility>
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 #if !defined(ENGINE_ENABLE_HIP)
 
@@ -42,4 +42,4 @@ int AudioVaeDecoder::samples() const noexcept {
 
 #endif
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3

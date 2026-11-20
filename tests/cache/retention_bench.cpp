@@ -5,8 +5,8 @@
 #include <optional>
 
 #include "tests/cache/fake_adapter.hpp"
-using namespace gufo::cache;
-using namespace gufo::cache::testing;
+using namespace mbufo::cache;
+using namespace mbufo::cache::testing;
 int main() {
   class Empty final : public MutationGuard {
     void BeforeOverwrite(ComponentId, Rows, Rows) override {}

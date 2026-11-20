@@ -10,14 +10,14 @@
 // Precision note: mean/variance accumulate in double; the final scale is
 // applied in float. This matches the HuggingFace FP32 reference bit-pattern
 // for the tested magnitudes (see tests/core/layernorm_gelu_test.cpp).
-#ifndef GUFO_CORE_COMPUTE_LAYERNORM_LAYERNORM_HPP_
-#define GUFO_CORE_COMPUTE_LAYERNORM_LAYERNORM_HPP_
+#ifndef MBUFO_CORE_COMPUTE_LAYERNORM_LAYERNORM_HPP_
+#define MBUFO_CORE_COMPUTE_LAYERNORM_LAYERNORM_HPP_
 
 #include <cmath>
 #include <cstddef>
 #include <span>
 
-namespace gufo::core::ln {
+namespace mbufo::core::ln {
 
 /// Traditional LayerNorm over one row:
 ///   out[i] = (x[i] - mean(x)) / sqrt(var(x) + eps) * weight[i]
@@ -77,6 +77,6 @@ namespace gufo::core::ln {
   return true;
 }
 
-}  // namespace gufo::core::ln
+}  // namespace mbufo::core::ln
 
-#endif  // GUFO_CORE_COMPUTE_LAYERNORM_LAYERNORM_HPP_
+#endif  // MBUFO_CORE_COMPUTE_LAYERNORM_LAYERNORM_HPP_

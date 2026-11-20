@@ -13,7 +13,7 @@
 
 #include "src/cache/disk.hpp"
 
-using namespace gufo::cache;
+using namespace mbufo::cache;
 namespace fs = std::filesystem;
 namespace {
 std::atomic<int> fail_sync{-1}, fail_write{-1};
@@ -31,7 +31,7 @@ ResourceLedger ledger{{1ULL << 32, 1ULL << 32, 0, 0}};
 struct Directory {
   fs::path path;
   Directory() {
-    char name[] = "/tmp/gufo-publication-test-XXXXXX";
+    char name[] = "/tmp/mbufo-publication-test-XXXXXX";
     path = mkdtemp(name);
   }
   ~Directory() { fs::remove_all(path); }

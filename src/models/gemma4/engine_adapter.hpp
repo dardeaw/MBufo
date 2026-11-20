@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GEMMA4_ENGINE_ADAPTER_HPP_
-#define GUFO_MODELS_GEMMA4_ENGINE_ADAPTER_HPP_
+#ifndef MBUFO_MODELS_GEMMA4_ENGINE_ADAPTER_HPP_
+#define MBUFO_MODELS_GEMMA4_ENGINE_ADAPTER_HPP_
 
 // Gemma4 adapter: exposes the existing gemma4::Model/Session through
 // the L0/L1 engine abstraction (EngineModel / SpeculativeSession).
@@ -44,10 +44,11 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/engine/attention_contract.hpp"
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/gemma4/engine.hpp"
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 
 class GemmaEngineSession final : public core::engine::SpeculativeSession {
  public:
@@ -103,7 +104,7 @@ class GemmaEngineSession final : public core::engine::SpeculativeSession {
   std::unique_ptr<Session> inner_;
 };
 
-class GemmaEngineModel final : public core::engine::EngineModel {
+class GemmaEngineModel final : public core::engine::EngineModel, public core::engine::MoeCapable, public core::engine::AttentionCapable {
  public:
   [[nodiscard]] static std::shared_ptr<GemmaEngineModel> Load(
       const std::string& model_path, const ModelOptions& options,
@@ -120,6 +121,10 @@ class GemmaEngineModel final : public core::engine::EngineModel {
   [[nodiscard]] std::uint32_t MaxContext() const noexcept override;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept override;
   [[nodiscard]] std::string ModelName() const override;
+  [[nodiscard]] core::engine::AttentionGeometry AttentionGeometryInfo() const override;
+  [[nodiscard]] core::engine::AttentionKernelInfo AttentionKernelsInfo() const override;
+  [[nodiscard]] core::engine::MoeGeometry MoeGeometryInfo() const override;
+  [[nodiscard]] core::engine::MoeKernelInfo MoeKernelsInfo() const override;
 
   // L0-external gemma4 pass-throughs (unchanged gemma4 semantics).
   [[nodiscard]] std::string Decode(
@@ -136,6 +141,10 @@ class GemmaEngineModel final : public core::engine::EngineModel {
   std::shared_ptr<Model> model_;
 };
 
-}  // namespace gufo::models::gemma4
+/// The MoE contract declaration of a loaded model (also what mbufo serve checks when it loads one).
+[[nodiscard]] core::engine::MoeGeometry DescribeMoeGeometry(const Model& model);
+[[nodiscard]] core::engine::MoeKernelInfo DescribeMoeKernels();
 
-#endif  // GUFO_MODELS_GEMMA4_ENGINE_ADAPTER_HPP_
+}  // namespace mbufo::models::gemma4
+
+#endif  // MBUFO_MODELS_GEMMA4_ENGINE_ADAPTER_HPP_

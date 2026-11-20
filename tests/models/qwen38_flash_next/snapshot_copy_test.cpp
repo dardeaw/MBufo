@@ -12,7 +12,7 @@
 #include <thread>
 #include <vector>
 
-namespace gpu = gufo::hip;
+namespace gpu = mbufo::hip;
 namespace {
 void Check(hipError_t result) {
   assert(result == hipSuccess);

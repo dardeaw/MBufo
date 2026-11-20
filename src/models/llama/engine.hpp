@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_LLAMA_ENGINE_HPP_
-#define GUFO_MODELS_LLAMA_ENGINE_HPP_
+#ifndef MBUFO_MODELS_LLAMA_ENGINE_HPP_
+#define MBUFO_MODELS_LLAMA_ENGINE_HPP_
 
 #include <cstdint>
 #include <memory>
@@ -13,7 +13,7 @@
 #include "src/models/llama/weights.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::models::llama {
+namespace mbufo::models::llama {
 
 struct ModelOptions {
   std::uint32_t max_context = 8192;
@@ -111,6 +111,6 @@ class Session final {
   friend class Model;
 };
 
-}  // namespace gufo::models::llama
+}  // namespace mbufo::models::llama
 
-#endif  // GUFO_MODELS_LLAMA_ENGINE_HPP_
+#endif  // MBUFO_MODELS_LLAMA_ENGINE_HPP_

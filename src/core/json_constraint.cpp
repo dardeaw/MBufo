@@ -14,7 +14,7 @@
 #include <string_view>
 #include <tuple>
 
-namespace gufo::sampling {
+namespace mbufo::sampling {
 namespace {
 constexpr std::uint32_t kTerminal = 1U << 31;
 constexpr std::uint32_t kLexeme = 1U << 30;
@@ -2563,4 +2563,4 @@ std::shared_ptr<const std::vector<std::uint8_t>> TokenConstraint::Allowed(
   }
   return masks_.emplace(std::move(canonical), std::move(mask)).first->second;
 }
-}  // namespace gufo::sampling
+}  // namespace mbufo::sampling

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_CONTINUATION_ADAPTER_HPP_
-#define GUFO_MODELS_QWEN_CONTINUATION_ADAPTER_HPP_
+#ifndef MBUFO_MODELS_QWEN_CONTINUATION_ADAPTER_HPP_
+#define MBUFO_MODELS_QWEN_CONTINUATION_ADAPTER_HPP_
 
 #include <atomic>
 
@@ -9,7 +9,7 @@
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 struct ContinuationFrontier {
   std::optional<tokenization::TokenId> token;
@@ -100,7 +100,7 @@ private:
       cache::ComponentId) const;
   [[nodiscard]] cache::Completion Transfer(
       State&, bool load, cache::Stream&,
-      const std::function<void(gufo::hip::TransferStream&)>&);
+      const std::function<void(mbufo::hip::TransferStream&)>&);
   [[nodiscard]] cache::Completion TransferRows(State&,
                                                const ContinuationComponent&,
                                                bool load, cache::Rows first,
@@ -119,5 +119,5 @@ private:
   std::vector<cache::ComponentDescriptor> descriptors_;
   cache::Identity identity_;
 };
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 #endif

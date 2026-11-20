@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_TTS_AUDIO_HPP_
-#define GUFO_MODELS_QWEN3_TTS_AUDIO_HPP_
+#ifndef MBUFO_MODELS_QWEN3_TTS_AUDIO_HPP_
+#define MBUFO_MODELS_QWEN3_TTS_AUDIO_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-namespace gufo::models::qwen3_tts {
+namespace mbufo::models::qwen3_tts {
 
 struct AudioBuffer {
   std::uint32_t sample_rate{0};
@@ -27,6 +27,6 @@ struct AudioBuffer {
 [[nodiscard]] std::vector<float> ResampleMono(const AudioBuffer& audio,
                                               std::uint32_t output_sample_rate);
 
-}  // namespace gufo::models::qwen3_tts
+}  // namespace mbufo::models::qwen3_tts
 
-#endif  // GUFO_MODELS_QWEN3_TTS_AUDIO_HPP_
+#endif  // MBUFO_MODELS_QWEN3_TTS_AUDIO_HPP_

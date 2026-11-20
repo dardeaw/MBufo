@@ -23,11 +23,12 @@
 #include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/core/compute/attention/flash_blas.hpp"
 #include "src/core/compute/attention/flash_wmma_gqa.hpp"
+#include "src/core/compute/attention/blocked_splitk.hpp"
 #include "src/core/compute/attention/flash_sink.hpp"
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/gptoss/kernels/kernels.hpp"
 
-namespace gufo::models::gptoss {
+namespace mbufo::models::gptoss {
 namespace {
 
 // Prefill chunk (tokens per Forward); GPTOSS_PREFILL_CHUNK overrides it (16..8192) for tuning.
@@ -1004,6 +1005,16 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                    attn_disp::AttentionRouteName(route));
     }
     const std::uint32_t kv_len = start_pos + n;
+    // Decode reads the blocked Q8 cache directly (row-chunk Split-K with the sink and the window): the dequantize-everything-
+    // then-F16-flash route moved ~3x the bytes, and re-dequantized the full cache even for the window-128 layers. Prefill
+    // (n > 1) keeps the F16 staging below. GPTOSS_NO_Q8_DIRECT=1 restores the staged route for A/B runs.
+    const bool direct_done =
+        n == 1 && d == 64 && getenv("GPTOSS_NO_Q8_DIRECT") == nullptr &&
+        core::compute::blocked_splitk::AttentionBlockedSinkRowChunk<core::compute::blocked_splitk::KvCodecQ8, 64>(
+            impl.qbuf, impl.buffers.kv_bk[il], impl.buffers.kv_bv[il], static_cast<const float*>(l.attn_sinks.device),
+            impl.attn_out, n, start_pos, c.num_heads, c.num_kv_heads, d, window, stream, score_scale, impl.flash_partials,
+            impl.flash_partials_bytes, 128);
+    if (!direct_done)
     (void)blocked::DequantizeKvRows(
         impl.buffers.kv_bk[il], impl.buffers.kv_k[il],
         impl.buffers.kv_bv[il], impl.buffers.kv_v[il],
@@ -1018,7 +1029,7 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
             impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
             static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n, start_pos, c.num_heads, c.num_kv_heads, d,
             window, score_scale, stream);
-    if (!wmma_done && !(n == 1 && d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr &&
+    if (!direct_done && !wmma_done && !(n == 1 && d == 64 && getenv("GPTOSS_NO_FLASH") == nullptr &&
           core::compute::flash_sink::FlashSinkDecode(
               impl.qbuf, impl.buffers.kv_k[il], impl.buffers.kv_v[il],
               static_cast<const float*>(l.attn_sinks.device), impl.attn_out, n,
@@ -1400,4 +1411,4 @@ std::int32_t Session::SampleGreedy() {
   return tok;
 }
 
-}  // namespace gufo::models::gptoss
+}  // namespace mbufo::models::gptoss

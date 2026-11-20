@@ -30,7 +30,7 @@ nix develop -c ctest --preset cpu-sanitizer --output-on-failure
 
 Preset definitions, build options and repository mechanics are in
 [development](DEVELOPMENT.md). Formatting and the Python
-documentation/dependency checks run on the editing host without building Gufo;
+documentation/dependency checks run on the editing host without building MBufo;
 their entrypoints are in `tools/ci/`.
 
 Selection by preset: `gpu-fast` excludes `slow` and `external-model` tests,
@@ -113,7 +113,7 @@ Model-owned procedures and outstanding qualification gaps live with the model:
 ## Independent references and artifacts
 
 Prefer hand-checkable analytic fixtures or the source checkpoint in a pinned
-official runtime. A promoted Gufo build is a regression reference; agreement
+official runtime. A promoted MBufo build is a regression reference; agreement
 with it alone does not establish upstream correctness. Record checkpoint
 storage type separately from compute and accumulation precision.
 

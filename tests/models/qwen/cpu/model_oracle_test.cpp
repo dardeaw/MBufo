@@ -9,7 +9,7 @@ void TestLogitComparatorExactMatch() {
   std::vector<float> ref = {1.0F, 2.5F, -3.2F, 0.0F};
   std::vector<float> cand = {1.0F, 2.5F, -3.2F, 0.0F};
 
-  const auto res = gufo::testing::CompareLogits(ref, cand, 1e-4F, 1e-4F);
+  const auto res = mbufo::testing::CompareLogits(ref, cand, 1e-4F, 1e-4F);
   assert(res.match);
   assert(res.finite);
   assert(res.top1_match);
@@ -25,7 +25,7 @@ void TestLogitComparatorTolerance() {
   std::vector<float> ref = {1.0F, 2.0F, 3.0F};
   std::vector<float> cand = {1.00001F, 2.00002F, 2.99999F};
 
-  const auto res = gufo::testing::CompareLogits(ref, cand, 1e-3F, 1e-3F);
+  const auto res = mbufo::testing::CompareLogits(ref, cand, 1e-3F, 1e-3F);
   assert(res.match);
   assert(res.top1_match);
   assert(res.mean_abs_diff > 0.0F);
@@ -37,7 +37,7 @@ void TestLogitComparatorDetectsTop1Mismatch() {
   std::vector<float> ref = {1.0F, 3.0F, 2.0F};
   std::vector<float> cand = {1.0F, 2.0F, 3.0F};
 
-  const auto res = gufo::testing::CompareLogits(ref, cand);
+  const auto res = mbufo::testing::CompareLogits(ref, cand);
   assert(!res.match);
   assert(!res.top1_match);
   assert(res.reference_argmax == 1);
@@ -49,10 +49,10 @@ void TestRMSNormOracleComparison() {
   std::vector<float> w = {1.0F, 1.0F, 1.0F, 1.0F};
   std::vector<float> out(4, 0.0F);
 
-  gufo::models::qwen::ReferenceRMSNorm(x, w, 1e-6F, out);
+  mbufo::models::qwen::ReferenceRMSNorm(x, w, 1e-6F, out);
 
   // Compare against identical reference
-  const auto res = gufo::testing::CompareLogits(out, out, 1e-5F, 1e-5F);
+  const auto res = mbufo::testing::CompareLogits(out, out, 1e-5F, 1e-5F);
   assert(res.match);
 }
 

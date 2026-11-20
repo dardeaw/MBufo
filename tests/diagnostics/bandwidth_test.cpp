@@ -42,14 +42,14 @@ std::filesystem::path FindFixturesRoot() {
 }
 
 void TestCpuBandwidthCorrectness() {
-  gufo::diagnostics::BandwidthOptions opts;
+  mbufo::diagnostics::BandwidthOptions opts;
   opts.backends = {"cpu"};
   opts.warmup = 1;
   opts.repetitions = 3;
   opts.duration_ms = 0;
   opts.working_set_bytes = 16ULL * 1024ULL * 1024ULL;  // 16 MiB for fast test
 
-  const auto results = gufo::diagnostics::MeasureCpuBandwidth(opts);
+  const auto results = mbufo::diagnostics::MeasureCpuBandwidth(opts);
   Expect(results.size() == 3,
          "Expected 3 CPU bandwidth paths (copy, read, write)");
 
@@ -66,17 +66,17 @@ void TestCpuBandwidthCorrectness() {
 }
 
 void TestBandwidthReportJsonStructure() {
-  const auto inv = gufo::diagnostics::CollectSystemInventory();
-  const auto fp = gufo::diagnostics::GenerateMachineFingerprint(inv);
+  const auto inv = mbufo::diagnostics::CollectSystemInventory();
+  const auto fp = mbufo::diagnostics::GenerateMachineFingerprint(inv);
 
-  gufo::diagnostics::BandwidthOptions opts;
+  mbufo::diagnostics::BandwidthOptions opts;
   opts.backends = {"cpu"};
   opts.warmup = 1;
   opts.repetitions = 2;
   opts.duration_ms = 0;
   opts.working_set_bytes = 8ULL * 1024ULL * 1024ULL;
 
-  const auto report = gufo::diagnostics::RunBandwidthBenchmark(opts, fp);
+  const auto report = mbufo::diagnostics::RunBandwidthBenchmark(opts, fp);
   const std::string json = report.ToJson();
 
   Expect(json.find("\"schemaVersion\": \"1.0.0\"") != std::string::npos,
@@ -90,19 +90,19 @@ void TestBandwidthReportJsonStructure() {
          "Has rawRepetitionsGbps");
 
   // Validate artifact
-  const auto val_res = gufo::diagnostics::ValidateArtifactContent(json);
+  const auto val_res = mbufo::diagnostics::ValidateArtifactContent(json);
   Expect(val_res.is_valid, "BandwidthReport JSON is valid artifact");
 }
 
 void TestBandwidthDuration() {
-  gufo::diagnostics::BandwidthOptions opts;
+  mbufo::diagnostics::BandwidthOptions opts;
   opts.backends = {"cpu"};
   opts.working_set_bytes = 1 << 20;
   opts.warmup = 1;
   opts.repetitions = 2;
   for (const auto duration_ms : {1U, 30U}) {
     opts.duration_ms = duration_ms;
-    for (const auto& path : gufo::diagnostics::MeasureCpuBandwidth(opts)) {
+    for (const auto& path : mbufo::diagnostics::MeasureCpuBandwidth(opts)) {
       Expect(path.elapsed_ms >= duration_ms, "requested duration is measured");
       Expect(path.repetitions >= opts.repetitions &&
                  path.raw_repetitions_gbps.size() == path.repetitions,
@@ -114,8 +114,8 @@ void TestBandwidthDuration() {
 }
 
 void TestArtifactValidation() {
-  using gufo::diagnostics::ValidateArtifactContent;
-  gufo::diagnostics::MachineFingerprint fingerprint;
+  using mbufo::diagnostics::ValidateArtifactContent;
+  mbufo::diagnostics::MachineFingerprint fingerprint;
   fingerprint.canonical.cpu_model = "a \"quoted\" CPU";
   fingerprint.fingerprint_id = fingerprint.canonical.ComputeFingerprintId();
   const auto valid = fingerprint.ToJson();
@@ -125,46 +125,46 @@ void TestArtifactValidation() {
                            std::string("[]"), std::string("null")})
     Expect(!ValidateArtifactContent(text).is_valid,
            "malformed artifact rejected");
-  auto root = gufo::json::parse(valid);
+  auto root = mbufo::json::parse(valid);
   root["fingerprintId"] = std::string(64, 'z');
   Expect(!ValidateArtifactContent(root.dump()).is_valid,
          "non-hex SHA rejected");
-  root = gufo::json::parse(valid);
+  root = mbufo::json::parse(valid);
   root["schemaVersion"] = 1;
   Expect(!ValidateArtifactContent(root.dump()).is_valid, "wrong type rejected");
-  root = gufo::json::parse(valid);
+  root = mbufo::json::parse(valid);
   root["canonical"]["cpuLogicalCores"] = -1;
   Expect(!ValidateArtifactContent(root.dump()).is_valid,
          "negative core count rejected");
-  root = gufo::json::parse(valid);
+  root = mbufo::json::parse(valid);
   root["canonical"]["cpuLogicalCores"] = 4294967296.0;
   Expect(!ValidateArtifactContent(root.dump()).is_valid,
          "overflowing core count rejected");
-  root = gufo::json::parse(valid);
+  root = mbufo::json::parse(valid);
   root["cpuModel"] = "spoofed value outside canonical";
   Expect(ValidateArtifactContent(root.dump()).is_valid,
          "only canonical fields are hashed");
   root["canonical"]["cpuModel"] = "tampered";
   Expect(!ValidateArtifactContent(root.dump()).is_valid,
          "tampered canonical field rejected");
-  root = gufo::json::Value::object();
-  root["nested"] = gufo::json::parse(valid);
+  root = mbufo::json::Value::object();
+  root["nested"] = mbufo::json::parse(valid);
   Expect(!ValidateArtifactContent(root.dump()).is_valid,
          "nested required fields rejected");
-  root = gufo::json::parse(valid);
+  root = mbufo::json::parse(valid);
   root.append_member("fingerprintId", fingerprint.fingerprint_id);
   Expect(!ValidateArtifactContent(root.dump()).is_valid,
          "duplicate key rejected");
-  root = gufo::json::parse(valid);
+  root = mbufo::json::parse(valid);
   root["canonical"] = "not an object";
   Expect(!ValidateArtifactContent(root.dump()).is_valid,
          "canonical must be an object");
-  root = gufo::json::Value::object();
+  root = mbufo::json::Value::object();
   root["schemaVersion"] = "1.0.0";
   root["fingerprintId"] = fingerprint.fingerprint_id;
   Expect(!ValidateArtifactContent(root.dump()).is_valid,
          "a schema and hash alone are not an artifact");
-  root = gufo::json::parse(valid);
+  root = mbufo::json::parse(valid);
   root["artifactType"] = "unknown";
   Expect(!ValidateArtifactContent(root.dump()).is_valid,
          "unknown artifact type rejected");

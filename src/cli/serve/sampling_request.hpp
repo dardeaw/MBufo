@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_SAMPLING_REQUEST_HPP_
-#define GUFO_SERVER_SAMPLING_REQUEST_HPP_
+#ifndef MBUFO_SERVER_SAMPLING_REQUEST_HPP_
+#define MBUFO_SERVER_SAMPLING_REQUEST_HPP_
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +15,7 @@
 #include "src/core/json.hpp"
 #include "src/core/sampling.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 struct SamplingRequestError {
   std::string message;
@@ -109,7 +109,7 @@ inline bool IsLlamaSamplerField(std::string_view field) {
   return false;
 }
 
-/// llama.cpp sampler fields that gufo does not implement. A field that is
+/// llama.cpp sampler fields that mbufo does not implement. A field that is
 /// absent, null, or set to a value that leaves llama.cpp's sampler chain
 /// unchanged is ignored, so clients that always send their sampler settings
 /// (Open WebUI 0.12 sends mirostat 0) still work. A value that would activate
@@ -344,6 +344,6 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
   return std::nullopt;
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_SAMPLING_REQUEST_HPP_
+#endif  // MBUFO_SERVER_SAMPLING_REQUEST_HPP_

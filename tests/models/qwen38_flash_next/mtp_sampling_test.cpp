@@ -11,8 +11,8 @@
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "tests/models/qwen27b/sampling_cases.hpp"
 
-namespace qfn = gufo::models::qwen38_flash_next;
-namespace sampling = gufo::sampling;
+namespace qfn = mbufo::models::qwen38_flash_next;
+namespace sampling = mbufo::sampling;
 
 void Require(bool condition, const char* message) {
   if (!condition)
@@ -141,7 +141,7 @@ void CheckCompactProposals() {
   candidates.size = 3;
   candidates.ids = {3, 1, 4};
   candidates.logits = {1.2F, 0.1F, -0.7F};
-  for (const auto& test : gufo::test::QwenSamplingCases()) {
+  for (const auto& test : mbufo::test::QwenSamplingCases()) {
     sampling::SamplerState sampler(test.config, history);
     const auto p = sampler.Distribution(target_logits);
     for (std::uint64_t seed = 0; seed < 16; ++seed) {
@@ -374,7 +374,7 @@ void CheckPointMassFrequencies() {
 void CheckVerificationBoundaries() {
   const std::array<float, 3> logits{0, -1, -2};
   const std::array<sampling::TokenId, 3> history{1, 1, 2};
-  for (const auto& test : gufo::test::QwenSamplingCases()) {
+  for (const auto& test : mbufo::test::QwenSamplingCases()) {
     auto config = test.config;
     config.temperature = 0.5F;
     config.seed = 6;
@@ -433,7 +433,7 @@ int main() {
     CheckPointMassFrequencies();
     const std::array<float, 5> logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
     const std::array<sampling::TokenId, 4> history{2, 3, 2, 0};
-    for (const auto& test : gufo::test::QwenSamplingCases()) {
+    for (const auto& test : mbufo::test::QwenSamplingCases()) {
       if (test.config.uses_random_sampling())
         continue;
       for (unsigned accepted = 0; accepted < 4; ++accepted) {

@@ -1,5 +1,5 @@
 {
-  "schema": "gufo-quantization-quality/1",
+  "schema": "mbufo-quantization-quality/1",
   "measured_on": "2026-09-24",
   "source_revision": "00d3996a168c77b086f54e94a85539f2481c0d41",
   "source_changes": "Test reference mode skips unrelated replay/concurrency sweeps; inference unchanged.",
@@ -8,7 +8,7 @@
   "binary_sha256": "f9bc02e8e0c55a5588069b31b8f4cf0034953dd71432afd5ad9e2baf100236b7",
   "build": "Nix package development environment; gpu-test RelWithDebInfo with assertions; gfx1151",
   "reference": {
-    "runtime": "Gufo BF16, not an independent official-model implementation",
+    "runtime": "MBufo BF16, not an independent official-model implementation",
     "files": {
       "Qwen3.8-27B-BF16-00001-of-00002.gguf": "b9966e82b7a4d87028b5eae061d578ee826305ebf8baea5bfc6e09bad0ba191f",
       "Qwen3.8-27B-BF16-00002-of-00002.gguf": "92e3943c4f9bd6292a7bef82369f65fed9bfed088b9df0fb2fa2ce17c9edfa02"

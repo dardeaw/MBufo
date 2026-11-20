@@ -146,7 +146,7 @@ retained separately under `pre-review-image-fix/`; subsequent guard additions
 change tests only. The serving candidate
 binary SHA-256 `9484c9c38669340485e3194cc43703fb5be1c29477518696e43e0c50f88a12dc`
 is pinned. Raw tests, binaries and measurements are retained outside Git in
-`/home/mixer/gufo-qualification/cache-card15-2026-10-10`.
+`/home/mixer/mbufo-qualification/cache-card15-2026-10-10`.
 
 The bounded inactive-path benchmark covers pp2048/tg128 at d0/d32K for Q4/Q8
 AR and mixed/repetitive DFlash2, plus C1/C2/C4/C6/C8 AR, two mixed corpus
@@ -195,7 +195,7 @@ upstream parity.
 PR #540 was merged locally with main `058d6e80` (#573), without rebasing.
 The merged production source is `af4d42e3`; the later merge commit `ca704f57`
 has the same tree. Tests and drivers are retained under
-`/home/mixer/gufo-qualification/qwen27b-component-2026-10-13`.
+`/home/mixer/mbufo-qualification/qwen27b-component-2026-10-13`.
 
 | Area | Current evidence |
 | --- | --- |

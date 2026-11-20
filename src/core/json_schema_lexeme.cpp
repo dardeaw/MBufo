@@ -13,7 +13,7 @@
 
 #include "src/core/json_schema_regex.hpp"
 
-namespace gufo::sampling {
+namespace mbufo::sampling {
 namespace {
 
 [[noreturn]] void Invalid(std::string_view reason) {
@@ -997,4 +997,4 @@ std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Number(
     const json::Value& schema, bool integer) {
   return std::make_shared<NumberLexeme>(schema, integer);
 }
-}  // namespace gufo::sampling
+}  // namespace mbufo::sampling

@@ -26,7 +26,7 @@
 #include "src/core/hip/transfer_pool.hpp"
 #include "tests/cache/fake_adapter.hpp"
 
-using namespace gufo;
+using namespace mbufo;
 using Category = cache::ResourceCategory;
 using Result = cache::TransferResult;
 namespace {

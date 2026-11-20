@@ -47,21 +47,21 @@ void TestSizeParser() {
   std::vector<std::size_t> sizes;
   std::string error;
   Expect(
-      gufo::diagnostics::ParseWorkingSetSizes("64,1024,52126", &sizes, &error),
+      mbufo::diagnostics::ParseWorkingSetSizes("64,1024,52126", &sizes, &error),
       error);
   Expect(sizes.size() == 3, "three working-set sizes parsed");
   Expect(sizes[0] == 64ULL * 1024ULL * 1024ULL, "64 MiB parsed");
   Expect(sizes[1] == 1024ULL * 1024ULL * 1024ULL, "1 GiB parsed");
-  Expect(!gufo::diagnostics::ParseWorkingSetSizes("64,invalid", &sizes, &error),
+  Expect(!mbufo::diagnostics::ParseWorkingSetSizes("64,invalid", &sizes, &error),
          "invalid size rejected");
-  Expect(!gufo::diagnostics::ParseWorkingSetSizes("64,", &sizes, &error),
+  Expect(!mbufo::diagnostics::ParseWorkingSetSizes("64,", &sizes, &error),
          "trailing separator rejected");
 }
 
 void TestStatistics() {
-  gufo::diagnostics::AllocationPhaseResult phase;
+  mbufo::diagnostics::AllocationPhaseResult phase;
   phase.raw_repetitions = {4.0, 1.0, 3.0, 2.0, 5.0};
-  gufo::diagnostics::ComputeAllocationPhaseStatistics(&phase);
+  mbufo::diagnostics::ComputeAllocationPhaseStatistics(&phase);
   Expect(phase.minimum == 1.0, "minimum computed");
   Expect(phase.median == 3.0, "median computed");
   Expect(phase.p95 == 5.0, "p95 computed");
@@ -69,16 +69,16 @@ void TestStatistics() {
 }
 
 void TestBoundedDiagnostic() {
-  const auto inventory = gufo::diagnostics::CollectSystemInventory();
+  const auto inventory = mbufo::diagnostics::CollectSystemInventory();
   const auto fingerprint =
-      gufo::diagnostics::GenerateMachineFingerprint(inventory);
-  gufo::diagnostics::AllocationBenchmarkOptions options;
+      mbufo::diagnostics::GenerateMachineFingerprint(inventory);
+  mbufo::diagnostics::AllocationBenchmarkOptions options;
   options.working_set_bytes = {4ULL * 1024ULL * 1024ULL};
   options.warmup = 1;
   options.repetitions = 2;
   options.transfer_chunk_bytes = 1ULL * 1024ULL * 1024ULL;
 
-  const auto report = gufo::diagnostics::RunHipAllocationBenchmark(
+  const auto report = mbufo::diagnostics::RunHipAllocationBenchmark(
       options, inventory, fingerprint);
   Expect(report.paths.size() == 5, "all five allocation paths reported");
   Expect(report.all_requested_paths_reported,
@@ -112,7 +112,7 @@ void TestBoundedDiagnostic() {
   }
 
   auto serialization_report = report;
-  gufo::diagnostics::AllocationPhaseResult serialized_phase;
+  mbufo::diagnostics::AllocationPhaseResult serialized_phase;
   serialized_phase.name = "serialization_probe";
   serialized_phase.operation = "verify raw repetition encoding";
   serialized_phase.unit = "ms";
@@ -128,7 +128,7 @@ void TestBoundedDiagnostic() {
          "allocation artifact type serialized");
   Expect(json.find("\"pageSizeBytes\":") != std::string::npos,
          "page size serialized");
-  const auto validation = gufo::diagnostics::ValidateArtifactContent(json);
+  const auto validation = mbufo::diagnostics::ValidateArtifactContent(json);
   Expect(validation.is_valid, "allocation artifact validates");
 }
 

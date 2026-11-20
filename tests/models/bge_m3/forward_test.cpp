@@ -17,8 +17,8 @@
 
 namespace {
 
-gufo::models::bge_m3::BgeM3F32Weights MakeTinyWeights() {
-  using gufo::models::bge_m3::BgeM3F32Weights;
+mbufo::models::bge_m3::BgeM3F32Weights MakeTinyWeights() {
+  using mbufo::models::bge_m3::BgeM3F32Weights;
   BgeM3F32Weights weights;
   weights.config.num_layers = 2;
   weights.config.hidden_size = 8;
@@ -72,9 +72,9 @@ bool Near(float a, float b, float eps = 1e-5f) {
 }
 
 void TestDeterminismAndShape() {
-  using gufo::models::bge_m3::BgeM3F32Weights;
-  using gufo::models::bge_m3::BgeM3Scratch;
-  using gufo::models::bge_m3::CpuForward;
+  using mbufo::models::bge_m3::BgeM3F32Weights;
+  using mbufo::models::bge_m3::BgeM3Scratch;
+  using mbufo::models::bge_m3::CpuForward;
   const BgeM3F32Weights weights = MakeTinyWeights();
   auto scratch = BgeM3Scratch::Create(weights.config, 8);
   const std::vector<std::uint32_t> ids{0, 5, 9, 2};
@@ -95,12 +95,12 @@ void TestDeterminismAndShape() {
 }
 
 void TestPoolingAndSensitivity() {
-  using gufo::core::embedding::ApplyPooling;
-  using gufo::core::embedding::L2Normalize;
-  using gufo::core::embedding::PoolingStrategy;
-  using gufo::models::bge_m3::CpuForward;
+  using mbufo::core::embedding::ApplyPooling;
+  using mbufo::core::embedding::L2Normalize;
+  using mbufo::core::embedding::PoolingStrategy;
+  using mbufo::models::bge_m3::CpuForward;
   const auto weights = MakeTinyWeights();
-  auto scratch = gufo::models::bge_m3::BgeM3Scratch::Create(weights.config, 8);
+  auto scratch = mbufo::models::bge_m3::BgeM3Scratch::Create(weights.config, 8);
   const std::vector<std::uint32_t> ids{0, 5, 9, 2};
   const std::vector<std::uint32_t> other{0, 6, 9, 2};
   std::vector<float> ha(4 * 8), hb(4 * 8);
@@ -118,9 +118,9 @@ void TestPoolingAndSensitivity() {
 }
 
 void TestPaddedBatch() {
-  using gufo::models::bge_m3::BgeM3Scratch;
-  using gufo::models::bge_m3::CpuForward;
-  using gufo::models::bge_m3::CpuForwardBatch;
+  using mbufo::models::bge_m3::BgeM3Scratch;
+  using mbufo::models::bge_m3::CpuForward;
+  using mbufo::models::bge_m3::CpuForwardBatch;
   const auto weights = MakeTinyWeights();
   const std::size_t h = 8;
   // Batch arenas must hold B * Lmax rows (positions still cap Lmax at 8).

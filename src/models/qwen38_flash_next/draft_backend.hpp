@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_BACKEND_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_BACKEND_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_BACKEND_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_BACKEND_HPP_
 
 // Flash-Next MTP draft backend: session-bound IDraftBackend adapter.
 //
@@ -41,7 +41,7 @@
 
 #include "src/core/speculative/draft_backend.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 class Session;
 struct MtpCandidateLogits;
@@ -106,6 +106,6 @@ class FlashNextMtpDraftBackend final : public speculative::IDraftBackend {
   std::uint64_t accepted_{0};
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_BACKEND_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_BACKEND_HPP_

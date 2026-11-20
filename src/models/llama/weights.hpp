@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_LLAMA_WEIGHTS_HPP_
-#define GUFO_MODELS_LLAMA_WEIGHTS_HPP_
+#ifndef MBUFO_MODELS_LLAMA_WEIGHTS_HPP_
+#define MBUFO_MODELS_LLAMA_WEIGHTS_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -9,7 +9,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/llama/config.hpp"
 
-namespace gufo::models::llama {
+namespace mbufo::models::llama {
 
 /// Non-owning view of one GGUF tensor: cols = ne[0] contiguous reduction,
 /// rows = ne[1]. `device` is the engine-owned device mirror (the GGUF mmap
@@ -51,6 +51,6 @@ struct ModelWeights {
       const core::GgufReader& reader, std::string* error_msg = nullptr);
 };
 
-}  // namespace gufo::models::llama
+}  // namespace mbufo::models::llama
 
-#endif  // GUFO_MODELS_LLAMA_WEIGHTS_HPP_
+#endif  // MBUFO_MODELS_LLAMA_WEIGHTS_HPP_

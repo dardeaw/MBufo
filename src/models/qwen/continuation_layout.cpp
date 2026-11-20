@@ -4,7 +4,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 namespace {
 std::size_t Product(std::initializer_list<std::size_t> factors) {
   std::size_t result = 1;
@@ -129,4 +129,4 @@ std::vector<ContinuationBackingClass> ContinuationLayout::BackingPlan(
     return {};
   return {{page, blocks, header + blocks * per_block}};
 }
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

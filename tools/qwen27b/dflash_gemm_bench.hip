@@ -157,8 +157,8 @@ struct Geometry {
 template<std::size_t Batch>
 void Run(const std::string& type, std::size_t rows, std::size_t columns,
          int iterations, bool fused = false, const std::string& up_type = "") {
-  using namespace gufo;
-  using namespace gufo::hip;
+  using namespace mbufo;
+  using namespace mbufo::hip;
   const std::size_t column_block = type == "bf16"                       ? 8
                                    : (type == "q8" || type == "iq4-nl") ? 32
                                                                         : 256;

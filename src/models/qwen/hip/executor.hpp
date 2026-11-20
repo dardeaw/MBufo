@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_
-#define GUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_
+#define MBUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_
 
 #include <array>
 #include <cstddef>
@@ -36,7 +36,7 @@
 #include "src/models/qwen/hip/prompt_hidden_buffer.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 class QwenPrefillCancelled final : public std::runtime_error {
 public:
@@ -657,7 +657,7 @@ public:
   /// Runs independent sessions' prompt chunks layer-synchronously: every
   /// session projects and appends KV with its own arena, one unified
   /// mixed-batch attention launch
-  /// (gufo::core::compute::mixed_batch::LaunchMixedBatchAttention) covers
+  /// (mbufo::core::compute::mixed_batch::LaunchMixedBatchAttention) covers
   /// the batch's attention rows per layer, then every session runs its own
   /// output projection and FFN. Refuses blocked-Q8 and non-F16 KV policies
   /// (mirroring ForwardTokenBatch) and batches wider than the decode cap.
@@ -863,8 +863,8 @@ private:
   bool replaying_ssm_state_{false};
 };
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_EXECUTOR_HPP_

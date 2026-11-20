@@ -20,10 +20,10 @@
 #include "src/models/qwen/vision/prompt.hpp"
 #include "tests/models/chat_template_golden_helpers.hpp"
 
-using gufo::tokenization::kEndOfText;
-using gufo::tokenization::kImagePad;
-using gufo::tokenization::kImEnd;
-using gufo::tokenization::kImStart;
+using mbufo::tokenization::kEndOfText;
+using mbufo::tokenization::kImagePad;
+using mbufo::tokenization::kImEnd;
+using mbufo::tokenization::kImStart;
 
 namespace {
 
@@ -36,7 +36,7 @@ void Expect(bool condition, std::string_view msg) {
 
 std::string Sha256(std::string_view value) {
   const auto* data = reinterpret_cast<const std::uint8_t*>(value.data());
-  return gufo::crypto::Sha256Hex({data, value.size()});
+  return mbufo::crypto::Sha256Hex({data, value.size()});
 }
 
 std::string ReadText(std::string_view path) {
@@ -60,7 +60,7 @@ public:
 
   void AddMetadataString(std::string_view key, std::string_view val) {
     AppendString(key);
-    AppendPod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kString));
+    AppendPod(static_cast<std::uint32_t>(mbufo::core::GgufValueType::kString));
     AppendString(val);
     metadata_count_++;
   }
@@ -99,16 +99,16 @@ private:
 };
 
 void TestBasicChatRendering() {
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
   Expect(tpl != nullptr, "CreateDefault succeeds");
 
-  std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kSystem, "You are a concise assistant.",
+  std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kSystem, "You are a concise assistant.",
        "", ""},
-      {gufo::tokenization::ChatRole::kUser, "What is 2+2?", "", ""},
+      {mbufo::tokenization::ChatRole::kUser, "What is 2+2?", "", ""},
   };
 
-  gufo::tokenization::ChatTemplateOptions opts;
+  mbufo::tokenization::ChatTemplateOptions opts;
   opts.add_generation_prompt = true;
   opts.enable_thinking = false;
 
@@ -125,18 +125,18 @@ void TestBasicChatRendering() {
 }
 
 void TestThinkingFraming() {
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
 
-  std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kUser, "Solve this equation.", "", ""},
-      {gufo::tokenization::ChatRole::kAssistant, "The roots are 2 and 3.", "",
+  std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kUser, "Solve this equation.", "", ""},
+      {mbufo::tokenization::ChatRole::kAssistant, "The roots are 2 and 3.", "",
        "First let's factor the polynomial."},
   };
 
-  gufo::tokenization::ChatTemplateOptions opts;
+  mbufo::tokenization::ChatTemplateOptions opts;
   opts.add_generation_prompt = true;
   opts.enable_thinking = true;
-  opts.reasoning_effort = gufo::tokenization::QwenReasoningEffort::kMedium;
+  opts.reasoning_effort = mbufo::tokenization::QwenReasoningEffort::kMedium;
 
   auto rendered = tpl->Render(messages, opts);
   Expect(rendered.has_value(), "Render with thinking succeeds");
@@ -153,15 +153,15 @@ void TestThinkingFraming() {
 }
 
 void TestHistoricalThinkingDoesNotEnableNewThinking() {
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
-  const std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kUser, "Name one color.", "", ""},
-      {gufo::tokenization::ChatRole::kAssistant, "Red", "",
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
+  const std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kUser, "Name one color.", "", ""},
+      {mbufo::tokenization::ChatRole::kAssistant, "Red", "",
        "I should answer with one color."},
-      {gufo::tokenization::ChatRole::kUser, "Name another.", "", ""},
+      {mbufo::tokenization::ChatRole::kUser, "Name another.", "", ""},
   };
 
-  gufo::tokenization::ChatTemplateOptions opts;
+  mbufo::tokenization::ChatTemplateOptions opts;
   opts.add_generation_prompt = true;
   opts.enable_thinking = false;
   const auto rendered = tpl->Render(messages, opts);
@@ -176,21 +176,21 @@ void TestHistoricalThinkingDoesNotEnableNewThinking() {
 }
 
 void TestReasoningEffortAndPreservation() {
-  const std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kSystem, "System rules.", "", ""},
-      {gufo::tokenization::ChatRole::kDeveloper, "Developer rules.", "", ""},
-      {gufo::tokenization::ChatRole::kUser, "First question.", "", ""},
-      {gufo::tokenization::ChatRole::kAssistant, "First answer.", "",
+  const std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kSystem, "System rules.", "", ""},
+      {mbufo::tokenization::ChatRole::kDeveloper, "Developer rules.", "", ""},
+      {mbufo::tokenization::ChatRole::kUser, "First question.", "", ""},
+      {mbufo::tokenization::ChatRole::kAssistant, "First answer.", "",
        "Old private reasoning."},
-      {gufo::tokenization::ChatRole::kUser, "Second question.", "", ""},
+      {mbufo::tokenization::ChatRole::kUser, "Second question.", "", ""},
   };
 
-  gufo::tokenization::ChatTemplateOptions options;
+  mbufo::tokenization::ChatTemplateOptions options;
   options.enable_thinking = true;
-  options.reasoning_effort = gufo::tokenization::QwenReasoningEffort::kLow;
+  options.reasoning_effort = mbufo::tokenization::QwenReasoningEffort::kLow;
   options.preserve_thinking = false;
   const auto rendered =
-      gufo::tokenization::QwenChatTemplate::Render(messages, options);
+      mbufo::tokenization::QwenChatTemplate::Render(messages, options);
   Expect(rendered.has_value(), "Reasoning options render");
   Expect(rendered->find("Reasoning effort is set to low.") != std::string::npos,
          "Low effort instruction is compiled into the system message");
@@ -205,13 +205,13 @@ void TestReasoningEffortAndPreservation() {
 }
 
 void TestBoundedOutputLimit() {
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
 
-  std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kUser, std::string(2000, 'A'), "", ""},
+  std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kUser, std::string(2000, 'A'), "", ""},
   };
 
-  gufo::tokenization::ChatTemplateOptions opts;
+  mbufo::tokenization::ChatTemplateOptions opts;
   opts.max_output_bytes = 100;  // Intentionally tiny limit
 
   std::string err;
@@ -223,11 +223,11 @@ void TestBoundedOutputLimit() {
 }
 
 void TestRenderedPromptBoundFollowsContext() {
-  using gufo::tokenization::ChatMessage;
-  using gufo::tokenization::ChatRole;
-  using gufo::tokenization::ChatTemplateOptions;
-  using gufo::tokenization::QwenChatTemplate;
-  using gufo::tokenization::RenderedPromptBoundBytes;
+  using mbufo::tokenization::ChatMessage;
+  using mbufo::tokenization::ChatRole;
+  using mbufo::tokenization::ChatTemplateOptions;
+  using mbufo::tokenization::QwenChatTemplate;
+  using mbufo::tokenization::RenderedPromptBoundBytes;
   constexpr std::size_t kMiB = 1024ULL * 1024ULL;
   Expect(RenderedPromptBoundBytes(0) == kMiB, "zero context keeps 1 MiB");
   Expect(RenderedPromptBoundBytes(4096) == kMiB,
@@ -236,7 +236,7 @@ void TestRenderedPromptBoundFollowsContext() {
          "native Flash-Next context scales the bound");
   Expect(RenderedPromptBoundBytes(409600) == 409600ULL * 128ULL,
          "extended context scales the bound");
-  // gufo #285: ~1.05 MB rendered, far below a 262,144-token context.
+  // mbufo #285: ~1.05 MB rendered, far below a 262,144-token context.
   const std::vector<ChatMessage> messages = {
       {ChatRole::kUser, std::string(1100000, 'a'), "", ""}};
   ChatTemplateOptions options;
@@ -250,7 +250,7 @@ void TestRenderedPromptBoundFollowsContext() {
 void TestGgufTemplateExtraction() {
   GgufTemplateBuilder builder;
   builder.AddMetadataString("general.name", "Qwen3.8-27B");
-  std::string reference = ReadText(GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE);
+  std::string reference = ReadText(MBUFO_QWEN38_CHAT_TEMPLATE_REFERENCE);
   Expect(!reference.empty(), "Pinned Qwen template reference is readable");
   if (reference.ends_with('\n')) {
     reference.pop_back();
@@ -261,24 +261,24 @@ void TestGgufTemplateExtraction() {
 
   std::string err;
   auto reader =
-      gufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &err);
+      mbufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &err);
   Expect(reader != nullptr, "Reader open succeeds");
 
   auto tpl =
-      gufo::tokenization::QwenChatTemplate::CreateFromGguf(*reader, &err);
+      mbufo::tokenization::QwenChatTemplate::CreateFromGguf(*reader, &err);
   Expect(tpl != nullptr, "Template extracted from GGUF");
   Expect(tpl->GetTemplateString().find("preserve_thinking") !=
              std::string_view::npos,
          "Template string matches GGUF header");
   Expect(tpl->GetProfile() ==
-             gufo::tokenization::QwenChatTemplate::Profile::kQwen38Reasoning,
+             mbufo::tokenization::QwenChatTemplate::Profile::kQwen38Reasoning,
          "Recognized Qwen3.8 template profile is classified");
   Expect(tpl->GetTemplateId() == "qwen38-reasoning-compiled-v3",
          "Compiled template version is stable");
   Expect(tpl->GetTemplateSha256().size() == 64,
          "Embedded template provenance is hashed");
   Expect(tpl->GetTemplateSha256() ==
-             gufo::tokenization::QwenChatTemplate::OfficialTemplateSha256(),
+             mbufo::tokenization::QwenChatTemplate::OfficialTemplateSha256(),
          "Pinned upstream template hash is recognized exactly");
 
   GgufTemplateBuilder lookalike_builder;
@@ -288,21 +288,21 @@ void TestGgufTemplateExtraction() {
       "{% set enable_thinking = true %}{% set preserve_thinking = true %}"
       "<|im_start|><think>");
   const auto lookalike_binary = lookalike_builder.Build();
-  auto lookalike_reader = gufo::core::GgufReader::OpenMemory(
+  auto lookalike_reader = mbufo::core::GgufReader::OpenMemory(
       lookalike_binary.data(), lookalike_binary.size(), &err);
   Expect(lookalike_reader != nullptr, "Look-alike GGUF opens");
-  Expect(gufo::tokenization::QwenChatTemplate::CreateFromGguf(*lookalike_reader,
+  Expect(mbufo::tokenization::QwenChatTemplate::CreateFromGguf(*lookalike_reader,
                                                               &err) == nullptr,
          "Qwen3.8 look-alike template is rejected by hash");
 }
 
 void TestHuggingFaceRenderedGoldens() {
-  using gufo::tokenization::ChatMessage;
-  using gufo::tokenization::ChatRole;
-  using gufo::tokenization::ChatTemplateOptions;
-  using gufo::tokenization::QwenChatTemplate;
-  using gufo::tokenization::QwenReasoningEffort;
-  using gufo::tokenization::ResolveQwenChatOptions;
+  using mbufo::tokenization::ChatMessage;
+  using mbufo::tokenization::ChatRole;
+  using mbufo::tokenization::ChatTemplateOptions;
+  using mbufo::tokenization::QwenChatTemplate;
+  using mbufo::tokenization::QwenReasoningEffort;
+  using mbufo::tokenization::ResolveQwenChatOptions;
 
   const std::vector<ChatMessage> base = {
       {ChatRole::kUser, "Name one color.", "", ""},
@@ -312,19 +312,19 @@ void TestHuggingFaceRenderedGoldens() {
       {ChatRole::kAssistant, "Red", "", "I should answer with one color."},
       {ChatRole::kUser, "Name another.", "", ""},
   };
-  std::ifstream input(GUFO_CHAT_TEMPLATE_HF_GOLDENS);
+  std::ifstream input(MBUFO_CHAT_TEMPLATE_HF_GOLDENS);
   Expect(input.good(), "Template fixture opens");
-  const auto fixture = gufo::json::parse(std::string{
+  const auto fixture = mbufo::json::parse(std::string{
       std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()});
   const auto check =
       [&](const std::vector<ChatMessage>& messages,
           const ChatTemplateOptions& options, std::string_view name,
-          std::span<const gufo::tokenization::ChatTool> tools = {}) {
+          std::span<const mbufo::tokenization::ChatTool> tools = {}) {
         const auto rendered =
             QwenChatTemplate::Render(messages, tools, options);
         Expect(rendered.has_value(), "Qwen Hugging Face golden renders");
         const auto expected =
-            gufo::testing::chat_goldens::GoldenCase(fixture, "qwen", name)
+            mbufo::testing::chat_goldens::GoldenCase(fixture, "qwen", name)
                 .member_str("rendered_sha256");
         Expect(Sha256(*rendered) == expected,
                "Qwen rendered bytes match the pinned Hugging Face golden");
@@ -344,12 +344,12 @@ void TestHuggingFaceRenderedGoldens() {
   options.reasoning_effort = QwenReasoningEffort::kXHigh;
   check(base, options, "thinking_xhigh");
   for (const auto effort :
-       {gufo::ReasoningEffort::kLow, gufo::ReasoningEffort::kMedium,
-        gufo::ReasoningEffort::kXHigh}) {
+       {mbufo::ReasoningEffort::kLow, mbufo::ReasoningEffort::kMedium,
+        mbufo::ReasoningEffort::kXHigh}) {
     const auto resolved = ResolveQwenChatOptions({.effort = effort});
-    const auto expected = effort == gufo::ReasoningEffort::kLow
+    const auto expected = effort == mbufo::ReasoningEffort::kLow
                               ? QwenReasoningEffort::kLow
-                          : effort == gufo::ReasoningEffort::kMedium
+                          : effort == mbufo::ReasoningEffort::kMedium
                               ? QwenReasoningEffort::kMedium
                               : QwenReasoningEffort::kXHigh;
     options.reasoning_effort = expected;
@@ -361,7 +361,7 @@ void TestHuggingFaceRenderedGoldens() {
   }
   check(base,
         ResolveQwenChatOptions(
-            {.enabled = false, .effort = gufo::ReasoningEffort::kLow}),
+            {.enabled = false, .effort = mbufo::ReasoningEffort::kLow}),
         "chat");
 
   options.reasoning_effort = QwenReasoningEffort::kMedium;
@@ -370,7 +370,7 @@ void TestHuggingFaceRenderedGoldens() {
   options.enable_thinking = false;
   options.preserve_thinking = true;
   check(history, options, "history_preserve");
-  const std::vector<gufo::tokenization::ChatTool> tools = {
+  const std::vector<mbufo::tokenization::ChatTool> tools = {
       {.name = "get_weather",
        .description = "Get weather",
        .parameters_json =
@@ -440,7 +440,7 @@ void TestHuggingFaceRenderedGoldens() {
 }
 
 void TestRenderAndTokenize() {
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
 
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i) {
@@ -451,7 +451,7 @@ void TestRenderAndTokenize() {
   vocab.emplace_back("<think>");
   vocab.emplace_back("</think>");
 
-  std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
+  std::unordered_map<std::string, mbufo::tokenization::TokenId> specials = {
       {std::string(kImStart), 256},
       {std::string(kImEnd), 257},
       {"<think>", 258},
@@ -459,15 +459,15 @@ void TestRenderAndTokenize() {
   };
 
   std::string err;
-  auto tokenizer = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto tokenizer = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       vocab, {}, specials, &err);
   Expect(tokenizer != nullptr, "Tokenizer initialized");
 
-  std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kUser, "Hello", "", ""},
+  std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kUser, "Hello", "", ""},
   };
 
-  gufo::tokenization::ChatTemplateOptions opts;
+  mbufo::tokenization::ChatTemplateOptions opts;
   opts.add_generation_prompt = true;
 
   opts.enable_thinking = false;
@@ -488,7 +488,7 @@ void TestRenderAndTokenize() {
 // which is what the model then imitates. The literal characters still reach
 // the model, and the framing around them stays framing.
 void TestContentSpellingATokenIsNotParsedAsOne() {
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
 
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i) {
@@ -501,7 +501,7 @@ void TestContentSpellingATokenIsNotParsedAsOne() {
 
   vocab.emplace_back(kEndOfText);
 
-  std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
+  std::unordered_map<std::string, mbufo::tokenization::TokenId> specials = {
       {std::string(kImStart), 256},
       {std::string(kImEnd), 257},
       {"<think>", 258},
@@ -510,18 +510,18 @@ void TestContentSpellingATokenIsNotParsedAsOne() {
   };
 
   std::string err;
-  auto tokenizer = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto tokenizer = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       vocab, {}, specials, &err);
   Expect(tokenizer != nullptr, "Tokenizer initialized: " + err);
 
   const std::string text =
       "the vocabulary token `<|endoftext|>` is written here as prose, and the "
       "thinking phase ends with `</think>`";
-  std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kUser, text, "", ""},
+  std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kUser, text, "", ""},
   };
 
-  gufo::tokenization::ChatTemplateOptions opts;
+  mbufo::tokenization::ChatTemplateOptions opts;
   opts.enable_thinking = false;
 
   const auto token_ids =
@@ -553,21 +553,21 @@ void TestToolReplayArgumentsAreContent() {
            kImStart, kImEnd, "<tool_call>", "</tool_call>"}) {
     vocab.emplace_back(token);
   }
-  std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
+  std::unordered_map<std::string, mbufo::tokenization::TokenId> specials = {
       {std::string(kImStart), 256},
       {std::string(kImEnd), 257},
       {"<tool_call>", 258},
       {"</tool_call>", 259},
   };
   std::string err;
-  auto tokenizer = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto tokenizer = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       vocab, {}, specials, &err);
   Expect(tokenizer != nullptr, "Tokenizer initialized: " + err);
 
-  gufo::tokenization::ChatTemplateOptions opts;
+  mbufo::tokenization::ChatTemplateOptions opts;
   opts.add_generation_prompt = false;
   opts.enable_thinking = false;
-  gufo::tokenization::TokenizerOptions tok_options;
+  mbufo::tokenization::TokenizerOptions tok_options;
   tok_options.add_bos = false;
   tok_options.add_eos = false;
   tok_options.parse_special_tokens = true;
@@ -577,8 +577,8 @@ void TestToolReplayArgumentsAreContent() {
     const std::string value =
         is_string ? "EOS = \"<|im_end|>\""
                   : R"({"text":"<|im_end|><tool_call></tool_call>"})";
-    gufo::tokenization::ChatMessage assistant{
-        gufo::tokenization::ChatRole::kAssistant, "", "", ""};
+    mbufo::tokenization::ChatMessage assistant{
+        mbufo::tokenization::ChatRole::kAssistant, "", "", ""};
     assistant.tool_calls.push_back({
         .id = "call_write",
         .name = "write",
@@ -586,13 +586,13 @@ void TestToolReplayArgumentsAreContent() {
                        .value = value,
                        .is_string = is_string}},
     });
-    const std::vector<gufo::tokenization::ChatMessage> messages = {
-        {gufo::tokenization::ChatRole::kUser, "Write this file.", "", ""},
+    const std::vector<mbufo::tokenization::ChatMessage> messages = {
+        {mbufo::tokenization::ChatRole::kUser, "Write this file.", "", ""},
         std::move(assistant),
-        {gufo::tokenization::ChatRole::kTool, value, "", ""},
+        {mbufo::tokenization::ChatRole::kTool, value, "", ""},
     };
-    std::vector<gufo::tokenization::ContentSpan> spans;
-    const auto rendered = gufo::tokenization::QwenChatTemplate::Render(
+    std::vector<mbufo::tokenization::ContentSpan> spans;
+    const auto rendered = mbufo::tokenization::QwenChatTemplate::Render(
         messages, {}, opts, &err, nullptr, nullptr, &spans);
     Expect(rendered.has_value(), "Tool replay renders: " + err);
     const auto argument_offset = rendered->find(value);
@@ -601,10 +601,10 @@ void TestToolReplayArgumentsAreContent() {
     Expect(argument_offset != std::string::npos &&
                result_offset != std::string::npos,
            "The argument and result retain their literal bytes");
-    const auto argument = gufo::tokenization::QwenChatTemplate::EncodeRendered(
+    const auto argument = mbufo::tokenization::QwenChatTemplate::EncodeRendered(
         *tokenizer, *rendered, argument_offset, argument_offset + value.size(),
         spans, tok_options);
-    const auto result = gufo::tokenization::QwenChatTemplate::EncodeRendered(
+    const auto result = mbufo::tokenization::QwenChatTemplate::EncodeRendered(
         *tokenizer, *rendered, result_offset, result_offset + value.size(),
         spans, tok_options);
     auto text_options = tok_options;
@@ -614,10 +614,10 @@ void TestToolReplayArgumentsAreContent() {
            "Replayed argument token IDs match tool-result text, including "
            "literal EOS");
 
-    const auto direct = gufo::tokenization::QwenChatTemplate::RenderAndTokenize(
+    const auto direct = mbufo::tokenization::QwenChatTemplate::RenderAndTokenize(
         *tokenizer, messages, opts, &err);
     Expect(direct.has_value(), "Tool replay tokenizes: " + err);
-    const auto prepared = gufo::models::qwen::vision::Prepare(
+    const auto prepared = mbufo::models::qwen::vision::Prepare(
         *tokenizer, messages, {}, opts, {}, 1024);
     Expect(prepared.tokens == *direct,
            "Serving and direct tokenization agree on replayed arguments");
@@ -633,7 +633,7 @@ void TestToolReplayArgumentsAreContent() {
 }
 
 void TestNewLiteralTokenDoesNotRetokenizeHistory() {
-  using namespace gufo::tokenization;
+  using namespace mbufo::tokenization;
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i)
     vocab.emplace_back(1, static_cast<char>(i));
@@ -695,7 +695,7 @@ void TestVisionPreparationReadsContentAsText() {
   vocab.emplace_back("</think>");
   vocab.emplace_back(kEndOfText);
 
-  std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
+  std::unordered_map<std::string, mbufo::tokenization::TokenId> specials = {
       {std::string(kImStart), 256},
       {std::string(kImEnd), 257},
       {"<think>", 258},
@@ -704,21 +704,21 @@ void TestVisionPreparationReadsContentAsText() {
   };
 
   std::string err;
-  auto tokenizer = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto tokenizer = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       vocab, {}, specials, &err);
   Expect(tokenizer != nullptr, "Tokenizer initialized: " + err);
 
   const std::string text = "Literal <|endoftext|> text";
-  std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kUser, text, "", ""},
+  std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kUser, text, "", ""},
   };
-  gufo::tokenization::ChatTemplateOptions opts;
+  mbufo::tokenization::ChatTemplateOptions opts;
   opts.enable_thinking = false;
 
   const auto injected = tokenizer->FindSpecialToken(kEndOfText);
   Expect(injected.has_value(), "the message token is a vocabulary token");
 
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
   const auto direct = tpl->RenderAndTokenize(*tokenizer, messages, opts, &err);
   Expect(direct.has_value(), "RenderAndTokenize succeeds: " + err);
   Expect(std::find(direct->begin(), direct->end(), *injected) == direct->end(),
@@ -726,7 +726,7 @@ void TestVisionPreparationReadsContentAsText() {
 
   // No images, which is the common case: the serving path still goes through
   // the vision preparation, and it must read the message as text as well.
-  const auto prepared = gufo::models::qwen::vision::Prepare(
+  const auto prepared = mbufo::models::qwen::vision::Prepare(
       *tokenizer, messages, {}, opts, {}, 512);
   Expect(std::find(prepared.tokens.begin(), prepared.tokens.end(), *injected) ==
              prepared.tokens.end(),
@@ -758,7 +758,7 @@ void TestEncodeRenderedReadsImageContentAsText() {
     vocab.emplace_back(token);
   }
 
-  std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
+  std::unordered_map<std::string, mbufo::tokenization::TokenId> specials = {
       {std::string(kImStart), 256},
       {std::string(kImEnd), 257},
       {"<think>", 258},
@@ -768,18 +768,18 @@ void TestEncodeRenderedReadsImageContentAsText() {
   };
 
   std::string err;
-  auto tokenizer = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto tokenizer = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       vocab, {}, specials, &err);
   Expect(tokenizer != nullptr, "Tokenizer initialized: " + err);
 
   const std::string text = "Literal <|endoftext|> text";
-  std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kUser, text, "", ""},
+  std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kUser, text, "", ""},
   };
   // Rendering only, so the placeholder is enough: nothing decodes these bytes.
   messages.back().images.push_back(
       {0, std::make_shared<const std::vector<std::uint8_t>>(1, 0)});
-  gufo::tokenization::ChatTemplateOptions opts;
+  mbufo::tokenization::ChatTemplateOptions opts;
   opts.enable_thinking = false;
 
   const auto injected = tokenizer->FindSpecialToken(kEndOfText);
@@ -788,8 +788,8 @@ void TestEncodeRenderedReadsImageContentAsText() {
          "the message and framing tokens are vocabulary tokens");
 
   std::vector<std::size_t> offsets;
-  std::vector<gufo::tokenization::ContentSpan> spans;
-  const auto rendered = gufo::tokenization::QwenChatTemplate::Render(
+  std::vector<mbufo::tokenization::ContentSpan> spans;
+  const auto rendered = mbufo::tokenization::QwenChatTemplate::Render(
       messages, {}, opts, &err, &offsets, nullptr, &spans);
   Expect(rendered.has_value(), "an image-bearing prompt renders: " + err);
   Expect(offsets.size() == 1 &&
@@ -797,18 +797,18 @@ void TestEncodeRenderedReadsImageContentAsText() {
                  kImagePad,
          "the picture becomes an image placeholder");
 
-  gufo::tokenization::TokenizerOptions tok_options;
+  mbufo::tokenization::TokenizerOptions tok_options;
   tok_options.add_bos = false;
   tok_options.add_eos = false;
   tok_options.parse_special_tokens = true;
   const auto encode = [&](std::size_t begin, std::size_t end) {
-    return gufo::tokenization::QwenChatTemplate::EncodeRendered(
+    return mbufo::tokenization::QwenChatTemplate::EncodeRendered(
         *tokenizer, *rendered, begin, end, spans, tok_options);
   };
   const auto whole = encode(0, rendered->size());
   const auto up_to_image = encode(0, offsets[0]);
   const auto after_image = encode(offsets[0] + 13, rendered->size());
-  const auto count = [&](const std::vector<gufo::tokenization::TokenId>& ids) {
+  const auto count = [&](const std::vector<mbufo::tokenization::TokenId>& ids) {
     return std::count(ids.begin(), ids.end(), *injected);
   };
   std::cout << "  image-bearing prompt: " << rendered->size() << " bytes, "
@@ -829,13 +829,13 @@ void TestEncodeRenderedReadsImageContentAsText() {
 }
 
 void TestChatCorpusConformance() {
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
 
   // Test Case 1: single turn user
   {
-    std::vector<gufo::tokenization::ChatMessage> msgs = {
-        {gufo::tokenization::ChatRole::kUser, "Hello, Strix Halo!", "", ""}};
-    gufo::tokenization::ChatTemplateOptions opts;
+    std::vector<mbufo::tokenization::ChatMessage> msgs = {
+        {mbufo::tokenization::ChatRole::kUser, "Hello, Strix Halo!", "", ""}};
+    mbufo::tokenization::ChatTemplateOptions opts;
     opts.add_generation_prompt = true;
     opts.enable_thinking = false;
     auto res = tpl->Render(msgs, opts);
@@ -848,11 +848,11 @@ void TestChatCorpusConformance() {
 
   // Test Case 2: tool message
   {
-    std::vector<gufo::tokenization::ChatMessage> msgs = {
-        {gufo::tokenization::ChatRole::kUser, "Fetch weather.", "", ""},
-        {gufo::tokenization::ChatRole::kTool,
+    std::vector<mbufo::tokenization::ChatMessage> msgs = {
+        {mbufo::tokenization::ChatRole::kUser, "Fetch weather.", "", ""},
+        {mbufo::tokenization::ChatRole::kTool,
          "{\"temp\": 22, \"city\": \"Rome\"}", "", ""}};
-    gufo::tokenization::ChatTemplateOptions opts;
+    mbufo::tokenization::ChatTemplateOptions opts;
     opts.add_generation_prompt = true;
     opts.enable_thinking = false;
     auto res = tpl->Render(msgs, opts);
@@ -868,9 +868,9 @@ void TestChatCorpusConformance() {
 
   // Test Case 3: Unicode CJK
   {
-    std::vector<gufo::tokenization::ChatMessage> msgs = {
-        {gufo::tokenization::ChatRole::kUser, "你好，世界！🚀", "", ""}};
-    gufo::tokenization::ChatTemplateOptions opts;
+    std::vector<mbufo::tokenization::ChatMessage> msgs = {
+        {mbufo::tokenization::ChatRole::kUser, "你好，世界！🚀", "", ""}};
+    mbufo::tokenization::ChatTemplateOptions opts;
     opts.add_generation_prompt = true;
     opts.enable_thinking = false;
     auto res = tpl->Render(msgs, opts);
@@ -883,9 +883,9 @@ void TestChatCorpusConformance() {
 }
 
 void TestToolImageRendering() {
-  using gufo::tokenization::ChatMessage;
-  using gufo::tokenization::ChatRole;
-  using gufo::tokenization::QwenChatTemplate;
+  using mbufo::tokenization::ChatMessage;
+  using mbufo::tokenization::ChatRole;
+  using mbufo::tokenization::QwenChatTemplate;
   const auto bytes = std::make_shared<const std::vector<std::uint8_t>>(1, 0);
   std::vector<ChatMessage> messages = {
       {ChatRole::kUser, "Inspect both files."},
@@ -901,10 +901,10 @@ void TestToolImageRendering() {
   messages[2].images = {{9, bytes}, {9, bytes}};
   messages[3].tool_call_id = "second";
   messages[3].images = {{0, bytes}};
-  gufo::tokenization::ChatTemplateOptions options;
+  mbufo::tokenization::ChatTemplateOptions options;
   options.enable_thinking = false;
   std::vector<std::size_t> offsets;
-  std::vector<gufo::tokenization::ContentSpan> spans;
+  std::vector<mbufo::tokenization::ContentSpan> spans;
   const auto rendered = QwenChatTemplate::Render(messages, {}, options, nullptr,
                                                  &offsets, nullptr, &spans);
   Expect(rendered.has_value(), "tool image history renders");
@@ -951,10 +951,10 @@ void TestToolImageRendering() {
 }
 
 void TestToolRendering() {
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
 
-  gufo::tokenization::ChatMessage assistant{
-      gufo::tokenization::ChatRole::kAssistant, "", "", ""};
+  mbufo::tokenization::ChatMessage assistant{
+      mbufo::tokenization::ChatRole::kAssistant, "", "", ""};
   assistant.tool_calls.push_back({
       .id = "call_weather",
       .name = "get_weather",
@@ -967,12 +967,12 @@ void TestToolRendering() {
               },
           },
   });
-  const std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kSystem, "Be concise.", "", ""},
-      {gufo::tokenization::ChatRole::kUser, "What is the weather?", "", ""},
+  const std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kSystem, "Be concise.", "", ""},
+      {mbufo::tokenization::ChatRole::kUser, "What is the weather?", "", ""},
       std::move(assistant),
   };
-  const std::vector<gufo::tokenization::ChatTool> tools = {
+  const std::vector<mbufo::tokenization::ChatTool> tools = {
       {
           .name = "get_weather",
           .description = "Return current weather",
@@ -981,7 +981,7 @@ void TestToolRendering() {
       },
   };
 
-  gufo::tokenization::ChatTemplateOptions options;
+  mbufo::tokenization::ChatTemplateOptions options;
   const auto rendered = tpl->Render(messages, tools, options);
   Expect(rendered.has_value(), "Tool-aware render succeeds");
   Expect(rendered->find("# Tools") != std::string::npos,
@@ -999,12 +999,12 @@ void TestToolRendering() {
 }
 
 void TestToolReplayPreservesGeneratedPrefix() {
-  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
 
   constexpr std::string_view kGeneratedText =
       "<think>\nI should read the requested file.\n</think>\n\n";
-  gufo::tokenization::ChatMessage assistant{
-      gufo::tokenization::ChatRole::kAssistant, "", "",
+  mbufo::tokenization::ChatMessage assistant{
+      mbufo::tokenization::ChatRole::kAssistant, "", "",
       "I should read the requested file."};
   assistant.tool_calls.push_back({
       .id = "call_read",
@@ -1019,11 +1019,11 @@ void TestToolReplayPreservesGeneratedPrefix() {
           },
   });
 
-  const std::vector<gufo::tokenization::ChatMessage> messages = {
-      {gufo::tokenization::ChatRole::kUser, "Read the file."},
+  const std::vector<mbufo::tokenization::ChatMessage> messages = {
+      {mbufo::tokenization::ChatRole::kUser, "Read the file."},
       std::move(assistant),
   };
-  gufo::tokenization::ChatTemplateOptions options;
+  mbufo::tokenization::ChatTemplateOptions options;
   options.add_generation_prompt = false;
   options.enable_thinking = false;
 
@@ -1048,9 +1048,9 @@ void TestToolReplayPreservesGeneratedPrefix() {
 // token: the full prompt is no longer a token prefix, the prompt before the
 // generation suffix still is.
 void TestEmptyReasoningReplayChangesThinkingSuffixTokens() {
-  using gufo::tokenization::ChatMessage;
-  using gufo::tokenization::ChatRole;
-  using gufo::tokenization::TokenId;
+  using mbufo::tokenization::ChatMessage;
+  using mbufo::tokenization::ChatRole;
+  using mbufo::tokenization::TokenId;
 
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i)
@@ -1069,12 +1069,12 @@ void TestEmptyReasoningReplayChangesThinkingSuffixTokens() {
   };
   std::string error;
   const auto tokenizer =
-      gufo::tokenization::QwenTokenizer::CreateFromVocabulary(vocab, merges,
+      mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(vocab, merges,
                                                               specials, &error);
   Expect(tokenizer != nullptr, "Tokenizer with a newline merge: " + error);
 
-  const auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
-  gufo::tokenization::ChatTemplateOptions options;
+  const auto tpl = mbufo::tokenization::QwenChatTemplate::CreateDefault();
+  mbufo::tokenization::ChatTemplateOptions options;
   options.add_generation_prompt = true;
   options.enable_thinking = true;
   options.preserve_thinking = true;
@@ -1084,7 +1084,7 @@ void TestEmptyReasoningReplayChangesThinkingSuffixTokens() {
       tpl->RenderAndTokenize(*tokenizer, first, options, &error);
   Expect(prompt.has_value(), "First turn tokenizes: " + error);
   const auto suffix = tokenizer->Encode(
-      gufo::tokenization::GenerationPrompt(options.enable_thinking),
+      mbufo::tokenization::GenerationPrompt(options.enable_thinking),
       {.add_bos = false, .add_eos = false, .parse_special_tokens = true});
   Expect(prompt->size() > suffix.size() &&
              std::equal(
@@ -1123,11 +1123,11 @@ void TestEmptyReasoningReplayChangesThinkingSuffixTokens() {
 }
 
 void TestStableBoundaryPrecedesReplacedFinalUserTurn() {
-  using gufo::tokenization::ChatMessage;
-  using gufo::tokenization::ChatRole;
-  using gufo::tokenization::QwenChatTemplate;
+  using mbufo::tokenization::ChatMessage;
+  using mbufo::tokenization::ChatRole;
+  using mbufo::tokenization::QwenChatTemplate;
 
-  gufo::tokenization::ChatTemplateOptions options;
+  mbufo::tokenization::ChatTemplateOptions options;
   options.add_generation_prompt = true;
   const auto render = [&](const std::vector<ChatMessage>& messages) {
     std::size_t stable = 0;
@@ -1167,7 +1167,7 @@ void TestStableBoundaryPrecedesReplacedFinalUserTurn() {
   // A user turn after an assistant reply is ordinary chat: it is kept, so the
   // boundary stays before the generation prompt.
   Expect(kept_text.compare(kept_stable, std::string::npos,
-                           gufo::tokenization::GenerationPrompt(
+                           mbufo::tokenization::GenerationPrompt(
                                options.enable_thinking)) == 0,
          "ordinary chat keeps the boundary before the generation prompt");
 
@@ -1188,7 +1188,7 @@ void TestStableBoundaryPrecedesReplacedFinalUserTurn() {
   const std::vector<ChatMessage> opening = {{ChatRole::kUser, "Hello"}};
   const auto [opening_text, opening_stable] = render(opening);
   Expect(opening_text.compare(opening_stable, std::string::npos,
-                              gufo::tokenization::GenerationPrompt(
+                              mbufo::tokenization::GenerationPrompt(
                                   options.enable_thinking)) == 0,
          "opening turn keeps the boundary before the generation prompt");
 }

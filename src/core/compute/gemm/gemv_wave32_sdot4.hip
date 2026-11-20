@@ -12,12 +12,13 @@
 #include <cstdlib>
 
 #include "src/core/compute/gemm/gemm.hpp"
+#include "src/core/quant/row_dot_traits.hpp"
 #include "src/core/compute/gemm/gemm_device.cuh"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 
 
 using device::Dot4S8S8;
@@ -99,8 +100,9 @@ BlockQ8_1* QuantizeToQ8Scratch(const float* x, std::size_t n_blocks,
 }
 }  // namespace detail
 
+template <class R>
 __global__ void __launch_bounds__(256)
-    GemvWave32BatchedQ8Kernel(const std::uint8_t* __restrict__ w,
+    GemvWave32BatchedQKernel(const std::uint8_t* __restrict__ w,
                               std::uint64_t row_bytes, std::uint32_t total_blk,
                               std::uint32_t tile_blk,
                               const BlockQ8_1* __restrict__ x_q8,
@@ -111,8 +113,8 @@ __global__ void __launch_bounds__(256)
 
   const std::uint32_t warp_id = threadIdx.x >> 5;
   const std::uint32_t lane = threadIdx.x & 31u;
-  const std::uint32_t b_grp = lane >> 2;
-  const std::uint32_t sub = lane & 3u;
+  const std::uint32_t b_grp = lane >> R::kQLaneShift;
+  const std::uint32_t sub = lane & R::kQLaneMask;
   const std::uint32_t row = blockIdx.x * 8u + warp_id;
   const std::uint8_t* wrow =
       row < m ? (w + static_cast<std::size_t>(row) * row_bytes) : nullptr;
@@ -133,22 +135,16 @@ __global__ void __launch_bounds__(256)
     __syncthreads();
 
     if (row < m) {
-      const std::uint8_t* wbase = wrow + static_cast<std::size_t>(b_off) * 18u;
-      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += 8u) {
+      const std::uint8_t* wbase = wrow + static_cast<std::size_t>(b_off) * R::kBlockBytes;
+      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += R::kQBlocksPerStep) {
         const std::uint32_t b = b0 + b_grp;
         if (b < tk_blk) {
-          const auto* bp =
-              reinterpret_cast<const std::uint16_t*>(wbase + b * 18u);
-          const float d4 = __half2float(*reinterpret_cast<const __half*>(bp));
-          const int v32 = static_cast<int>(bp[1u + 2u * sub]) |
-                          (static_cast<int>(bp[2u + 2u * sub]) << 16);
-          const int vi0 = v32 & 0x0F0F0F0F;
-          const int vi1 = (v32 >> 4) & 0x0F0F0F0F;
+          typename R::QLane wl;
+          R::LoadQLane(wbase + b * R::kBlockBytes, sub, wl);
           for (std::uint32_t t = 0; t < n_tokens; ++t) {
             const BlockQ8_1& xblk = sx[t * tile_blk + b];
-            int dot = Dot4U4S8(vi0, xblk.qs[sub], 0);
-            dot = Dot4U4S8(vi1, xblk.qs[4u + sub], dot);
-            sum[t] += d4 * (xblk.d * static_cast<float>(dot) - 2.0F * xblk.s);
+            const int dot = R::QIntDot(wl, xblk, sub);
+            sum[t] += R::QTail(wl, xblk, dot);
           }
         }
       }
@@ -167,73 +163,9 @@ __global__ void __launch_bounds__(256)
   }
 }
 
+template <class R>
 __global__ void __launch_bounds__(256)
-    GemvWave32BatchedQ8_0Kernel(const std::uint8_t* __restrict__ w,
-                                std::uint64_t row_bytes,
-                                std::uint32_t total_blk, std::uint32_t tile_blk,
-                                const BlockQ8_1* __restrict__ x_q8,
-                                float* __restrict__ y, std::uint32_t n_tokens,
-                                std::uint32_t m, float softcap) {
-  extern __shared__ __align__(8) unsigned char smem_gemv_q80[];
-  auto* sx = reinterpret_cast<BlockQ8_1*>(smem_gemv_q80);
-
-  const std::uint32_t warp_id = threadIdx.x >> 5;
-  const std::uint32_t lane = threadIdx.x & 31u;
-  const std::uint32_t b_grp = lane >> 3;  // 0..3 (4 blocks per wave step)
-  const std::uint32_t sub = lane & 7u;    // 0..7 (4 int8s per lane = 32B/block)
-  const std::uint32_t row = blockIdx.x * 8u + warp_id;
-  const std::uint8_t* wrow =
-      row < m ? (w + static_cast<std::size_t>(row) * row_bytes) : nullptr;
-
-  float sum[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
-  for (std::uint32_t b_off = 0; b_off < total_blk; b_off += tile_blk) {
-    const std::uint32_t tk_blk =
-        (total_blk - b_off) < tile_blk ? (total_blk - b_off) : tile_blk;
-    const std::uint32_t words2 = tk_blk * 5u;
-    for (std::uint32_t t = 0; t < n_tokens; ++t) {
-      const auto* src2 = reinterpret_cast<const uint2*>(
-          x_q8 + static_cast<std::size_t>(t) * total_blk + b_off);
-      auto* dst2 = reinterpret_cast<uint2*>(sx + t * tile_blk);
-      for (std::uint32_t i = threadIdx.x; i < words2; i += 256u) {
-        dst2[i] = src2[i];
-      }
-    }
-    __syncthreads();
-
-    if (row < m) {
-      const std::uint8_t* wbase = wrow + static_cast<std::size_t>(b_off) * 34u;
-      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += 4u) {
-        const std::uint32_t b = b0 + b_grp;
-        if (b < tk_blk) {
-          const auto* bp =
-              reinterpret_cast<const std::uint16_t*>(wbase + b * 34u);
-          const float d8 = __half2float(*reinterpret_cast<const __half*>(bp));
-          const int w32 = static_cast<int>(bp[1u + 2u * sub]) |
-                          (static_cast<int>(bp[2u + 2u * sub]) << 16);
-          for (std::uint32_t t = 0; t < n_tokens; ++t) {
-            const BlockQ8_1& xblk = sx[t * tile_blk + b];
-            const int dot = Dot4S8S8(w32, xblk.qs[sub], 0);
-            sum[t] += (d8 * xblk.d) * static_cast<float>(dot);
-          }
-        }
-      }
-    }
-    if (b_off + tile_blk < total_blk) __syncthreads();
-  }
-
-  if (row < m) {
-    for (std::uint32_t t = 0; t < n_tokens; ++t) {
-      float v = WaveSum(sum[t]);
-      if (lane == 0u) {
-        if (softcap > 0.0F) v = tanhf(v / softcap) * softcap;
-        y[static_cast<std::size_t>(t) * m + row] = v;
-      }
-    }
-  }
-}
-
-__global__ void __launch_bounds__(256)
-    GemvGateUpSwigluBatchedQ8Kernel(const std::uint8_t* __restrict__ w_gate,
+    GemvGateUpSwigluBatchedQKernel(const std::uint8_t* __restrict__ w_gate,
                                     const std::uint8_t* __restrict__ w_up,
                                     std::uint64_t row_bytes,
                                     std::uint32_t total_blk,
@@ -246,8 +178,8 @@ __global__ void __launch_bounds__(256)
 
   const std::uint32_t warp_id = threadIdx.x >> 5;
   const std::uint32_t lane = threadIdx.x & 31u;
-  const std::uint32_t b_grp = lane >> 2;
-  const std::uint32_t sub = lane & 3u;
+  const std::uint32_t b_grp = lane >> R::kQLaneShift;
+  const std::uint32_t sub = lane & R::kQLaneMask;
   const std::uint32_t row = blockIdx.x * 8u + warp_id;
   const std::size_t off = static_cast<std::size_t>(row) * row_bytes;
 
@@ -269,38 +201,22 @@ __global__ void __launch_bounds__(256)
 
     if (row < m) {
       const std::uint8_t* gbase =
-          w_gate + off + static_cast<std::size_t>(b_off) * 18u;
+          w_gate + off + static_cast<std::size_t>(b_off) * R::kBlockBytes;
       const std::uint8_t* ubase =
-          w_up + off + static_cast<std::size_t>(b_off) * 18u;
-      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += 8u) {
+          w_up + off + static_cast<std::size_t>(b_off) * R::kBlockBytes;
+      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += R::kQBlocksPerStep) {
         const std::uint32_t b = b0 + b_grp;
         if (b < tk_blk) {
-          const auto* gbp =
-              reinterpret_cast<const std::uint16_t*>(gbase + b * 18u);
-          const float gd4 = __half2float(*reinterpret_cast<const __half*>(gbp));
-          const int gv32 = static_cast<int>(gbp[1u + 2u * sub]) |
-                           (static_cast<int>(gbp[2u + 2u * sub]) << 16);
-          const int gvi0 = gv32 & 0x0F0F0F0F;
-          const int gvi1 = (gv32 >> 4) & 0x0F0F0F0F;
-
-          const auto* ubp =
-              reinterpret_cast<const std::uint16_t*>(ubase + b * 18u);
-          const float ud4 = __half2float(*reinterpret_cast<const __half*>(ubp));
-          const int uv32 = static_cast<int>(ubp[1u + 2u * sub]) |
-                           (static_cast<int>(ubp[2u + 2u * sub]) << 16);
-          const int uvi0 = uv32 & 0x0F0F0F0F;
-          const int uvi1 = (uv32 >> 4) & 0x0F0F0F0F;
+          typename R::QLane gl, ul;
+          R::LoadQLane(gbase + b * R::kBlockBytes, sub, gl);
+          R::LoadQLane(ubase + b * R::kBlockBytes, sub, ul);
 
           for (std::uint32_t t = 0; t < n_tokens; ++t) {
             const BlockQ8_1& xblk = sx[t * tile_blk + b];
-            const int xlo = xblk.qs[sub];
-            const int xhi = xblk.qs[4u + sub];
-            int gdot = Dot4U4S8(gvi0, xlo, 0);
-            gdot = Dot4U4S8(gvi1, xhi, gdot);
-            int udot = Dot4U4S8(uvi0, xlo, 0);
-            udot = Dot4U4S8(uvi1, xhi, udot);
-            sg[t] += gd4 * (xblk.d * static_cast<float>(gdot) - 2.0F * xblk.s);
-            su[t] += ud4 * (xblk.d * static_cast<float>(udot) - 2.0F * xblk.s);
+            const int gdot = R::QIntDot(gl, xblk, sub);
+            const int udot = R::QIntDot(ul, xblk, sub);
+            sg[t] += R::QTail(gl, xblk, gdot);
+            su[t] += R::QTail(ul, xblk, udot);
           }
         }
       }
@@ -381,28 +297,15 @@ __global__ void __launch_bounds__(256)
         for (std::uint32_t b0 = 0; b0 < nblk; b0 += 8) {
           const std::uint32_t b = b0 + b_grp;
           if (b < nblk) {
-            const auto* bp =
-                reinterpret_cast<const std::uint16_t*>(wbase + b * 18u);
-            const float d = __half2float(*reinterpret_cast<const __half*>(bp));
-            const std::uint32_t q01 = bp[1 + 2 * sub];
-            const std::uint32_t q23 = bp[2 + 2 * sub];
-            const float wl0 = static_cast<float>(static_cast<int>(q01 & 0xFu) - 8);
-            const float wh0 = static_cast<float>(static_cast<int>((q01 >> 4) & 0xFu) - 8);
-            const float wl1 = static_cast<float>(static_cast<int>((q01 >> 8) & 0xFu) - 8);
-            const float wh1 = static_cast<float>(static_cast<int>((q01 >> 12) & 0xFu) - 8);
-            const float wl2 = static_cast<float>(static_cast<int>(q23 & 0xFu) - 8);
-            const float wh2 = static_cast<float>(static_cast<int>((q23 >> 4) & 0xFu) - 8);
-            const float wl3 = static_cast<float>(static_cast<int>((q23 >> 8) & 0xFu) - 8);
-            const float wh3 = static_cast<float>(static_cast<int>((q23 >> 12) & 0xFu) - 8);
+            ::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>::LaneBlock lb;
+            ::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>::LoadLaneBlock(wbase + b * 18u, sub, lb);
             for (std::uint32_t t = 0; t < n_tokens; ++t) {
               const float4 xlo = *reinterpret_cast<const float4*>(
                   &sx[t][b * 32u + 4u * sub]);
               const float4 xhi = *reinterpret_cast<const float4*>(
                   &sx[t][b * 32u + 16u + 4u * sub]);
-              const float acc = wl0 * xlo.x + wh0 * xhi.x + wl1 * xlo.y +
-                                wh1 * xhi.y + wl2 * xlo.z + wh2 * xhi.z +
-                                wl3 * xlo.w + wh3 * xhi.w;
-              sum[t] += d * acc;
+              const float acc = ::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>::LaneBlockExpr(lb, xlo, xhi);
+              sum[t] += lb.d * acc;
             }
           }
         }
@@ -412,7 +315,7 @@ __global__ void __launch_bounds__(256)
           const float4 wv = *reinterpret_cast<const float4*>(r + j);
           for (std::uint32_t t = 0; t < n_tokens; ++t) {
             const float4 xv = *reinterpret_cast<const float4*>(&sx[t][j]);
-            sum[t] += wv.x * xv.x + wv.y * xv.y + wv.z * xv.z + wv.w * xv.w;
+            sum[t] += ::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kF32>::Dot4Expr(wv, xv);
           }
         }
       } else {
@@ -656,7 +559,7 @@ void GemvBatched(const void* wdev, int type, std::uint64_t row_bytes,
         const std::size_t smem =
             static_cast<std::size_t>(n_tokens) * tile_blk * sizeof(BlockQ8_1);
         hipLaunchKernelGGL(
-            GemvWave32BatchedQ8_0Kernel, grid, block, smem, stream,
+            (GemvWave32BatchedQKernel<::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ8_0>>), grid, block, smem, stream,
             static_cast<const std::uint8_t*>(wdev), row_bytes, total_blk,
             tile_blk, x_q8, y, n_tokens, m, softcap);
         return;
@@ -679,7 +582,7 @@ void GemvBatched(const void* wdev, int type, std::uint64_t row_bytes,
         const std::size_t smem =
             static_cast<std::size_t>(n_tokens) * tile_blk * sizeof(BlockQ8_1);
         hipLaunchKernelGGL(
-            GemvWave32BatchedQ8Kernel, grid, block, smem, stream,
+            (GemvWave32BatchedQKernel<::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>>), grid, block, smem, stream,
             static_cast<const std::uint8_t*>(wdev), row_bytes, total_blk,
             tile_blk, x_q8, y, n_tokens, m, softcap);
         return;
@@ -733,7 +636,7 @@ void GemvGateUpSwiglu(const void* w_gate, const void* w_up, int type,
         const std::size_t smem =
             static_cast<std::size_t>(n_tokens) * tile_blk * sizeof(BlockQ8_1);
         hipLaunchKernelGGL(
-            GemvGateUpSwigluBatchedQ8Kernel, grid, block, smem, stream,
+            (GemvGateUpSwigluBatchedQKernel<::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>>), grid, block, smem, stream,
             static_cast<const std::uint8_t*>(w_gate),
             static_cast<const std::uint8_t*>(w_up), row_bytes, total_blk,
             tile_blk, x_q8, out_act, n_tokens, m);
@@ -865,28 +768,15 @@ __global__ void __launch_bounds__(256) GemvQkvBatchedKernel(
         for (std::uint32_t b0 = 0; b0 < nblk; b0 += 8) {
           const std::uint32_t b = b0 + b_grp;
           if (b < nblk) {
-            const auto* bp =
-                reinterpret_cast<const std::uint16_t*>(wbase + b * 18u);
-            const float d = __half2float(*reinterpret_cast<const __half*>(bp));
-            const std::uint32_t q01 = bp[1 + 2 * sub];
-            const std::uint32_t q23 = bp[2 + 2 * sub];
-            const float wl0 = static_cast<float>(static_cast<int>(q01 & 0xFu) - 8);
-            const float wh0 = static_cast<float>(static_cast<int>((q01 >> 4) & 0xFu) - 8);
-            const float wl1 = static_cast<float>(static_cast<int>((q01 >> 8) & 0xFu) - 8);
-            const float wh1 = static_cast<float>(static_cast<int>((q01 >> 12) & 0xFu) - 8);
-            const float wl2 = static_cast<float>(static_cast<int>(q23 & 0xFu) - 8);
-            const float wh2 = static_cast<float>(static_cast<int>((q23 >> 4) & 0xFu) - 8);
-            const float wl3 = static_cast<float>(static_cast<int>((q23 >> 8) & 0xFu) - 8);
-            const float wh3 = static_cast<float>(static_cast<int>((q23 >> 12) & 0xFu) - 8);
+            ::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>::LaneBlock lb;
+            ::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>::LoadLaneBlock(wbase + b * 18u, sub, lb);
             for (std::uint32_t t = 0; t < n_tokens; ++t) {
               const float4 xlo = *reinterpret_cast<const float4*>(
                   &sx[t][b * 32u + 4u * sub]);
               const float4 xhi = *reinterpret_cast<const float4*>(
                   &sx[t][b * 32u + 16u + 4u * sub]);
-              const float acc = wl0 * xlo.x + wh0 * xhi.x + wl1 * xlo.y +
-                                wh1 * xhi.y + wl2 * xlo.z + wh2 * xhi.z +
-                                wl3 * xlo.w + wh3 * xhi.w;
-              sum[t] += d * acc;
+              const float acc = ::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>::LaneBlockExpr(lb, xlo, xhi);
+              sum[t] += lb.d * acc;
             }
           }
         }
@@ -909,7 +799,8 @@ __global__ void __launch_bounds__(256) GemvQkvBatchedKernel(
   }
 }
 
-__global__ void __launch_bounds__(256) GemvQkvBatchedQ8Kernel(
+template <class R>
+__global__ void __launch_bounds__(256) GemvQkvBatchedQKernel(
     const std::uint8_t* __restrict__ w_q, std::uint64_t rb_q,
     std::uint32_t qdim, const std::uint8_t* __restrict__ w_k,
     std::uint64_t rb_k, const std::uint8_t* __restrict__ w_v,
@@ -923,8 +814,8 @@ __global__ void __launch_bounds__(256) GemvQkvBatchedQ8Kernel(
 
   const std::uint32_t warp_id = threadIdx.x >> 5;
   const std::uint32_t lane = threadIdx.x & 31u;
-  const std::uint32_t b_grp = lane >> 2;
-  const std::uint32_t sub = lane & 3u;
+  const std::uint32_t b_grp = lane >> R::kQLaneShift;
+  const std::uint32_t sub = lane & R::kQLaneMask;
   const std::uint32_t row = blockIdx.x * 8u + warp_id;
 
   const std::uint8_t* wrow = nullptr;
@@ -964,22 +855,16 @@ __global__ void __launch_bounds__(256) GemvQkvBatchedQ8Kernel(
     __syncthreads();
 
     if (row < total_m) {
-      const std::uint8_t* wbase = wrow + static_cast<std::size_t>(b_off) * 18u;
-      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += 8u) {
+      const std::uint8_t* wbase = wrow + static_cast<std::size_t>(b_off) * R::kBlockBytes;
+      for (std::uint32_t b0 = 0; b0 < tk_blk; b0 += R::kQBlocksPerStep) {
         const std::uint32_t b = b0 + b_grp;
         if (b < tk_blk) {
-          const auto* bp =
-              reinterpret_cast<const std::uint16_t*>(wbase + b * 18u);
-          const float d4 = __half2float(*reinterpret_cast<const __half*>(bp));
-          const int v32 = static_cast<int>(bp[1u + 2u * sub]) |
-                          (static_cast<int>(bp[2u + 2u * sub]) << 16);
-          const int vi0 = v32 & 0x0F0F0F0F;
-          const int vi1 = (v32 >> 4) & 0x0F0F0F0F;
+          typename R::QLane wl;
+          R::LoadQLane(wbase + b * R::kBlockBytes, sub, wl);
           for (std::uint32_t t = 0; t < n_tokens; ++t) {
             const BlockQ8_1& xblk = sx[t * tile_blk + b];
-            int dot = Dot4U4S8(vi0, xblk.qs[sub], 0);
-            dot = Dot4U4S8(vi1, xblk.qs[4u + sub], dot);
-            sum[t] += d4 * (xblk.d * static_cast<float>(dot) - 2.0F * xblk.s);
+            const int dot = R::QIntDot(wl, xblk, sub);
+            sum[t] += R::QTail(wl, xblk, dot);
           }
         }
       }
@@ -1033,7 +918,7 @@ void GemvQkv(const void* w_q, int type_q, std::uint64_t rb_q,
         const std::size_t smem =
             static_cast<std::size_t>(n_tokens) * tile_blk * sizeof(BlockQ8_1);
         hipLaunchKernelGGL(
-            GemvQkvBatchedQ8Kernel, grid, block, smem, stream,
+            (GemvQkvBatchedQKernel<::mbufo::core::quant::RowDot<::mbufo::core::quant::FormatId::kQ4_0>>), grid, block, smem, stream,
             static_cast<const std::uint8_t*>(w_q), rb_q, qdim,
             static_cast<const std::uint8_t*>(w_k), rb_k,
             static_cast<const std::uint8_t*>(w_v), rb_v, kvdim, total_m,
@@ -1072,7 +957,7 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
     return;
   }
 
-  const float sumf = ::gufo::hip::QuantWarpBlockDot(type, A, m, x, K, lane_id, 0, 1);
+  const float sumf = ::mbufo::hip::QuantWarpBlockDot(type, A, m, x, K, lane_id, 0, 1);
   if (lane_id == 0) {
     y[m] = sumf;
   }
@@ -1102,18 +987,18 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 
   if (type == core::GgmlType::kQ8_0) {
-    const std::size_t num_blocks = K / ::gufo::hip::kQ8_0BlockSize;
+    const std::size_t num_blocks = K / ::mbufo::hip::kQ8_0BlockSize;
     const auto* row0_blocks =
-        static_cast<const ::gufo::hip::Q8_0Block*>(A) + (m0 * num_blocks);
+        static_cast<const ::mbufo::hip::Q8_0Block*>(A) + (m0 * num_blocks);
     const auto* row1_blocks =
-        (m1 < M) ? (static_cast<const ::gufo::hip::Q8_0Block*>(A) + (m1 * num_blocks))
+        (m1 < M) ? (static_cast<const ::mbufo::hip::Q8_0Block*>(A) + (m1 * num_blocks))
                  : nullptr;
     float sum0 = 0.0F;
     float sum1 = 0.0F;
 
     for (std::size_t b = lane_id; b < num_blocks; b += 32) {
-      const float* xb = x + (b * ::gufo::hip::kQ8_0BlockSize);
-      const ::gufo::hip::Q8_0Block& wblk0 = row0_blocks[b];
+      const float* xb = x + (b * ::mbufo::hip::kQ8_0BlockSize);
+      const ::mbufo::hip::Q8_0Block& wblk0 = row0_blocks[b];
       const float d0 = __half2float(wblk0.d);
       float blk_dot0 = 0.0F;
 #pragma unroll
@@ -1123,7 +1008,7 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
       sum0 += d0 * blk_dot0;
 
       if (row1_blocks != nullptr) {
-        const ::gufo::hip::Q8_0Block& wblk1 = row1_blocks[b];
+        const ::mbufo::hip::Q8_0Block& wblk1 = row1_blocks[b];
         const float d1 = __half2float(wblk1.d);
         float blk_dot1 = 0.0F;
 #pragma unroll
@@ -1149,22 +1034,22 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 
   if (type == core::GgmlType::kQ8_K) {
-    const std::size_t num_blocks = K / ::gufo::hip::kQ8KBlockSize;
+    const std::size_t num_blocks = K / ::mbufo::hip::kQ8KBlockSize;
     const auto* row0_blocks =
-        static_cast<const ::gufo::hip::Q8KBlock*>(A) + (m0 * num_blocks);
+        static_cast<const ::mbufo::hip::Q8KBlock*>(A) + (m0 * num_blocks);
     const auto* row1_blocks =
-        (m1 < M) ? (static_cast<const ::gufo::hip::Q8KBlock*>(A) + (m1 * num_blocks))
+        (m1 < M) ? (static_cast<const ::mbufo::hip::Q8KBlock*>(A) + (m1 * num_blocks))
                  : nullptr;
     float sum0 = 0.0F;
     float sum1 = 0.0F;
 
     for (std::size_t b = 0; b < num_blocks; ++b) {
-      const ::gufo::hip::Q8KBlock& wblk0 = row0_blocks[b];
+      const ::mbufo::hip::Q8KBlock& wblk0 = row0_blocks[b];
       const float d_w0 = wblk0.d;
-      const ::gufo::hip::Q8KBlock* wblk1 =
+      const ::mbufo::hip::Q8KBlock* wblk1 =
           (row1_blocks != nullptr) ? &row1_blocks[b] : nullptr;
       const float d_w1 = (wblk1 != nullptr) ? wblk1->d : 0.0F;
-      const float* xb = x + (b * ::gufo::hip::kQ8KBlockSize);
+      const float* xb = x + (b * ::mbufo::hip::kQ8KBlockSize);
       float dot0 = 0.0F;
       float dot1 = 0.0F;
 #pragma unroll
@@ -1194,9 +1079,9 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
     return;
   }
 
-  const float s0 = ::gufo::hip::QuantWarpBlockDot(type, A, m0, x, K, lane_id, 0, 1);
+  const float s0 = ::mbufo::hip::QuantWarpBlockDot(type, A, m0, x, K, lane_id, 0, 1);
   const float s1 =
-      (m1 < M) ? ::gufo::hip::QuantWarpBlockDot(type, A, m1, x, K, lane_id, 0, 1) : 0.0F;
+      (m1 < M) ? ::mbufo::hip::QuantWarpBlockDot(type, A, m1, x, K, lane_id, 0, 1) : 0.0F;
   if (lane_id == 0) {
     y[m0] = s0;
     if (m1 < M) {
@@ -1516,6 +1401,6 @@ void SmallGemm(const void* w, int type, const float* x, float* out,
 }
 }  // namespace fn_compat
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // defined(ENGINE_ENABLE_HIP)

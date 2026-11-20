@@ -1,6 +1,6 @@
 {
-  "schema": "gufo-benchmark-identities/1",
-  "gufo": {
+  "schema": "mbufo-benchmark-identities/1",
+  "mbufo": {
     "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd",
     "build": "nix build, ROCm 7.2.3, gfx1151",
     "production_source_changes_during_measurement": true,

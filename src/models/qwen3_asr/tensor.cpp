@@ -3,7 +3,7 @@
 #include <limits>
 #include <utility>
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 
 std::size_t DTypeSize(DType dtype) noexcept {
   switch (dtype) {
@@ -47,4 +47,4 @@ bool TensorStore::Add(Tensor tensor) {
   return tensors_.emplace(name, std::move(tensor)).second;
 }
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr

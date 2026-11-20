@@ -239,10 +239,10 @@
         },
         "command": [
           "/nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3",
-          "/home/mixer/gufo-qualification/issue593-reserve-final/snapshot/tests/functional/run.py",
+          "/home/mixer/mbufo-qualification/issue593-reserve-final/snapshot/tests/functional/run.py",
           "--record-baseline",
           "--output",
-          "/home/mixer/gufo-qualification/issue593-reserve-final/affected-off",
+          "/home/mixer/mbufo-qualification/issue593-reserve-final/affected-off",
           "--sampling-preset",
           "qwen38",
           "--suite",
@@ -252,7 +252,7 @@
           "--expected-input-modalities",
           "text,image",
           "--",
-          "/home/mixer/gufo-qualification/issue593-reserve-final/gufo",
+          "/home/mixer/mbufo-qualification/issue593-reserve-final/mbufo",
           "serve",
           "llm",
           "--model",
@@ -342,10 +342,10 @@
         },
         "command": [
           "/nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3",
-          "/home/mixer/gufo-qualification/issue593-reserve-final/snapshot/tests/functional/run.py",
+          "/home/mixer/mbufo-qualification/issue593-reserve-final/snapshot/tests/functional/run.py",
           "--record-baseline",
           "--output",
-          "/home/mixer/gufo-qualification/issue593-reserve-final/affected-mtp",
+          "/home/mixer/mbufo-qualification/issue593-reserve-final/affected-mtp",
           "--sampling-preset",
           "qwen38",
           "--suite",
@@ -355,7 +355,7 @@
           "--expected-input-modalities",
           "text,image",
           "--",
-          "/home/mixer/gufo-qualification/issue593-reserve-final/gufo",
+          "/home/mixer/mbufo-qualification/issue593-reserve-final/mbufo",
           "serve",
           "llm",
           "--model",
@@ -515,10 +515,10 @@
     "cold_snapshot_work": "Candidate captures 6 checkpoints versus main 4 and copies 269,995,372 additional bytes; observed snapshot time about 25 ms versus 16-18 ms. The raw phase flag is retained, not relabeled as a pass."
   },
   "raw_evidence_roots": [
-    "/home/mixer/gufo-qualification/issue593-all-final",
-    "/home/mixer/gufo-qualification/issue593-reserve-final",
-    "/home/mixer/gufo-qualification/issue593-all",
-    "/home/mixer/gufo-qualification/issue593-startup-reserve",
-    "/home/mixer/gufo-qualification/issue593-prefill-final"
+    "/home/mixer/mbufo-qualification/issue593-all-final",
+    "/home/mixer/mbufo-qualification/issue593-reserve-final",
+    "/home/mixer/mbufo-qualification/issue593-all",
+    "/home/mixer/mbufo-qualification/issue593-startup-reserve",
+    "/home/mixer/mbufo-qualification/issue593-prefill-final"
   ]
 }

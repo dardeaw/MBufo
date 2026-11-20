@@ -1,5 +1,5 @@
 {
-  "schema": "gufo-ds4-boundary-replay/1",
+  "schema": "mbufo-ds4-boundary-replay/1",
   "measured_on": "2026-09-24",
   "test": "ds4_quality_test --indexer-boundary",
   "build": "Nix gpu-test RelWithDebInfo, assertions enabled",
@@ -12,7 +12,7 @@
       3
     ]
   },
-  "reference": "Gufo autoregressive, identical target weights and fixed token history",
+  "reference": "MBufo autoregressive, identical target weights and fixed token history",
   "cases": {
     "dspark_c1": {
       "generated_tokens": 128,

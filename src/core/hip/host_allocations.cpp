@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <new>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 int PinHostPages(void* data, std::size_t bytes) noexcept {
   if (!data || !bytes)
@@ -88,4 +88,4 @@ std::size_t HostAllocations::PinnedBytes() const noexcept {
   return bytes;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip

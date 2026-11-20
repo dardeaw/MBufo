@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GEMMA4_ENGINE_HPP_
-#define GUFO_MODELS_GEMMA4_ENGINE_HPP_
+#ifndef MBUFO_MODELS_GEMMA4_ENGINE_HPP_
+#define MBUFO_MODELS_GEMMA4_ENGINE_HPP_
 
 #include <cstdint>
 #include <memory>
@@ -13,7 +13,7 @@
 #include "src/models/gemma4/weights.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 
 struct ModelOptions {
   std::uint32_t max_context = 8192;
@@ -95,7 +95,7 @@ public:
                               std::string* error_msg = nullptr);
   /// One decode step for a batch of sessions on the same model: per layer,
   /// every session runs QKV projection + KV store, one unified mixed-batch
-  /// attention launch (gufo::core::compute::mixed_batch) covers the batch,
+  /// attention launch (mbufo::core::compute::mixed_batch) covers the batch,
   /// then every session runs wo + FFN. Full d=512 layers stay F16; blocked
   /// SWA layers ride the unified blocked dispatch. Sessions with MTP enabled
   /// are refused (use Evaluate instead). Returns false on validation
@@ -138,6 +138,8 @@ private:
 
   // Single-layer phases factored out of Forward so DecodeBatch can run them
   // batch-wide with one unified attention launch in the middle.
+  /// Per-layer inputs of the E-models (no-op when the model has no per-layer embeddings).
+  static void BuildPle(Session& s, std::uint32_t n, hipStream_t stream);
   static void ForwardLayerPre(Session& s, std::uint32_t il, std::uint32_t n,
                               std::uint32_t start_pos, hipStream_t stream);
   static void ForwardLayerAttn(Session& s, std::uint32_t il, std::uint32_t n,
@@ -169,6 +171,6 @@ private:
                                     std::vector<std::int32_t>* out);
 };
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4
 
-#endif  // GUFO_MODELS_GEMMA4_ENGINE_HPP_
+#endif  // MBUFO_MODELS_GEMMA4_ENGINE_HPP_

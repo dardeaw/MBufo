@@ -12,7 +12,7 @@ adapter. No cache behavior yet. This card settles the RFC's open item
 
 ## Scope
 
-- CMake static library `gufo_cache` under `src/cache/`, with its tests
+- CMake static library `mbufo_cache` under `src/cache/`, with its tests
   registered in the CPU test presets.
 - Headers: identifiers, component descriptors and positions, capabilities,
   compatibility and input identity (port the `ContinuationInputPrefix`
@@ -34,7 +34,7 @@ This summarizes the public contract. The headers in `src/cache/` define the
 complete lifetime and failure rules.
 
 ```cpp
-namespace gufo::cache {
+namespace mbufo::cache {
 
 enum class ComponentKind : std::uint8_t {
   kAppendRows,    // immutable once below the frontier; shareable
@@ -94,7 +94,7 @@ class Adapter {
   virtual bool Invalidate(Slot&) noexcept = 0;
 };
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 ```
 
 Later cards extend it: card 07 adds a prefill pass-plan query, card 10 adds a
@@ -129,7 +129,7 @@ None: this card adds contracts only, no executable behavior worth measuring.
 
 ### Implementation record
 
-`src/cache/` now builds as the independent static library `gufo_cache` in the
+`src/cache/` now builds as the independent static library `mbufo_cache` in the
 CPU and gfx1151 release presets. Public headers define typed component/slot
 identifiers, descriptors, independent component positions, capabilities,
 compatibility and supplemental input identity, slots, mutation guards,
@@ -196,7 +196,7 @@ cmake --preset cpu-sanitizer
 cmake --build --preset cpu-sanitizer --target cache_adapter_test cache_adapter_lifecycle_test --parallel 4
 ctest --preset cpu-sanitizer -R '^cache_(adapter(_lifecycle)?|boundary)_test$' --output-on-failure
 cmake --preset release
-cmake --build --preset release --target gufo_cache --parallel 4
+cmake --build --preset release --target mbufo_cache --parallel 4
 cmake --build --preset pr --parallel 4
 ```
 
@@ -231,7 +231,7 @@ cards. Build artifacts stay in the ignored `build/` directories.
 
 ## Done when
 
-- [x] `gufo_cache` builds in the `cpu-test` and `release` presets.
+- [x] `mbufo_cache` builds in the `cpu-test` and `release` presets.
 - [x] The boundary check runs in the `pr` preset.
 
 ## Review focus

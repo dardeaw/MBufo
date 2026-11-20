@@ -24,7 +24,7 @@ the directory, and build the startup index from metadata only.
 - **Startup:** read manifests (each bounded in size) and stat their
   dependencies. Read no payload bytes. Mark entries "durable, unverified".
 - **Legacy files:** recognize the current store's managed files (`*.kvc` with
-  the `GUFO` magic, `.tmp-*`) and remove them within the disk budget. Never
+  the `MBUFO` magic, `.tmp-*`) and remove them within the disk budget. Never
   touch unknown files and never recurse into unrelated directories.
 
 ## Not in this PR
@@ -78,7 +78,7 @@ the disk format version and compatibility identity:
 
 | Field | Encoding |
 | --- | --- |
-| Magic, format | Eight bytes `GUFOMNF2`, u32 version 2 |
+| Magic, format | Eight bytes `MBUFOMNF2`, u32 version 2 |
 | Checkpoint, lineage | Two u64 IDs |
 | Compatibility | 32-byte SHA-256 digest of the adapter's canonical identity, supplied by caller |
 | Purpose, rank | u8 enum, u32 |
@@ -109,7 +109,7 @@ of directory enumeration order. Card 12 must validate payload checksums during
 restore before execution; card 13 supplies lookup across tiers.
 
 Legacy cleanup examines only root regular files: `.tmp-*` and `.kvc` files
-whose first four bytes are `GUFO`. Unknown files, symlinks, hard links and all
+whose first four bytes are `MBUFO`. Unknown files, symlinks, hard links and all
 unrelated directories remain untouched. Cleanup only removes bytes and allocates
 no disk payload; after cleanup, excess v2 usage fails startup before new writes
 can occur. A preexisting over-budget legacy store may therefore shrink to fit;
@@ -152,7 +152,7 @@ Reproduce using the pinned CPU dependency shell (CMake, Ninja, pkg-config,
 Python and ICU/curl/PNG/JPEG/WebP/OpenSSL from `flake.lock`):
 
 ```sh
-cmake --preset cpu-test -DGUFO_BUILD_TOOLS=ON
+cmake --preset cpu-test -DMBUFO_BUILD_TOOLS=ON
 cmake --build --preset cpu-test --target cache_disk_test cache_disk_bench --parallel 4
 ctest --preset cpu-test -R '^cache_(disk|boundary)_test$' --output-on-failure
 build/cpu-test/tests/cache/cache_disk_bench

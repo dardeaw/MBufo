@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 
 GemmaEngineSession::GemmaEngineSession(std::shared_ptr<Model> model,
                                        std::unique_ptr<Session> inner)
@@ -203,9 +203,70 @@ std::uint32_t GemmaEngineModel::MaxContext() const noexcept {
   return model_->MaxContext();
 }
 
+core::engine::MoeGeometry DescribeMoeGeometry(const Model& model) {
+  const auto& w = model.weights();
+  const auto& c = w.config;
+  core::engine::MoeGeometry g;
+  if (c.num_experts == 0) return g;  // dense Gemma 4: no routed experts
+  g.experts = c.num_experts;
+  g.top_k = c.experts_used;
+  g.hidden = c.hidden_size;
+  g.expert_ff = c.expert_ff;
+  g.shared_ff = c.shared_ff;
+  for (const auto& l : w.layers) {
+    if (l.gate_up_exps.size_bytes == 0) continue;  // dense-FFN layer
+    // gate and up are one merged tensor
+    g.AddLayer(static_cast<int>(l.gate_up_exps.type), static_cast<int>(l.gate_up_exps.type), static_cast<int>(l.down_exps.type));
+  }
+  return g;
+}
+
+core::engine::MoeKernelInfo DescribeMoeKernels() {
+  core::engine::MoeKernelInfo k;
+  k.origin = core::engine::MoeKernelOrigin::kCoreRowDot;
+  k.gate_up_kernel = "core MoeWaveGateUp (lane geometry, RowDot<Q4_0>, GeLU-tanh); grouped Q8_1 kernel for verification batches";
+  k.down_kernel = "core MoeWaveDown (lane geometry, RowDot<Q4_0>); grouped Q8_1 kernel for verification batches";
+  k.masks_inactive_slots = true;
+  k.graph_capture_safe = true;
+  return k;
+}
+
+core::engine::MoeGeometry GemmaEngineModel::MoeGeometryInfo() const { return DescribeMoeGeometry(*model_); }
+core::engine::MoeKernelInfo GemmaEngineModel::MoeKernelsInfo() const { return DescribeMoeKernels(); }
+
 std::size_t GemmaEngineModel::ResidentBytes() const noexcept {
   return model_->ResidentBytes();
 }
+
+
+core::engine::AttentionGeometry DescribeAttentionGeometry(const Model& model) {
+  const auto& c = model.weights().config;
+  core::engine::AttentionGeometry g;
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    const std::uint32_t kvh = c.KvHeads(c.KvProducingLayer(il));  // shared-KV layers attend over the producer's cache
+    if (kvh == 0) continue;
+    core::engine::AttentionGroup a;
+    a.heads = c.num_heads;
+    a.kv_heads = kvh;
+    a.head_dim = c.HeadDim(il);
+    a.window = c.LayerIsSwa(il) ? c.sliding_window : 0;
+    a.kv_format = a.head_dim == 256 ? core::engine::AttentionKvFormat::kEither : core::engine::AttentionKvFormat::kF16;
+    g.AddLayer(a);
+  }
+  return g;
+}
+
+core::engine::AttentionKernelInfo DescribeAttentionKernels() {
+  core::engine::AttentionKernelInfo k;
+  k.decode = {core::engine::AttentionKernelOrigin::kCore, "core blocked-Q8 row-chunk split-K (multi-wave) on sliding-window d256 layers", "",
+              "full d512 layers and F16 KV run gemma4's AttentionRowChunkF16Kernel (private, row invariant)", true};
+  k.prefill = {core::engine::AttentionKernelOrigin::kCore, "core flash_wmma_large (d256/d512, F16 + blocked-Q8) and 16-head blocked WMMA", "",
+               "n <= 8 and head counts the WMMA kernels do not serve run the scalar read", false};
+  return k;
+}
+
+core::engine::AttentionGeometry GemmaEngineModel::AttentionGeometryInfo() const { return DescribeAttentionGeometry(*model_); }
+core::engine::AttentionKernelInfo GemmaEngineModel::AttentionKernelsInfo() const { return DescribeAttentionKernels(); }
 
 std::string GemmaEngineModel::ModelName() const {
   return model_->ModelName();
@@ -234,7 +295,7 @@ namespace {
 // carries no such field).
 const core::engine::EngineRegistrar kRegisterGemma4Engine(
     core::engine::EngineBackendInfo{
-        "gemma4", "Gemma4 26B A4B MoE text (f16/q8 KV)"},
+        "gemma4", "Gemma4 26B A4B MoE text (f16/q8 KV)", true},
     [](const core::engine::EngineLoadRequest& request,
        std::string* error_msg) -> std::shared_ptr<core::engine::EngineModel> {
       ModelOptions options;
@@ -249,4 +310,4 @@ const core::engine::EngineRegistrar kRegisterGemma4Engine(
 
 }  // namespace
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_OPS_ATTENTION_HPP_
-#define GUFO_MODELS_QWEN_HIP_OPS_ATTENTION_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_OPS_ATTENTION_HPP_
+#define MBUFO_MODELS_QWEN_HIP_OPS_ATTENTION_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +13,7 @@
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 /// Computes Fused QKV Projections for Full Attention layers in a single kernel
 void LaunchFusedQKVProjections(const void* q_w, core::GgmlType q_type,
@@ -159,8 +159,8 @@ void LaunchBatchedAttentionGemm(
     std::uint32_t num_kv_heads, std::uint32_t head_dim,
     hipStream_t stream = nullptr);
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_OPS_ATTENTION_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_OPS_ATTENTION_HPP_

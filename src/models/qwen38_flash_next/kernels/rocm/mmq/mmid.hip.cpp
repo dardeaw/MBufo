@@ -148,7 +148,7 @@ static void launch_mm_ids_helper_scan(
         // the old allocation is left to the process (it happens once per
         // widest shape).
         int32_t * grown = nullptr;
-        HIP_CHECK(gufo::hip::AllocateDevice(&grown, need * sizeof(int32_t)));
+        HIP_CHECK(mbufo::hip::AllocateDevice(&grown, need * sizeof(int32_t)));
         g_ids_scratch = grown;
         g_ids_scratch_elems = need;
     }

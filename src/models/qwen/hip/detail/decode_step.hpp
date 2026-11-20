@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_DETAIL_DECODE_STEP_HPP_
-#define GUFO_MODELS_QWEN_HIP_DETAIL_DECODE_STEP_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_DETAIL_DECODE_STEP_HPP_
+#define MBUFO_MODELS_QWEN_HIP_DETAIL_DECODE_STEP_HPP_
 
 #include <cstdint>
 
@@ -7,11 +7,11 @@
 #include "src/models/qwen/tokenizer.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
 
-namespace gufo::models {
+namespace mbufo::models {
 struct QwenModelWeights;
 }
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 class QwenGpuArena;
 struct QwenExecutionPolicy;
@@ -32,6 +32,6 @@ void ExecuteDecodeStep(
     QwenRecurrentStateIo recurrent_state,
     models::qwen::vision::DeviceInput* image_input = nullptr);
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
-#endif  // GUFO_MODELS_QWEN_HIP_DETAIL_DECODE_STEP_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_DETAIL_DECODE_STEP_HPP_

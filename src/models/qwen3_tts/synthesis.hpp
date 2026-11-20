@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_TTS_SYNTHESIS_HPP_
-#define GUFO_MODELS_QWEN3_TTS_SYNTHESIS_HPP_
+#ifndef MBUFO_MODELS_QWEN3_TTS_SYNTHESIS_HPP_
+#define MBUFO_MODELS_QWEN3_TTS_SYNTHESIS_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@
 #include "src/models/qwen3_tts/audio.hpp"
 #include "src/models/qwen3_tts/sampling.hpp"
 
-namespace gufo::models::qwen3_tts {
+namespace mbufo::models::qwen3_tts {
 
 struct SynthesisRequest {
   std::string text;
@@ -39,6 +39,6 @@ struct SynthesisResult {
 
 using CancellationCheck = std::function<bool()>;
 
-}  // namespace gufo::models::qwen3_tts
+}  // namespace mbufo::models::qwen3_tts
 
-#endif  // GUFO_MODELS_QWEN3_TTS_SYNTHESIS_HPP_
+#endif  // MBUFO_MODELS_QWEN3_TTS_SYNTHESIS_HPP_

@@ -1,7 +1,7 @@
 // Phase C-1 (GGUF通用化.md v2 §4): shared-core home for the quantized-GEMM
 // launchers gemma4 previously reached through
 // models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp. Every body below is
-// a verbatim copy (namespace relocated to gufo::core::compute::gemm only);
+// a verbatim copy (namespace relocated to mbufo::core::compute::gemm only);
 // flash-next keeps its own originals untouched until Phase C-2 rewires it.
 // Numeric behavior is identical by construction (same kernels, same launch).
 #if defined(ENGINE_ENABLE_HIP)
@@ -16,7 +16,7 @@
 
 #include "src/core/compute/gemm/gemm.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 
 // Rope declarations for the template's attention epilogue (kAttention only;
 // core instantiates kAttention=false, so these are never ODR-used here).
@@ -999,6 +999,6 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
   return true;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // ENGINE_ENABLE_HIP

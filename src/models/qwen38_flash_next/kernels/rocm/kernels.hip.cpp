@@ -17,7 +17,7 @@
 
 // HIP kernels follow the layouts and operator formulas in reference.cpp.
 
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace mbufo::models::qwen38_flash_next::rocm {
 namespace {
 
 constexpr unsigned kThreads = 256;
@@ -1608,7 +1608,7 @@ __device__ __forceinline__ void GdnRowReduce(float& u, float& p) {
   p = GdnXorAddDpp<2>(p);
 }
 
-// Two-row LDS reuse adapted from mikealanni/gufo f450218743bc (MIT).
+// Two-row LDS reuse adapted from mikealanni/mbufo f450218743bc (MIT).
 /// Qwen row-split recurrence specialized to the model's 128x128 state. Four
 /// lanes own the 32-key slices of a row, eight row groups share a wave and
 /// each lane carries kRows state rows. The q/k slices of a token are read from
@@ -9683,4 +9683,4 @@ void MtpTopCandidates(const float* logits, std::uint32_t* ids,
                                       stream);
 }
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace mbufo::models::qwen38_flash_next::rocm

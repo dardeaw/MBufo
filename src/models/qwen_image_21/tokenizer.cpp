@@ -10,7 +10,7 @@
 
 #include "src/models/qwen_image_21/weights.hpp"
 
-namespace gufo::models::qwen_image_21 {
+namespace mbufo::models::qwen_image_21 {
 
 Tokenizer::Tokenizer(const std::filesystem::path& root) {
   const auto config = ReadJson(root / "processor/tokenizer.json");
@@ -148,4 +148,4 @@ std::vector<std::uint32_t> Tokenizer::Encode(std::string_view input) const {
   return result;
 }
 
-}  // namespace gufo::models::qwen_image_21
+}  // namespace mbufo::models::qwen_image_21

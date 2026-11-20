@@ -13,12 +13,12 @@
 
 namespace {
 
-namespace qwen3_asr = gufo::models::qwen3_asr;
-using gufo::server::AsrService;
-using gufo::server::AsrServiceOptions;
-using gufo::server::HandleAudioAsrApiRequest;
-using gufo::server::HttpRequest;
-using gufo::server::HttpResponse;
+namespace qwen3_asr = mbufo::models::qwen3_asr;
+using mbufo::server::AsrService;
+using mbufo::server::AsrServiceOptions;
+using mbufo::server::HandleAudioAsrApiRequest;
+using mbufo::server::HttpRequest;
+using mbufo::server::HttpResponse;
 
 [[noreturn]] void Fail(const std::string& message) {
   std::cerr << "FAIL qwen3_asr_audio_api_test: " << message << '\n';
@@ -80,7 +80,7 @@ AsrService MakeService(FakeRunner* runner) {
 std::string Multipart(std::string response_format = "json",
                       bool include_unknown = false,
                       std::string_view stream = {}) {
-  constexpr std::string_view boundary = "gufo-test-boundary";
+  constexpr std::string_view boundary = "mbufo-test-boundary";
   std::string body;
   const auto append = [&](std::string_view name, std::string_view value,
                           std::string_view filename = {}) {
@@ -101,7 +101,7 @@ std::string Multipart(std::string response_format = "json",
   append("file", "RIFFfake", "sample.wav");
   append("model", "qwen3-asr");
   append("language", "en");
-  append("prompt", "Names: Gufo.");
+  append("prompt", "Names: MBufo.");
   append("response_format", response_format);
   append("max_tokens", "42");
   append("temperature", "0");
@@ -118,7 +118,7 @@ std::string Multipart(std::string response_format = "json",
 
 HttpResponse Send(AsrService& service, std::string body,
                   std::string content_type =
-                      "multipart/form-data; boundary=gufo-test-boundary") {
+                      "multipart/form-data; boundary=mbufo-test-boundary") {
   return HandleAudioAsrApiRequest(
       HttpRequest{
           .method = "POST",
@@ -147,17 +147,17 @@ void TestJsonRequest() {
                 std::string::npos,
         "valid multipart request returns OpenAI JSON");
   Check(runner.calls == 1 && runner.wav_bytes == 8U &&
-            runner.context == "Names: Gufo." &&
+            runner.context == "Names: MBufo." &&
             runner.language == std::optional<std::string>("en") &&
             runner.maximum_tokens == 42U,
         "multipart fields reach the model contract");
-  Check(HasHeader(response, "X-Gufo-ASR-Backend", "native-hip"),
+  Check(HasHeader(response, "X-MBufo-ASR-Backend", "native-hip"),
         "native backend is exposed");
   Check(response.log_details.find("encoder_ms=") != std::string::npos &&
             response.log_details.find("decoder_ms=") != std::string::npos &&
             response.log_details.find("A native transcript.") ==
                 std::string::npos &&
-            response.log_details.find("Names: Gufo.") == std::string::npos,
+            response.log_details.find("Names: MBufo.") == std::string::npos,
         "transcription diagnostics report work without transcript or context");
 }
 

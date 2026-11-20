@@ -6,7 +6,7 @@
 #include <cmath>
 #include <vector>
 #include "src/core/compute/attention/flash_wmma_gqa.hpp"
-using namespace gufo::core::compute::flash_wmma_gqa;
+using namespace mbufo::core::compute::flash_wmma_gqa;
 int main(int argc, char** argv) {
   struct C { unsigned D, heads, kvh, n, start, window, sink; const char* what; };
   std::vector<C> cases;

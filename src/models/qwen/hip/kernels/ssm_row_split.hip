@@ -17,7 +17,7 @@
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // Defined in kernels/ssm_recurrence.hip and hip/batched_ssm.hip respectively;
 // the row-split route shares the convolution and post-normalization kernels.
@@ -472,5 +472,5 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
   }
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

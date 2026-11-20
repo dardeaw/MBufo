@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::models {
+namespace mbufo::models {
 
 QwenKvCache::QwenKvCache(std::uint32_t num_layers, std::uint32_t num_kv_heads,
                          std::uint32_t max_context, std::uint32_t head_dim)
@@ -107,4 +107,4 @@ QwenScratchArena::QwenScratchArena(const core::ModelConfig& config) {
   logits = alloc_span(vocab_size);
 }
 
-}  // namespace gufo::models
+}  // namespace mbufo::models

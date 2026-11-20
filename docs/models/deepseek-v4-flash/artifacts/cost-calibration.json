@@ -1,5 +1,5 @@
 {
-  "schema": "gufo.ds4-cost-calibration.v1",
+  "schema": "mbufo.ds4-cost-calibration.v1",
   "date": "2026-09-10",
   "workload": "gfx1151; tg128; fixed repeating prefix; one isolated run per point; cycle cost includes drafting, verification and commit",
   "limitations": "Some points contain only one or two probes because the previous controller backs off. These are cost estimates; qualify selected defaults with the repeated full release sweep.",
@@ -7,7 +7,7 @@
   "candidate": {
     "production_source_sha256": "d16c09c46943c884e1a45fd3eb8f1c169a74c4a934fa8989172156a7b164e08f",
     "binary_sha256": "bcfd95e2ee097bd57ec3d8adb833418711659f1984fb67c22301aa30af0105f5",
-    "nix_output": "jmcn1w7y45fajyjjxkqx24ycjinnhcwk-gufo-eb1b81e-dirty"
+    "nix_output": "jmcn1w7y45fajyjjxkqx24ycjinnhcwk-mbufo-eb1b81e-dirty"
   },
   "ar_control": {
     "production_source_sha256": "8bf93c6df8a2940d0780672765855a2651c2d28214f611e4fb8cbd7e0ab3c175",

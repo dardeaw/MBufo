@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_TTS_HIP_SYNTHESIS_RUNTIME_HPP_
-#define GUFO_MODELS_QWEN3_TTS_HIP_SYNTHESIS_RUNTIME_HPP_
+#ifndef MBUFO_MODELS_QWEN3_TTS_HIP_SYNTHESIS_RUNTIME_HPP_
+#define MBUFO_MODELS_QWEN3_TTS_HIP_SYNTHESIS_RUNTIME_HPP_
 
 #include <cstddef>
 #include <memory>
@@ -8,7 +8,7 @@
 #include "src/models/qwen3_tts/config.hpp"
 #include "src/models/qwen3_tts/synthesis.hpp"
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 
 /// End-to-end native HIP synthesis for one supported Qwen3-TTS 12Hz 1.7B
 /// variant.
@@ -36,6 +36,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
-#endif  // GUFO_MODELS_QWEN3_TTS_HIP_SYNTHESIS_RUNTIME_HPP_
+#endif  // MBUFO_MODELS_QWEN3_TTS_HIP_SYNTHESIS_RUNTIME_HPP_

@@ -15,18 +15,18 @@
 // Gate iron rule (docs/MIXED_BATCH.md): when `gate != nullptr` the kernel
 // applies `sigmoid(gate)` in its epilogue and the caller MUST NOT run a
 // second SigmoidMul over the output.
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_MIXED_BATCH_ATTN_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_MIXED_BATCH_ATTN_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_MIXED_BATCH_ATTN_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_MIXED_BATCH_ATTN_HPP_
 
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::mixed_batch {
+namespace mbufo::core::compute::mixed_batch {
 
 // Per-side KV element codec. kQ4 selects the 18-byte packed-nibble grid
-// (GUFO_KV_Q4/V4); it rides the same blocked kernels as kQ8 with
+// (MBUFO_KV_Q4/V4); it rides the same blocked kernels as kQ8 with
 // key/value_block_bytes == 18. Blocked Fp8 (E4M3) has no kernel and is
 // refused by the launcher.
 enum class MixedKvCodec : std::uint32_t { kF16 = 0, kQ8 = 1, kQ4 = 2 };
@@ -92,6 +92,6 @@ bool LaunchMixedBatchAttention(const MixedBlk* blks, std::size_t n_blks,
                                void* scratch, std::size_t scratch_bytes,
                                hipStream_t stream);
 
-}  // namespace gufo::core::compute::mixed_batch
+}  // namespace mbufo::core::compute::mixed_batch
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_MIXED_BATCH_ATTN_HPP_
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_MIXED_BATCH_ATTN_HPP_

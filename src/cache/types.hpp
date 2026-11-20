@@ -1,10 +1,10 @@
-#ifndef GUFO_CACHE_TYPES_HPP_
-#define GUFO_CACHE_TYPES_HPP_
+#ifndef MBUFO_CACHE_TYPES_HPP_
+#define MBUFO_CACHE_TYPES_HPP_
 
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 
 using Token = std::uint32_t;
 using Rows = std::uint64_t;
@@ -53,6 +53,6 @@ struct Capabilities {
   bool persistent_encoding{false};
 };
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 
 #endif

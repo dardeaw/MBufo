@@ -1,4 +1,4 @@
-// `gufo serve llm` uploads the vision sidecar while loading through
+// `mbufo serve llm` uploads the vision sidecar while loading through
 // Encoder::Upload: the weights upload once, ResidentBytes accounts for exactly
 // them, and a later Encode reuses them instead of uploading again.
 #include <hip/hip_runtime.h>
@@ -38,7 +38,7 @@ extern "C" hipError_t __wrap_hipMemcpyAsync(void* destination,
 }
 
 namespace {
-using gufo::models::qwen::vision::Encoder;
+using mbufo::models::qwen::vision::Encoder;
 
 void Require(bool condition, const std::string& message) {
   if (!condition)
@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
   }
   try {
     std::string error;
-    const auto reader = gufo::core::GgufReader::OpenFile(argv[1], &error);
+    const auto reader = mbufo::core::GgufReader::OpenFile(argv[1], &error);
     Require(reader != nullptr, error);
     // Every tensor except the two F32 patch embeddings, which upload as one
     // converted BF16 tensor.
@@ -72,7 +72,7 @@ int main(int argc, char** argv) {
       if (tensor.name != "v.patch_embd.weight" &&
           tensor.name != "v.patch_embd.weight.1") {
         expected += tensor.ElementCount() *
-                    (tensor.type == gufo::core::GgmlType::kF32 ? 4 : 2);
+                    (tensor.type == mbufo::core::GgmlType::kF32 ? 4 : 2);
       }
     }
     const auto width = static_cast<std::uint32_t>(
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
                 FreeDeviceBytes() + kSlackBytes >= prepared,
             "a second Upload allocated the weights again");
 
-    gufo::core::Image image{
+    mbufo::core::Image image{
         .width = 256,
         .height = 256,
         .pixels = std::vector<std::uint8_t>(std::size_t{256} * 256 * 3, 128)};

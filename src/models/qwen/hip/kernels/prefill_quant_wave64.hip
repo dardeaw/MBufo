@@ -1,7 +1,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 
-namespace gufo::hip::detail {
+namespace mbufo::hip::detail {
 
 bool TryLaunchQuantPrefillWave64(core::GgmlType type, const void* w,
                                  const void* x, float* y, std::size_t batch,
@@ -43,5 +43,5 @@ bool TryLaunchQuantPrefillWave64(core::GgmlType type, const void* w,
   }
 }
 
-}  // namespace gufo::hip::detail
+}  // namespace mbufo::hip::detail
 #endif

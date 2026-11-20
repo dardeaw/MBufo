@@ -254,7 +254,7 @@ def main() -> int:
         "generated_ids.npy",
     ]
     manifest = {
-        "schema": "gufo.qwen3-asr-reference.v2",
+        "schema": "mbufo.qwen3-asr-reference.v2",
         "source_revision": source_revision(args.reference_root),
         "model_revision": args.model.name,
         "model": "Qwen/Qwen3-ASR-1.7B",

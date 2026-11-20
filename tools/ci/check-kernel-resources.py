@@ -342,7 +342,7 @@ def main() -> int:
     if args.write_baseline:
         allow = {n: {"max_scratch": k["scratch"]} for n, k in sorted(using.items())}
         Path(args.write_baseline).write_text(json.dumps(
-            {"schema": "gufo.kernel-resources.v1", "note": args.note,
+            {"schema": "mbufo.kernel-resources.v1", "note": args.note,
              "default_max_scratch": 0, "allow": allow}, indent=1) + "\n")
         print(f"wrote {len(allow)} allowances ({len(kernels)} kernels) to {args.write_baseline}")
         return 0

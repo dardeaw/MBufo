@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_SPECULATIVE_PROMPT_LOOKUP_HPP_
-#define GUFO_CORE_SPECULATIVE_PROMPT_LOOKUP_HPP_
+#ifndef MBUFO_CORE_SPECULATIVE_PROMPT_LOOKUP_HPP_
+#define MBUFO_CORE_SPECULATIVE_PROMPT_LOOKUP_HPP_
 
 #include <algorithm>
 #include <concepts>
@@ -9,7 +9,7 @@
 #include <span>
 #include <vector>
 
-namespace gufo::speculative {
+namespace mbufo::speculative {
 
 /// Prompt lookup: proposals copied from the session's own committed tokens.
 /// The drafter's context (committed tokens plus the cycle's chain so far)
@@ -333,6 +333,6 @@ private:
   std::size_t request_start_{kNoResume};
 };
 
-}  // namespace gufo::speculative
+}  // namespace mbufo::speculative
 
-#endif  // GUFO_CORE_SPECULATIVE_PROMPT_LOOKUP_HPP_
+#endif  // MBUFO_CORE_SPECULATIVE_PROMPT_LOOKUP_HPP_

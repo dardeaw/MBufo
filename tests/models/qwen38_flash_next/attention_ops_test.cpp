@@ -19,8 +19,8 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
-namespace q = gufo::models::qwen38_flash_next::rocm;
-namespace qfn = gufo::models::qwen38_flash_next;
+namespace q = mbufo::models::qwen38_flash_next::rocm;
+namespace qfn = mbufo::models::qwen38_flash_next;
 namespace {
 
 // The model's full-attention geometry: 24 query heads over 2 KV heads,
@@ -304,8 +304,8 @@ void CheckYarnVisionPhase(float factor) {
   HipBuffer<std::int32_t> positions(3);
   CheckHip(hipMemcpy(positions.get(), thw.data(), 12, hipMemcpyHostToDevice),
            "vision positions");
-  const gufo::models::qwen::vision::DeviceRope host_rope{positions.get(), 1, 0};
-  HipBuffer<gufo::models::qwen::vision::DeviceRope> rope(1);
+  const mbufo::models::qwen::vision::DeviceRope host_rope{positions.get(), 1, 0};
+  HipBuffer<mbufo::models::qwen::vision::DeviceRope> rope(1);
   CheckHip(hipMemcpy(rope.get(), &host_rope, sizeof(host_rope),
                      hipMemcpyHostToDevice),
            "vision rope");

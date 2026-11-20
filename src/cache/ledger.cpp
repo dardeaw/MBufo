@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 namespace {
 constexpr std::size_t Index(ResourceCategory category) {
   return static_cast<std::size_t>(category);
@@ -428,4 +428,4 @@ void ResourceLedger::ClearFaults() {
   const std::lock_guard lock(state_->mutex);
   state_->faults = {};
 }
-}  // namespace gufo::cache
+}  // namespace mbufo::cache

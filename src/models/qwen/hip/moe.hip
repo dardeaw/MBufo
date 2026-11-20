@@ -16,10 +16,10 @@
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/swiglu.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
-namespace gemm = ::gufo::core::compute::gemm;
+namespace gemm = ::mbufo::core::compute::gemm;
 
 // Device-only routed-tile builder: one entry per (expert, bucket chunk) with
 // the chunk index in the high bits, matching RoutedF16Gemm's tile decoding.
@@ -199,7 +199,7 @@ bool MoeForwardHip(const core::ModelConfig& config,
       gemm::LaunchDecodeMoeKQuant(
           layer.ffn_gate_exps.data, gate_type, layer.ffn_up_exps.data,
           layer.ffn_down_exps.data, down_type, x, scratch.ids.data(),
-          scratch.down_e.data(), n_tokens, static_cast<std::uint32_t>(top_k),
+          scratch.gate_e.data(), scratch.down_e.data(), n_tokens, static_cast<std::uint32_t>(top_k),
           hidden, expert_ff, stream);
   if (!use_decode_kq) {
   // 3. Compact slots by expert into 16-row padded buckets.
@@ -429,6 +429,6 @@ bool MoeForwardHip(const core::ModelConfig& config,
   return true;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)

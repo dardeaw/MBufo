@@ -58,12 +58,18 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen/engine_adapter.hpp"
+#include "src/models/qwen38_flash_next/engine_adapter.hpp"
+#include "src/models/gptoss/engine_adapter.hpp"
+#include "src/models/gemma4/engine_adapter.hpp"
+#include "src/models/deepseek_v4_flash/engine_adapter.hpp"
+#include "src/core/engine/moe_contract.hpp"
 #include "src/models/bge_m3/engine.hpp"
 #include "src/models/bge_reranker/engine.hpp"
 #include "src/models/qwen_reranker/engine.hpp"
 #endif
 
-namespace gufo::server {
+namespace mbufo::server {
 
 // A selected token ends the turn only when the request admits EOS and the token
 // is one of the model's stop tokens. The engine stops there itself and the stop
@@ -93,7 +99,7 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
                                                   std::uint32_t max_context) {
   auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
                                                       request.add_vision_id);
-  // gufo #285: the rendered prompt may be as long as the context can hold.
+  // mbufo #285: the rendered prompt may be as long as the context can hold.
   options.max_output_bytes =
       tokenization::RenderedPromptBoundBytes(max_context);
   return options;
@@ -257,7 +263,7 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
         "DeepSeek disk cache requires an artifact fingerprint");
   }
   std::ostringstream identity;
-  identity << "schema=gufo-text-continuation-v2\n"
+  identity << "schema=mbufo-text-continuation-v2\n"
            << "model_kind=deepseek4\n"
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
@@ -297,7 +303,7 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
         "fingerprint");
   }
   std::ostringstream identity;
-  identity << "schema=gufo-text-continuation-v2\n"
+  identity << "schema=mbufo-text-continuation-v2\n"
            << "model_kind=qwen38-flash-next\n"
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
@@ -346,7 +352,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
     state_abi += "-blocked-q8";
   }
   std::ostringstream identity;
-  identity << "schema=gufo-text-continuation-v2\n"
+  identity << "schema=mbufo-text-continuation-v2\n"
            << "model_kind=qwen3.8\n"
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
@@ -1081,7 +1087,7 @@ public:
       component_identity_ = persistence_->compatibility_identity;
     } else {
       std::ostringstream identity;
-      identity << "schema=gufo-process-qwen-component-v2\n"
+      identity << "schema=mbufo-process-qwen-component-v2\n"
                << "model_instance=" << model_.get() << '\n'
                << "draft_instance=" << dflash_model_.get() << '\n'
                << "context_tokens=" << max_context_ << '\n';
@@ -1570,8 +1576,8 @@ public:
       std::uint32_t max_context, bool use_dspark) {
     std::string error;
     session_ = model->CreateSession(
-        use_dspark ? gufo::core::SessionMode::kSpeculative
-                   : gufo::core::SessionMode::kAutoregressive,
+        use_dspark ? mbufo::core::SessionMode::kSpeculative
+                   : mbufo::core::SessionMode::kAutoregressive,
         max_context, &error);
     if (session_ == nullptr) {
       throw std::runtime_error("Failed to create DeepSeek session: " + error);
@@ -2437,7 +2443,7 @@ public:
       component_identity_ = persistence_->compatibility_identity;
     } else {
       std::ostringstream identity;
-      identity << "schema=gufo-process-text-continuation-v1\n"
+      identity << "schema=mbufo-process-text-continuation-v1\n"
                << "model_instance=" << model_.get() << '\n'
                << "context_tokens=" << max_context_ << '\n'
                << "mtp=" << use_mtp_ << '\n'
@@ -2511,8 +2517,8 @@ public:
         .resident_weights_bytes = model_->ResidentBytes(),
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = model_->SessionBytes(
-            use_mtp_ ? gufo::core::SessionMode::kSpeculative
-                     : gufo::core::SessionMode::kAutoregressive,
+            use_mtp_ ? mbufo::core::SessionMode::kSpeculative
+                     : mbufo::core::SessionMode::kAutoregressive,
             max_context_),
         // Runtime scratch is shared and already allocated at model load;
         // reserve its remaining lazy buffers once from aggregate capacity.
@@ -3105,12 +3111,12 @@ private:
 // ---------------------------------------------------------------------------
 // GPT-OSS HTTP backend: plain Sync/Evaluate sessions owned per request slot,
 // no MTP/draft sidecar and no continuation snapshots in serve. Prompt framing
-// mirrors `gufo prompt` (harmony channels, same system block); tools are
+// mirrors `mbufo prompt` (harmony channels, same system block); tools are
 // listed in the developer message and round-trip through the generic JSON
 // <tool_call> envelope (instruction + grammar from text_model_runner.cpp,
 // parsed back by ParseQwenCalls' compatibility form). Reasoning channels pass
 // through as content: no thinking split, so greedy serve output matches
-// `gufo prompt` token for token.
+// `mbufo prompt` token for token.
 // ---------------------------------------------------------------------------
 constexpr std::string_view kGptOssStateAbi = "gptoss-gfx1151-state-v1";
 
@@ -3546,7 +3552,7 @@ class GptOssTextRunner final : public HipTextModelRunner {
 // Llama HTTP backend: plain Sync/Evaluate sessions owned per request slot,
 // no speculative sidecar and no continuation snapshots in serve (dense GQA,
 // d=128: attention and GEMM ride the dispatcher's existing paths for q8 KV,
-// local dense F16 kernel otherwise). Prompt framing mirrors `gufo prompt`
+// local dense F16 kernel otherwise). Prompt framing mirrors `mbufo prompt`
 // (Llama-3.1 headers); tools are listed in the system message and round-trip
 // through the generic JSON <tool_call> envelope, as for GPT-OSS above.
 // ---------------------------------------------------------------------------
@@ -5428,6 +5434,23 @@ InferenceBackend::InferenceBackend() : impl_(std::make_unique<Impl>()) {}
 
 InferenceBackend::~InferenceBackend() = default;
 
+// MoE engines must declare their geometry, expert formats and decode-kernel origin (core/engine/moe_contract.hpp). The registry enforces it
+// for models it creates; serve loads engines directly, so the same check runs here on the loaded model, and the declaration is logged.
+bool EnforceMoeContract(const char* engine, const core::engine::MoeGeometry& geometry,
+                        const core::engine::MoeKernelInfo& kernels, std::string* error) {
+  const auto report = core::engine::ValidateMoeContract(geometry, kernels);
+  if (!report.ok()) {
+    SetError(error, std::string(engine) + " violates the MoE contract: " + report.problems.front());
+    return false;
+  }
+  if (geometry.moe_layers != 0) {
+    std::cerr << "[moe-contract] " << engine << ": " << geometry.moe_layers << " MoE layers, " << geometry.experts << " experts top-"
+              << geometry.top_k << ", kernels " << core::engine::MoeKernelOriginName(kernels.origin) << ", routed bytes/token "
+              << static_cast<double>(core::engine::ExpectedRoutedBytesPerToken(geometry)) / 1e9 << " GB\n";
+  }
+  return true;
+}
+
 bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             std::uint32_t max_context,
                             std::size_t session_count,
@@ -5520,6 +5543,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error, "Failed to create DeepSeek model: " + load_error);
       return false;
     }
+    if (!EnforceMoeContract("deepseek_v4_flash", models::deepseek_v4_flash::DescribeMoeGeometry(*reader), models::deepseek_v4_flash::DescribeMoeKernels(), error)) return false;
     if (DiskCacheEnabled(resolved_disk_cache_config) &&
         resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
         !FingerprintArtifact(
@@ -5592,6 +5616,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                "Failed to create Qwen3.8-Flash-Next model: " + load_error);
       return false;
     }
+    if (!EnforceMoeContract("qwen38_flash_next", models::qwen38_flash_next::DescribeMoeGeometry(*model), models::qwen38_flash_next::DescribeMoeKernels(), error)) return false;
     if (rope_scaling) {
       Logger::Info(
           "loader",
@@ -5660,6 +5685,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error, "Failed to create Gemma4 model: " + load_error);
       return false;
     }
+    if (!EnforceMoeContract("gemma4", models::gemma4::DescribeMoeGeometry(*model), models::gemma4::DescribeMoeKernels(), error)) return false;
     // Gemma4 sessions reprocess the prompt from position 0 and expose no
     // continuation snapshots, so there is no persistent disk-cache identity.
     if (DiskCacheEnabled(resolved_disk_cache_config)) {
@@ -5849,6 +5875,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error, "Failed to create GPT-OSS model: " + load_error);
       return false;
     }
+    if (!EnforceMoeContract("gptoss", models::gptoss::DescribeMoeGeometry(*model), models::gptoss::DescribeMoeKernels(), error)) return false;
     std::cerr << "[gpt-oss] kv_cache_quant=" << kv_cache_quant << '\n';
     // GPT-OSS sessions expose no continuation snapshots, so there is no
     // persistent disk-cache identity; the RAM pool owns every session.
@@ -5925,6 +5952,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     SetError(error, "Qwen GPU model must not be null");
     return false;
   }
+  if (!EnforceMoeContract("qwen", models::qwen::DescribeQwenMoeGeometry(*model), models::qwen::DescribeQwenMoeKernels(), error)) return false;
   if (max_context == 0)
     max_context = model->GetConfig().context_length;
   if (max_context < 2 || max_context > model->GetConfig().context_length) {
@@ -5967,7 +5995,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     return false;
   }
   // Blocked-Q8 attention KV for Qwen3.8-27B-class models. An explicit
-  // --kv-quant flag (or admin kv_cache_quant field) wins over the `gufo
+  // --kv-quant flag (or admin kv_cache_quant field) wins over the `mbufo
   // prompt` env switch (QWEN_KV_QUANT); with neither, f16 stays the default.
   // QwenGpuModel::CreateFromGguf needs no policy parameter: the policy
   // applies at executor/adapter level, not weight loading.
@@ -6049,7 +6077,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
       speculative_options.initial_draft_tokens =
           speculative_config.max_draft_tokens;
       speculative_options.use_batched_verification =
-          std::getenv("GUFO_NO_BATCHED_VERIFY") == nullptr;
+          std::getenv("MBUFO_NO_BATCHED_VERIFY") == nullptr;
       speculative_options.retain_frontier_logits = true;
       speculative_options.enable_adaptive_draft_length = false;
     }
@@ -7185,4 +7213,4 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
 #endif
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

@@ -1,5 +1,5 @@
-#ifndef GUFO_CACHE_RETENTION_HPP_
-#define GUFO_CACHE_RETENTION_HPP_
+#ifndef MBUFO_CACHE_RETENTION_HPP_
+#define MBUFO_CACHE_RETENTION_HPP_
 
 #include <array>
 #include <bitset>
@@ -10,7 +10,7 @@
 #include "src/cache/adapter.hpp"
 #include "src/cache/prefix_index.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 // Retention roles differ from execution provenance (prompt/grid/generated).
 enum class RetentionPurpose : std::uint8_t {
   kRetry,
@@ -196,5 +196,5 @@ private:
   // total; access recency and borrowed-row preservation do not.
   mutable std::optional<std::size_t> retained_payload_bytes_;
 };
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 #endif

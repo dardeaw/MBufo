@@ -7,7 +7,7 @@
 #include <string>
 #include <unordered_set>
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 namespace {
 
 struct Binder {
@@ -120,6 +120,12 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   w.token_embd = b.Get("token_embd.weight", hidden, vocab);
   w.output_norm = b.Get("output_norm.weight", hidden);
   w.output = b.Get("output.weight", hidden, vocab);
+  if (config->ple_dim > 0) {
+    const std::uint64_t ple_total = static_cast<std::uint64_t>(config->ple_dim) * config->num_layers;
+    w.per_layer_token_embd = b.Get("per_layer_token_embd.weight", ple_total, vocab);
+    w.per_layer_model_proj = b.Get("per_layer_model_proj.weight", hidden, ple_total);
+    w.per_layer_proj_norm = b.Get("per_layer_proj_norm.weight", config->ple_dim);
+  }
   if (w.output.empty()) {
     w.output = w.token_embd;  // tied LM head
   }
@@ -142,7 +148,7 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     l.swa = config->LayerIsSwa(il);
     const std::uint32_t head_dim = config->HeadDim(il);
     const std::uint32_t kv_heads = config->KvHeads(il);
-    l.has_kv = kv_heads > 0;
+    l.has_kv = config->OwnsKv(il);
     l.has_out_scale =
         reader.FindTensor(p + "layer_output_scale.weight") != nullptr;
 
@@ -191,9 +197,15 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     }
 
     l.ffn_norm = b.Get(p + "ffn_norm.weight", hidden);
-    l.ffn_gate = b.Get(p + "ffn_gate.weight", hidden, config->shared_ff);
-    l.ffn_up = b.Get(p + "ffn_up.weight", hidden, config->shared_ff);
-    l.ffn_down = b.Get(p + "ffn_down.weight", config->shared_ff, hidden);
+    const std::uint64_t ff = config->FfDim(il);
+    l.ffn_gate = b.Get(p + "ffn_gate.weight", hidden, ff);
+    l.ffn_up = b.Get(p + "ffn_up.weight", hidden, ff);
+    l.ffn_down = b.Get(p + "ffn_down.weight", ff, hidden);
+    if (config->ple_dim > 0) {
+      l.ple_inp_gate = b.Get(p + "inp_gate.weight", hidden, config->ple_dim);
+      l.ple_proj = b.Get(p + "proj.weight", config->ple_dim, hidden);
+      l.ple_post_norm = b.Get(p + "post_norm.weight", hidden);
+    }
     l.ffn_post_norm = b.Get(p + "post_ffw_norm.weight", hidden);
 
     l.router = b.Get(p + "ffn_gate_inp.weight", hidden, config->num_experts);
@@ -239,6 +251,11 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   require(w.token_embd, "token_embd.weight");
   require(w.output_norm, "output_norm.weight", true);
   require(w.output, "output.weight");
+  if (config->ple_dim > 0) {
+    require(w.per_layer_token_embd, "per_layer_token_embd.weight");
+    require(w.per_layer_model_proj, "per_layer_model_proj.weight");
+    require(w.per_layer_proj_norm, "per_layer_proj_norm.weight", true);
+  }
   for (std::uint32_t il = 0; il < config->num_layers && b.ok; ++il) {
     const std::string p = "blk." + std::to_string(il) + ".";
     const auto& l = w.layers[il];
@@ -256,6 +273,11 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     require(l.ffn_up, p + "ffn_up.weight");
     require(l.ffn_down, p + "ffn_down.weight");
     require(l.ffn_post_norm, p + "post_ffw_norm.weight", true);
+    if (config->ple_dim > 0) {
+      require(l.ple_inp_gate, p + "inp_gate.weight");
+      require(l.ple_proj, p + "proj.weight");
+      require(l.ple_post_norm, p + "post_norm.weight", true);
+    }
     if (l.IsMoe()) {
       require(l.router, p + "ffn_gate_inp.weight");
       require(l.router_scale, p + "ffn_gate_inp.scale", true);
@@ -274,4 +296,4 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   return w;
 }
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4

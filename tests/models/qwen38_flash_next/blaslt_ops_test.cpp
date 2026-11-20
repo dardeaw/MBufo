@@ -43,7 +43,7 @@ struct Buffer {
 
 int main() {
   try {
-    using gufo::models::qwen38_flash_next::rocm::BlasLt;
+    using mbufo::models::qwen38_flash_next::rocm::BlasLt;
     std::string error;
     auto warmed = BlasLt::Create(nullptr, &error);
     Require(warmed != nullptr, error);

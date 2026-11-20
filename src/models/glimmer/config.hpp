@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_GLIMMER_CONFIG_HPP_
-#define GUFO_MODELS_GLIMMER_CONFIG_HPP_
+#ifndef MBUFO_MODELS_GLIMMER_CONFIG_HPP_
+#define MBUFO_MODELS_GLIMMER_CONFIG_HPP_
 
 #include <cstdint>
 #include <optional>
@@ -8,7 +8,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 
 /// Architecture parameters of a `muse-glimmer` GGUF artifact (Muse Glimmer
 /// 30B: dense GQA decoder with SWA layers, QK-norm, attention output gate,
@@ -44,6 +44,6 @@ struct Config {
       const core::GgufReader& gguf, std::string* error_msg = nullptr);
 };
 
-}  // namespace gufo::models::glimmer
+}  // namespace mbufo::models::glimmer
 
-#endif  // GUFO_MODELS_GLIMMER_CONFIG_HPP_
+#endif  // MBUFO_MODELS_GLIMMER_CONFIG_HPP_

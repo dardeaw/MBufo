@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_IMAGE_21_TOKENIZER_HPP_
-#define GUFO_MODELS_QWEN_IMAGE_21_TOKENIZER_HPP_
+#ifndef MBUFO_MODELS_QWEN_IMAGE_21_TOKENIZER_HPP_
+#define MBUFO_MODELS_QWEN_IMAGE_21_TOKENIZER_HPP_
 
 #include <filesystem>
 #include <memory>
@@ -8,7 +8,7 @@
 
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::models::qwen_image_21 {
+namespace mbufo::models::qwen_image_21 {
 
 class Tokenizer {
 public:
@@ -21,5 +21,5 @@ private:
   std::string pattern_;
 };
 
-}  // namespace gufo::models::qwen_image_21
+}  // namespace mbufo::models::qwen_image_21
 #endif

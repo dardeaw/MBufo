@@ -53,7 +53,7 @@ let
   };
 in
 stdenv.mkDerivation {
-  pname = "gufo";
+  pname = "mbufo";
   version = packageVersion;
   src = productionSource;
 
@@ -85,10 +85,10 @@ stdenv.mkDerivation {
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
     "-DBUILD_TESTING=OFF"
-    "-DGUFO_RELEASE_VERSION=${versionLabel}"
-    "-DGUFO_REVISION=${revision}"
-    "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
-    "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
+    "-DMBUFO_RELEASE_VERSION=${versionLabel}"
+    "-DMBUFO_REVISION=${revision}"
+    "-DMBUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
+    "-DMBUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
   ];
 
@@ -96,19 +96,19 @@ stdenv.mkDerivation {
   postFixup = ''
     # HIP loads ROCr transitively. Select the patched ABI-compatible runtime
     # without rebuilding the unchanged HIP/BLAS compiler and kernel libraries.
-    wrapProgram "$out/bin/gufo" \
+    wrapProgram "$out/bin/mbufo" \
       --prefix LD_LIBRARY_PATH : "${rocmRuntime}/lib"
   '';
   installCheckPhase = ''
     runHook preInstallCheck
 
-    test "$($out/bin/gufo --version)" = "gufo version ${versionLabel} (${revision})"
-    $out/bin/gufo --help >/dev/null
-    test "$($out/bin/gufo-server --version)" = "gufo version ${versionLabel} (${revision})"
-    $out/bin/gufo-server --help >/dev/null
-    test ! -e $out/bin/gufo-kernel-bench
-    test -f $out/share/licenses/gufo/LICENSE
-    test -f $out/share/licenses/gufo/third-party/LICENSE.ds4
+    test "$($out/bin/mbufo --version)" = "mbufo version ${versionLabel} (${revision})"
+    $out/bin/mbufo --help >/dev/null
+    test "$($out/bin/mbufo-server --version)" = "mbufo version ${versionLabel} (${revision})"
+    $out/bin/mbufo-server --help >/dev/null
+    test ! -e $out/bin/mbufo-kernel-bench
+    test -f $out/share/licenses/mbufo/LICENSE
+    test -f $out/share/licenses/mbufo/third-party/LICENSE.ds4
 
     runHook postInstallCheck
   '';
@@ -125,10 +125,10 @@ stdenv.mkDerivation {
   };
 
   meta = with lib; {
-    description = "Gufo Engine — local inference runtime for AMD Strix Halo (gfx1151 GPU)";
+    description = "MBufo Engine — local inference runtime for AMD Strix Halo (gfx1151 GPU)";
     homepage = "https://github.com/gufo-org/gufo";
     license = licenses.mit;
     platforms = [ "x86_64-linux" ];
-    mainProgram = "gufo";
+    mainProgram = "mbufo";
   };
 }

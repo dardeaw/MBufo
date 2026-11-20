@@ -33,7 +33,7 @@ denoising step. Every request starts with separate caches and RNG.
 The raw system prompt is `Comprehend and analyze the provided prompt.`; its
 14-token prefix is removed from the encoder output, as in the pinned pipeline.
 The repository README recommends 2048² output, while this Diffusers revision
-defaults `output_resolution` to 1024. Gufo follows the pipeline default;
+defaults `output_resolution` to 1024. MBufo follows the pipeline default;
 explicit `size` selects larger outputs without changing reference-image resizing.
 Convolution bias follows the pinned PyTorch/MIOpen BF16 path: round the product
 before adding bias. Linear projections retain their single final rounding.
@@ -44,7 +44,7 @@ compare matched block inputs as well as the complete trajectory. Do not change
 weights, remove reference images, reduce precision or skip diffusion steps to
 pass a speed gate.
 
-Gufo's RNG differs from PyTorch's. Compare shared initial noise, not numeric
+MBufo's RNG differs from PyTorch's. Compare shared initial noise, not numeric
 seeds alone. Edit RNG seeds also bind the ordered, resized RGBA references:
 reusing a generation seed must not replay the noise that generated the source.
 This preserves repeatability for identical requests, including successive edits,
@@ -54,4 +54,4 @@ Diffusers and Transformers source is Apache-2.0 licensed. The separately
 downloaded weights use the
 [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/LICENSE),
 which limits the granted use to non-commercial purposes; commercial use requires
-a separate license. Gufo's MIT license does not relicense those weights.
+a separate license. MBufo's MIT license does not relicense those weights.

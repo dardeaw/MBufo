@@ -643,7 +643,7 @@
     "manifest": {
       "revision": "fdc2184941a19867fb2d643030717fec344b7280",
       "binary_sha256": "b1ab0e9795df6fbac837cb00971dd021058cff045fc63178ccc3ac53265165f9",
-      "binary_path": "/nix/store/x2jmw49iq1pkzw2yqcrcnhd1lq72dk1k-gufo-0-unstable-fdc2184/bin/gufo",
+      "binary_path": "/nix/store/x2jmw49iq1pkzw2yqcrcnhd1lq72dk1k-mbufo-0-unstable-fdc2184/bin/mbufo",
       "platform_profile": "performance",
       "starting_temperatures_c": {
         "acpitz_2:temp1_input": 39.8,
@@ -663,14 +663,14 @@
         "amdgpu:edge": 39.0
       },
       "started_unix": 1792136488.50991,
-      "target": "gufo",
+      "target": "mbufo",
       "reference_results": "unchanged; not rerun",
       "model_revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
       "repetitions": 1,
       "power_control": "Recorded at least 90 s idle recovery and matching temperature limits before each independent AR, mixed MTP and repetitive MTP server; canonical requests, shared calibration, warmups and mixed/repetitive order unchanged; no power/profile changes.",
       "tuned_profile": "Current active profile: accelerator-performance",
       "status": "complete",
-      "scope": "All six Gufo card tables; reference data unchanged.",
+      "scope": "All six MBufo card tables; reference data unchanged.",
       "single_finished_unix": 1792137435.0187473,
       "finished_unix": 1792137915.2058399
     },

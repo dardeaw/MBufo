@@ -28,24 +28,24 @@
 
 namespace {
 
-using gufo::server::ChatRequest;
-using gufo::server::ContinuationDiskEvent;
-using gufo::server::ContinuationDiskEventAction;
-using gufo::server::ContinuationDiskEventReason;
-using gufo::server::ContinuationDiskStore;
-using gufo::server::ContinuationDiskStoreOptions;
-using gufo::server::TextDecodeSelection;
-using gufo::server::TextExecutionPlan;
-using gufo::server::TextExecutionPlanKind;
-using gufo::server::TextModelRunner;
-using gufo::server::TextPrefillStep;
-using gufo::server::TextRunnerCapabilities;
-using gufo::server::TextRunnerDescriptor;
-using gufo::server::TextRunnerPersistenceDescriptor;
-using gufo::server::TextRunnerResourceClaim;
-using gufo::server::TextRunnerSnapshot;
-using gufo::server::TextRunnerState;
-using gufo::server::TextRunnerToken;
+using mbufo::server::ChatRequest;
+using mbufo::server::ContinuationDiskEvent;
+using mbufo::server::ContinuationDiskEventAction;
+using mbufo::server::ContinuationDiskEventReason;
+using mbufo::server::ContinuationDiskStore;
+using mbufo::server::ContinuationDiskStoreOptions;
+using mbufo::server::TextDecodeSelection;
+using mbufo::server::TextExecutionPlan;
+using mbufo::server::TextExecutionPlanKind;
+using mbufo::server::TextModelRunner;
+using mbufo::server::TextPrefillStep;
+using mbufo::server::TextRunnerCapabilities;
+using mbufo::server::TextRunnerDescriptor;
+using mbufo::server::TextRunnerPersistenceDescriptor;
+using mbufo::server::TextRunnerResourceClaim;
+using mbufo::server::TextRunnerSnapshot;
+using mbufo::server::TextRunnerState;
+using mbufo::server::TextRunnerToken;
 
 constexpr std::size_t kFakePayloadBytes = 16;
 constexpr std::size_t kDiskHeaderBytes = 96;
@@ -61,7 +61,7 @@ class TemporaryDirectory {
 public:
   TemporaryDirectory() {
     std::string pattern = (std::filesystem::temp_directory_path() /
-                           "gufo-continuation-disk-XXXXXX")
+                           "mbufo-continuation-disk-XXXXXX")
                               .string();
     char* created = ::mkdtemp(pattern.data());
     if (created == nullptr) {
@@ -221,7 +221,7 @@ public:
   }
 
   [[nodiscard]] TextDecodeSelection SelectNext(
-      TextRunnerState&, gufo::sampling::SamplerState&) const override {
+      TextRunnerState&, mbufo::sampling::SamplerState&) const override {
     throw std::logic_error("fake persistence test does not decode");
   }
 
@@ -353,12 +353,12 @@ ContinuationDiskStore::RestoreResult RestoreTokens(
 
 void TestSha256KnownVector() {
   const std::array<std::uint8_t, 3> input = {'a', 'b', 'c'};
-  Expect(gufo::crypto::Sha256Hex(input) ==
+  Expect(mbufo::crypto::Sha256Hex(input) ==
              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
          "shared SHA-256 implementation matches the standard vector");
-  gufo::crypto::Sha256Hasher incremental;
+  mbufo::crypto::Sha256Hasher incremental;
   incremental.Update(std::span(input).first(1));
-  gufo::crypto::Sha256Hasher first;
+  mbufo::crypto::Sha256Hasher first;
   first.Update(std::span(input).first(1));
   Expect(incremental.Digest() == first.Finish(),
          "prefix digest matches an independently finished hash");
@@ -373,7 +373,7 @@ void TestSha256KnownVector() {
     std::ofstream output(path, std::ios::binary);
     output.write("abc", 3);
   }
-  Expect(gufo::crypto::Sha256FileHex(path) ==
+  Expect(mbufo::crypto::Sha256FileHex(path) ==
              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
          "streamed artifact SHA-256 matches the in-memory implementation");
 }
@@ -1104,7 +1104,7 @@ void TestImageIdentitySurvivesRestart() {
 }
 
 void TestAppendedImagePrefixesSurviveRestart() {
-  using gufo::server::ContinuationInputPrefix;
+  using mbufo::server::ContinuationInputPrefix;
   TemporaryDirectory directory;
   FakeRunner runner("image-prefix-cache");
   const std::vector<TextRunnerToken> prompt{1, 2, 3, 248056, 4, 5, 248056, 6};

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Functional text API checks with the official OpenAI Python SDK.
 
-Run with nix develop -c python3. Start a Gufo text server first; all requests
+Run with nix develop -c python3. Start a MBufo text server first; all requests
 go to the explicitly supplied loopback endpoint.
 """
 
@@ -88,7 +88,7 @@ class CheckResults(dict):
 
 
 def chat_result(client, request, streaming=False, on_chunk=None, on_open=None):
-    """Accumulate typed SDK chunks, including Gufo's reasoning/usage extensions."""
+    """Accumulate typed SDK chunks, including MBufo's reasoning/usage extensions."""
     result = client.chat.completions.create(
         **request, stream=streaming,
         **({"stream_options": {"include_usage": True}} if streaming else {}),
@@ -408,7 +408,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             **request, "extra_body": {**request["extra_body"], "cache_prompt": True}}, True)
         assert signature(cached) == signature(inherited), (cached, inherited)
         assert cached["usage"]["cached_tokens"] > 0, cached
-        assert cached["usage"]["gufo"]["prefill_tokens"] == 0, cached
+        assert cached["usage"]["mbufo"]["prefill_tokens"] == 0, cached
         record(f"sampling_cached_preset_thinking{thinking}", cached)
 
         # Distinct request-owned samplers must replay when admitted together.
@@ -672,7 +672,7 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
         return chat_result(client, body, True)
     with ThreadPoolExecutor(width) as pool:
         first = list(pool.map(simultaneous, cases))
-    assert max(row["usage"]["gufo"]["physical_execution_width"] for row in first) == width, first
+    assert max(row["usage"]["mbufo"]["physical_execution_width"] for row in first) == width, first
     for index, (body, row) in enumerate(zip(cases, first)):
         replay = chat_result(client, body)
         def signature(result):
@@ -785,7 +785,7 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
             with ThreadPoolExecutor(width) as pool:
                 batched += list(pool.map(together, members))
             references += [serial[index] for index in members]
-    assert max(row["usage"]["gufo"]["physical_execution_width"] for row in batched) > 1, batched
+    assert max(row["usage"]["mbufo"]["physical_execution_width"] for row in batched) > 1, batched
     for row, reference in zip(batched, references, strict=True):
         assert (row["text"], row["finish"]) == (reference["text"], reference["finish"]), (
             row, reference)
@@ -904,7 +904,7 @@ def check_conversations(client, model, checks, vision=False, server_log=None):
             warm = chat(label + "_resume", request)
             assert warm["usage"]["cached_tokens"] >= 128, warm
             if not retain:
-                assert warm["usage"]["gufo"]["prefill_tokens"] <= 16, warm
+                assert warm["usage"]["mbufo"]["prefill_tokens"] <= 16, warm
             replay = chat(label + "_replay", request, True)
             assert (
                 warm["text"].strip(),
@@ -948,7 +948,7 @@ def check_conversations(client, model, checks, vision=False, server_log=None):
                 repeated,
             )
             usage = repeated["usage"]
-            prefilled = usage["gufo"]["prefill_tokens"]
+            prefilled = usage["mbufo"]["prefill_tokens"]
             assert usage["prompt_tokens"] == cold["usage"]["prompt_tokens"], repeated
             assert usage["cached_tokens"] > 0, repeated
             assert usage["cached_tokens"] + prefilled == usage["prompt_tokens"], repeated
@@ -1034,7 +1034,7 @@ def check_long_context(client, model, checks, context, vision=False, server_log=
     replay = chat("long_schema_cached", request, True)
     assert signature(replay) == signature(first), replay
     usage = replay["usage"]
-    prefilled = usage["gufo"]["prefill_tokens"]
+    prefilled = usage["mbufo"]["prefill_tokens"]
     assert usage["prompt_tokens"] == depth, replay
     assert usage["cached_tokens"] + prefilled == depth, replay
     check_unchanged_retry("long_schema_cached", replay, prefilled,
@@ -1057,7 +1057,7 @@ def check_long_context(client, model, checks, context, vision=False, server_log=
                      reasoning={"effort": "none"}, extra_body={"top_k": 20},
                      text={"format": {"type": "json_schema", "name": "remembered_keyword",
                                       "strict": True, "schema": schema}})
-    # seed/presence are Gufo extensions on Responses, not SDK keyword arguments.
+    # seed/presence are MBufo extensions on Responses, not SDK keyword arguments.
     responses["extra_body"].update(seed=responses.pop("seed"),
                                     presence_penalty=responses.pop("presence_penalty"))
     response = client.responses.create(**responses)
@@ -1101,7 +1101,7 @@ def check_long_context(client, model, checks, context, vision=False, server_log=
     resumed = chat("long_cancel_resume", continued, True)
     assert json.loads(resumed["text"]) == {"keyword": "LANTERN"}, resumed
     assert resumed["usage"]["cached_tokens"] >= depth - 128, resumed
-    assert resumed["usage"]["gufo"]["prefill_tokens"] < 128, resumed
+    assert resumed["usage"]["mbufo"]["prefill_tokens"] < 128, resumed
     repeated = chat("long_cancel_replay", continued)
     assert signature(resumed) == signature(repeated), (resumed, repeated)
     stopped = chat("long_json_stop", {**request, "stop": "TERN"}, True)
@@ -1494,7 +1494,7 @@ def check_strict_tools(client, model, checks):
                   "tools": [{"type": "function", "function": {
                       **tool["function"], "strict": False}}]}
     signature(record("non_strict_single_call", chat_result(client, non_strict, True)))
-    # gufo #315: a required choice constrains decoding on the default path too,
+    # mbufo #315: a required choice constrains decoding on the default path too,
     # so prose pressure cannot leave the requirement unmet.
     forced = {**common, "tool_choice": "required", "parallel_tool_calls": True,
               "max_completion_tokens": 192,
@@ -1957,7 +1957,7 @@ def check_state_edges(client, model, checks, speculative, vision=False, server_l
     replay = chat_result(client, request)
     assert replay["tools"][0]["function"] == completed["tools"][0]["function"], replay
     check_unchanged_retry("schema_error_did_not_poison_cache", replay,
-                          replay["usage"]["gufo"]["prefill_tokens"],
+                          replay["usage"]["mbufo"]["prefill_tokens"],
                           server_log, replay_start, replay_end)
     checks["schema_error_did_not_poison_cache"] = replay
 
@@ -2462,7 +2462,7 @@ def check_prompt_progress(client, model, checks, width, vision, allow_missing, s
     replay = chat("progress_cached", cached)
     assert signature(on) == signature(replay)
     check_unchanged_retry("progress_cached", replay,
-                          replay["usage"]["gufo"]["prefill_tokens"],
+                          replay["usage"]["mbufo"]["prefill_tokens"],
                           server_log, replay_start, replay_end)
     sampled = {**cached, "temperature": .7, "top_p": .85, "presence_penalty": .3,
                "frequency_penalty": .2, "extra_body": {
@@ -2560,7 +2560,7 @@ def check_prompt_progress(client, model, checks, width, vision, allow_missing, s
         "extra_body": {**interrupted["extra_body"], "cache_prompt": True}})
     assert signature(recovered) == signature(replay)
     check_unchanged_retry("progress_cancel_replay", replay,
-                          replay["usage"]["gufo"]["prefill_tokens"],
+                          replay["usage"]["mbufo"]["prefill_tokens"],
                           server_log, replay_start, replay_end)
 
 
@@ -2674,7 +2674,7 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
         assert any(o["processing"] == width and o["deferred"] > 0
                    for o in observations), observations
         if width > 1:
-            assert any(r["usage"]["gufo"]["shared_prefix_wait_ms"] > 0 for r in results), results
+            assert any(r["usage"]["mbufo"]["shared_prefix_wait_ms"] > 0 for r in results), results
         assert all(r["text"].strip() == "ALPHA" for r in results), results
         return {"results": results, "observations": observations}
     completed("metrics_shared_prefix_reservations", shared_prefix_reservations)
@@ -2766,7 +2766,7 @@ def main():
     parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
                         help="Expected loaded inputs for the discovery suite")
     parser.add_argument("--base-url", required=True, help="http://127.0.0.1:PORT/v1")
-    parser.add_argument("--model", required=True, help="Gufo served model name")
+    parser.add_argument("--model", required=True, help="MBufo served model name")
     parser.add_argument("--request-timeout", type=float, default=120,
                         help="Finite positive SDK request deadline in seconds")
     parser.add_argument("--expect-reasoning", action="store_true")

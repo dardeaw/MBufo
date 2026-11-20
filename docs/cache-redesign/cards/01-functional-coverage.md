@@ -37,7 +37,7 @@ Keep these; extend them where a pattern below fits better than a new suite.
 | 5 | **One large tool result.** A single append of 10k+ tokens, then a retry or edit right after it. | TraceLab: rare 10k+ appends carry over 70% of prefill. | The retry or edit does not prefill the large append again. |
 | 6 | **Volatile tokens near the start.** A per-request header or timestamp in the system prompt. | Claude Code's attribution header defeats llama.cpp reuse. | No false hit, and one-use entries do not push useful checkpoints out. |
 | 7 | **UI side requests.** Title, tag and follow-up generation after every reply, with a prompt that embeds the chat. | Open WebUI background tasks. | The main conversation's next turn still reuses its history. |
-| 8 | **Claude Code over `/v1/messages`** with tools and streaming. | gufo #469. | A long tool loop reuses history turn after turn. |
+| 8 | **Claude Code over `/v1/messages`** with tools and streaming. | mbufo #469. | A long tool loop reuses history turn after turn. |
 | 9 | **Subagent fan-out, then the parent resumes.** | Claude Code Task tool; RFC W2. | Children share the parent prefix; the parent's deep checkpoint survives in RAM or on disk. |
 | 10 | **Model swap restart.** The server is stopped and started between turns, as llama-swap does; also an abrupt kill while a write is queued. | llama-swap setups; RFC W4. | The next turn restores from disk; after a kill, only published checkpoints hit. |
 | 11 | **A short RAM hit beside a deeper disk checkpoint.** | RFC E3 (W2). | The deeper usable checkpoint is selected. |
@@ -133,7 +133,7 @@ Normal runner command, with a fresh output directory and selected suites:
 nix develop -c python3 tests/functional/run.py \
   --record-baseline --output /tmp/card01 --sampling-preset qwen38 \
   --suite cache-transforms -- \
-  /path/to/main/gufo serve llm \
+  /path/to/main/mbufo serve llm \
   --model /path/to/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
   --mtp-model /path/to/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf \
   --speculative off --sessions 1 --context 32768 --think off
@@ -227,7 +227,7 @@ TTFT is in milliseconds and includes one observation for each request.
 
 #### History transformations · AR
 
-Status: **passed**. 28 requests. Local evidence: `/tmp/gufo-card01-final-transforms-ar`.
+Status: **passed**. 28 requests. Local evidence: `/tmp/mbufo-card01-final-transforms-ar`.
 Harness SHA-256: `9983991da46c81aa70a2f261c1c562b1b24555ea5446c0cd136c4efa7a4d1816`. Loaded mode: `off`;
 drafts proposed/accepted: 0/0 across this server run.
 
@@ -264,7 +264,7 @@ drafts proposed/accepted: 0/0 across this server run.
 
 #### History transformations · MTP
 
-Status: **passed**. 28 requests. Local evidence: `/tmp/gufo-card01-transforms-mtp`.
+Status: **passed**. 28 requests. Local evidence: `/tmp/mbufo-card01-transforms-mtp`.
 Harness SHA-256: `9983991da46c81aa70a2f261c1c562b1b24555ea5446c0cd136c4efa7a4d1816`. Loaded mode: `mtp`;
 drafts proposed/accepted: 84/30 across this server run.
 
@@ -301,7 +301,7 @@ drafts proposed/accepted: 84/30 across this server run.
 
 #### Pressure · AR
 
-Status: **failed**. 106 requests. Local evidence: `/tmp/gufo-card01-all-fn-ar`.
+Status: **failed**. 106 requests. Local evidence: `/tmp/mbufo-card01-all-fn-ar`.
 Harness SHA-256: `618481ffb00a6562706a3ffe60106ce73dc75d5d6de8680b9a985c288fd78b90`. Loaded mode: `off`;
 drafts proposed/accepted: 0/0 across this server run.
 
@@ -427,7 +427,7 @@ against 2147483648 RAM bytes.
 
 #### Pressure · MTP
 
-Status: **failed**. 98 requests. Local evidence: `/tmp/gufo-card01-pressure-messages-mtp`.
+Status: **failed**. 98 requests. Local evidence: `/tmp/mbufo-card01-pressure-messages-mtp`.
 Harness SHA-256: `9983991da46c81aa70a2f261c1c562b1b24555ea5446c0cd136c4efa7a4d1816`. Loaded mode: `mtp`;
 drafts proposed/accepted: 884/676 across this server run.
 
@@ -544,7 +544,7 @@ against 2147483648 RAM bytes.
 
 #### Messages tool loop · AR
 
-Status: **passed**. 48 requests. Local evidence: `/tmp/gufo-card01-all-fn-ar`.
+Status: **passed**. 48 requests. Local evidence: `/tmp/mbufo-card01-all-fn-ar`.
 Harness SHA-256: `618481ffb00a6562706a3ffe60106ce73dc75d5d6de8680b9a985c288fd78b90`. Loaded mode: `off`;
 drafts proposed/accepted: 0/0 across this server run.
 
@@ -603,7 +603,7 @@ Twelve tool cycles ended at 13786 prompt tokens.
 
 #### Messages tool loop · MTP
 
-Status: **passed**. 48 requests. Local evidence: `/tmp/gufo-card01-pressure-messages-mtp`.
+Status: **passed**. 48 requests. Local evidence: `/tmp/mbufo-card01-pressure-messages-mtp`.
 Harness SHA-256: `9983991da46c81aa70a2f261c1c562b1b24555ea5446c0cd136c4efa7a4d1816`. Loaded mode: `mtp`;
 drafts proposed/accepted: 884/676 across this server run.
 
@@ -662,7 +662,7 @@ Twelve tool cycles ended at 13786 prompt tokens.
 
 #### Disk lifecycle · AR
 
-Local evidence: `/tmp/gufo-card01-lifecycle-fn-ar`. Harness SHA-256:
+Local evidence: `/tmp/mbufo-card01-lifecycle-fn-ar`. Harness SHA-256:
 `86c19aca2bacbfea25204e5072314aaf01e499d514a9250575ad67d3d2cab9db`. Fault library SHA-256:
 `f0f985ad02de5839f732f5edebbc5c9a38f2ca580b0562eae017c83bf6e11fa4`.
 
@@ -760,7 +760,7 @@ restarted: loaded `off`, drafts proposed/accepted 0/0; startup 16181.880 ms.
 
 #### Disk lifecycle · MTP
 
-Local evidence: `/tmp/gufo-card01-lifecycle-fn-mtp`. Harness SHA-256:
+Local evidence: `/tmp/mbufo-card01-lifecycle-fn-mtp`. Harness SHA-256:
 `86c19aca2bacbfea25204e5072314aaf01e499d514a9250575ad67d3d2cab9db`. Fault library SHA-256:
 `f0f985ad02de5839f732f5edebbc5c9a38f2ca580b0562eae017c83bf6e11fa4`.
 
@@ -914,7 +914,7 @@ production binary and separate output directories:
 nix develop -c python3 tests/functional/run.py \
   --record-baseline --output /tmp/compaction-ar --sampling-preset qwen38 \
   --suite cache-compaction -- \
-  /path/to/main/result/bin/gufo serve llm \
+  /path/to/main/result/bin/mbufo serve llm \
   --model /path/to/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
   --mtp-model /path/to/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf \
   --speculative off --sessions 1 --context 32768 --think off
@@ -996,8 +996,8 @@ decode, queue and wall timings are retained separately in JSON.
 | MTP | `summary_retry_cold` | 2302 | 0 | 2302 | 1527.583 |
 | MTP | `continue_cold` | 2327 | 0 | 2327 | 1555.754 |
 
-Raw artifacts: `/tmp/gufo-card01-compaction-fn-ar-03` and
-`/tmp/gufo-card01-compaction-fn-mtp`. Earlier attempts remain retained: the
+Raw artifacts: `/tmp/mbufo-card01-compaction-fn-ar-03` and
+`/tmp/mbufo-card01-compaction-fn-mtp`. Earlier attempts remain retained: the
 first lacked the SDK; the second exposed an overly strict harness expectation
 that required almost the full system prefix despite a coherent earlier
 checkpoint. Their reports and distinct harness hashes remain outside Git as

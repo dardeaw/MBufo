@@ -21,7 +21,7 @@
 
 namespace {
 
-namespace q = gufo::models::qwen38_flash_next::rocm;
+namespace q = mbufo::models::qwen38_flash_next::rocm;
 
 constexpr std::uint32_t kHeads = 24;
 constexpr std::uint32_t kKvHeads = 2;

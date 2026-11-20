@@ -29,7 +29,7 @@
 #include "src/models/qwen3_asr/hip/text_ops.hpp"
 #include "src/models/qwen3_asr/loader.hpp"
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 namespace {
 
 constexpr std::uint32_t kAudioPadToken = 151676;
@@ -838,11 +838,11 @@ bool TextDecoderHipRuntime::GenerateDevice(
   }
 }
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
 #else
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 
 TextDecoderHipRuntime::~TextDecoderHipRuntime() = default;
 
@@ -884,6 +884,6 @@ bool TextDecoderHipRuntime::GenerateDevice(
   return false;
 }
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
 #endif

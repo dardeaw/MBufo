@@ -61,7 +61,7 @@ applied at runtime, never folded into quants.
 
 ## Anchor grades vs llama.cpp (same Q4_K_M file, raw prompt, greedy)
 
-| Prompt | gufo f16 | llama.cpp | Grade |
+| Prompt | mbufo f16 | llama.cpp | Grade |
 |---|---|---|---|
 | "Hello world, this is a test." (8 tok) | 1328:13.67 | 1328:13.05 | A (top-1+top-2 match, <1.0) |
 | "The quick brown fox..." (10 tok) | 623:13.73 | 623:13.81 | A (top-1 match, 0.07) |

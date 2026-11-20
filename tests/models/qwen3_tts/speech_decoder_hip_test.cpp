@@ -17,7 +17,7 @@
 
 namespace {
 
-namespace qwen3_tts_hip = gufo::models::qwen3_tts::hip;
+namespace qwen3_tts_hip = mbufo::models::qwen3_tts::hip;
 
 struct NpyFloat {
   std::vector<std::size_t> shape;

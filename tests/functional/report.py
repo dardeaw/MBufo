@@ -25,7 +25,7 @@ def load_json(path):
 
 
 def parse_bench(text):
-    """Map each `gufo bench` test name to its first t/s value."""
+    """Map each `mbufo bench` test name to its first t/s value."""
     rates = {}
     for line in text.splitlines():
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]

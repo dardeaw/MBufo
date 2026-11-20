@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_CONTINUATION_DISK_STORE_HPP_
-#define GUFO_SERVER_CONTINUATION_DISK_STORE_HPP_
+#ifndef MBUFO_SERVER_CONTINUATION_DISK_STORE_HPP_
+#define MBUFO_SERVER_CONTINUATION_DISK_STORE_HPP_
 
 #include <atomic>
 #include <cstddef>
@@ -13,7 +13,7 @@
 
 #include "src/cli/serve/text_model_runner.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 enum class ContinuationDiskEventAction : std::uint8_t {
   kStored,
@@ -202,6 +202,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_CONTINUATION_DISK_STORE_HPP_
+#endif  // MBUFO_SERVER_CONTINUATION_DISK_STORE_HPP_

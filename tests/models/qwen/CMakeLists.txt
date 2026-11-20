@@ -1,6 +1,6 @@
 function(add_qwen_cpu_test target source labels)
   add_executable(${target} ${PROJECT_SOURCE_DIR}/${source})
-  target_link_libraries(${target} PRIVATE gufo_core)
+  target_link_libraries(${target} PRIVATE mbufo_core)
   add_test(NAME ${target} COMMAND ${target})
   set_tests_properties(${target} PROPERTIES LABELS "${labels}")
 endfunction()
@@ -17,8 +17,8 @@ add_qwen_cpu_test(qwen_chat_template_test
   tests/models/qwen/tokenization/chat_template_test.cpp
   "cpu;tokenization;chat_template")
 target_compile_definitions(qwen_chat_template_test PRIVATE
-  GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE="${PROJECT_SOURCE_DIR}/src/models/qwen/reference/chat_template.jinja"
-  GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
+  MBUFO_QWEN38_CHAT_TEMPLATE_REFERENCE="${PROJECT_SOURCE_DIR}/src/models/qwen/reference/chat_template.jinja"
+  MBUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
 
 add_qwen_cpu_test(qwen_cpu_oracles_test
   tests/models/qwen/cpu/oracles_test.cpp
@@ -60,7 +60,7 @@ if (ENGINE_ENABLE_HIP)
   function(add_qwen_hip_test target source labels)
     add_executable(${target} ${PROJECT_SOURCE_DIR}/${source})
     target_link_libraries(${target} PRIVATE
-      gufo_core hip::host roc::hipblas roc::rocblas)
+      mbufo_core hip::host roc::hipblas roc::rocblas)
     add_test(NAME ${target} COMMAND ${target})
     set_tests_properties(${target} PROPERTIES
       LABELS "${labels}"

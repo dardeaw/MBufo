@@ -10,7 +10,7 @@
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/core/speculative/draft_registry.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 QwenMtpGpuDraftBackend::QwenMtpGpuDraftBackend(
     std::unique_ptr<QwenMtpGpuExecutor> executor, QwenMtpGpuDraftConfig config)
@@ -266,5 +266,5 @@ const bool kQwenMtpDraftRegistered = RegisterQwenMtpDraftBackend();
 
 }  // namespace
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

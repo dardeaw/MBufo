@@ -25,22 +25,22 @@
 #include "src/eval/extract.hpp"
 #include "src/eval/http_client.hpp"
 
-#ifndef GUFO_REVISION
-#define GUFO_REVISION "unknown"
+#ifndef MBUFO_REVISION
+#define MBUFO_REVISION "unknown"
 #endif
-#ifndef GUFO_EVAL_SOURCE_DATA
-#define GUFO_EVAL_SOURCE_DATA \
+#ifndef MBUFO_EVAL_SOURCE_DATA
+#define MBUFO_EVAL_SOURCE_DATA \
   "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
 #endif
-#ifndef GUFO_EVAL_INSTALLED_DATA
-#define GUFO_EVAL_INSTALLED_DATA GUFO_EVAL_SOURCE_DATA
+#ifndef MBUFO_EVAL_INSTALLED_DATA
+#define MBUFO_EVAL_INSTALLED_DATA MBUFO_EVAL_SOURCE_DATA
 #endif
 
-namespace gufo::cli {
+namespace mbufo::cli {
 namespace {
 
-using gufo::eval::HttpResult;
-using gufo::json::Value;
+using mbufo::eval::HttpResult;
+using mbufo::json::Value;
 
 constexpr std::size_t kMaximumQuestions = 75;
 constexpr std::size_t kMaximumCompletionTokens = 16000;
@@ -75,12 +75,12 @@ struct ParsedCompletion {
 };
 
 std::filesystem::path DefaultEvalData() {
-  std::filesystem::path source = GUFO_EVAL_SOURCE_DATA;
+  std::filesystem::path source = MBUFO_EVAL_SOURCE_DATA;
   std::error_code error;
   if (std::filesystem::is_regular_file(source, error)) {
     return source;
   }
-  return GUFO_EVAL_INSTALLED_DATA;
+  return MBUFO_EVAL_INSTALLED_DATA;
 }
 
 std::string Environment(std::string_view name) {
@@ -190,7 +190,7 @@ std::optional<ModelInfo> ParseSingleModel(const HttpResult& response,
   }
 
   try {
-    const Value root = gufo::json::parse(response.body);
+    const Value root = mbufo::json::parse(response.body);
     const Value* data = root.find("data");
     if (data == nullptr || !data->is_array()) {
       throw std::runtime_error("response has no data array");
@@ -216,11 +216,11 @@ std::optional<ModelInfo> ParseSingleModel(const HttpResult& response,
     if (info.revision.empty()) {
       info.revision = model.member_str("model_revision");
     }
-    const Value* gufo = model.find("gufo");
-    if (gufo != nullptr && gufo->is_object()) {
-      info.artifact_id = gufo->member_str("artifact_id");
+    const Value* mbufo = model.find("mbufo");
+    if (mbufo != nullptr && mbufo->is_object()) {
+      info.artifact_id = mbufo->member_str("artifact_id");
       if (info.revision.empty()) {
-        info.revision = gufo->member_str("repository_revision");
+        info.revision = mbufo->member_str("repository_revision");
       }
     }
     return info;
@@ -261,7 +261,7 @@ Value RequestJson(const ModelInfo& model, Value messages, bool greedy) {
 std::optional<ParsedCompletion> ParseCompletion(const HttpResult& response,
                                                 std::string* error) {
   try {
-    const Value root = gufo::json::parse(response.body);
+    const Value root = mbufo::json::parse(response.body);
     const Value* choices = root.find("choices");
     if (choices == nullptr || !choices->is_array() || choices->size() != 1) {
       throw std::runtime_error("response must contain exactly one choice");
@@ -302,7 +302,7 @@ std::optional<ParsedCompletion> ParseCompletion(const HttpResult& response,
 
 std::string ApiErrorCode(const HttpResult& response) {
   try {
-    const Value root = gufo::json::parse(response.body);
+    const Value root = mbufo::json::parse(response.body);
     const Value* api_error = root.find("error");
     if (api_error != nullptr && api_error->is_object()) {
       return api_error->member_str("code");
@@ -368,7 +368,7 @@ bool WriteReport(const std::filesystem::path& output, const Value& report,
 
 std::string SanitizedCommand(const EvalOptions& options) {
   std::ostringstream command;
-  command << "gufo eval";
+  command << "mbufo eval";
   if (options.base_url != kDefaultBaseUrl) {
     command << " --base-url <endpoint>";
   }
@@ -391,7 +391,7 @@ Value OptionalIdentity(std::string value, std::string_view base_url,
 }
 
 std::string EvaluatorState() {
-  const std::string revision = GUFO_REVISION;
+  const std::string revision = MBUFO_REVISION;
   if (revision == "unknown") {
     return "unknown";
   }
@@ -400,11 +400,11 @@ std::string EvaluatorState() {
 
 int Execute(const EvalOptions& options) {
   std::string error;
-  if (!gufo::eval::ValidateBaseUrl(options.base_url, &error)) {
+  if (!mbufo::eval::ValidateBaseUrl(options.base_url, &error)) {
     std::cerr << "eval: " << error << '\n';
     return 2;
   }
-  const auto suite = gufo::eval::LoadEvalSuite(DefaultEvalData(), &error);
+  const auto suite = mbufo::eval::LoadEvalSuite(DefaultEvalData(), &error);
   if (!suite.has_value()) {
     std::cerr << "eval: " << error << '\n';
     return 1;
@@ -421,9 +421,9 @@ int Execute(const EvalOptions& options) {
 
   std::string bearer_token = Environment("OPENAI_API_KEY");
   if (bearer_token.empty()) {
-    bearer_token = Environment("GUFO_EVAL_API_KEY");
+    bearer_token = Environment("MBUFO_EVAL_API_KEY");
   }
-  const gufo::eval::HttpClient client(options.base_url, bearer_token);
+  const mbufo::eval::HttpClient client(options.base_url, bearer_token);
   const auto model_response = client.Get("/models");
   const auto discovered = ParseSingleModel(model_response, &error);
   if (!discovered.has_value()) {
@@ -431,8 +431,8 @@ int Execute(const EvalOptions& options) {
     return 1;
   }
   ModelInfo model = *discovered;
-  const std::string model_revision = Environment("GUFO_EVAL_MODEL_REVISION");
-  const std::string artifact_id = Environment("GUFO_EVAL_ARTIFACT_ID");
+  const std::string model_revision = Environment("MBUFO_EVAL_MODEL_REVISION");
+  const std::string artifact_id = Environment("MBUFO_EVAL_ARTIFACT_ID");
   if (!model_revision.empty()) {
     model.revision = model_revision;
   }
@@ -441,7 +441,7 @@ int Execute(const EvalOptions& options) {
   }
 
   Value report = Value::object();
-  report["schema"] = "gufo.eval-result.v1";
+  report["schema"] = "mbufo.eval-result.v1";
   report["benchmark"] = suite->benchmark;
   Value source = Value::object();
   source["repository"] = suite->source_repository;
@@ -451,7 +451,7 @@ int Execute(const EvalOptions& options) {
   report["benchmark_source"] = std::move(source);
 
   Value run = Value::object();
-  run["evaluator_commit"] = GUFO_REVISION;
+  run["evaluator_commit"] = MBUFO_REVISION;
   run["evaluator_worktree"] = EvaluatorState();
   run["command"] = SanitizedCommand(options);
   run["questions"] = options.questions;
@@ -460,18 +460,18 @@ int Execute(const EvalOptions& options) {
   run["max_completion_tokens"] = kMaximumCompletionTokens;
   run["request_timeout_ms"] =
       std::chrono::duration_cast<std::chrono::milliseconds>(
-          gufo::eval::HttpClient::kRequestTimeout)
+          mbufo::eval::HttpClient::kRequestTimeout)
           .count();
   run["temperature"] = options.greedy ? Value(0) : Value();
   run["temperature_policy"] = options.greedy ? "greedy" : "server_default";
   run["thinking_policy"] = "server_default";
   Value server = Value::object();
-  server["label"] = OptionalIdentity(Environment("GUFO_EVAL_SERVER_LABEL"),
+  server["label"] = OptionalIdentity(Environment("MBUFO_EVAL_SERVER_LABEL"),
                                      options.base_url, bearer_token);
-  server["commit"] = OptionalIdentity(Environment("GUFO_EVAL_SERVER_COMMIT"),
+  server["commit"] = OptionalIdentity(Environment("MBUFO_EVAL_SERVER_COMMIT"),
                                       options.base_url, bearer_token);
   server["configuration"] = OptionalIdentity(
-      Environment("GUFO_EVAL_SERVER_CONFIG"), options.base_url, bearer_token);
+      Environment("MBUFO_EVAL_SERVER_CONFIG"), options.base_url, bearer_token);
   run["server"] = std::move(server);
   Value model_json = Value::object();
   model_json["id"] = SafeIdentity(model.id, options.base_url, bearer_token);
@@ -512,7 +512,7 @@ int Execute(const EvalOptions& options) {
 
   for (std::size_t index = 0; index < options.questions; ++index) {
     const auto& eval_case = suite->cases[index];
-    const std::string user_prompt = gufo::eval::BuildUserPrompt(eval_case);
+    const std::string user_prompt = mbufo::eval::BuildUserPrompt(eval_case);
     Value request_messages = MessagesJson(suite->system_prompt, user_prompt);
     Value report_messages = MessagesJson(suite->system_prompt, user_prompt);
     const Value request =
@@ -524,7 +524,7 @@ int Execute(const EvalOptions& options) {
     item["ds4_index"] = eval_case.ds4_index;
     item["source"] = eval_case.source;
     item["case_id"] = eval_case.id;
-    item["kind"] = std::string(gufo::eval::AnswerKindName(eval_case.kind));
+    item["kind"] = std::string(mbufo::eval::AnswerKindName(eval_case.kind));
     item["messages"] = std::move(report_messages);
     item["expected_answer"] = eval_case.answer;
 
@@ -586,11 +586,11 @@ int Execute(const EvalOptions& options) {
       item["metrics"] = std::move(completion->metrics);
 
       const auto result =
-          gufo::eval::GradeAnswer(eval_case, completion->content);
+          mbufo::eval::GradeAnswer(eval_case, completion->content);
       grade["extraction_status"] = std::string(
-          gufo::eval::ExtractionStatusName(result.extraction.status));
+          mbufo::eval::ExtractionStatusName(result.extraction.status));
       grade["extracted_answer"] =
-          result.extraction.status == gufo::eval::ExtractionStatus::kFound
+          result.extraction.status == mbufo::eval::ExtractionStatus::kFound
               ? Value(result.extraction.answer)
               : Value();
       grade["verdict"] = result.passed ? "passed" : "failed";
@@ -639,7 +639,7 @@ int Execute(const EvalOptions& options) {
 EvalOptions ParseOptions(std::span<const char* const> args,
                          bool* help_requested, std::string* error) {
   EvalOptions options;
-  ArgParser parser("gufo eval",
+  ArgParser parser("mbufo eval",
                    "Run the pinned Antirez DS4 capability questions against "
                    "an OpenAI-compatible server.");
   parser.AddOption("", "--base-url", "URL",
@@ -668,7 +668,7 @@ EvalOptions ParseOptions(std::span<const char* const> args,
 
 void PrintEvalHelp(std::string_view) {
   EvalOptions options;
-  ArgParser parser("gufo eval",
+  ArgParser parser("mbufo eval",
                    "Run the pinned Antirez DS4 capability questions against "
                    "an OpenAI-compatible server.");
   parser.AddOption("", "--base-url", "URL",
@@ -696,10 +696,10 @@ int RunEval(std::span<const char* const> args) {
     return 2;
   }
   if (help_requested) {
-    PrintEvalHelp("gufo");
+    PrintEvalHelp("mbufo");
     return 0;
   }
   return Execute(options);
 }
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli

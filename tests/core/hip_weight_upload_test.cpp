@@ -14,7 +14,7 @@
 
 #include "src/core/hip/weight_upload.hpp"
 
-using gufo::hip::WeightUpload;
+using mbufo::hip::WeightUpload;
 
 namespace {
 
@@ -28,7 +28,7 @@ void Require(bool ok, const std::string& message) {
 struct Files {
   std::filesystem::path directory;
   Files() {
-    char path[] = "/tmp/gufo-weight-upload-XXXXXX";
+    char path[] = "/tmp/mbufo-weight-upload-XXXXXX";
     const char* result = ::mkdtemp(path);
     Require(result != nullptr, "mkdtemp");
     directory = result;
@@ -64,7 +64,7 @@ int main() {
     Require(out.good(), "write shard");
   }
 
-  std::array<gufo::core::GgufMappedRegion, 2> regions;
+  std::array<mbufo::core::GgufMappedRegion, 2> regions;
   for (std::size_t i = 0; i < paths.size(); ++i) {
     regions[i] = {nullptr, source[i].size(),
                   ::open(paths[i].c_str(), O_RDONLY | O_CLOEXEC)};

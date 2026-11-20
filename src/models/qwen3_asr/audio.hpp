@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_AUDIO_HPP_
-#define GUFO_MODELS_QWEN3_ASR_AUDIO_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_AUDIO_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_AUDIO_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 
 inline constexpr std::uint32_t kAudioSampleRate = 16000;
 inline constexpr std::size_t kAudioMelBins = 128;
@@ -58,6 +58,6 @@ struct AudioChunk {
 [[nodiscard]] std::vector<AudioChunk> SplitAudio(
     std::span<const float> waveform, std::size_t maximum_samples);
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr
 
-#endif  // GUFO_MODELS_QWEN3_ASR_AUDIO_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_AUDIO_HPP_

@@ -28,14 +28,14 @@ bool IsPinned(const float* data) {
   return attributes.type == hipMemoryTypeHost;
 }
 
-void Fill(gufo::hip::PromptHiddenBuffer& buffer, std::size_t from) {
+void Fill(mbufo::hip::PromptHiddenBuffer& buffer, std::size_t from) {
   float* data = buffer.Data();
   for (std::size_t i = from; i < buffer.Size(); ++i) {
     data[i] = static_cast<float>(i);
   }
 }
 
-bool Holds(const gufo::hip::PromptHiddenBuffer& buffer) {
+bool Holds(const mbufo::hip::PromptHiddenBuffer& buffer) {
   const auto view = buffer.View();
   for (std::size_t i = 0; i < view.size(); ++i) {
     if (view[i] != static_cast<float>(i)) {
@@ -48,7 +48,7 @@ bool Holds(const gufo::hip::PromptHiddenBuffer& buffer) {
 // A prompt within the bound captures into pinned memory and keeps its
 // capacity across prompts.
 void TestPinnedWithinBound() {
-  gufo::hip::PromptHiddenBuffer buffer;
+  mbufo::hip::PromptHiddenBuffer buffer;
   buffer.Reserve(4096, 8192);
   buffer.Resize(1024);
   Fill(buffer, 0);
@@ -65,7 +65,7 @@ void TestPinnedWithinBound() {
 
 // Growth inside the bound keeps the captured rows.
 void TestPinnedGrowth() {
-  gufo::hip::PromptHiddenBuffer buffer;
+  mbufo::hip::PromptHiddenBuffer buffer;
   buffer.Reserve(1024, 8192);
   buffer.Resize(1024);
   Fill(buffer, 0);
@@ -78,7 +78,7 @@ void TestPinnedGrowth() {
 // A larger request uses pageable memory, and growth past the bound moves the
 // captured rows there.
 void TestPageableBeyondBound() {
-  gufo::hip::PromptHiddenBuffer reserved;
+  mbufo::hip::PromptHiddenBuffer reserved;
   reserved.Reserve(16384, 8192);
   reserved.Resize(16384);
   Fill(reserved, 0);
@@ -86,7 +86,7 @@ void TestPageableBeyondBound() {
         "a request past the bound must be pageable");
   Check(Holds(reserved), "pageable capture must keep its rows");
 
-  gufo::hip::PromptHiddenBuffer grown;
+  mbufo::hip::PromptHiddenBuffer grown;
   grown.Reserve(4096, 8192);
   grown.Resize(4096);
   Fill(grown, 0);
@@ -101,18 +101,18 @@ void TestPageableBeyondBound() {
   Check(IsPinned(grown.Data()), "the next bounded prompt must be pinned again");
 }
 
-std::size_t ChargedBytes(const gufo::cache::ResourceLedger& ledger) {
+std::size_t ChargedBytes(const mbufo::cache::ResourceLedger& ledger) {
   return ledger.Snapshot().bytes[static_cast<std::size_t>(
-      gufo::cache::ResourceCategory::kMetadata)];
+      mbufo::cache::ResourceCategory::kMetadata)];
 }
 
 // A ledger is charged for exactly the pinned capacity until the buffer frees
 // it. A refused charge captures into pageable memory and holds nothing.
 void TestLedgerCharge() {
   constexpr std::size_t kLimit = std::size_t{1} << 20;
-  gufo::cache::ResourceLedger ledger({kLimit, kLimit, 0, kLimit});
+  mbufo::cache::ResourceLedger ledger({kLimit, kLimit, 0, kLimit});
   {
-    gufo::hip::PromptHiddenBuffer buffer;
+    mbufo::hip::PromptHiddenBuffer buffer;
     buffer.Reserve(1024, 8192, &ledger);
     Check(IsPinned(buffer.Data()), "a charged capture must be pinned");
     Check(ChargedBytes(ledger) == 1024 * sizeof(float),
@@ -133,8 +133,8 @@ void TestLedgerCharge() {
   }
   Check(ChargedBytes(ledger) == 0, "destruction must release the charge");
 
-  gufo::cache::ResourceLedger small({4096, 4096, 0, 4096});
-  gufo::hip::PromptHiddenBuffer refused;
+  mbufo::cache::ResourceLedger small({4096, 4096, 0, 4096});
+  mbufo::hip::PromptHiddenBuffer refused;
   refused.Reserve(4096, 8192, &small);
   refused.Resize(4096);
   Fill(refused, 0);
@@ -156,9 +156,9 @@ void TestLedgerCharge() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  if (const int gate = gufo::test::GateHipDevice(
-          gufo::test::HipDeviceRequirement::kOptional, "prompt hidden buffer");
-      gate != gufo::test::kHipTestSuccess) {
+  if (const int gate = mbufo::test::GateHipDevice(
+          mbufo::test::HipDeviceRequirement::kOptional, "prompt hidden buffer");
+      gate != mbufo::test::kHipTestSuccess) {
     return gate;
   }
   TestPinnedWithinBound();

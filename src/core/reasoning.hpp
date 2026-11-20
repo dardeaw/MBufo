@@ -1,11 +1,11 @@
-#ifndef GUFO_CORE_REASONING_HPP_
-#define GUFO_CORE_REASONING_HPP_
+#ifndef MBUFO_CORE_REASONING_HPP_
+#define MBUFO_CORE_REASONING_HPP_
 
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 
-namespace gufo {
+namespace mbufo {
 
 /// Provider-neutral reasoning levels accepted by the HTTP and CLI surfaces.
 ///
@@ -27,6 +27,6 @@ struct ReasoningOptions {
   std::optional<std::size_t> budget_tokens;
 };
 
-}  // namespace gufo
+}  // namespace mbufo
 
-#endif  // GUFO_CORE_REASONING_HPP_
+#endif  // MBUFO_CORE_REASONING_HPP_

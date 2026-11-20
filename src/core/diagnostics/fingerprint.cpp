@@ -6,7 +6,7 @@
 #include <iomanip>
 #include <sstream>
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 namespace {
 
@@ -261,4 +261,4 @@ std::string MachineFingerprint::ToHuman() const {
   return oss.str();
 }
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

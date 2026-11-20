@@ -9,6 +9,8 @@ package as the reference and adds synthetic F16/BF16 rows.
       dq_test.cpp <repo>/src/core/compute/gemm/dequant_rows.hip -o dq_test
   ./dq_test <outdir> && python3 dq_cmp.py <outdir>
 """
+import os
+MODELS = os.environ.get('MBUFO_MODELS_DIR', 'models')
 import gguf, json, os, random, sys
 import numpy as np
 from gguf import quants
@@ -17,11 +19,11 @@ out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
 CODE = {'Q4_0': 2, 'Q8_0': 8, 'Q4_K': 12, 'Q5_K': 13, 'Q6_K': 14}
 SRC = {
-    'Q4_0': ('/mnt/nvme-data/gufo-models/gemma-4-26b/gemma-4-26B-A4B-it-Q4_0.gguf', 'blk.0.attn_k.weight'),
-    'Q8_0': ('/mnt/nvme-data/gufo-models/muse-glimmer-30b/Muse-Glimmer-30B-Q8_0.gguf', 'output.weight'),
-    'Q4_K': ('/mnt/nvme-data/gufo-models/muse-glimmer-30b/Muse-Glimmer-30B-UD-Q4_K_XL.gguf', 'token_embd.weight'),
-    'Q5_K': ('/mnt/nvme-data/gufo-models/muse-glimmer-30b/Muse-Glimmer-30B-UD-Q4_K_XL.gguf', 'output.weight'),
-    'Q6_K': ('/mnt/nvme-data/gufo-models/gemma-4-12b/gemma-4-12b-it-Q4_K_M.gguf', 'blk.0.attn_v.weight'),
+    'Q4_0': (MODELS + '/gemma-4-26b/gemma-4-26B-A4B-it-Q4_0.gguf', 'blk.0.attn_k.weight'),
+    'Q8_0': (MODELS + '/muse-glimmer-30b/Muse-Glimmer-30B-Q8_0.gguf', 'output.weight'),
+    'Q4_K': (MODELS + '/muse-glimmer-30b/Muse-Glimmer-30B-UD-Q4_K_XL.gguf', 'token_embd.weight'),
+    'Q5_K': (MODELS + '/muse-glimmer-30b/Muse-Glimmer-30B-UD-Q4_K_XL.gguf', 'output.weight'),
+    'Q6_K': (MODELS + '/gemma-4-12b/gemma-4-12b-it-Q4_K_M.gguf', 'blk.0.attn_v.weight'),
 }
 rng = random.Random(7)
 meta = []

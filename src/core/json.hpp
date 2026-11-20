@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_JSON_HPP_
-#define GUFO_CORE_JSON_HPP_
+#ifndef MBUFO_CORE_JSON_HPP_
+#define MBUFO_CORE_JSON_HPP_
 
 #include <charconv>
 #include <cmath>
@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::json {
+namespace mbufo::json {
 
 /// Minimal, ordered JSON value with a recursive-descent parser and serializer.
 /// Object member order is preserved via a vector of (key, value) pairs.
@@ -584,6 +584,6 @@ struct Parser {
   return value;
 }
 
-}  // namespace gufo::json
+}  // namespace mbufo::json
 
-#endif  // GUFO_CORE_JSON_HPP_
+#endif  // MBUFO_CORE_JSON_HPP_

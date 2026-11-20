@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_HIP_DETAIL_HIPBLASLT_PLAN_DATABASE_HPP_
-#define GUFO_CORE_HIP_DETAIL_HIPBLASLT_PLAN_DATABASE_HPP_
+#ifndef MBUFO_CORE_HIP_DETAIL_HIPBLASLT_PLAN_DATABASE_HPP_
+#define MBUFO_CORE_HIP_DETAIL_HIPBLASLT_PLAN_DATABASE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace gufo::hip::detail {
+namespace mbufo::hip::detail {
 
 inline constexpr std::uint32_t kHipblasLtPlanDatabaseSchemaVersion = 1;
 
@@ -74,6 +74,6 @@ struct HipblasLtPlanDatabaseLoadResult {
     const HipblasLtPlanDatabase& database, std::size_t batch_size,
     std::size_t m, std::size_t k, HipblasLtPlanDataType data_type);
 
-}  // namespace gufo::hip::detail
+}  // namespace mbufo::hip::detail
 
-#endif  // GUFO_CORE_HIP_DETAIL_HIPBLASLT_PLAN_DATABASE_HPP_
+#endif  // MBUFO_CORE_HIP_DETAIL_HIPBLASLT_PLAN_DATABASE_HPP_

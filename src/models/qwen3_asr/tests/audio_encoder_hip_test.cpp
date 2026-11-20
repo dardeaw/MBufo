@@ -19,7 +19,7 @@
 #include "src/models/qwen3_asr/hip/audio_encoder_runtime.hpp"
 #include "src/models/qwen3_asr/hip/audio_ops.hpp"
 
-namespace qwen3_asr_hip = gufo::models::qwen3_asr::hip;
+namespace qwen3_asr_hip = mbufo::models::qwen3_asr::hip;
 
 namespace {
 

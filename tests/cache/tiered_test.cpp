@@ -25,8 +25,8 @@ void operator delete(void* pointer, std::size_t) noexcept {
   std::free(pointer);
 }
 
-using namespace gufo::cache;
-using namespace gufo::cache::testing;
+using namespace mbufo::cache;
+using namespace mbufo::cache::testing;
 namespace fs = std::filesystem;
 namespace {
 void DeeperDiskAndRAMEviction() {

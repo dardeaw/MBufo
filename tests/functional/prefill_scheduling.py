@@ -66,6 +66,6 @@ def check_prefill_scheduling(client, model, checks, chat_result, width, context)
     for row in (control, result, completed):
         usage = row["usage"]
         assert usage["cached_tokens"] == 0, usage
-        assert usage["gufo"]["prefill_tokens"] == usage["prompt_tokens"], usage
+        assert usage["mbufo"]["prefill_tokens"] == usage["prompt_tokens"], usage
     assert completed["usage"]["completion_tokens"] == 1, completed
     assert trace.updates[-1]["processed"] == trace.updates[-1]["total"], trace.updates

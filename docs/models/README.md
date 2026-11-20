@@ -28,7 +28,7 @@ reference evidence needed by a maintained check. Old experiment records remain
 in Git history. See [benchmark methodology](../BENCHMARKS.md).
 
 Quality reports distinguish agreement with an independent model implementation
-from consistency between Gufo execution modes. Greedy speculative decoding
+from consistency between MBufo execution modes. Greedy speculative decoding
 should reproduce AR; sampled speculation can use different random draws.
 Seeded replay is checked within the same execution configuration.
 For numerical comparisons, lower KL divergence, total variation, relative L2

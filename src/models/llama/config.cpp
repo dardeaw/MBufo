@@ -1,6 +1,6 @@
 #include "src/models/llama/config.hpp"
 
-namespace gufo::models::llama {
+namespace mbufo::models::llama {
 namespace {
 
 struct Reader {
@@ -77,4 +77,4 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   return c;
 }
 
-}  // namespace gufo::models::llama
+}  // namespace mbufo::models::llama

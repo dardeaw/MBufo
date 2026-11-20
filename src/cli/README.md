@@ -1,11 +1,11 @@
 # CLI (`src/cli`)
 
-This directory contains the unified `gufo` CLI.
+This directory contains the unified `mbufo` CLI.
 
 ## Philosophy
 
-1. **One Binary**: All user-facing capabilities (`serve`, `prompt`, `chat`, `bench`, `video`, `diagnose`, `probe`) live under the single `gufo` executable.
-2. **Subcommands Over Flag Soup**: Model-specific or modality-specific options belong under explicit subcommands (e.g. `gufo serve ... llm ...`, `gufo serve ... video ...`), keeping global options clean and self-documenting.
+1. **One Binary**: All user-facing capabilities (`serve`, `prompt`, `chat`, `bench`, `video`, `diagnose`, `probe`) live under the single `mbufo` executable.
+2. **Subcommands Over Flag Soup**: Model-specific or modality-specific options belong under explicit subcommands (e.g. `mbufo serve ... llm ...`, `mbufo serve ... video ...`), keeping global options clean and self-documenting.
 3. **Declarative Parsing**: Flags and arguments are declared and bound to typed struct fields using `ArgParser` (`src/cli/arg_parser.hpp`). Never parse raw `argv` manually.
 4. **CLI Layer vs Engine Core**: Code in `src/cli/` handles argument parsing, terminal output, and daemon lifecycle. Heavy computational work and kernel dispatches belong in `src/models/` and `src/core/`.
 
@@ -17,11 +17,11 @@ Each top-level command has its own dedicated subdirectory:
 src/cli/
 ├── main.cpp              # Root dispatcher & global flags (-h, -v, help)
 ├── arg_parser.hpp        # Declarative type-safe argument parser
-├── bench/                # `gufo bench` (model throughput & kernel benchmarks)
-├── diagnose/             # `gufo diagnose` & `gufo probe` (hardware inventory & toolchain probe)
-├── prompt/               # `gufo prompt` & `gufo chat` (text generation CLI & REPL)
-├── serve/                # `gufo serve` (HTTP API server: `llm`, `video`, `audio`)
-└── video/                # `gufo video` (MiniMax H3 text-to-video generator CLI)
+├── bench/                # `mbufo bench` (model throughput & kernel benchmarks)
+├── diagnose/             # `mbufo diagnose` & `mbufo probe` (hardware inventory & toolchain probe)
+├── prompt/               # `mbufo prompt` & `mbufo chat` (text generation CLI & REPL)
+├── serve/                # `mbufo serve` (HTTP API server: `llm`, `video`, `audio`)
+└── video/                # `mbufo video` (MiniMax H3 text-to-video generator CLI)
 ```
 
 ## Adding a Command or Flag
@@ -33,7 +33,7 @@ src/cli/
   - **Descriptions**: Keep descriptions concise yet explanatory (include defaults and expected value formats).
   - **Partial Implementation Notation**: If a flag is not yet supported for all models/backends, annotate the description with `(TODO: <model>)` (e.g., `(TODO: deepseek)` or `(TODO: qwen)`).
 - **Adding a Command**:
-  1. Create `src/cli/<command>/<command>.hpp` and `<command>.cpp` in `namespace gufo::cli`.
+  1. Create `src/cli/<command>/<command>.hpp` and `<command>.cpp` in `namespace mbufo::cli`.
   2. Implement `Run<Command>(std::span<const char* const> args)`.
   3. Register the routing in `src/cli/main.cpp`.
-  4. Add the source files to `CMakeLists.txt` under `add_executable(gufo ...)` and write unit tests in `tests/cli/`.
+  4. Add the source files to `CMakeLists.txt` under `add_executable(mbufo ...)` and write unit tests in `tests/cli/`.

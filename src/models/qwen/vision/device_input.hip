@@ -4,7 +4,7 @@
 
 #include "src/models/qwen/vision/device_input.hpp"
 
-namespace gufo::models::qwen::vision {
+namespace mbufo::models::qwen::vision {
 namespace {
 void Check(hipError_t error) {
   if (error != hipSuccess)
@@ -123,4 +123,4 @@ void DeviceInput::Inject(float* hidden, std::uint32_t position,
     Check(hipGetLastError());
   }
 }
-}  // namespace gufo::models::qwen::vision
+}  // namespace mbufo::models::qwen::vision

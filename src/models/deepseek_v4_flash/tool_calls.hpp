@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_TOOL_CALLS_HPP_
-#define GUFO_MODELS_DEEPSEEK_V4_FLASH_TOOL_CALLS_HPP_
+#ifndef MBUFO_MODELS_DEEPSEEK_V4_FLASH_TOOL_CALLS_HPP_
+#define MBUFO_MODELS_DEEPSEEK_V4_FLASH_TOOL_CALLS_HPP_
 
 #include <array>
 #include <cstddef>
@@ -12,7 +12,7 @@
 
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 
 /// The literals that frame a DeepSeek tool invocation. AppendToolCalls renders
 /// with the canonical member of each spelling family, and
@@ -72,6 +72,6 @@ void ScanDeepSeekToolCalls(
     std::vector<std::pair<std::size_t, std::size_t>>* spans = nullptr,
     bool partial = false);
 
-}  // namespace gufo::models::deepseek_v4_flash
+}  // namespace mbufo::models::deepseek_v4_flash
 
-#endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_TOOL_CALLS_HPP_
+#endif  // MBUFO_MODELS_DEEPSEEK_V4_FLASH_TOOL_CALLS_HPP_

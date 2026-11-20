@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 /// Retrieval draft source over the token history. When the text so far ends in
 /// a phrase that occurred earlier, the tokens that followed that occurrence are
@@ -118,4 +118,4 @@ private:
   std::vector<std::int32_t> head_;
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next

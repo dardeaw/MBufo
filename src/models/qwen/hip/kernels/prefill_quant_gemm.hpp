@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_KERNELS_PREFILL_QUANT_GEMM_HPP_
-#define GUFO_MODELS_QWEN_HIP_KERNELS_PREFILL_QUANT_GEMM_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_KERNELS_PREFILL_QUANT_GEMM_HPP_
+#define MBUFO_MODELS_QWEN_HIP_KERNELS_PREFILL_QUANT_GEMM_HPP_
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
@@ -17,7 +17,7 @@
 #include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
@@ -561,6 +561,6 @@ namespace detail {
                                                hipStream_t stream);
 }  // namespace detail
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif
 #endif

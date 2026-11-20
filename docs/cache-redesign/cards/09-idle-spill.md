@@ -140,7 +140,7 @@ Measured 2026-10-09 on Linux 7.2.9, Ryzen AI MAX+ 395 / Radeon 8060S
 `flake.lock`: GCC 15.3.0, HIP Clang 22.0.0, ROCm 7.2.3, HIP runtime 70253211.
 
 ```sh
-nix develop -c cmake --preset release -DGUFO_BUILD_TOOLS=ON
+nix develop -c cmake --preset release -DMBUFO_BUILD_TOOLS=ON
 nix develop -c cmake --build --preset release --target cache_idle_spill_bench --parallel 4
 nix develop -c build/release/cache_idle_spill_bench
 ```

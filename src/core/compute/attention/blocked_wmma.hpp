@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_WMMA_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_WMMA_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_BLOCKED_WMMA_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_BLOCKED_WMMA_HPP_
 
 // Blocked-Q8 WMMA prefill attention for SWA (d == 256) layers: the shared
 // 34-byte blocked KV caches (32x int8 codes + f16 per-32-block scale) are
@@ -17,7 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::blocked_wmma {
+namespace mbufo::core::compute::blocked_wmma {
 
 // Element codec tag of the shared blocked Q8 KV layout: symmetric INT8 over
 // amax/127 with a per-32-block f16 scale (34 bytes per block).
@@ -36,7 +36,7 @@ struct KvCodecQ8 {
 /// `window` is the SWA window (0 = dense causal); the pointer shift is
 /// applied inside. `score_scale` multiplies the QK scores (default 1.0).
 /// `key_block_bytes` / `value_block_bytes` select each side's block layout
-/// (34 = 8-bit codes, 18 = packed 4-bit codes for the GUFO_KV_Q4/V4 grids).
+/// (34 = 8-bit codes, 18 = packed 4-bit codes for the MBUFO_KV_Q4/V4 grids).
 /// Returns false when the shape is unsupported (caller falls back to the
 /// scalar direct read); never launches with a zero grid.
 template <typename Codec, std::uint32_t kHeadDim>
@@ -49,6 +49,6 @@ bool AttentionBlockedWmma(const float* q, const std::uint8_t* k_cache,
                           std::uint32_t key_block_bytes = 34,
                           std::uint32_t value_block_bytes = 34);
 
-}  // namespace gufo::core::compute::blocked_wmma
+}  // namespace mbufo::core::compute::blocked_wmma
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_BLOCKED_WMMA_HPP_
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_BLOCKED_WMMA_HPP_

@@ -68,7 +68,7 @@ def parse(path: Path, repetitions: int,
 def summarize(ar_log: Path, dspark_log: Path, repetitions: int, output: Path,
               concurrency: tuple[int, ...] = CONCURRENCY,
               sampling: dict | None = None) -> None:
-    """Validate a matched AR/DSpark pair of `gufo bench -v` logs.
+    """Validate a matched AR/DSpark pair of `mbufo bench -v` logs.
 
     `sampling` records the sampling controls used for both logs. Stochastic
     DSpark guarantees replay within a fixed configuration, not the AR seed
@@ -105,7 +105,7 @@ def summarize(ar_log: Path, dspark_log: Path, repetitions: int, output: Path,
             "acceptance": accepted / drafted if drafted else None,
         })
     report = {
-        "schema": "gufo.ds4-benchmark.v1", "repetitions": repetitions,
+        "schema": "mbufo.ds4-benchmark.v1", "repetitions": repetitions,
         "units": "aggregate prefill / per-user generation, tokens per second",
         "mode": mode, "sampling": sampling, "concurrency": list(concurrency),
         "logs_sha256": {

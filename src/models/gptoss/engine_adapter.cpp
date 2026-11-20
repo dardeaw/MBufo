@@ -5,7 +5,7 @@
 
 #include <utility>
 
-namespace gufo::models::gptoss {
+namespace mbufo::models::gptoss {
 
 GptossEngineSession::GptossEngineSession(std::shared_ptr<Model> model,
                                          std::unique_ptr<Session> inner)
@@ -118,9 +118,67 @@ std::uint32_t GptossEngineModel::MaxContext() const noexcept {
   return model_->MaxContext();
 }
 
+core::engine::MoeGeometry DescribeMoeGeometry(const Model& model) {
+  const auto& w = model.weights();
+  const auto& c = w.config;
+  core::engine::MoeGeometry g;
+  if (c.num_experts == 0) return g;
+  g.experts = c.num_experts;
+  g.top_k = c.experts_used;
+  g.hidden = c.hidden_size;
+  g.expert_ff = c.expert_ff;
+  g.shared_ff = 0;
+  for (const auto& l : w.layers) {
+    if (l.gate_up_exps.size_bytes == 0) continue;
+    g.AddLayer(static_cast<int>(l.gate_up_exps.type), static_cast<int>(l.gate_up_exps.type), static_cast<int>(l.down_exps.type));
+  }
+  return g;
+}
+
+core::engine::MoeKernelInfo DescribeMoeKernels() {
+  core::engine::MoeKernelInfo k;
+  k.origin = core::engine::MoeKernelOrigin::kCoreRowDot;
+  k.gate_up_kernel = "core MoeDecodeGateUpActMxfp4 (RowDot<MXFP4> block math, SwiGLU-OAI, biases)";
+  k.down_kernel = "core MoeDecodeDownEpiMxfp4 (RowDot<MXFP4> block math, weighted epilogue)";
+  k.masks_inactive_slots = true;
+  k.graph_capture_safe = true;
+  return k;
+}
+
+core::engine::MoeGeometry GptossEngineModel::MoeGeometryInfo() const { return DescribeMoeGeometry(*model_); }
+core::engine::MoeKernelInfo GptossEngineModel::MoeKernelsInfo() const { return DescribeMoeKernels(); }
+
 std::size_t GptossEngineModel::ResidentBytes() const noexcept {
   return model_->ResidentBytes();
 }
+
+
+core::engine::AttentionGeometry DescribeAttentionGeometry(const Model& model) {
+  const auto& c = model.weights().config;
+  core::engine::AttentionGeometry g;
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    core::engine::AttentionGroup a;
+    a.heads = c.num_heads;
+    a.kv_heads = c.num_kv_heads;
+    a.head_dim = c.head_dim;
+    a.window = c.LayerWindow(il);
+    a.sink = true;
+    g.AddLayer(a);
+  }
+  return g;
+}
+
+core::engine::AttentionKernelInfo DescribeAttentionKernels() {
+  core::engine::AttentionKernelInfo k;
+  k.decode = {core::engine::AttentionKernelOrigin::kCore, "core AttentionBlockedSinkRowChunk (direct Q8 read, sink + window)", "",
+              "F16 KV keeps the earlier sink kernels", true};
+  k.prefill = {core::engine::AttentionKernelOrigin::kModelPrivate, "gptoss sink flash prefill",
+               "learned-sink softmax prefill is not in the core WMMA flash kernels yet", "", false};
+  return k;
+}
+
+core::engine::AttentionGeometry GptossEngineModel::AttentionGeometryInfo() const { return DescribeAttentionGeometry(*model_); }
+core::engine::AttentionKernelInfo GptossEngineModel::AttentionKernelsInfo() const { return DescribeAttentionKernels(); }
 
 std::string GptossEngineModel::ModelName() const {
   return model_->ModelName();
@@ -141,7 +199,7 @@ namespace {
 // gptoss::ModelOptions (zero/empty fields keep engine defaults).
 const core::engine::EngineRegistrar kRegisterGptossEngine(
     core::engine::EngineBackendInfo{
-        "gptoss", "GPT-OSS MoE decoder (q8 KV / f16 KV)"},
+        "gptoss", "GPT-OSS MoE decoder (q8 KV / f16 KV)", true},
     [](const core::engine::EngineLoadRequest& request,
        std::string* error_msg) -> std::shared_ptr<core::engine::EngineModel> {
       ModelOptions options;
@@ -156,4 +214,4 @@ const core::engine::EngineRegistrar kRegisterGptossEngine(
 
 }  // namespace
 
-}  // namespace gufo::models::gptoss
+}  // namespace mbufo::models::gptoss

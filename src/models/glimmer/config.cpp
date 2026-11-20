@@ -1,6 +1,6 @@
 #include "src/models/glimmer/config.hpp"
 
-namespace gufo::models::glimmer {
+namespace mbufo::models::glimmer {
 namespace {
 
 struct Reader {
@@ -93,4 +93,4 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   return c;
 }
 
-}  // namespace gufo::models::glimmer
+}  // namespace mbufo::models::glimmer

@@ -38,7 +38,7 @@ enum class Route { kScalar, kWave };
 // Independent equations from z-lab/dflash model_mlx.py, pinned in eval/README.
 // Keep these small operator checks with the ring/attention checks.
 void TestDynamicConvolution() {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   constexpr std::uint32_t tokens = 8, hidden = 5120, taps = 2, group_size = 16;
   constexpr std::uint32_t groups = hidden / group_size;
   std::vector<float> input(tokens * hidden),
@@ -52,7 +52,7 @@ void TestDynamicConvolution() {
   DeviceBuffer<float> d_input(input), d_dynamic(dynamic), d_base(base),
       d_output(input.size());
   for (std::uint32_t side = 0; side < 2; ++side) {
-    gufo::hip::kernels::LaunchDFlashGroupedDynamicConv(
+    mbufo::hip::kernels::LaunchDFlashGroupedDynamicConv(
         d_input.data(), d_dynamic.data(), d_base.data(), d_output.data(),
         tokens, hidden, taps, group_size, side, nullptr);
     const auto output = d_output.CopyToHost();
@@ -66,7 +66,7 @@ void TestDynamicConvolution() {
                                channel / group_size] *
                        value;
         }
-        gufo::test::Expect(
+        mbufo::test::Expect(
             std::isfinite(output[token * hidden + channel]) &&
                 std::abs(output[token * hidden + channel] - reference) < 2e-7,
             "DFlash grouped convolution differs from the causal equation");
@@ -77,8 +77,8 @@ void TestDynamicConvolution() {
 
 void TestProposalVerification(std::span<const std::uint32_t> ids,
                               std::span<const float> q, std::uint32_t vocab) {
-  using gufo::test::DeviceBuffer;
-  using gufo::test::Expect;
+  using mbufo::test::DeviceBuffer;
+  using mbufo::test::Expect;
   Expect(std::ranges::find(ids, 0U) == ids.end() &&
              std::ranges::find(ids, 1U) == ids.end(),
          "residual fixture must include tokens outside draft top-k");
@@ -90,18 +90,18 @@ void TestProposalVerification(std::span<const std::uint32_t> ids,
   logits[ids[2]] = std::log(0.15F);
   DeviceBuffer<float> d_logits(logits);
   DeviceBuffer<std::uint32_t> d_token(1), d_accepted(1);
-  gufo::hip::GpuSamplingWorkspace workspace;
-  gufo::hip::AllocateGpuSamplingWorkspace(&workspace, vocab, ids.size());
+  mbufo::hip::GpuSamplingWorkspace workspace;
+  mbufo::hip::AllocateGpuSamplingWorkspace(&workspace, vocab, ids.size());
   for (const bool filtered : {false, true}) {
-    gufo::sampling::SamplingConfig config;
+    mbufo::sampling::SamplingConfig config;
     config.temperature = filtered ? 0.8F : 1.0F;
     config.top_k = filtered ? 4 : 0;
     config.top_p = filtered ? 0.95F : 1.0F;
     config.min_p = filtered ? 0.05F : 0.0F;
     config.repeat_penalty = filtered ? 1.2F : 1.0F;
     const std::vector<std::uint32_t> history = {ids[0], ids[0]};
-    const auto p = gufo::sampling::BuildDistribution(logits, config, history);
-    std::vector<gufo::sampling::Probability> residual;
+    const auto p = mbufo::sampling::BuildDistribution(logits, config, history);
+    std::vector<mbufo::sampling::Probability> residual;
     double rejection_mass = 0;
     for (const auto& entry : p.entries()) {
       const auto found = std::ranges::find(ids, entry.token);
@@ -115,20 +115,20 @@ void TestProposalVerification(std::span<const std::uint32_t> ids,
     // Linear GPU sampling walks token IDs; the filtered route walks sorted
     // target logits. Select a midpoint in every nonempty residual interval.
     if (!filtered)
-      std::ranges::sort(residual, {}, &gufo::sampling::Probability::token);
-    gufo::hip::GpuSamplingParameters parameters{
+      std::ranges::sort(residual, {}, &mbufo::sampling::Probability::token);
+    mbufo::hip::GpuSamplingParameters parameters{
         .temperature = config.temperature,
         .top_k = config.top_k,
         .top_p = config.top_p,
         .min_p = config.min_p,
         .repeat_penalty = config.repeat_penalty,
     };
-    const std::array<gufo::sampling::TokenPenalty, 1> penalties{
+    const std::array<mbufo::sampling::TokenPenalty, 1> penalties{
         {{ids[0], 0, 1}}};
     const auto verify = [&](std::size_t candidate, double accept_u,
                             double residual_u, bool accepted,
                             std::uint32_t expected) {
-      gufo::hip::LaunchGPUSpeculativeSampling(
+      mbufo::hip::LaunchGPUSpeculativeSampling(
           d_logits.data(), d_token.data(), d_accepted.data(), vocab, parameters,
           ids[candidate], q[candidate], ids.data(), q.data(), ids.size(),
           accept_u, residual_u, penalties.data(), filtered ? 1 : 0, &workspace);
@@ -162,11 +162,11 @@ void TestProposalVerification(std::span<const std::uint32_t> ids,
              "selector plus verifier must recover the complete target "
              "distribution");
   }
-  gufo::hip::FreeGpuSamplingWorkspace(&workspace);
+  mbufo::hip::FreeGpuSamplingWorkspace(&workspace);
 }
 
 void TestSelector(std::uint32_t vocab) {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   // Cross a partial-top-k partition boundary and leave a short final partition.
   constexpr std::uint32_t rank = 256, anchor = 3;
   std::vector<float> logits(vocab), projected(rank);
@@ -196,7 +196,7 @@ void TestSelector(std::uint32_t vocab) {
   DeviceBuffer<std::uint32_t> d_anchor(std::vector<std::uint32_t>{anchor}),
       d_selected(1);
   const auto scratch_size =
-      gufo::hip::kernels::DFlashSelectorScratchElements(vocab);
+      mbufo::hip::kernels::DFlashSelectorScratchElements(vocab);
   DeviceBuffer<float> d_scores(scratch_size);
   DeviceBuffer<std::uint32_t> d_ids(scratch_size);
   std::vector<std::uint32_t> sorted(vocab);
@@ -219,14 +219,14 @@ void TestSelector(std::uint32_t vocab) {
       // Unwritten partial slots must never enter the candidate set.
       d_scores.CopyFrom(std::vector<float>(scratch_size, 1e20F));
       d_ids.CopyFrom(std::vector<std::uint32_t>(scratch_size, vocab - 1));
-      gufo::hip::kernels::LaunchDFlashSelectorStep(
+      mbufo::hip::kernels::LaunchDFlashSelectorStep(
           d_logits.data(), d_projected.data(), d_predecessors.data(),
           d_successors.data(), d_anchor.data(), d_selected.data(),
           d_confidence.data(), d_scores.data(), d_ids.data(), temperature,
           d_uniform.data(), d_candidates.data(), d_probabilities.data(), vocab,
           rank, top_k, nullptr);
       const auto candidates = d_candidates.CopyToHost();
-      gufo::test::Expect(
+      mbufo::test::Expect(
           std::equal(candidates.begin(), candidates.end(), sorted.begin()),
           "DFlash selector top-k differs from full vocabulary sort");
       const auto probabilities = d_probabilities.CopyToHost();
@@ -249,7 +249,7 @@ void TestSelector(std::uint32_t vocab) {
                       << " actual=" << probabilities[c] << " expected=" << p
                       << '\n';
           }
-          gufo::test::Expect(std::isfinite(probabilities[c]) &&
+          mbufo::test::Expect(std::isfinite(probabilities[c]) &&
                                  std::abs(probabilities[c] - p) < 2e-6,
                              "DFlash sparse proposal probability is incorrect");
           const double previous = cumulative;
@@ -258,7 +258,7 @@ void TestSelector(std::uint32_t vocab) {
             selected = c;
         }
       }
-      gufo::test::Expect(d_selected.CopyToHost()[0] == sorted[selected],
+      mbufo::test::Expect(d_selected.CopyToHost()[0] == sorted[selected],
                          "DFlash selector chose the wrong candidate");
       const double confidence =
           temperature > 0
@@ -266,10 +266,10 @@ void TestSelector(std::uint32_t vocab) {
               : 1.0;
       if (temperature == 0) {
         for (std::size_t c = 0; c < top_k; ++c)
-          gufo::test::Expect(probabilities[c] == (c == selected ? 1.0F : 0.0F),
+          mbufo::test::Expect(probabilities[c] == (c == selected ? 1.0F : 0.0F),
                              "greedy proposal probabilities must be one-hot");
       }
-      gufo::test::Expect(
+      mbufo::test::Expect(
           std::abs(d_confidence.CopyToHost()[0] - confidence) < 2e-6,
           "DFlash selected-token probability is incorrect");
       if (vocab == 2065 && top_k == 16 && temperature == 0.8F)
@@ -279,7 +279,7 @@ void TestSelector(std::uint32_t vocab) {
 }
 
 void TestSelectorZeroUniform() {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   const auto bf16 = [](float value) {
     return static_cast<std::uint16_t>(std::bit_cast<std::uint32_t>(value) >>
                                       16);
@@ -293,23 +293,23 @@ void TestSelectorZeroUniform() {
       successors(std::vector<std::uint16_t>{bf16(-1000), bf16(0), bf16(0)});
   DeviceBuffer<std::uint32_t> anchor(std::vector<std::uint32_t>{2}),
       selected(1), candidates(2);
-  const auto size = gufo::hip::kernels::DFlashSelectorScratchElements(3);
+  const auto size = mbufo::hip::kernels::DFlashSelectorScratchElements(3);
   DeviceBuffer<float> scores(size);
   DeviceBuffer<std::uint32_t> ids(size);
-  gufo::hip::kernels::LaunchDFlashSelectorStep(
+  mbufo::hip::kernels::LaunchDFlashSelectorStep(
       logits.data(), projected.data(), predecessors.data(), successors.data(),
       anchor.data(), selected.data(), confidence.data(), scores.data(),
       ids.data(), 1.0F, uniform.data(), candidates.data(), probabilities.data(),
       3, 1, 2, nullptr);
-  gufo::test::Expect(
+  mbufo::test::Expect(
       selected.CopyToHost()[0] == 1 && confidence.CopyToHost()[0] == 1.0F,
       "a zero random draw must not select zero probability");
 }
 
 void TestBatchedSelector() {
-  using gufo::hip::kernels::DFlashSelectorSequence;
-  using gufo::test::DeviceBuffer;
-  using gufo::test::Expect;
+  using mbufo::hip::kernels::DFlashSelectorSequence;
+  using mbufo::test::DeviceBuffer;
+  using mbufo::test::Expect;
   constexpr std::uint32_t vocab = 2065, rank = 32;
   std::vector<std::uint16_t> predecessor(vocab * rank), successor(vocab * rank);
   for (std::size_t index = 0; index < predecessor.size(); ++index) {
@@ -353,7 +353,7 @@ void TestBatchedSelector() {
         d_uniforms(uniforms), d_confidences(rows);
     DeviceBuffer<std::uint32_t> d_tokens(tokens);
     const auto partials =
-        gufo::hip::kernels::DFlashSelectorScratchElements(vocab);
+        mbufo::hip::kernels::DFlashSelectorScratchElements(vocab);
     DeviceBuffer<float> d_scores(rows * partials);
     DeviceBuffer<std::uint32_t> d_ids(rows * partials);
     for (const auto top_k : {1U, 7U, 16U}) {
@@ -366,7 +366,7 @@ void TestBatchedSelector() {
         const auto sequence = sequences[index];
         for (std::uint32_t step = 0; step < sequence.count; ++step) {
           const auto row = first_row + step;
-          gufo::hip::kernels::LaunchDFlashSelectorStep(
+          mbufo::hip::kernels::LaunchDFlashSelectorStep(
               d_logits.data() + row * vocab, d_hidden.data() + row * rank,
               d_predecessor.data(), d_successor.data(),
               d_tokens.data() + row + index, d_tokens.data() + row + index + 1U,
@@ -388,7 +388,7 @@ void TestBatchedSelector() {
       d_confidences.CopyFrom(std::vector<float>(rows, -1.0F));
       d_scores.CopyFrom(std::vector<float>(rows * partials, 1e20F));
       d_ids.CopyFrom(std::vector<std::uint32_t>(rows * partials, vocab - 1));
-      gufo::hip::kernels::LaunchDFlashSelectorBatch(
+      mbufo::hip::kernels::LaunchDFlashSelectorBatch(
           d_logits.data(), d_hidden.data(), d_predecessor.data(),
           d_successor.data(), d_tokens.data(), d_confidences.data(),
           d_scores.data(), d_ids.data(), d_uniforms.data(), d_candidates.data(),
@@ -486,18 +486,18 @@ float MaxRouteDifference(Route route, std::uint32_t current_pos,
   HIP_CHECK(hipMemset(d_wave_out, 0, q_elements * sizeof(float)));
 
   const float scale = 1.0F / std::sqrt(static_cast<float>(kHeadDim));
-  gufo::hip::kernels::LaunchDFlashNonCausalAttentionScalar(
+  mbufo::hip::kernels::LaunchDFlashNonCausalAttentionScalar(
       d_q, d_injected_k, d_injected_v, d_block_k, d_block_v, d_scalar_out,
       current_pos, history_length, block_count, kSlidingWindow, kNumQueryHeads,
       kNumKvHeads, kHeadDim, scale, nullptr, current_pos + block_count);
   if (route == Route::kWave) {
-    gufo::hip::kernels::LaunchDFlashNonCausalAttentionWave(
+    mbufo::hip::kernels::LaunchDFlashNonCausalAttentionWave(
         d_q, d_ring_k, d_ring_v, d_block_k, d_block_v, d_wave_out, current_pos,
         history_length, block_count, kSlidingWindow, kNumQueryHeads,
         kNumKvHeads, kHeadDim, scale, nullptr, kSlidingWindow);
   }
   if (route == Route::kScalar) {
-    gufo::hip::kernels::LaunchDFlashNonCausalAttentionScalar(
+    mbufo::hip::kernels::LaunchDFlashNonCausalAttentionScalar(
         d_q, d_ring_k, d_ring_v, d_block_k, d_block_v, d_wave_out, current_pos,
         history_length, block_count, kSlidingWindow, kNumQueryHeads,
         kNumKvHeads, kHeadDim, scale, nullptr, kSlidingWindow);
@@ -523,7 +523,7 @@ float MaxRouteDifference(Route route, std::uint32_t current_pos,
 
   float max_difference = 0.0F;
   for (std::size_t index = 0; index < q_elements; ++index) {
-    gufo::test::Expect(std::isfinite(wave_out[index]),
+    mbufo::test::Expect(std::isfinite(wave_out[index]),
                        "DFlash candidate attention produced a non-finite "
                        "output");
     max_difference =
@@ -565,7 +565,7 @@ float MaxRouteDifference(Route route, std::uint32_t current_pos,
           reference +=
               scores[key] * values[row * kv_dim + kv_head * kHeadDim + d];
         }
-        gufo::test::Expect(
+        mbufo::test::Expect(
             std::abs(wave_out[q_offset + d] - reference / denominator) < 1e-5,
             "DFlash attention differs from the windowed softmax equation");
       }
@@ -577,14 +577,14 @@ float MaxRouteDifference(Route route, std::uint32_t current_pos,
 void TestRouteEquivalence(std::uint32_t current_pos,
                           std::uint32_t history_length, const char* label,
                           std::uint32_t block_count = kBlockCount) {
-  gufo::test::Expect(MaxRouteDifference(Route::kScalar, current_pos,
+  mbufo::test::Expect(MaxRouteDifference(Route::kScalar, current_pos,
                                         history_length, block_count) == 0.0F,
                      "ring addressing must preserve scalar attention exactly");
   const float wave = MaxRouteDifference(Route::kWave, current_pos,
                                         history_length, block_count);
   std::cout << "DFlash non-causal attention " << label
             << ": max |scalar - wave| = " << wave << "\n";
-  gufo::test::Expect(wave < 1e-5F,
+  mbufo::test::Expect(wave < 1e-5F,
                      "DFlash wave attention diverges from the reference");
 }
 
@@ -595,9 +595,9 @@ void TestRouteEquivalence(std::uint32_t current_pos,
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen DFlash non-causal attention ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

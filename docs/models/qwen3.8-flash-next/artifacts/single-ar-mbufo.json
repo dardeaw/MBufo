@@ -1,0 +1,219 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.1.8",
+      "memoryTotalBytes": 134309875712,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "fe5929d418cfe1f7e3aa4a09199012c1fa064859f1fc762a8cbcda970358f158",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-18",
+  "mode": null,
+  "model": {
+    "id": "Qwen3.8-Flash-Next",
+    "variant": null
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.161 tokens/word, template overhead 12 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "command": "mbufo serve --port 34269 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "b7df29a4a061aef9f0eb72057935f0523ab707463a2ad1f9767d77922f866839",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2040
+        }
+      ],
+      "pp": 1801.01,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 28.29,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "command": "mbufo serve --port 34269 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 12249,
+          "completion_sha256": "aee5460f9b1e76e10f3862a3b7f1a778deeb1587327bd8f78472eb32faeac08f",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2047
+        }
+      ],
+      "pp": 1710.64,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 28.21,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "command": "mbufo serve --port 34269 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 130932,
+          "completion_sha256": "1ea9ca664c0b22e298138b2c634b3bdf1b8c34ecb56006a0e9a274b167bacdb5",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2047
+        }
+      ],
+      "pp": 1557.18,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 27.85,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "command": "mbufo serve --port 34269 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 16324,
+          "completion_sha256": "3fea49a4076c86669cbf3eb1029c1347dcb5d2894da74efb33dbc728a330fd9a",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2047
+        }
+      ],
+      "pp": 1706.86,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 28.25,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "command": "mbufo serve --port 34269 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 32718,
+          "completion_sha256": "dd75440f01c4ae6baa82078076db815d0d62b81265814bd7eb65218795c045cd",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2029
+        }
+      ],
+      "pp": 1672.6,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 28.18,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "command": "mbufo serve --port 34269 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 4095,
+          "completion_sha256": "eb200472459cc84364f98335fb0a5d9d870a490c380ed12187ec7ee255926bb4",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2043
+        }
+      ],
+      "pp": 1727.95,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 28.27,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "command": "mbufo serve --port 34269 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 65447,
+          "completion_sha256": "093392ac53f6123a788069ba0d60cde4e6983639196a8703adcbc1cb42d214c3",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2058
+        }
+      ],
+      "pp": 1602.93,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 28.09,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "8192": {
+      "command": "mbufo serve --port 34269 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 8184,
+          "completion_sha256": "1159e496bf955d2431d563e9ce17e9c068c17aeb2ba36246ea4c5503578d4a45",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2048
+        }
+      ],
+      "pp": 1721.41,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 28.27,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "mbufo",
+      "serve",
+      "--port",
+      "34269",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": false,
+    "revision": "fec4759d064585d72f87c6e11af5cfa0e1fa95c7"
+  },
+  "table": "single-ar",
+  "target": "mbufo"
+}

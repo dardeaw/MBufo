@@ -27,7 +27,7 @@
 #include "src/models/qwen3_asr/hip/blas.hpp"
 #include "src/models/qwen3_asr/loader.hpp"
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 namespace {
 
 constexpr std::size_t kMelBins = 128;
@@ -634,11 +634,11 @@ bool AudioEncoderHipRuntime::EncodeDevice(
   }
 }
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
 #else
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 
 AudioEncoderHipRuntime::~AudioEncoderHipRuntime() = default;
 
@@ -677,6 +677,6 @@ bool AudioEncoderHipRuntime::EncodeDevice(std::span<const float>, std::size_t,
   return false;
 }
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
 #endif

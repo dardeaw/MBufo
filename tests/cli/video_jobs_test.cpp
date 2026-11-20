@@ -20,12 +20,12 @@
 
 namespace {
 
-namespace h3 = gufo::minimax_h3;
-using gufo::server::VideoJobRequest;
-using gufo::server::VideoJobResult;
-using gufo::server::VideoJobService;
-using gufo::server::VideoJobServiceOptions;
-using gufo::server::VideoJobStatus;
+namespace h3 = mbufo::minimax_h3;
+using mbufo::server::VideoJobRequest;
+using mbufo::server::VideoJobResult;
+using mbufo::server::VideoJobService;
+using mbufo::server::VideoJobServiceOptions;
+using mbufo::server::VideoJobStatus;
 
 [[noreturn]] void Fail(const std::string& message) {
   std::cerr << "FAIL video_jobs_test: " << message << '\n';
@@ -165,7 +165,7 @@ void WriteCompletedJob(const std::filesystem::path& directory,
                        std::string_view id, std::string_view format = "mp4") {
   std::filesystem::create_directories(directory);
   std::ofstream metadata(directory / "job.json");
-  metadata << "{\"schema\":\"gufo.video-job.v1\",\"id\":\"" << id
+  metadata << "{\"schema\":\"mbufo.video-job.v1\",\"id\":\"" << id
            << "\",\"status\":\"completed\",\"progress\":100,"
               "\"created_at\":3000,\"completed_at\":3001,"
               "\"expires_at\":4000,\"model\":\"minimax-h3\","
@@ -274,7 +274,7 @@ void TestQueueLifecycleAndRecovery(const std::filesystem::path& root) {
     const std::string parameters = ReadAll(directory / "parameters.json");
     const std::string telemetry = ReadAll(directory / "telemetry.json");
     Check(metadata.find("\"status\":\"completed\"") != std::string::npos &&
-              telemetry.find("gufo.minimax-h3-generation-telemetry.v1") !=
+              telemetry.find("mbufo.minimax-h3-generation-telemetry.v1") !=
                   std::string::npos,
           "completed state is published with telemetry");
     Check(metadata.find("private prompt") == std::string::npos &&
@@ -282,14 +282,14 @@ void TestQueueLifecycleAndRecovery(const std::filesystem::path& root) {
               parameters.find("private prompt") == std::string::npos &&
               parameters.find("/private/") == std::string::npos,
           "persisted job data excludes prompts and private paths");
-    std::ofstream(directory / "job.json.gufo-partial-injected") << "incomplete";
+    std::ofstream(directory / "job.json.mbufo-partial-injected") << "incomplete";
   }
 
   {
     VideoJobService recovered(options);
     Check(recovered.ready(), recovered.initialization_error());
     Check(!std::filesystem::exists(root / completed_id /
-                                   "job.json.gufo-partial-injected"),
+                                   "job.json.mbufo-partial-injected"),
           "restart removes partial metadata files");
     const auto lookup = recovered.Get(completed_id);
     Check(lookup.job.has_value() &&
@@ -593,7 +593,7 @@ void TestRunnerOutputBoundary(const std::filesystem::path& root) {
 int main() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() /
-      ("gufo-video-jobs-test-" + std::to_string(getpid()));
+      ("mbufo-video-jobs-test-" + std::to_string(getpid()));
   std::error_code ignored;
   std::filesystem::remove_all(base, ignored);
   std::filesystem::create_directories(base);

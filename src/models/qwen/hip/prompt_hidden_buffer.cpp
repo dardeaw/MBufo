@@ -4,7 +4,7 @@
 #include <cstring>
 #include <new>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 void PromptHiddenBuffer::Reserve(std::size_t elements, std::size_t pinned_limit,
                                  cache::ResourceLedger* ledger) {
@@ -104,4 +104,4 @@ void PromptHiddenBuffer::MoveToPageable(std::size_t elements) {
   pageable_.reserve(elements);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip

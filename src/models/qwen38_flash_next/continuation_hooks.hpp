@@ -1,9 +1,9 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_HOOKS_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_HOOKS_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_HOOKS_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_HOOKS_HPP_
 
 #include <cstdint>
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 class ContinuationAdapter;
 // Installed only in sessions owned by the new adapter. Legacy serving leaves
 // the pointer null. These callbacks run on the host before state is changed or
@@ -20,5 +20,5 @@ public:
   virtual void BeforeRestore() = 0;
   virtual void BeforeRelease() noexcept = 0;
 };
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 #endif

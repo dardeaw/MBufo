@@ -67,7 +67,7 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
         print(f"CHECK {label}", file=sys.stderr, flush=True)
         usage = result["usage"]
         total, reused, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
-                                    usage["gufo"]["prefill_tokens"])
+                                    usage["mbufo"]["prefill_tokens"])
         assert all(type(n) is int and n >= 0 for n in (total, reused, prefilled)), usage
         assert reused + prefilled == total, usage
         if body.get("extra_body", {}).get("cache_prompt") is False:
@@ -96,7 +96,7 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
             and result["finish"] == "stop", result
 
     def wait_ms(result):
-        return result["usage"]["gufo"]["shared_prefix_wait_ms"]
+        return result["usage"]["mbufo"]["shared_prefix_wait_ms"]
 
     # Sharing needs concurrent sessions and a runner that reuses prefixes.
     probe = [{"role": "system", "content": system_prompt("cache_concurrency_probe", 8)},
@@ -125,9 +125,9 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
             for index in waited:
                 usage = results[index]["usage"]
                 bound = usage["prompt_tokens"] - shared + TAIL_ALLOWANCE
-                if usage["gufo"]["prefill_tokens"] > bound:
+                if usage["mbufo"]["prefill_tokens"] > bound:
                     failures.append(
-                        f"{label}_{index}: prefilled {usage['gufo']['prefill_tokens']} "
+                        f"{label}_{index}: prefilled {usage['mbufo']['prefill_tokens']} "
                         f"tokens, expected at most {bound} after restoring the shared prefix")
         # Waiting must never change an answer: compare uncached controls.
         for index, (messages, warm) in enumerate(zip(conversations, results)):

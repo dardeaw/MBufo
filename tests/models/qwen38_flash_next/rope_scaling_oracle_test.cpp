@@ -15,7 +15,7 @@
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 #include "tests/models/qwen38_flash_next/rope_scaling_golden.hpp"
 
-namespace qfn = gufo::models::qwen38_flash_next;
+namespace qfn = mbufo::models::qwen38_flash_next;
 
 namespace {
 
@@ -63,7 +63,7 @@ void CheckCpuOracle() {
   for (const std::uint32_t pos : {0U, 1000U, 131069U, 262143U}) {
     auto a = Values(kHeads * kDim, pos + 7);
     auto b = a;
-    gufo::models::qwen38_flash_next::cpu::Rope(a.data(), kHeads, kDim, kRotary,
+    mbufo::models::qwen38_flash_next::cpu::Rope(a.data(), kHeads, kDim, kRotary,
                                                pos, 1e7F);
     LegacyRope(b.data(), kHeads, kDim, kRotary, pos, 1e7F);
     Require(a == b, "disabled YaRN changed cpu::Rope bits");
@@ -75,7 +75,7 @@ void CheckCpuOracle() {
     const auto yarn = qfn::MakeYarnRope(Yarn(g.factor), kRotary, 1e7F);
     const auto input = Values(kHeads * kDim, 99);
     auto out = input;
-    gufo::models::qwen38_flash_next::cpu::Rope(out.data(), kHeads, kDim,
+    mbufo::models::qwen38_flash_next::cpu::Rope(out.data(), kHeads, kDim,
                                                kRotary, kPos, 1e7F, yarn);
     for (std::uint32_t h = 0; h < kHeads; ++h) {
       const float* x = input.data() + h * kDim;

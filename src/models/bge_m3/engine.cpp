@@ -7,7 +7,7 @@
 
 #include "src/core/pooling_norm.hpp"
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 
 #ifndef ENGINE_ENABLE_HIP
 // Out-of-line so the destructor is defined exactly once per build mode;
@@ -135,4 +135,4 @@ std::unique_ptr<EngineModel> ModelRegistry::Create(
   return it->second(model_path, error_msg);
 }
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3

@@ -5,7 +5,7 @@
 #include <numeric>
 #include <stdexcept>
 
-namespace gufo::models::qwen3_tts {
+namespace mbufo::models::qwen3_tts {
 
 bool ValidSamplingOptions(const SamplingOptions& options) {
   const auto temperature = [](float value) {
@@ -74,4 +74,4 @@ std::uint32_t SampleCodec(std::vector<TokenScore>& candidates,
   return candidates[distribution(*random)].token;
 }
 
-}  // namespace gufo::models::qwen3_tts
+}  // namespace mbufo::models::qwen3_tts

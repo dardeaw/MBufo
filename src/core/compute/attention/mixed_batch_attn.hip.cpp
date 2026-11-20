@@ -27,7 +27,7 @@
 #include "src/core/compute/attention/blocked_wmma.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 
-namespace gufo::core::compute::mixed_batch {
+namespace mbufo::core::compute::mixed_batch {
 namespace {
 
 __device__ __forceinline__ float Sigmoid(float x) {
@@ -261,8 +261,8 @@ bool LaunchMixedBatchAttention(const MixedBlk* blks, std::size_t n_blks,
           ? scratch_bytes - MixedBatchF16ScratchBytes(n_blks)
           : 0;
   // Phase A policy: measured thresholds (prefill 32 / splitk 8+1024) with
-  // GUFO_ATTN_* env overrides; F16 batches never reach this path.
-  const auto attn_policy = ::gufo::core::compute::attention_dispatcher::
+  // MBUFO_ATTN_* env overrides; F16 batches never reach this path.
+  const auto attn_policy = ::mbufo::core::compute::attention_dispatcher::
       AttentionDispatchPolicy::WithEnvDefaults();
   for (std::size_t i = 0; i < n_blks; ++i) {
     const MixedBlk& b = blks[i];
@@ -272,7 +272,7 @@ bool LaunchMixedBatchAttention(const MixedBlk* blks, std::size_t n_blks,
     // Phase A: route this block through the shared dispatcher. Only Q8/Q4
     // reach here (other codecs refused above); window is always 0 here
     // (blocked batches are pre-shifted dense-causal by the caller).
-    namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+    namespace attn_disp = ::mbufo::core::compute::attention_dispatcher;
     attn_disp::AttentionDispatchInput din;
     din.q_len = b.n_rows;
     din.kv_len = b.kv_len;
@@ -336,5 +336,5 @@ bool LaunchMixedBatchAttention(const MixedBlk* blks, std::size_t n_blks,
   return true;
 }
 
-}  // namespace gufo::core::compute::mixed_batch
+}  // namespace mbufo::core::compute::mixed_batch
 #endif  // defined(ENGINE_ENABLE_HIP)

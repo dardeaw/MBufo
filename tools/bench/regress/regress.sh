@@ -2,9 +2,9 @@
 # Cross-model regression for shared (core) kernel changes: run the same fixed prompts on a BASE
 # binary and a NEW binary for every model that uses the shared kernels, then compare speed and text.
 #
-#   tools/bench/regress/regress.sh <outdir> <base-gufo> <new-gufo> [--kernels] [--fn] [model-name ...]
+#   tools/bench/regress/regress.sh <outdir> <base-mbufo> <new-mbufo> [--kernels] [--fn] [model-name ...]
 #
-# Stops gufo.service while it runs and always restores it. Models and flags live in the MODELS table.
+# Stops mbufo.service while it runs and always restores it. Models and flags live in the MODELS table.
 # Greedy text can legitimately flip on near-ties when a kernel's summation order changes; identical text
 # is the strong signal, "DIFFERENT" needs a look at the similarity and the first differing character.
 # --kernels also runs the float64-reference kernel checks under tools/bench/*_check.
@@ -14,13 +14,13 @@ RUN_KERNELS=0; RUN_FN=0; ONLY=()
 for a in "$@"; do case $a in --kernels) RUN_KERNELS=1;; --fn) RUN_FN=1;; *) ONLY+=("$a");; esac; done
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../../.." && pwd)
-G=/mnt/nvme-data/gufo-models
+G=${MBUFO_MODELS_DIR:?set MBUFO_MODELS_DIR to the models directory}
 mkdir -p "$OUT"
 PORT=8751
-S() { sudo -n "$@" 2>/dev/null || (echo are23234 | sudo -S "$@" 2>/dev/null); }
+S() { sudo -n "$@"; }
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/run.log"; }
 killsrv() { pkill -TERM -f "[s]erve llm.*-p $PORT" 2>/dev/null; for i in $(seq 1 40); do pgrep -f "[s]erve llm.*-p $PORT" >/dev/null || return; sleep 1; done; pkill -KILL -f "[s]erve llm.*-p $PORT" 2>/dev/null; sleep 2; }
-restore() { killsrv; sleep 3; S systemctl start gufo; log "restored: $(systemctl is-active gufo)"; }
+restore() { killsrv; sleep 3; S systemctl start mbufo; log "restored: $(systemctl is-active mbufo)"; }
 trap restore EXIT
 export LD_LIBRARY_PATH=/opt/rocm/lib
 
@@ -33,18 +33,18 @@ MODELS=(
   "glimmerq8w_q8|$G/muse-glimmer-30b/Muse-Glimmer-30B-Q8_0.gguf|q8||2000"
   "glimmerq8w_f16|$G/muse-glimmer-30b/Muse-Glimmer-30B-Q8_0.gguf|f16||2000"
   "gemma26_q8|$G/gemma-4-26b/gemma-4-26B-A4B-it-Q4_0.gguf|q8||6000"
-  "qwen27_q8|$G/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf|q8|GUFO_KV_WMMA=1 GUFO_KV_I8=2|6000"
+  "qwen27_q8|$G/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf|q8|MBUFO_KV_WMMA=1 MBUFO_KV_I8=2|6000"
 )
-[ $RUN_FN = 1 ] && MODELS+=("fn_fast_q8|$G/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf|q8|GUFO_KV_WMMA=1 GUFO_KV_I8=2|6000")
+[ $RUN_FN = 1 ] && MODELS+=("fn_fast_q8|$G/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf|q8|MBUFO_KV_WMMA=1 MBUFO_KV_I8=2|6000")
 
-log "stopping gufo.service"; S systemctl stop gufo; sleep 5
+log "stopping mbufo.service"; S systemctl stop mbufo; sleep 5
 
 if [ $RUN_KERNELS = 1 ]; then
   log "== kernel checks"
   K=$OUT/kernels; mkdir -p $K
   # Each check: prep data (python), build the test with hipcc, run. The build line is in each tool's README docstring.
   I="-I$REPO -DENGINE_ENABLE_HIP=1 --offload-arch=gfx1151 -std=c++20 -O2"
-  LIBG=$(find $REPO/build/release -name libgufo_core_gemm.a 2>/dev/null | head -1)
+  LIBG=$(find $REPO/build/release -name libmbufo_core_gemm.a 2>/dev/null | head -1)
   python3 $REPO/tools/bench/dequant_rows_check/dq_prep.py $K/dq >/dev/null 2>&1
   hipcc $I -x hip $REPO/tools/bench/dequant_rows_check/dq_test.cpp $REPO/src/core/compute/gemm/dequant_rows.hip -o $K/dq_test 2>/dev/null && $K/dq_test $K/dq > $K/dq.txt 2>&1; python3 $REPO/tools/bench/dequant_rows_check/dq_cmp.py $K/dq 2>&1 | tail -1 | sed 's/^/dequant_rows: /' | tee -a $OUT/run.log
   python3 $REPO/tools/bench/flash_decode_check/fd_prep.py $K/fd >/dev/null 2>&1

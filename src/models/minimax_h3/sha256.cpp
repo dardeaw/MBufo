@@ -7,7 +7,7 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 namespace {
 
@@ -173,4 +173,4 @@ std::string Sha256File(const std::filesystem::path& path) {
   return Hex(context.Finish());
 }
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3

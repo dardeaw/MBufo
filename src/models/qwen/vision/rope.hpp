@@ -1,7 +1,7 @@
-#ifndef GUFO_MODELS_QWEN_VISION_ROPE_HPP_
-#define GUFO_MODELS_QWEN_VISION_ROPE_HPP_
+#ifndef MBUFO_MODELS_QWEN_VISION_ROPE_HPP_
+#define MBUFO_MODELS_QWEN_VISION_ROPE_HPP_
 #include <cstdint>
-namespace gufo::models::qwen::vision {
+namespace mbufo::models::qwen::vision {
 struct DeviceRope {
   const std::int32_t* positions{
       nullptr};  ///< interleaved [physical token][T,H,W]
@@ -28,5 +28,5 @@ __device__ inline float RopePosition(const DeviceRope* rope,
 }
 #endif
 
-}  // namespace gufo::models::qwen::vision
+}  // namespace mbufo::models::qwen::vision
 #endif

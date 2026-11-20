@@ -9,7 +9,7 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
-namespace gufo::models::llama::kernels {
+namespace mbufo::models::llama::kernels {
 namespace {
 
 // Q8_0 block (GGUF grid): f16 scale first, then 32 int8 codes. (This is
@@ -376,4 +376,4 @@ void AttentionF16(const float* q, const __half* k_cache,
                      heads, kv_heads, d, score_scale);
 }
 
-}  // namespace gufo::models::llama::kernels
+}  // namespace mbufo::models::llama::kernels

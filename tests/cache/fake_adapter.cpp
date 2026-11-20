@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace gufo::cache::testing {
+namespace mbufo::cache::testing {
 struct FakeTransfer {
   std::function<TransferResult()> run;
   std::optional<TransferResult> result;
@@ -584,4 +584,4 @@ void FakeAdapter::FailNextAllocation() noexcept {
 void FakeAdapter::FailNextTransfer() noexcept {
   fail_transfer_ = true;
 }
-}  // namespace gufo::cache::testing
+}  // namespace mbufo::cache::testing

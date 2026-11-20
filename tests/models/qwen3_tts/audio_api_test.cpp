@@ -17,12 +17,12 @@
 
 namespace {
 
-namespace qwen3_tts = gufo::models::qwen3_tts;
-using gufo::server::HandleAudioTtsApiRequest;
-using gufo::server::HttpRequest;
-using gufo::server::HttpResponse;
-using gufo::server::TtsService;
-using gufo::server::TtsServiceOptions;
+namespace qwen3_tts = mbufo::models::qwen3_tts;
+using mbufo::server::HandleAudioTtsApiRequest;
+using mbufo::server::HttpRequest;
+using mbufo::server::HttpResponse;
+using mbufo::server::TtsService;
+using mbufo::server::TtsServiceOptions;
 
 [[noreturn]] void Fail(const std::string& message) {
   std::cerr << "FAIL qwen3_tts_audio_api_test: " << message << '\n';
@@ -150,7 +150,7 @@ void TestSpeech() {
         "response is a mono PCM16 WAV");
   Check(HasHeader(response, "Content-Type", "audio/wav"),
         "WAV content type is explicit");
-  Check(HasHeader(response, "X-Gufo-Codec-Steps", "2"),
+  Check(HasHeader(response, "X-MBufo-Codec-Steps", "2"),
         "codec step count is exposed");
   Check(runner.calls == 1 && runner.latest.text == "The boy who lived." &&
             runner.latest.speaker == "vivian" &&
@@ -235,7 +235,7 @@ void TestStreaming() {
     return true;
   });
   Check(
-      pcm == gufo::server::EncodePcm16(std::vector<float>{-1, -.5F, 0, .5F, 1}),
+      pcm == mbufo::server::EncodePcm16(std::vector<float>{-1, -.5F, 0, .5F, 1}),
       "PCM chunks retain buffered sample encoding");
   auto sse = Send(
       service, "POST", "/v1/audio/speech",
@@ -266,13 +266,13 @@ void TestStreaming() {
         "unsupported stream formats fail closed");
   }
   std::string decoded;
-  Check(gufo::server::DecodeAudioBase64(gufo::server::EncodeAudioBase64(pcm),
+  Check(mbufo::server::DecodeAudioBase64(mbufo::server::EncodeAudioBase64(pcm),
                                         pcm.size(), &decoded) &&
             decoded == pcm,
         "audio base64 round trip");
-  Check(!gufo::server::DecodeAudioBase64("AB==", 16, &decoded) &&
-            !gufo::server::DecodeAudioBase64("YQ==AAAA", 16, &decoded) &&
-            !gufo::server::DecodeAudioBase64("AAAA", 2, &decoded),
+  Check(!mbufo::server::DecodeAudioBase64("AB==", 16, &decoded) &&
+            !mbufo::server::DecodeAudioBase64("YQ==AAAA", 16, &decoded) &&
+            !mbufo::server::DecodeAudioBase64("AAAA", 2, &decoded),
         "base64 rejects noncanonical padding and oversized audio");
   const std::string text = "Value 3.14 is fine. Next phrase! Then 中文。";
   std::string pending = text;

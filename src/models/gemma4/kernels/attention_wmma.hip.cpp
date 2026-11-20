@@ -14,7 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::models::gemma4::kernels::wmma {
+namespace mbufo::models::gemma4::kernels::wmma {
 
 // --- helpers carried over from the Qwen kernel ---
 namespace {
@@ -1152,5 +1152,5 @@ bool AttentionWmma(const float* q, const __half* k_cache, const __half* v_cache,
   return true;
 }
 
-}  // namespace gufo::models::gemma4::kernels::wmma
+}  // namespace mbufo::models::gemma4::kernels::wmma
 #endif  // ENGINE_ENABLE_HIP

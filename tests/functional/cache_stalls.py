@@ -42,7 +42,7 @@ def check_cache_stalls(client, model, checks, chat_result, concurrency, context,
                 print(f"CHECK {label}", file=sys.stderr, flush=True)
                 usage = result["usage"]
                 total, cached, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
-                                            usage["gufo"]["prefill_tokens"])
+                                            usage["mbufo"]["prefill_tokens"])
                 assert all(type(n) is int and n >= 0 for n in (total, cached, prefilled))
                 assert cached + prefilled == total and words <= total < words + 256, result
                 assert result["reasoning"].strip() and not result["tools"], result

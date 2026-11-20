@@ -1,11 +1,11 @@
-#ifndef GUFO_CORE_MAPPED_PREFETCH_HPP_
-#define GUFO_CORE_MAPPED_PREFETCH_HPP_
+#ifndef MBUFO_CORE_MAPPED_PREFETCH_HPP_
+#define MBUFO_CORE_MAPPED_PREFETCH_HPP_
 
 #include <cstddef>
 
 #include "src/core/platform/prefault.hpp"
 
-namespace gufo::core {
+namespace mbufo::core {
 
 /// Populate an existing readable mapping before HIP registration or upload.
 /// Kept as a forwarding wrapper over platform::PrefaultMappedRange for the
@@ -14,6 +14,6 @@ inline void PrefaultMappedRange(const void* data, std::size_t bytes) {
   platform::PrefaultMappedRange(data, bytes);
 }
 
-}  // namespace gufo::core
+}  // namespace mbufo::core
 
-#endif  // GUFO_CORE_MAPPED_PREFETCH_HPP_
+#endif  // MBUFO_CORE_MAPPED_PREFETCH_HPP_

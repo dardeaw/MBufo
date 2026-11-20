@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_IMAGE_21_HIP_RUNTIME_HPP_
-#define GUFO_MODELS_QWEN_IMAGE_21_HIP_RUNTIME_HPP_
+#ifndef MBUFO_MODELS_QWEN_IMAGE_21_HIP_RUNTIME_HPP_
+#define MBUFO_MODELS_QWEN_IMAGE_21_HIP_RUNTIME_HPP_
 
 #include <hip/hip_runtime_api.h>
 #include <hipblas/hipblas.h>
@@ -14,7 +14,7 @@
 #include "src/models/qwen_image_21/model.hpp"
 #include "src/models/qwen_image_21/weights.hpp"
 
-namespace gufo::models::qwen_image_21::hip {
+namespace mbufo::models::qwen_image_21::hip {
 
 void Check(hipError_t status);
 
@@ -144,5 +144,5 @@ private:
               const Matrix* bias = nullptr, bool convolution = false);
 };
 
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace mbufo::models::qwen_image_21::hip
 #endif

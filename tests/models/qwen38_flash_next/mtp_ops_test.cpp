@@ -18,7 +18,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
-namespace q = gufo::models::qwen38_flash_next::rocm;
+namespace q = mbufo::models::qwen38_flash_next::rocm;
 namespace {
 
 void CheckHip(hipError_t error, const char* operation) {
@@ -40,7 +40,7 @@ auto Allocate(std::size_t count) {
 }
 
 void CheckPenaltyArgmax(std::uint32_t vocab) {
-  namespace sampling = gufo::sampling;
+  namespace sampling = mbufo::sampling;
   // Ragged vocabularies end at the allocation boundary, with every MTP width.
   for (unsigned rows = 1; rows <= 7; ++rows) {
     for (unsigned mode = 0; mode < 5; ++mode) {
@@ -204,7 +204,7 @@ void CheckArgmax(std::uint32_t vocab) {
            "capture");
   q::Argmax(device_logits.get(), scratch.get(), output.get() + 1, rows, vocab,
             stream);
-  gufo::hip::LaunchBatchedGPUArgmax(
+  mbufo::hip::LaunchBatchedGPUArgmax(
       device_logits.get(), greedy_ids.get(), rows, vocab,
       {greedy_scratch.get(), greedy_scratch_size}, stream);
   q::GatherArgmaxCandidates(device_logits.get(), greedy_ids.get(),
@@ -246,7 +246,7 @@ void CheckArgmax(std::uint32_t vocab) {
             " actual=" + std::to_string(actual[t + 1]));
       }
       const auto& prediction = predictions[t + 1];
-      gufo::sampling::SamplerState sampler;
+      mbufo::sampling::SamplerState sampler;
       std::uint32_t greedy = 0;
       bool finite = true;
       try {
@@ -275,7 +275,7 @@ void CheckArgmax(std::uint32_t vocab) {
 }
 
 void CheckCandidates(std::uint32_t vocab) {
-  constexpr auto kCandidates = gufo::models::qwen38_flash_next::kMtpCandidates;
+  constexpr auto kCandidates = mbufo::models::qwen38_flash_next::kMtpCandidates;
   const auto workspace_size = q::MtpCandidateWorkspaceSize(vocab);
   auto device_ids = Allocate<std::uint32_t>(workspace_size + 2);
   auto scratch_ids = Allocate<std::uint32_t>(workspace_size + 2);
@@ -382,7 +382,7 @@ int main() {
     CheckArgmax(1);
     CheckArgmax(257);
     CheckArgmax(248320);
-    CheckHip(gufo::hip::PrepareBatchedGPUArgmax(), "prepare MTP argmax");
+    CheckHip(mbufo::hip::PrepareBatchedGPUArgmax(), "prepare MTP argmax");
     CheckArgmax(248320);
     for (const unsigned vocab :
          {1, 63, 64, 65, 255, 256, 257, 1024, 1025, 16385, 248320}) {

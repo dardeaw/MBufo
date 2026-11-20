@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_FLASH_WMMA_GQA_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_FLASH_WMMA_GQA_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_FLASH_WMMA_GQA_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_FLASH_WMMA_GQA_HPP_
 
 // WMMA (16x16x16 F16, F32 accumulate) flash-attention prefill for head_dim 64 or 128 with any even GQA ratio,
 // F16 KV planes, causal masking, an optional sliding window and optional per-head attention sinks.
@@ -19,7 +19,7 @@
 
 #include <cstdint>
 
-namespace gufo::core::compute::flash_wmma_gqa {
+namespace mbufo::core::compute::flash_wmma_gqa {
 
 /// A block serves a group of query heads inside one KV group, so heads / kv_heads must be even.
 [[nodiscard]] constexpr bool IsFlashWmmaSupported(std::uint32_t heads, std::uint32_t kv_heads,
@@ -35,6 +35,6 @@ namespace gufo::core::compute::flash_wmma_gqa {
                                     std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t head_dim,
                                     std::uint32_t window, float score_scale, hipStream_t stream);
 
-}  // namespace gufo::core::compute::flash_wmma_gqa
+}  // namespace mbufo::core::compute::flash_wmma_gqa
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_FLASH_WMMA_GQA_HPP_
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_FLASH_WMMA_GQA_HPP_

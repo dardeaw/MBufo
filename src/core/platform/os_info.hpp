@@ -1,10 +1,10 @@
-#ifndef GUFO_CORE_PLATFORM_OS_INFO_HPP_
-#define GUFO_CORE_PLATFORM_OS_INFO_HPP_
+#ifndef MBUFO_CORE_PLATFORM_OS_INFO_HPP_
+#define MBUFO_CORE_PLATFORM_OS_INFO_HPP_
 
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::platform {
+namespace mbufo::platform {
 
 /// OS page size in bytes; never zero.
 std::size_t PageSizeBytes();
@@ -16,6 +16,6 @@ std::size_t PageSizeBytes();
 /// when the OS cannot answer.
 std::uint64_t AvailableMemoryBytes();
 
-}  // namespace gufo::platform
+}  // namespace mbufo::platform
 
-#endif  // GUFO_CORE_PLATFORM_OS_INFO_HPP_
+#endif  // MBUFO_CORE_PLATFORM_OS_INFO_HPP_

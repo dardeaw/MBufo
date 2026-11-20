@@ -56,7 +56,7 @@ void CheckTransfer(bool post, std::string_view response, bool stalls) {
       (void)release.try_acquire_for(std::chrono::seconds(2));
     close(peer);
   });
-  const gufo::eval::HttpClient client(
+  const mbufo::eval::HttpClient client(
       "http://127.0.0.1:" + std::to_string(ntohs(address.sin_port)), "",
       std::chrono::milliseconds(100));
   const auto result =

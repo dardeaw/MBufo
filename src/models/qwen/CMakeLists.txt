@@ -1,4 +1,4 @@
-target_sources(gufo_core PRIVATE
+target_sources(mbufo_core PRIVATE
   ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_layout.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/image_cache.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/prompt.cpp
@@ -26,11 +26,11 @@ target_sources(gufo_core PRIVATE
 
 if (ENGINE_ENABLE_HIP)
   find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-  target_link_libraries(gufo_core PRIVATE OpenSSL::Crypto)
-  target_link_libraries(gufo_core PRIVATE gufo_cache_hip)
-  target_link_libraries(gufo_core PRIVATE gufo_core_blocked_kv)
-  target_link_libraries(gufo_core PRIVATE gufo_core_gemm)
-  target_sources(gufo_core PRIVATE
+  target_link_libraries(mbufo_core PRIVATE OpenSSL::Crypto)
+  target_link_libraries(mbufo_core PRIVATE mbufo_cache_hip)
+  target_link_libraries(mbufo_core PRIVATE mbufo_core_blocked_kv)
+  target_link_libraries(mbufo_core PRIVATE mbufo_core_gemm)
+  target_sources(mbufo_core PRIVATE
     ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_adapter.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/encoder.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/device_input.hip
@@ -101,14 +101,14 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip
-    TARGET_DIRECTORY gufo_core
+    TARGET_DIRECTORY mbufo_core
     PROPERTIES COMPILE_OPTIONS -mwavefrontsize64)
   # Iterative ILP improves Q4/Q5 groups of sixteen without changing arithmetic.
   # Keep it isolated: other widths regress. Line tables retain source profiling
   # while avoiding an LLVM register-pressure crash with full debug information.
   set_source_files_properties(
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip
-    TARGET_DIRECTORY gufo_core
+    TARGET_DIRECTORY mbufo_core
     PROPERTIES COMPILE_OPTIONS
     "-mwavefrontsize64;-gline-tables-only;-Xarch_device;-mllvm=-amdgpu-sched-strategy=iterative-ilp")
   # SLP vectorization puts the K-quant scales and offsets of the blocked
@@ -118,12 +118,12 @@ if (ENGINE_ENABLE_HIP)
     SOURCE
       ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_gemm.hip
       ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
-    TARGET_DIRECTORY gufo_core
+    TARGET_DIRECTORY mbufo_core
     APPEND PROPERTY COMPILE_OPTIONS -fno-slp-vectorize)
 endif()
 
-if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
+if (ENGINE_ENABLE_HIP AND MBUFO_BUILD_TOOLS)
   add_executable(qwen27b_continuation_probe EXCLUDE_FROM_ALL
     ${PROJECT_SOURCE_DIR}/tests/models/qwen27b/continuation_probe.cpp)
-  target_link_libraries(qwen27b_continuation_probe PRIVATE gufo_core)
+  target_link_libraries(qwen27b_continuation_probe PRIVATE mbufo_core)
 endif()

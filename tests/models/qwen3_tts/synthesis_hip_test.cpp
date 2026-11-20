@@ -9,7 +9,7 @@
 #include "src/models/qwen3_tts/hip/synthesis_runtime.hpp"
 
 int main(int argc, char** argv) {
-  namespace tts = gufo::models::qwen3_tts;
+  namespace tts = mbufo::models::qwen3_tts;
   const std::string root =
       argc > 1 ? argv[1]
                : "/home/fbozzo/projects/Qwen3-TTS-12Hz-1.7B-CustomVoice";

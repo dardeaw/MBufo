@@ -16,7 +16,7 @@
 
 #include "src/models/minimax_h3/sha256.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 namespace {
 
 constexpr std::array<int, 5> kFramesPerToken = {1, 4, 4, 4, 4};
@@ -438,7 +438,7 @@ std::string PackedLayoutSha256(const PackedLayout& layout) {
   std::vector<unsigned char> bytes;
   bytes.reserve(128 + layout.segments.size() * 24 +
                 layout.positions.size() * 24);
-  AppendString(&bytes, "gufo.minimax-h3-layout.v1");
+  AppendString(&bytes, "mbufo.minimax-h3-layout.v1");
   AppendLittleEndian(&bytes, layout.text_rows);
   AppendLittleEndian(&bytes, layout.audio_target_rows);
   AppendLittleEndian(&bytes, layout.video_target_rows);
@@ -466,7 +466,7 @@ std::string PackedLayoutSha256(const PackedLayout& layout) {
 std::string ModulationRowMapSha256(std::span<const std::uint32_t> rows) {
   std::vector<unsigned char> bytes;
   bytes.reserve(32 + rows.size() * 4);
-  AppendString(&bytes, "gufo.minimax-h3-row-map.v1");
+  AppendString(&bytes, "mbufo.minimax-h3-row-map.v1");
   AppendLittleEndian(&bytes, rows.size());
   for (const std::uint32_t row : rows) {
     for (unsigned int shift = 0; shift < 32; shift += 8) {
@@ -787,4 +787,4 @@ bool HipEulerUpdate(void* sample_f32, std::size_t sample_elements,
 }
 #endif
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3

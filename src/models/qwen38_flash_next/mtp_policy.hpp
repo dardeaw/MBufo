@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_POLICY_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_POLICY_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_MTP_POLICY_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_MTP_POLICY_HPP_
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,7 @@
 
 #include "src/models/qwen38_flash_next/mtp_costs.hpp"
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 inline constexpr std::uint32_t kMaxMtpDraftTokens = 7;
 
@@ -317,6 +317,6 @@ private:
   unsigned stable_cycles_{0};
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_POLICY_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_MTP_POLICY_HPP_

@@ -5,7 +5,7 @@
 #include <cstring>
 #include <limits>
 
-namespace gufo::quant {
+namespace mbufo::quant {
 
 // Standard half-precision float to single-precision float conversion
 float Fp16ToFloat(std::uint16_t h) noexcept {
@@ -967,4 +967,4 @@ bool ValidateQ3_0_ROCMFPX(const void* data, std::size_t nbytes) {
   return true;
 }
 
-}  // namespace gufo::quant
+}  // namespace mbufo::quant

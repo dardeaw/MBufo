@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_HIP_MTP_HPP_
-#define GUFO_MODELS_QWEN_HIP_MTP_HPP_
+#ifndef MBUFO_MODELS_QWEN_HIP_MTP_HPP_
+#define MBUFO_MODELS_QWEN_HIP_MTP_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +16,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 /// Immutable GPU-visible MTP layer weights. Current GGUF K-quant matrices are
 /// expanded once to BF16; the tied embedding and LM head remain shared with
@@ -213,7 +213,7 @@ private:
   std::string last_error_;
 };
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_HIP_MTP_HPP_
+#endif  // MBUFO_MODELS_QWEN_HIP_MTP_HPP_

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_
-#define GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_
+#ifndef MBUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_
+#define MBUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -14,7 +14,7 @@
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/runtime/model.h"
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 
 struct ModelOptions {
   std::uint32_t max_context = 4096;
@@ -196,6 +196,6 @@ private:
   friend class Session;
 };
 
-}  // namespace gufo::models::deepseek_v4_flash
+}  // namespace mbufo::models::deepseek_v4_flash
 
-#endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_
+#endif  // MBUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_

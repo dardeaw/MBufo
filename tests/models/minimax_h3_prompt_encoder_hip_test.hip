@@ -21,16 +21,16 @@
 
 namespace {
 
-using gufo::minimax_h3::CancellationToken;
-using gufo::minimax_h3::EncodePromptLayer50;
-using gufo::minimax_h3::ModelInventory;
-using gufo::minimax_h3::PromptEmbedding;
-using gufo::minimax_h3::PromptEncoderLiveRegisteredHostBytes;
-using gufo::minimax_h3::PromptEncoderOptions;
-using gufo::minimax_h3::PromptEncoderTelemetry;
-using gufo::minimax_h3::Sha256File;
-using gufo::minimax_h3::Tokenizer;
-namespace h3ops = gufo::minimax_h3::ops;
+using mbufo::minimax_h3::CancellationToken;
+using mbufo::minimax_h3::EncodePromptLayer50;
+using mbufo::minimax_h3::ModelInventory;
+using mbufo::minimax_h3::PromptEmbedding;
+using mbufo::minimax_h3::PromptEncoderLiveRegisteredHostBytes;
+using mbufo::minimax_h3::PromptEncoderOptions;
+using mbufo::minimax_h3::PromptEncoderTelemetry;
+using mbufo::minimax_h3::Sha256File;
+using mbufo::minimax_h3::Tokenizer;
+namespace h3ops = mbufo::minimax_h3::ops;
 
 int failures = 0;
 
@@ -278,15 +278,15 @@ bool CheckAnalytic() {
 }
 
 int CheckReal() {
-  const char* root_value = std::getenv("GUFO_H3_MODEL_ROOT");
+  const char* root_value = std::getenv("MBUFO_H3_MODEL_ROOT");
   if (root_value == nullptr || *root_value == '\0') {
-    std::cout << "SKIP: GUFO_H3_MODEL_ROOT unset\n";
+    std::cout << "SKIP: MBUFO_H3_MODEL_ROOT unset\n";
     return 77;
   }
   const std::filesystem::path root(root_value);
   std::string error;
   auto inventory =
-      ModelInventory::Inspect(root, GUFO_H3_SOURCE_MANIFEST, &error);
+      ModelInventory::Inspect(root, MBUFO_H3_SOURCE_MANIFEST, &error);
   CHECK(inventory.has_value());
   if (!inventory.has_value()) {
     std::cerr << error << '\n';
@@ -295,7 +295,7 @@ int CheckReal() {
   Tokenizer tokenizer;
   CHECK(Tokenizer::Load(root / "FL2VA/tokenizer/tokenizer.json", &tokenizer,
                         &error));
-  const char* prompt_value = std::getenv("GUFO_H3_PROMPT_TEXT");
+  const char* prompt_value = std::getenv("MBUFO_H3_PROMPT_TEXT");
   const std::string prompt =
       prompt_value != nullptr && *prompt_value != '\0'
           ? prompt_value
@@ -316,14 +316,14 @@ int CheckReal() {
   CHECK(error.find("text-only") != std::string::npos);
 
   PromptEncoderOptions options;
-  if (const char* layers = std::getenv("GUFO_H3_PROMPT_LAYERS");
+  if (const char* layers = std::getenv("MBUFO_H3_PROMPT_LAYERS");
       layers != nullptr && *layers != '\0') {
     options.layer_count =
         static_cast<std::size_t>(std::strtoull(layers, nullptr, 10));
   }
-  const char* golden_path = std::getenv("GUFO_H3_PROMPT_GOLDEN");
+  const char* golden_path = std::getenv("MBUFO_H3_PROMPT_GOLDEN");
   if (golden_path != nullptr && *golden_path != '\0') {
-    const char* golden_layers = std::getenv("GUFO_H3_PROMPT_GOLDEN_LAYERS");
+    const char* golden_layers = std::getenv("MBUFO_H3_PROMPT_GOLDEN_LAYERS");
     options.layer_count = golden_layers != nullptr && *golden_layers != '\0'
                               ? static_cast<std::size_t>(
                                     std::strtoull(golden_layers, nullptr, 10))
@@ -372,7 +372,7 @@ int CheckReal() {
             << " layer_gpu_ms=" << layer_gpu_ms
             << " prefetch_wait_ms=" << layer_prefetch_wait_ms << '\n';
 
-  if (const char* output_path = std::getenv("GUFO_H3_PROMPT_OUTPUT");
+  if (const char* output_path = std::getenv("MBUFO_H3_PROMPT_OUTPUT");
       output_path != nullptr && *output_path != '\0') {
     std::ofstream native_output(output_path, std::ios::binary);
     native_output.write(
@@ -384,7 +384,7 @@ int CheckReal() {
 
   if (golden_path != nullptr && *golden_path != '\0') {
     if (const char* expected_hash =
-            std::getenv("GUFO_H3_PROMPT_GOLDEN_SHA256");
+            std::getenv("MBUFO_H3_PROMPT_GOLDEN_SHA256");
         expected_hash != nullptr && *expected_hash != '\0') {
       CHECK(Sha256File(golden_path) == expected_hash);
     }

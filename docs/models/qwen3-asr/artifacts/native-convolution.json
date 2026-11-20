@@ -47,7 +47,7 @@
     "median_total_ms": 989.210373,
     "model": "/var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5",
     "repeat": 3,
-    "schema": "gufo.qwen3-asr.benchmark.v1",
+    "schema": "mbufo.qwen3-asr.benchmark.v1",
     "transcript": "Uh huh. Oh yeah, yeah. He wasn't even that big when I started listening to him, but and his solo music didn't do overly well, but he did very well when he started writing for other people.",
     "warmup": 1
   },
@@ -64,7 +64,7 @@
     "median_total_ms": 985.673495,
     "model": "/var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5",
     "repeat": 3,
-    "schema": "gufo.qwen3-asr.benchmark.v1",
+    "schema": "mbufo.qwen3-asr.benchmark.v1",
     "transcript": "Uh huh. Oh yeah, yeah. He wasn't even that big when I started listening to him, but and his solo music didn't do overly well, but he did very well when he started writing for other people.",
     "warmup": 1
   },
@@ -91,15 +91,15 @@
     "text_projection_ms": 749.633184,
     "convolution": [
       {
-        "kernel": "gufo::models::qwen3_asr::hip::(anonymous namespace)::FirstConvolution(unsigned short const*, unsigned short const*, hip_bfloat16*)",
+        "kernel": "mbufo::models::qwen3_asr::hip::(anonymous namespace)::FirstConvolution(unsigned short const*, unsigned short const*, hip_bfloat16*)",
         "gpu_ms": 0.805556
       },
       {
-        "kernel": "void gufo::models::qwen3_asr::hip::(anonymous namespace)::Convolution<64, 50, 480, 32, 6, 2>(unsigned short const*, unsigned short const*, hip_bfloat16*)",
+        "kernel": "void mbufo::models::qwen3_asr::hip::(anonymous namespace)::Convolution<64, 50, 480, 32, 6, 2>(unsigned short const*, unsigned short const*, hip_bfloat16*)",
         "gpu_ms": 2.249834
       },
       {
-        "kernel": "void gufo::models::qwen3_asr::hip::(anonymous namespace)::Convolution<32, 25, 480, 32, 6, 2>(unsigned short const*, unsigned short const*, hip_bfloat16*)",
+        "kernel": "void mbufo::models::qwen3_asr::hip::(anonymous namespace)::Convolution<32, 25, 480, 32, 6, 2>(unsigned short const*, unsigned short const*, hip_bfloat16*)",
         "gpu_ms": 0.660003
       }
     ]

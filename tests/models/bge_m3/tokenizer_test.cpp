@@ -4,7 +4,7 @@
 // exercises added-token splitting, NFKC/whitespace normalization, Viterbi
 // lattice decoding, single-unk runs, the [CLS]/[SEP] wrap, and the window
 // refusal -- with no external files.
-// Part B (GUFO_BGE_MODEL set, else skipped): exact HF parity over the 343
+// Part B (MBUFO_BGE_MODEL set, else skipped): exact HF parity over the 343
 // committed golden vectors (tests/models/bge_m3/testdata/*.json, generated
 // from sentence-transformers + transformers). Any NFKC-version drift between
 // ICU and the HF Precompiled table shows up here first.
@@ -99,7 +99,7 @@ struct MiniGguf {
   std::size_t kv_pos_{0};
 };
 
-std::unique_ptr<gufo::models::bge_m3::SpmUnigramTokenizer> MakeTinyTokenizer(
+std::unique_ptr<mbufo::models::bge_m3::SpmUnigramTokenizer> MakeTinyTokenizer(
     std::string& error) {
   // Pieces: 0 <s>, 1 </s>, 2 <unk>, 3 "▁a", 4 "▁b", 5 "▁ab" (cheap),
   // 6 "▁c", 7 <pad>, 8 "b" + 9 "c" (continuation pieces without the marker,
@@ -126,13 +126,13 @@ std::unique_ptr<gufo::models::bge_m3::SpmUnigramTokenizer> MakeTinyTokenizer(
   builder.AddI32Array("tokenizer.ggml.token_type",
                       {3, 3, 2, 1, 1, 1, 1, 3, 1, 1});
   const std::string blob = builder.Build();
-  auto reader = gufo::core::GgufReader::OpenMemory(blob.data(), blob.size(),
+  auto reader = mbufo::core::GgufReader::OpenMemory(blob.data(), blob.size(),
                                                   &error);
   if (reader == nullptr) {
     std::cerr << "tiny gguf open failed: " << error << "\n";
     return nullptr;
   }
-  auto tok = gufo::models::bge_m3::SpmUnigramTokenizer::CreateFromGguf(
+  auto tok = mbufo::models::bge_m3::SpmUnigramTokenizer::CreateFromGguf(
       *reader, &error);
   if (tok == nullptr) {
     std::cerr << "tiny tokenizer create failed: " << error << "\n";
@@ -141,7 +141,7 @@ std::unique_ptr<gufo::models::bge_m3::SpmUnigramTokenizer> MakeTinyTokenizer(
 }
 
 int TestTinyTokenizer() {
-  using gufo::models::bge_m3::SpmUnigramTokenizer;
+  using mbufo::models::bge_m3::SpmUnigramTokenizer;
   std::string error;
   auto tok = MakeTinyTokenizer(error);
   if (tok == nullptr) {
@@ -191,10 +191,10 @@ void TestTinyRefusals() {  MiniGguf builder;
   const std::string blob = builder.Build();
   std::string error;
   auto reader =
-      gufo::core::GgufReader::OpenMemory(blob.data(), blob.size(), &error);
+      mbufo::core::GgufReader::OpenMemory(blob.data(), blob.size(), &error);
   assert(reader != nullptr);
   auto tok =
-      gufo::models::bge_m3::SpmUnigramTokenizer::CreateFromGguf(*reader,
+      mbufo::models::bge_m3::SpmUnigramTokenizer::CreateFromGguf(*reader,
                                                                 &error);
   assert(tok == nullptr && !error.empty());
 }
@@ -325,13 +325,13 @@ bool ParseGoldens(const std::string& json,
 
 int TestGoldens(const std::string& model_path, const std::string& data_dir) {
   std::string error;
-  auto model = gufo::models::bge_m3::ModelRegistry::Instance().Create(
+  auto model = mbufo::models::bge_m3::ModelRegistry::Instance().Create(
       "bge-m3", model_path, &error);
   if (model == nullptr) {
     std::cerr << "golden: model load failed: " << error << "\n";
     return 1;
   }
-  // NOTE: the registry lives in engine.cpp; this test links gufo_core, so
+  // NOTE: the registry lives in engine.cpp; this test links mbufo_core, so
   // the self-registration runs. Include engine.hpp for ModelRegistry.
   std::size_t checked = 0;
   std::size_t mismatched = 0;
@@ -396,12 +396,12 @@ int main(int argc, char** argv) {
   if (TestTinyTokenizer() != 0) return 1;
   TestTinyRefusals();
   std::cout << "tokenizer synthetic: all assertions passed\n";
-  const char* model_path = std::getenv("GUFO_BGE_MODEL");
+  const char* model_path = std::getenv("MBUFO_BGE_MODEL");
   if (model_path == nullptr || model_path[0] == '\0') {
-    std::cout << "tokenizer golden: skipped (GUFO_BGE_MODEL unset)\n";
+    std::cout << "tokenizer golden: skipped (MBUFO_BGE_MODEL unset)\n";
     return 77;  // CTest SKIP_RETURN_CODE: external-model gate
   }
   std::string data_dir =
-      argc > 1 ? argv[1] : std::string(GUFO_BGE_TESTDATA_DIR);
+      argc > 1 ? argv[1] : std::string(MBUFO_BGE_TESTDATA_DIR);
   return TestGoldens(model_path, data_dir);
 }

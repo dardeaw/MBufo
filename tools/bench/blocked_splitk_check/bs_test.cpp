@@ -13,7 +13,7 @@
 
 #include "src/core/compute/attention/blocked_splitk.hpp"
 
-using namespace gufo::core::compute::blocked_splitk;
+using namespace mbufo::core::compute::blocked_splitk;
 
 #define CK(x) do { hipError_t err__ = (x); if (err__ != hipSuccess) { std::fprintf(stderr, "HIP error %s at %d\n", hipGetErrorString(err__), __LINE__); return 2; } } while (0)
 
@@ -63,11 +63,11 @@ int main(int argc, char** argv) {
     const float scale = 1.0f / std::sqrt(static_cast<float>(D));
     const float* ref = reinterpret_cast<const float*>(rb.data());
     std::vector<float> o_new(nt * heads * D), o_old(nt * heads * D);
-    unsetenv("GUFO_BLOCKED_SPLITK_LEGACY");
+    unsetenv("MBUFO_BLOCKED_SPLITK_LEGACY");
     const bool ok_new = Run(D, d_q, d_k, d_v, d_o, nt, d_sp, kv_len, heads, kvh, kbb, vbb, d_p, pbytes, scale);
     CK(hipDeviceSynchronize());
     CK(hipMemcpy(o_new.data(), d_o, o_new.size() * 4, hipMemcpyDeviceToHost));
-    setenv("GUFO_BLOCKED_SPLITK_LEGACY", "1", 1);
+    setenv("MBUFO_BLOCKED_SPLITK_LEGACY", "1", 1);
     const bool ok_old = Run(D, d_q, d_k, d_v, d_o, nt, d_sp, kv_len, heads, kvh, kbb, vbb, d_p, pbytes, scale);
     CK(hipDeviceSynchronize());
     CK(hipMemcpy(o_old.data(), d_o, o_old.size() * 4, hipMemcpyDeviceToHost));
@@ -83,9 +83,9 @@ int main(int argc, char** argv) {
     const bool ok = expect_refuse ? (!ok_new && !ok_old) : (ok_new && e_new < 2e-5 && (!ok_old || e_old < 2e-5));
     char tbuf[96] = "";
     if (timing && ok) {
-      unsetenv("GUFO_BLOCKED_SPLITK_LEGACY");
+      unsetenv("MBUFO_BLOCKED_SPLITK_LEGACY");
       const float us_new = TimeUs([&] { Run(D, d_q, d_k, d_v, d_o, nt, d_sp, kv_len, heads, kvh, kbb, vbb, d_p, pbytes, scale); }, 200);
-      setenv("GUFO_BLOCKED_SPLITK_LEGACY", "1", 1);
+      setenv("MBUFO_BLOCKED_SPLITK_LEGACY", "1", 1);
       const float us_old = !ok_old ? 0.0f : TimeUs([&] { Run(D, d_q, d_k, d_v, d_o, nt, d_sp, kv_len, heads, kvh, kbb, vbb, d_p, pbytes, scale); }, 200);
       std::snprintf(tbuf, sizeof tbuf, "  %7.1f us (legacy %7.1f us, %.1fx)", us_new, us_old, us_old > 0 ? us_old / us_new : 0.0f);
     }

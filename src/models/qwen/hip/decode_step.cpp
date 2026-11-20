@@ -1,4 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
+#include <cstdlib>
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
@@ -12,7 +13,7 @@
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/models/qwen/modules/modules.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 void EmitDecodeRouteTelemetry(const models::QwenModelWeights& weights,
                               const QwenExecutionPolicy& policy) {
@@ -56,6 +57,11 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
   auto& ssm_scratch = scratch.ssm;
   auto& ffn_scratch = scratch.ffn;
   const std::size_t sequence_length = static_cast<std::size_t>(pos) + 1;
+  // Blocked-Q8 decode read: row-chunk Split-K by default (MBUFO_QWEN_BLOCKED_NO_SPLITK=1 restores the single-block scan, whose
+  // 16 blocks leave most CUs idle at long context). Past 128 tokens this step already runs outside the HIP graph
+  // (use_split_k_decode below); a graph captured below that replays correctly because a row of up to 128 keys is one chunk.
+  static const bool kNoBlockedSplitK = std::getenv("MBUFO_QWEN_BLOCKED_NO_SPLITK") != nullptr;
+  const bool blocked_splitk = !kNoBlockedSplitK && policy.UsesBlockedAttentionKv() && arena.d_split_k_qtile != nullptr;
   const bool use_split_k_decode = detail::IsSplitKDecodeAttentionSupported(
       sequence_length, config.num_attention_heads, config.num_key_value_heads,
       config.head_dim);
@@ -82,7 +88,7 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
     // §4.2: the shared prequant scratch rides the module context so the
     // module-routed GEMVs (attn_output, ffn_down) use the caller arena; the
     // buffer is allocated outside graph capture, capture only uses it.
-    const gufo::models::qwen::HipModuleContext module_ctx(
+    const mbufo::models::qwen::HipModuleContext module_ctx(
         static_cast<void*>(arena.stream), l, pos, arena.d_preq_q81,
         arena.preq_q81_bytes);
 
@@ -91,8 +97,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // kernel, same args, same arena slices (d_hidden in, d_normed out);
       // behavior identical to the former inline `LaunchRMSNorm` call.
       const auto norm_view =
-          gufo::models::qwen::MakeAttnNormView(layer, config);
-      gufo::models::qwen::NormForward(
+          mbufo::models::qwen::MakeAttnNormView(layer, config);
+      mbufo::models::qwen::NormForward(
           module_ctx, norm_view, decode_scratch.hidden, decode_scratch.normed);
     }
 
@@ -186,7 +192,13 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
                 static_cast<std::size_t>(attn_layer_idx) * blocked_layer_bytes,
             ssm_scratch.gate.data(), ssm_scratch.out.data(), 1, d_in_pos,
             config.num_attention_heads, config.num_key_value_heads,
-            config.head_dim, arena.stream);
+            config.head_dim, arena.stream,
+            blocked_splitk ? static_cast<std::uint32_t>(sequence_length) : 0U,
+            blocked_splitk ? arena.d_split_k_qtile : nullptr,
+            blocked_splitk ? 8 * detail::DecodeAttentionScratchElements(
+                                     config.num_attention_heads, config.head_dim) *
+                                 sizeof(float)
+                           : 0);
       } else if (use_split_k_decode) {
         LaunchAttention(
             attention_scratch.q.data(), attention_scratch.k.data(),
@@ -216,7 +228,7 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // Output projection, routed through the quant_gemm module (HIP
       // backend). Same kernel, same args, same arena slices (d_ssm_out in,
       // d_attn_out out); behavior-identical to the former inline `LaunchGEMV`.
-      gufo::models::qwen::QuantGemm(
+      mbufo::models::qwen::QuantGemm(
           module_ctx, layer.attn_output, ssm_scratch.out.first(attention_size),
           hidden_size, attention_size, attention_scratch.output);
     } else {
@@ -249,7 +261,7 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
     }
 
     {
-      gufo::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
+      mbufo::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
                                       attention_scratch.output);
 
       {
@@ -275,14 +287,14 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // same down GEMV as the former inline calls; behavior identical. The
       // module reads the arena device spans (x = d_normed, act_scratch =
       // d_ffn_act, out = d_ffn_out) directly.
-      const auto ffn_view = gufo::models::qwen::MakeFfnView(layer, config);
-      gufo::models::qwen::FfnForward(
+      const auto ffn_view = mbufo::models::qwen::MakeFfnView(layer, config);
+      mbufo::models::qwen::FfnForward(
           module_ctx, ffn_view, decode_scratch.normed, ffn_scratch.activation,
           ffn_scratch.activation, ffn_scratch.activation, ffn_scratch.out);
     }
 
     // Residual Add
-    gufo::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
+    mbufo::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
                                     ffn_scratch.out);
 
     if (const auto tap_index = arena.GetTargetLayerCaptureIndex(l);
@@ -313,5 +325,5 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
   }
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

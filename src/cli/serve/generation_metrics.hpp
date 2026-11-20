@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_GENERATION_METRICS_HPP_
-#define GUFO_SERVER_GENERATION_METRICS_HPP_
+#ifndef MBUFO_SERVER_GENERATION_METRICS_HPP_
+#define MBUFO_SERVER_GENERATION_METRICS_HPP_
 
 #include <algorithm>
 #include <atomic>
@@ -10,7 +10,7 @@
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/core/json.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 // Process-wide `/metrics` values. Token counters advance per prefill chunk and
 // per generated token, so scrapes see work while requests are still running.
@@ -252,6 +252,6 @@ inline json::Value PromptProgressJson(
   return value;
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_GENERATION_METRICS_HPP_
+#endif  // MBUFO_SERVER_GENERATION_METRICS_HPP_

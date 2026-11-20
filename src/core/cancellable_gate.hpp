@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_CANCELLABLE_GATE_HPP_
-#define GUFO_CORE_CANCELLABLE_GATE_HPP_
+#ifndef MBUFO_CORE_CANCELLABLE_GATE_HPP_
+#define MBUFO_CORE_CANCELLABLE_GATE_HPP_
 
 #include <algorithm>
 #include <chrono>
@@ -13,7 +13,7 @@
 #include <string>
 #include <utility>
 
-namespace gufo::core {
+namespace mbufo::core {
 
 // FIFO admission for a runtime with mutable device state. Waiting clients can
 // cancel without waiting for the current inference to finish.
@@ -89,5 +89,5 @@ private:
   std::size_t capacity_;
 };
 
-}  // namespace gufo::core
-#endif  // GUFO_CORE_CANCELLABLE_GATE_HPP_
+}  // namespace mbufo::core
+#endif  // MBUFO_CORE_CANCELLABLE_GATE_HPP_

@@ -106,7 +106,7 @@
       "paths": [
         "docs/FUNCTIONAL-IMPACT.md",
         "tests/functional/**",
-        "tools/gufo/**"
+        "tools/mbufo/**"
       ],
       "priority": 20,
       "profiles": [

@@ -9,7 +9,7 @@
 #include "src/core/hip/transfer_pool.hpp"
 
 using Clock = std::chrono::steady_clock;
-using namespace gufo;
+using namespace mbufo;
 namespace {
 void Check(hipError_t status) {
   if (status != hipSuccess)

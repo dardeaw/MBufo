@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_DSPARK_INTERNAL_H_
-#define GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_DSPARK_INTERNAL_H_
+#ifndef MBUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_DSPARK_INTERNAL_H_
+#define MBUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_DSPARK_INTERNAL_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -133,4 +133,4 @@ void ds4_dspark_close(ds4_dspark_model *dspark);
 /* Total concatenated target feature width consumed by main_proj. */
 uint32_t ds4_dspark_feature_width(const ds4_dspark_model *dspark);
 
-#endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_DSPARK_INTERNAL_H_
+#endif  // MBUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_DSPARK_INTERNAL_H_

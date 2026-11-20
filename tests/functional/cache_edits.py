@@ -59,7 +59,7 @@ def check_cache_edits(client, model, checks, chat_result, server_log=None):
         def work(result):
             usage = result["usage"]
             total, reused, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
-                                        usage["gufo"]["prefill_tokens"])
+                                        usage["mbufo"]["prefill_tokens"])
             assert all(type(n) is int and n >= 0 for n in (total, reused, prefilled)), usage
             assert reused + prefilled == total, usage
             return total, reused, prefilled
@@ -101,7 +101,7 @@ def check_cache_edits(client, model, checks, chat_result, server_log=None):
         prompt, reused, prefilled = work(edited)
         if shape == "rewind":
             assert prompt < total, (edited, cold)
-        detail = edited["usage"]["gufo"]
+        detail = edited["usage"]["mbufo"]
         evidence = {"prompt_tokens": prompt, "cached_tokens": reused,
                     "prefill_tokens": prefilled,
                     **{key: detail.get(key) for key in (

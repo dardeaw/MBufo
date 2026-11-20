@@ -50,7 +50,7 @@ def check_cache_rotation(client, model, checks, chat_result):
         print(f"CHECK {label}", file=sys.stderr, flush=True)
         usage = result["usage"]
         total, reused, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
-                                    usage["gufo"]["prefill_tokens"])
+                                    usage["mbufo"]["prefill_tokens"])
         assert all(type(n) is int and n >= 0 for n in (total, reused, prefilled)), usage
         assert reused + prefilled == total, usage
         if cold:

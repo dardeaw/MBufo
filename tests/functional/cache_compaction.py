@@ -26,7 +26,7 @@ def check_cache_compaction(client, model, checks, chat_result, context, server_l
     def work(result):
         usage = result["usage"]
         total, cached, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
-                                    usage["gufo"]["prefill_tokens"])
+                                    usage["mbufo"]["prefill_tokens"])
         assert all(type(n) is int and n >= 0 for n in (total, cached, prefilled)), usage
         assert cached + prefilled == total, usage
         return total, cached, prefilled

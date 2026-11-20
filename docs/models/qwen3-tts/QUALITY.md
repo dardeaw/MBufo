@@ -41,7 +41,7 @@ The paragraph is:
   only 36/80 total codes across five greedy frames. With identical official
   inputs/history, predictor agreement is 41/45; small BF16 rounding differences
   affect close choices. Native reproducibility does not prove upstream parity.
-- Gufo and PyTorch use different RNGs. Equal seeds across runtimes need not
+- MBufo and PyTorch use different RNGs. Equal seeds across runtimes need not
   produce the same speech. Greedy generation can fail to reach EOS; bound tests.
 - Base's aggregate speech-code agreement is 57.74%; official BF16/F32
   self-agreement is 55.14%. Waveform and embedding gates still apply.

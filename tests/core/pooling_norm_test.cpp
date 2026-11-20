@@ -11,11 +11,11 @@
 
 namespace {
 
-using gufo::core::embedding::ApplyPooling;
-using gufo::core::embedding::L2Normalize;
-using gufo::core::embedding::PoolingStrategy;
-using gufo::core::embedding::PoolingStrategyFromGgufType;
-using gufo::core::embedding::VectorNorm;
+using mbufo::core::embedding::ApplyPooling;
+using mbufo::core::embedding::L2Normalize;
+using mbufo::core::embedding::PoolingStrategy;
+using mbufo::core::embedding::PoolingStrategyFromGgufType;
+using mbufo::core::embedding::VectorNorm;
 
 bool Near(float a, float b, float eps = 1e-5f) {
   return std::fabs(a - b) <= eps;

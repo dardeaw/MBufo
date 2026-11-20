@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace gufo::minimax_h3::dit_ops {
+namespace mbufo::minimax_h3::dit_ops {
 
 // Dense, noncausal BF16 attention, head dimension 128. Inputs are head-major;
 // output is row-major, ready for the attention output projection. For >4096
@@ -23,4 +23,4 @@ void LaunchProjectionAttention(const std::uint16_t* query,
                                std::uint16_t* output, std::uint32_t rows,
                                std::uint32_t heads, hipStream_t stream);
 
-}  // namespace gufo::minimax_h3::dit_ops
+}  // namespace mbufo::minimax_h3::dit_ops

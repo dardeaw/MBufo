@@ -1,5 +1,5 @@
-#ifndef GUFO_TESTS_MODELS_QWEN_HIP_SUPPORT_COMPARISONS_HPP_
-#define GUFO_TESTS_MODELS_QWEN_HIP_SUPPORT_COMPARISONS_HPP_
+#ifndef MBUFO_TESTS_MODELS_QWEN_HIP_SUPPORT_COMPARISONS_HPP_
+#define MBUFO_TESTS_MODELS_QWEN_HIP_SUPPORT_COMPARISONS_HPP_
 
 #include <cmath>
 #include <cstdlib>
@@ -7,7 +7,7 @@
 #include <span>
 #include <string_view>
 
-namespace gufo::test {
+namespace mbufo::test {
 
 inline void Expect(bool condition, std::string_view message) {
   if (!condition) {
@@ -36,6 +36,6 @@ inline void ExpectSpanNear(std::span<const float> expected,
   }
 }
 
-}  // namespace gufo::test
+}  // namespace mbufo::test
 
-#endif  // GUFO_TESTS_MODELS_QWEN_HIP_SUPPORT_COMPARISONS_HPP_
+#endif  // MBUFO_TESTS_MODELS_QWEN_HIP_SUPPORT_COMPARISONS_HPP_

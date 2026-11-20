@@ -225,8 +225,8 @@ void RunCase(std::size_t batch, std::size_t m, std::size_t k, bool dual) {
   // values, not the original fp32 ones.
   std::vector<std::uint16_t> h_x_bf16(h_x.size());
   for (std::size_t i = 0; i < h_x.size(); ++i) {
-    h_x_bf16[i] = gufo::test::FloatToBf16Bits(h_x[i]);
-    h_x[i] = gufo::test::Bf16BitsToFloat(h_x_bf16[i]);
+    h_x_bf16[i] = mbufo::test::FloatToBf16Bits(h_x[i]);
+    h_x[i] = mbufo::test::Bf16BitsToFloat(h_x_bf16[i]);
   }
 
   void* d_w = nullptr;
@@ -236,7 +236,7 @@ void RunCase(std::size_t batch, std::size_t m, std::size_t k, bool dual) {
   float* d_y = nullptr;
   float* d_y2 = nullptr;
   const std::size_t q8_bytes =
-      gufo::hip::QuantizedActivationBytes(batch, k) + 4096;
+      mbufo::hip::QuantizedActivationBytes(batch, k) + 4096;
   HIP_CHECK(hipMalloc(&d_w, h_w.size() * sizeof(HostQ8_0Block)));
   HIP_CHECK(hipMalloc(&d_w2, h_w2.size() * sizeof(HostQ8_0Block)));
   HIP_CHECK(hipMalloc(&d_x_bf16, h_x_bf16.size() * sizeof(std::uint16_t)));
@@ -253,7 +253,7 @@ void RunCase(std::size_t batch, std::size_t m, std::size_t k, bool dual) {
   HIP_CHECK(hipMemset(d_y, 0, batch * m * sizeof(float)));
   HIP_CHECK(hipMemset(d_y2, 0, batch * m * sizeof(float)));
 
-  gufo::hip::LaunchQuantizeActivationQ8_1(d_x_bf16, d_q8, batch, k);
+  mbufo::hip::LaunchQuantizeActivationQ8_1(d_x_bf16, d_q8, batch, k);
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<std::uint8_t> h_q8(q8_bytes);
@@ -286,10 +286,10 @@ void RunCase(std::size_t batch, std::size_t m, std::size_t k, bool dual) {
   }
 
   if (dual) {
-    gufo::hip::LaunchBatchedDualQuantGEMMPreQuantized(
-        gufo::core::GgmlType::kQ8_0, d_w, d_w2, d_q8, d_y, d_y2, batch, m, k);
+    mbufo::hip::LaunchBatchedDualQuantGEMMPreQuantized(
+        mbufo::core::GgmlType::kQ8_0, d_w, d_w2, d_q8, d_y, d_y2, batch, m, k);
   } else {
-    gufo::hip::LaunchBatchedQuantGEMMPreQuantized(gufo::core::GgmlType::kQ8_0,
+    mbufo::hip::LaunchBatchedQuantGEMMPreQuantized(mbufo::core::GgmlType::kQ8_0,
                                                   d_w, d_q8, d_y, batch, m, k);
   }
   HIP_CHECK(hipDeviceSynchronize());
@@ -319,12 +319,12 @@ void RunCase(std::size_t batch, std::size_t m, std::size_t k, bool dual) {
 // LaunchBatchedFusedSwiGLUQuantizeQ8_1. Comparing whole Q8_1 buffers makes that
 // exact, including the per-block scales, the activation-sum sidecar, and the
 // tail-tile zeroing for a batch that is not a multiple of the 16-token tile.
-void RunFusedSwiGluEpilogueCase(gufo::core::GgmlType type, std::size_t batch,
+void RunFusedSwiGluEpilogueCase(mbufo::core::GgmlType type, std::size_t batch,
                                 std::size_t m, std::size_t k) {
-  std::cout << "fused SwiGLU epilogue: type=" << gufo::core::ToString(type)
+  std::cout << "fused SwiGLU epilogue: type=" << mbufo::core::ToString(type)
             << " batch=" << batch << " m=" << m << " k=" << k << "\n";
   const std::size_t out_bytes = batch * m * sizeof(float);
-  if (!gufo::hip::IsFusedSwiGluGemmEpilogueSupported(type, batch, m,
+  if (!mbufo::hip::IsFusedSwiGluGemmEpilogueSupported(type, batch, m,
                                                      out_bytes)) {
     std::cout << "  unsupported shape, skipped\n";
     return;
@@ -349,13 +349,13 @@ void RunFusedSwiGluEpilogueCase(gufo::core::GgmlType type, std::size_t batch,
   }
   std::vector<std::uint16_t> h_x_bf16(batch * k);
   for (auto& v : h_x_bf16) {
-    v = gufo::test::FloatToBf16Bits(rng.Uniform(-1.5F, 1.5F));
+    v = mbufo::test::FloatToBf16Bits(rng.Uniform(-1.5F, 1.5F));
   }
 
   const std::size_t act_bytes =
-      gufo::hip::QuantizedActivationBytes(batch, k) + 4096;
+      mbufo::hip::QuantizedActivationBytes(batch, k) + 4096;
   const std::size_t q8_bytes =
-      gufo::hip::QuantizedActivationBytes(batch, m) + 4096;
+      mbufo::hip::QuantizedActivationBytes(batch, m) + 4096;
 
   void* d_gate_w = nullptr;
   void* d_up_w = nullptr;
@@ -386,19 +386,19 @@ void RunFusedSwiGluEpilogueCase(gufo::core::GgmlType type, std::size_t batch,
   HIP_CHECK(hipMemset(d_ref, 0x5A, q8_bytes));
   HIP_CHECK(hipMemset(d_got, 0x5A, q8_bytes));
 
-  gufo::hip::LaunchQuantizeActivationQ8_1(d_x_bf16, d_act, batch, k);
+  mbufo::hip::LaunchQuantizeActivationQ8_1(d_x_bf16, d_act, batch, k);
 
   // Reference: the two projections, then the separate SwiGLU + quantize pass.
-  gufo::hip::LaunchBatchedDualQuantGEMMPreQuantized(
+  mbufo::hip::LaunchBatchedDualQuantGEMMPreQuantized(
       type, d_gate_w, d_up_w, d_act, d_gate, d_up, batch, m, k);
-  gufo::hip::LaunchBatchedFusedSwiGLUQuantizeQ8_1(d_gate, d_up, d_ref, batch,
+  mbufo::hip::LaunchBatchedFusedSwiGLUQuantizeQ8_1(d_gate, d_up, d_ref, batch,
                                                   m);
   HIP_CHECK(hipDeviceSynchronize());
 
   // Under test. The gate buffer is rewritten by the fused route as well, so it
   // cannot be shared with the reference run.
   HIP_CHECK(hipMemset(d_gate, 0, batch * m * sizeof(float)));
-  gufo::hip::LaunchBatchedDualQuantGEMMSwiGLUQuantizeQ8_1(
+  mbufo::hip::LaunchBatchedDualQuantGEMMSwiGLUQuantizeQ8_1(
       type, d_gate_w, d_up_w, d_act, d_gate, d_got, batch, m, k);
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -462,7 +462,7 @@ void RunFusedNormQuantizeCase(std::size_t batch, std::size_t dim,
   }
 
   const std::size_t q8_bytes =
-      gufo::hip::QuantizedActivationBytes(batch, dim) + 4096;
+      mbufo::hip::QuantizedActivationBytes(batch, dim) + 4096;
 
   float* d_x = nullptr;
   float* d_r = nullptr;
@@ -495,20 +495,20 @@ void RunFusedNormQuantizeCase(std::size_t batch, std::size_t dim,
   HIP_CHECK(hipMemset(d_ref, 0xA5, q8_bytes));
   HIP_CHECK(hipMemset(d_got, 0xA5, q8_bytes));
 
-  if (!gufo::hip::IsFusedRMSNormQuantizeQ8_1Supported(dim)) {
+  if (!mbufo::hip::IsFusedRMSNormQuantizeQ8_1Supported(dim)) {
     std::cerr << "fused RMSNorm+Q8_1 rejected a supported row length\n";
     std::abort();
   }
 
   // Reference: the separate chain the fused kernel replaces.
   if (with_residual) {
-    gufo::hip::LaunchBatchedResidualAdd(d_hidden_ref, d_r, d_hidden_ref, batch,
+    mbufo::hip::LaunchBatchedResidualAdd(d_hidden_ref, d_r, d_hidden_ref, batch,
                                         dim);
   }
-  gufo::hip::LaunchBatchedRMSNorm(with_residual ? d_hidden_ref : d_x, d_w,
+  mbufo::hip::LaunchBatchedRMSNorm(with_residual ? d_hidden_ref : d_x, d_w,
                                   d_normed, nullptr, batch, dim, 1e-6F);
-  gufo::hip::LaunchQuantizeActivationQ8_1FromFp32(d_normed, d_ref, batch, dim);
-  gufo::hip::LaunchBatchedFusedRMSNormQuantizeQ8_1(
+  mbufo::hip::LaunchQuantizeActivationQ8_1FromFp32(d_normed, d_ref, batch, dim);
+  mbufo::hip::LaunchBatchedFusedRMSNormQuantizeQ8_1(
       with_residual ? d_hidden_got : d_x, with_residual ? d_r : nullptr, d_w,
       with_residual ? d_hidden_got : nullptr, d_got, batch, dim, 1e-6F);
   HIP_CHECK(hipDeviceSynchronize());
@@ -571,9 +571,9 @@ void RunFusedNormQuantizeCase(std::size_t batch, std::size_t dim,
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen prefill quant GEMM ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 
@@ -591,9 +591,9 @@ int main() {
   // Fused SwiGLU + Q8_1 epilogue on the up projection. Macro-tile aligned, a
   // batch that is not a multiple of the 16-token tile, and a shape below the
   // batch-96 route so the support predicate's rejection is exercised too.
-  RunFusedSwiGluEpilogueCase(gufo::core::GgmlType::kQ8_0, 128, 256, 256);
-  RunFusedSwiGluEpilogueCase(gufo::core::GgmlType::kQ8_0, 200, 384, 512);
-  RunFusedSwiGluEpilogueCase(gufo::core::GgmlType::kQ8_0, 64, 256, 256);
+  RunFusedSwiGluEpilogueCase(mbufo::core::GgmlType::kQ8_0, 128, 256, 256);
+  RunFusedSwiGluEpilogueCase(mbufo::core::GgmlType::kQ8_0, 200, 384, 512);
+  RunFusedSwiGluEpilogueCase(mbufo::core::GgmlType::kQ8_0, 64, 256, 256);
 
   // Fused RMSNorm + Q8_1 quantize: the production hidden size, a batch that is
   // not a multiple of the 16-token tile, and a short row.

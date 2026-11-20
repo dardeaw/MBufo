@@ -1,4 +1,4 @@
-# 4-bit value cache (`GUFO_KV_V4`)
+# 4-bit value cache (`MBUFO_KV_V4`)
 
 Status: **usable, opt-in.** Not the default. Values are stored on a signed
 4-bit grid while keys stay 8-bit.
@@ -16,7 +16,7 @@ the value route the one place where precision can be spent.
 | | key block | value block | K + V per position |
 | --- | --- | --- | --- |
 | `q8` | 34 B | 34 B | 1088 B |
-| `q8` + `GUFO_KV_V4=1` | 34 B | **18 B** | **832 B** (−23.5%) |
+| `q8` + `MBUFO_KV_V4=1` | 34 B | **18 B** | **832 B** (−23.5%) |
 
 The value block is 16 bytes of packed nibbles plus the same `f16` block scale,
 which moves from offset 32 to offset 16. Element `2b` is the low nibble and
@@ -33,19 +33,19 @@ The engine reads the variable at session construction, so it must be in the
 service environment, not the shell that talks to the API.
 
 ```bash
-sudo install -D -m644 /dev/stdin /etc/systemd/system/gufo.service.d/kv-v4.conf <<'EOF'
+sudo install -D -m644 /dev/stdin /etc/systemd/system/mbufo.service.d/kv-v4.conf <<'EOF'
 [Service]
-Environment=GUFO_KV_V4=1
+Environment=MBUFO_KV_V4=1
 EOF
 sudo systemctl daemon-reload
-sudo systemctl restart gufo
+sudo systemctl restart mbufo
 ```
 
 Verify it reached the process, not just the unit:
 
 ```bash
-PID=$(systemctl show -p MainPID --value gufo)
-tr '\0' '\n' < /proc/$PID/environ | grep GUFO_KV_V4
+PID=$(systemctl show -p MainPID --value mbufo)
+tr '\0' '\n' < /proc/$PID/environ | grep MBUFO_KV_V4
 ```
 
 It only takes effect with `--kv-quant q8`. `f16` has no blocked layout to pack, so it ignores the flag.
@@ -71,9 +71,9 @@ long-running sessions as the remaining test.
 ## Turning it off
 
 ```bash
-sudo rm /etc/systemd/system/gufo.service.d/kv-v4.conf
+sudo rm /etc/systemd/system/mbufo.service.d/kv-v4.conf
 sudo systemctl daemon-reload
-sudo systemctl restart gufo
+sudo systemctl restart mbufo
 ```
 
 ## Reproducing the numbers
@@ -84,7 +84,7 @@ MODEL=/path/to/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
 PROBE_ARGS="--model $MODEL --kv-q8 --prompt-file prompt.txt"
 
 $PROBE       $PROBE_ARGS --dump q8.bin
-GUFO_KV_V4=1 $PROBE $PROBE_ARGS --dump q8v4.bin
+MBUFO_KV_V4=1 $PROBE $PROBE_ARGS --dump q8v4.bin
 ```
 
 Both dumps are `rows * 248320` float32 logits. Compare with mean KL over the
@@ -93,14 +93,14 @@ any served instance first.
 
 ## Scope
 
-`GUFO_KV_V4` is a precision knob, not a correctness switch: there is no repair
+`MBUFO_KV_V4` is a precision knob, not a correctness switch: there is no repair
 path behind it, and no fallback if the value grid is too coarse for a given
 prompt. It is documented so it can be measured, not so it can be switched on
 blindly.
 
-## 4-bit keys (`GUFO_KV_Q4`)
+## 4-bit keys (`MBUFO_KV_Q4`)
 
-Keys use the same 18-byte block as values once `GUFO_KV_Q4` is set: 16 packed
+Keys use the same 18-byte block as values once `MBUFO_KV_Q4` is set: 16 packed
 nibble bytes (element `2b` in the low nibble, `2b+1` in the high) followed by
 an f16 scale at offset 16. One lane owns a whole 32-element block, so both
 nibbles of a payload byte are written by the same lane and no read-modify-write

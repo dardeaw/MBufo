@@ -6,7 +6,7 @@ from dataclasses import replace
 import math
 import re
 
-from gufo.serving_bench import RequestObservation
+from mbufo.serving_bench import RequestObservation
 
 PREFILL = re.compile(
     r"ds4-server: chat ctx=(\d+)\.\.(\d+):(\d+).*? prompt done ([\d.]+)s$")

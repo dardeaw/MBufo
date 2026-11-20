@@ -30,7 +30,7 @@ def main():
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1:3] != ["serve", "llm"]:
-        parser.error("pass a production gufo serve llm command after --")
+        parser.error("pass a production mbufo serve llm command after --")
     for flag in ("--host", "--port"):
         if option(command, flag) is not None:
             parser.error(f"the test owns {flag}")
@@ -82,7 +82,7 @@ def main():
                     save()
                     assert result["text"].strip() == "ALPHA" and not result["tools"], result
                     usage = result["usage"]
-                    assert usage["cached_tokens"] + usage["gufo"]["prefill_tokens"] == usage["prompt_tokens"]
+                    assert usage["cached_tokens"] + usage["mbufo"]["prefill_tokens"] == usage["prompt_tokens"]
                     return result
 
                 short = body([{"role": "user", "content": "Reply with only the code ALPHA."}])
@@ -138,8 +138,8 @@ def main():
                     # Catch a multi-second pass blocking an unrelated cached
                     # request. Retain phase timings for the stricter matched
                     # main/candidate 5% and 3 ms comparison.
-                    peer_ms = peer["usage"]["gufo"]["ttft_ms"]
-                    control_ms = control["usage"]["gufo"]["ttft_ms"]
+                    peer_ms = peer["usage"]["mbufo"]["ttft_ms"]
+                    control_ms = control["usage"]["mbufo"]["ttft_ms"]
                     limit = 50 if args.deep_peers and mode == "off" else 1000
                     assert peer_ms < control_ms + limit, (case, peer_ms, control_ms)
                     if args.deep_peers:
@@ -150,7 +150,7 @@ def main():
                         retained = call("deep_retained", body(messages))
                         minimum = peers[0]["usage"]["prompt_tokens"] + (mode == "off")
                         assert retained["usage"]["cached_tokens"] >= minimum, retained
-                        assert retained["usage"]["gufo"]["component_cache"]["reuse"] == "live", retained
+                        assert retained["usage"]["mbufo"]["component_cache"]["reuse"] == "live", retained
                         continue
                     resumed = call(f"{case}_resumed", request)
                     completed = progress["processed"] + progress["cache"]

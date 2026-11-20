@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 void Check(hipError_t status) {
   if (status != hipSuccess)
@@ -186,4 +186,4 @@ std::unique_ptr<TransferStream> TransferPool::TryAcquire() {
   return nullptr;
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip

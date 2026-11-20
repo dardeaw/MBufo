@@ -15,7 +15,7 @@
 
 namespace {
 
-using gufo::server::Trace;
+using mbufo::server::Trace;
 namespace fs = std::filesystem;
 
 void WriteRecord(std::string_view event, std::string_view text) {
@@ -38,7 +38,7 @@ std::vector<std::string> Lines(const fs::path& path) {
 void TestPartialWriteIsRolledBack() {
   const auto path =
       fs::temp_directory_path() /
-      ("gufo-trace-partial-" + std::to_string(::getpid()) + ".jsonl");
+      ("mbufo-trace-partial-" + std::to_string(::getpid()) + ".jsonl");
   fs::remove(path);
   assert(!Trace::Open(path.string()).has_value());
   WriteRecord("before", "kept");
@@ -63,8 +63,8 @@ void TestPartialWriteIsRolledBack() {
   const auto lines = Lines(path);
   fs::remove(path);
   assert(lines.size() == 2);
-  assert(gufo::json::parse(lines[0]).member_str("event") == "before");
-  assert(gufo::json::parse(lines[1]).member_str("event") == "after");
+  assert(mbufo::json::parse(lines[0]).member_str("event") == "before");
+  assert(mbufo::json::parse(lines[1]).member_str("event") == "after");
 }
 
 }  // namespace

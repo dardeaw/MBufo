@@ -26,7 +26,7 @@
 #include "src/models/minimax_h3/dit.hpp"
 #include "src/models/minimax_h3/dit_ops.hip.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -85,7 +85,7 @@ bool ValidateTarget(int* device, std::string* error) {
   if (!std::string_view(properties.gcnArchName).starts_with("gfx1151") ||
       properties.integrated == 0) {
     SetError(error,
-             "MiniMax H3 denoising supports only integrated gfx1151 Gufo "
+             "MiniMax H3 denoising supports only integrated gfx1151 MBufo "
              "Halo; detected " +
                  std::string(properties.gcnArchName));
     return false;
@@ -1971,6 +1971,6 @@ std::span<const std::uint16_t> DenoiserSession::refined_text() const noexcept {
              : std::span<const std::uint16_t>(impl_->refined_text_host);
 }
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3
 
 #endif  // ENGINE_ENABLE_HIP

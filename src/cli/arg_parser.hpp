@@ -1,5 +1,5 @@
-#ifndef GUFO_CLI_ARG_PARSER_HPP_
-#define GUFO_CLI_ARG_PARSER_HPP_
+#ifndef MBUFO_CLI_ARG_PARSER_HPP_
+#define MBUFO_CLI_ARG_PARSER_HPP_
 
 #include <algorithm>
 #include <charconv>
@@ -18,7 +18,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace gufo::cli {
+namespace mbufo::cli {
 
 /// A lightweight, type-safe C++20 command-line argument parser.
 class ArgParser {
@@ -461,6 +461,6 @@ private:
   mutable bool help_requested_ = false;
 };
 
-}  // namespace gufo::cli
+}  // namespace mbufo::cli
 
-#endif  // GUFO_CLI_ARG_PARSER_HPP_
+#endif  // MBUFO_CLI_ARG_PARSER_HPP_

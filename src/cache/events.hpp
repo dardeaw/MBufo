@@ -1,12 +1,12 @@
-#ifndef GUFO_CACHE_EVENTS_HPP_
-#define GUFO_CACHE_EVENTS_HPP_
+#ifndef MBUFO_CACHE_EVENTS_HPP_
+#define MBUFO_CACHE_EVENTS_HPP_
 
 #include <cstddef>
 #include <cstdint>
 
 #include "src/cache/types.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 
 enum class EventKind : std::uint8_t {
   kCapture,
@@ -36,6 +36,6 @@ public:
   virtual void Emit(const Event&) noexcept = 0;
 };
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 
 #endif

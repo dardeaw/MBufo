@@ -97,7 +97,7 @@ bool RunEulerCase(float sigma_from_timestep, float ratio,
   }
 
   std::string error;
-  if (!gufo::minimax_h3::HipEulerUpdate(device_sample.data(), sample.size(), 2,
+  if (!mbufo::minimax_h3::HipEulerUpdate(device_sample.data(), sample.size(), 2,
                                          device_last.data(),
                                          device_previous.data(), last.size(),
                                          sigma_from_timestep, ratio, 0.0F,
@@ -124,9 +124,9 @@ bool RunEulerTrajectory(
       {-0.625F, 1.75F, -0.125F, 0.5F},
   }};
   std::string error;
-  auto schedule = gufo::minimax_h3::BuildServingSchedule(4, &error);
+  auto schedule = mbufo::minimax_h3::BuildServingSchedule(4, &error);
   auto plan = schedule.has_value()
-                  ? gufo::minimax_h3::BuildEulerPlan(*schedule, 1, &error)
+                  ? mbufo::minimax_h3::BuildEulerPlan(*schedule, 1, &error)
                   : std::nullopt;
   if (!plan.has_value()) {
     std::cerr << error << '\n';
@@ -147,7 +147,7 @@ bool RunEulerTrajectory(
     const auto& item = (*plan)[step];
     if (!CopyToDevice(device_velocity.data(), velocities[step].data(),
                       sizeof(velocities[step]), stream.get()) ||
-        !gufo::minimax_h3::HipEulerUpdate(
+        !mbufo::minimax_h3::HipEulerUpdate(
             device_sample.data(), initial.size(), 0, device_velocity.data(),
             device_velocity.data(), initial.size(),
             video ? item.video_sigma_from_timestep
@@ -230,13 +230,13 @@ int main() {
   std::string error;
   void* const invalid_device_pointer =
       reinterpret_cast<void*>(std::uintptr_t{1});
-  if (gufo::minimax_h3::HipEulerUpdate(
+  if (mbufo::minimax_h3::HipEulerUpdate(
           invalid_device_pointer, 1, 0, invalid_device_pointer,
           invalid_device_pointer, 1, 0.0F, 0.5F, 0.0F, nullptr, &error)) {
     std::cerr << "MiniMax H3 HIP Euler accepted a zero-sigma step\n";
     return 1;
   }
-  if (gufo::minimax_h3::HipEulerUpdate(
+  if (mbufo::minimax_h3::HipEulerUpdate(
           invalid_device_pointer, 1, 1, invalid_device_pointer,
           invalid_device_pointer, 1, 0.25F, 0.5F, 0.0F, nullptr, &error)) {
     std::cerr << "MiniMax H3 HIP Euler accepted an out-of-bounds range\n";

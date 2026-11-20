@@ -1,11 +1,11 @@
-#ifndef GUFO_CORE_HIP_SNAPSHOT_COPY_HPP_
-#define GUFO_CORE_HIP_SNAPSHOT_COPY_HPP_
+#ifndef MBUFO_CORE_HIP_SNAPSHOT_COPY_HPP_
+#define MBUFO_CORE_HIP_SNAPSHOT_COPY_HPP_
 
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // Byte-exact, asynchronous snapshot download. Aligned registered host backing
 // uses its device alias; pageable/unaligned buffers retain HIP's copy path.
@@ -22,5 +22,5 @@ namespace gufo::hip {
                                               std::size_t bytes,
                                               hipStream_t stream);
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif

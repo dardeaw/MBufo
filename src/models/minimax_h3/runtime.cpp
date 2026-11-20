@@ -18,11 +18,11 @@
 #include "src/models/minimax_h3/json.hpp"
 #include "src/models/minimax_h3/sha256.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 namespace {
 
-constexpr std::string_view kManifestSchema = "gufo.minimax-h3-source.v1";
+constexpr std::string_view kManifestSchema = "mbufo.minimax-h3-source.v1";
 constexpr std::string_view kModelKind = "minimax-h3-fl2va-bf16";
 constexpr std::string_view kRevision =
     "42ed227ee7df40d41602854ae760620d6eb651fe";
@@ -916,4 +916,4 @@ const ResidentTensor* PhaseSession::FindTensor(
   return nullptr;
 }
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3

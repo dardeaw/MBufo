@@ -3,7 +3,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 
 Completion::Completion(std::unique_ptr<CompletionSignal> signal)
     : signal_(std::move(signal)) {
@@ -38,4 +38,4 @@ TransferResult Completion::Wait() noexcept {
   return *result_;
 }
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache

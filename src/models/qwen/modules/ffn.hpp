@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_MODULES_FFN_HPP_
-#define GUFO_MODELS_QWEN_MODULES_FFN_HPP_
+#ifndef MBUFO_MODELS_QWEN_MODULES_FFN_HPP_
+#define MBUFO_MODELS_QWEN_MODULES_FFN_HPP_
 
 #include <cstddef>
 #include <span>
@@ -7,7 +7,7 @@
 #include "src/models/qwen/modules/layer_view.hpp"
 #include "src/models/qwen/modules/module_ctx.hpp"
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 /// SwiGLU FFN: out = (SiLU(gate) * up) @ down.
 ///
@@ -24,6 +24,6 @@ void FfnForward(const HipModuleContext& ctx, const FfnLayerView& view,
                 std::span<float> up_scratch, std::span<float> act_scratch,
                 std::span<float> out) noexcept;
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 
-#endif  // GUFO_MODELS_QWEN_MODULES_FFN_HPP_
+#endif  // MBUFO_MODELS_QWEN_MODULES_FFN_HPP_

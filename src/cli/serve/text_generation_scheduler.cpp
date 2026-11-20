@@ -28,7 +28,7 @@
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 constexpr std::size_t kDecodeProgressInterval = 50;
@@ -1960,7 +1960,7 @@ struct TextGenerationScheduler::Impl {
   // prefill-chunk / decode-step pair while a prefill and decoders coexist.
   // Returns false, with the decoders back in `decoding` untouched, when the
   // merge is refused; the caller then runs the ordinary pair.
-  // On by default; GUFO_MIXED_MTP=0 restores the alternating pair. The chunk
+  // On by default; MBUFO_MIXED_MTP=0 restores the alternating pair. The chunk
   // runs ForwardBatch's wide mode (fused prefill arithmetic), so a 512-token
   // chunk with three decoders takes ~523 ms against ~530 ms for the chunk
   // alone plus a decode step: during another request's prefill, decoders
@@ -1971,7 +1971,7 @@ struct TextGenerationScheduler::Impl {
       std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
       std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
     static const bool enabled = [] {
-      const char* e = std::getenv("GUFO_MIXED_MTP");
+      const char* e = std::getenv("MBUFO_MIXED_MTP");
       return e == nullptr || e[0] == '\0' || e[0] != '0';
     }();
     if (!enabled || prefilling.empty() || decoding.empty())
@@ -2183,7 +2183,7 @@ struct TextGenerationScheduler::Impl {
   // Mixed prefill+decode step (P3): one prefill chunk rides the same batch
   // as plain decodes via pool PrefillWithCoworkers. Returns true when handled
   // (merged, or legacy-fallback completed inline); false runs the legacy
-  // StepPrefill alone. Gated by GUFO_MIXED_BATCH; MTP-speculative batches and
+  // StepPrefill alone. Gated by MBUFO_MIXED_BATCH; MTP-speculative batches and
   // snapshot/checkpoint states fall through untouched. Prepared decodes are
   // never resampled: refusal reuses them through ExecutePreparedDecodeBatch.
   bool TryStepMixedBatch(
@@ -2191,7 +2191,7 @@ struct TextGenerationScheduler::Impl {
       std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
       std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
     static const bool mixed_batches = [] {
-      const char* e = std::getenv("GUFO_MIXED_BATCH");
+      const char* e = std::getenv("MBUFO_MIXED_BATCH");
       return e == nullptr || e[0] != '0';
     }();
     if (!mixed_batches)
@@ -2980,4 +2980,4 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
                 publish_token_pieces, std::move(metadata));
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

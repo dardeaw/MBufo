@@ -5,7 +5,7 @@ The model-private DeepSeek V4 Flash engine is adapted from DS4 commit
 
 Only the model graph, GGUF/tokenizer support, request-session state, and ROCm
 kernel dependency closure are retained. DS4 command-line, HTTP server, agent,
-evaluation, and disk-cache frontends are intentionally excluded so Gufo owns
+evaluation, and disk-cache frontends are intentionally excluded so MBufo owns
 those product surfaces.
 
 The imported backend was converted to native ROCm/HIP source names and APIs.
@@ -14,11 +14,11 @@ or mutable state.
 
 ## Integration Boundary
 
-`engine.hpp` and `engine.cpp` are the stable Gufo-owned C++20 API. Product
+`engine.hpp` and `engine.cpp` are the stable MBufo-owned C++20 API. Product
 code uses that API for model loading, tokenization, request sessions,
 snapshots, logits, and cancellation.
 
-The imported implementation is part of the Gufo model package rather than a
+The imported implementation is part of the MBufo model package rather than a
 nested external project:
 
 - `runtime` owns independent C++20 modules for GGUF/model data, tokenizer,

@@ -3,7 +3,7 @@
 
 #include "src/core/pooling_norm.hpp"
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 namespace {
 
 constexpr std::uint32_t kClsPoolingType = 2;
@@ -92,4 +92,4 @@ std::optional<BgeM3Config> ExtractBgeM3Config(const core::GgufReader& reader,
   return config;
 }
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3

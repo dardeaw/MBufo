@@ -18,7 +18,7 @@
 
 #include "src/core/json.hpp"
 
-namespace gufo::models::qwen3_asr {
+namespace mbufo::models::qwen3_asr {
 namespace {
 
 class MappedFile {
@@ -243,4 +243,4 @@ bool LooksLikeQwen3Asr(const std::string& model_dir) {
   return config.has_value() && IsSupportedModelConfig(*config);
 }
 
-}  // namespace gufo::models::qwen3_asr
+}  // namespace mbufo::models::qwen3_asr

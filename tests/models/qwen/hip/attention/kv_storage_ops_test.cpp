@@ -22,9 +22,9 @@
 
 namespace {
 
-using gufo::hip::QwenExecutionPolicy;
-using gufo::hip::QwenGpuArena;
-using gufo::hip::QwenKvCacheStorage;
+using mbufo::hip::QwenExecutionPolicy;
+using mbufo::hip::QwenGpuArena;
+using mbufo::hip::QwenKvCacheStorage;
 
 void Expect(bool condition, std::string_view message) {
   if (!condition) {
@@ -42,8 +42,8 @@ QwenExecutionPolicy Fp32Policy() {
   return policy;
 }
 
-gufo::core::ModelConfig ProductionQwen27BConfig() {
-  gufo::core::ModelConfig config;
+mbufo::core::ModelConfig ProductionQwen27BConfig() {
+  mbufo::core::ModelConfig config;
   config.model_name = "qwen3.8-27b";
   config.num_layers = 64;
   config.hidden_size = 5120;
@@ -70,7 +70,7 @@ gufo::core::ModelConfig ProductionQwen27BConfig() {
 // fallback. Even KV head counts reach the wave64 kernel from 512 tokens;
 // four KV heads is the production 27B shape (24 query heads of 256).
 void TestCausalDecodeRows(unsigned kv_heads) {
-  using gufo::test::DeviceBuffer;
+  using mbufo::test::DeviceBuffer;
   constexpr unsigned dim = 256, rows = 8, context = 65544, layer = 1;
   const unsigned heads = 6 * kv_heads, width = heads * dim;
   const std::size_t cache_size = std::size_t{2} * context * kv_heads * dim;
@@ -88,7 +88,7 @@ void TestCausalDecodeRows(unsigned kv_heads) {
       actual(query.size());
   DeviceBuffer<__half> kv_half(cache_half);
   const auto row_scratch =
-      gufo::hip::detail::DecodeAttentionScratchElements(heads, dim);
+      mbufo::hip::detail::DecodeAttentionScratchElements(heads, dim);
   DeviceBuffer<float> scratch(rows * row_scratch);
   for (bool fp16 : {false, true}) {
     for (bool gated : {false, true}) {
@@ -98,7 +98,7 @@ void TestCausalDecodeRows(unsigned kv_heads) {
           float* const cache32 = fp16 ? nullptr : kv.data();
           void* const cache16 = fp16 ? kv_half.data() : nullptr;
           for (unsigned row = 0; row < batch; ++row) {
-            gufo::hip::LaunchAttention(q.data() + row * width, nullptr, nullptr,
+            mbufo::hip::LaunchAttention(q.data() + row * width, nullptr, nullptr,
                                        gated ? g.data() + row * width : nullptr,
                                        cache32, cache32, cache16, cache16,
                                        expected.data() + row * width, layer,
@@ -107,7 +107,7 @@ void TestCausalDecodeRows(unsigned kv_heads) {
           }
           const auto reference = expected.CopyToHost();
           for (auto capacity : {row_scratch, scratch.size()}) {
-            gufo::hip::LaunchCausalDecodeAttention(
+            mbufo::hip::LaunchCausalDecodeAttention(
                 q.data(), gated ? g.data() : nullptr, cache32, cache32, cache16,
                 cache16, actual.data(), layer, start, batch, context, heads,
                 kv_heads, dim, nullptr, {scratch.data(), capacity});
@@ -154,7 +154,7 @@ void TestProductionMemoryScaling() {
 }
 
 void TestCanonicalMemoryAccountingAndSnapshot() {
-  const auto config = gufo::models::qwen::make_small_qwen_config();
+  const auto config = mbufo::models::qwen::make_small_qwen_config();
   constexpr std::uint32_t context = 32;
   const auto fp32 = Fp32Policy();
   const auto fp16 = Fp16Policy();
@@ -221,7 +221,7 @@ void TestCanonicalMemoryAccountingAndSnapshot() {
 }
 
 void TestCompactPersistentSnapshotRoundTrip() {
-  const auto config = gufo::models::qwen::make_small_qwen_config();
+  const auto config = mbufo::models::qwen::make_small_qwen_config();
   constexpr std::uint32_t context = 32;
   constexpr std::uint32_t valid_context = 7;
   constexpr std::size_t header_bytes = 80;
@@ -383,13 +383,13 @@ void TestCompactImageLayout() {
     put(header + i * 12 + 4, 1);
     put(header + i * 12 + 8, 1);
   }
-  const auto layout = gufo::hip::QwenGpuSnapshot::ReadRopeLayout(payload);
+  const auto layout = mbufo::hip::QwenGpuSnapshot::ReadRopeLayout(payload);
   Expect(layout.images.size() == images &&
              layout.images.back().offset == images - 1,
          "compact snapshots retain every image beyond 256");
   const auto rejected = [&] {
     try {
-      gufo::hip::QwenGpuSnapshot::ReadRopeLayout(payload);
+      mbufo::hip::QwenGpuSnapshot::ReadRopeLayout(payload);
       return false;
     } catch (const std::invalid_argument&) {
       return true;
@@ -484,12 +484,12 @@ void TestOnlineAndGraphDecodeFp16Equivalence() {
     const std::size_t attention_offset =
         static_cast<std::size_t>(position) * attention_width;
     const std::size_t kv_offset = static_cast<std::size_t>(position) * kv_width;
-    gufo::hip::LaunchAttention(
+    mbufo::hip::LaunchAttention(
         d_query + attention_offset, d_key + kv_offset, d_value + kv_offset,
         d_gate + attention_offset, d_fp32_cache, d_fp32_cache + cache_elements,
         nullptr, nullptr, d_fp32_out + attention_offset, 0, position,
         max_context, num_heads, num_kv_heads, head_dim);
-    gufo::hip::LaunchAttention(
+    mbufo::hip::LaunchAttention(
         d_query + attention_offset, d_key + kv_offset, d_value + kv_offset,
         d_gate + attention_offset, nullptr, nullptr, d_fp16_cache,
         static_cast<std::uint16_t*>(d_fp16_cache) + cache_elements,
@@ -502,13 +502,13 @@ void TestOnlineAndGraphDecodeFp16Equivalence() {
                       hipMemcpyHostToDevice));
   const std::size_t graph_attention_offset = positions * attention_width;
   const std::size_t graph_kv_offset = positions * kv_width;
-  gufo::hip::LaunchAttention(d_query + graph_attention_offset,
+  mbufo::hip::LaunchAttention(d_query + graph_attention_offset,
                              d_key + graph_kv_offset, d_value + graph_kv_offset,
                              d_gate + graph_attention_offset, d_fp32_cache,
                              d_fp32_cache + cache_elements, nullptr, nullptr,
                              d_fp32_out + graph_attention_offset, 0, d_position,
                              max_context, num_heads, num_kv_heads, head_dim);
-  gufo::hip::LaunchAttention(
+  mbufo::hip::LaunchAttention(
       d_query + graph_attention_offset, d_key + graph_kv_offset,
       d_value + graph_kv_offset, d_gate + graph_attention_offset, nullptr,
       nullptr, d_fp16_cache,
@@ -584,7 +584,7 @@ void TestSplitKDecodeFp16Equivalence() {
   HIP_CHECK(hipMalloc(&d_fp32_out, attention_width * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_fp16_out, attention_width * sizeof(float)));
   const std::size_t scratch_elements =
-      gufo::hip::detail::DecodeAttentionScratchElements(num_heads, head_dim);
+      mbufo::hip::detail::DecodeAttentionScratchElements(num_heads, head_dim);
   HIP_CHECK(hipMalloc(&d_fp32_scratch, scratch_elements * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_fp16_scratch, scratch_elements * sizeof(float)));
   HIP_CHECK(hipMemcpy(d_query, query.data(), query.size() * sizeof(float),
@@ -600,7 +600,7 @@ void TestSplitKDecodeFp16Equivalence() {
   HIP_CHECK(hipMemcpy(d_k_weight, k_weight.data(),
                       k_weight.size() * sizeof(float), hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchBatchedFusedQKNormRoPEKvWrite(
+  mbufo::hip::LaunchBatchedFusedQKNormRoPEKvWrite(
       d_query, d_key, d_value, d_q_weight, d_k_weight, d_query, d_key,
       d_fp32_cache, d_fp32_cache + cache_elements, d_fp16_cache,
       static_cast<std::uint16_t*>(d_fp16_cache) + cache_elements, 0, 0,
@@ -608,14 +608,14 @@ void TestSplitKDecodeFp16Equivalence() {
       1000000.0F);
   const std::size_t final_attention_offset = (positions - 1U) * attention_width;
   const std::size_t final_kv_offset = (positions - 1U) * kv_width;
-  gufo::hip::LaunchAttention(
+  mbufo::hip::LaunchAttention(
       d_query + final_attention_offset, d_key + final_kv_offset,
       d_value + final_kv_offset, d_gate + final_attention_offset, d_fp32_cache,
       d_fp32_cache + cache_elements, nullptr, nullptr, d_fp32_out, 0,
       static_cast<std::uint32_t>(positions - 1U), max_context, num_heads,
       num_kv_heads, head_dim, nullptr, d_fp32_scratch,
       /*skip_kv_write=*/true);
-  gufo::hip::LaunchAttention(
+  mbufo::hip::LaunchAttention(
       d_query + final_attention_offset, d_key + final_kv_offset,
       d_value + final_kv_offset, d_gate + final_attention_offset, nullptr,
       nullptr, d_fp16_cache,
@@ -661,7 +661,7 @@ void TestSplitKDecodeFp16Equivalence() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen FP16 KV storage ops test");
   if (device_status != 0) {
     return device_status;

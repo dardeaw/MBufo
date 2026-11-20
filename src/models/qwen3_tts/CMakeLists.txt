@@ -4,7 +4,7 @@
 
 set(QWEN3_TTS_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_library(gufo_qwen3_tts STATIC
+add_library(mbufo_qwen3_tts STATIC
   audio.cpp
   config.cpp
   loader.cpp
@@ -20,19 +20,19 @@ add_library(gufo_qwen3_tts STATIC
   hip/talker_runtime.cpp
 )
 
-target_include_directories(gufo_qwen3_tts PUBLIC ${PROJECT_SOURCE_DIR})
+target_include_directories(mbufo_qwen3_tts PUBLIC ${PROJECT_SOURCE_DIR})
 
-target_link_libraries(gufo_qwen3_tts PUBLIC
+target_link_libraries(mbufo_qwen3_tts PUBLIC
   ICU::uc
   Threads::Threads)
 
 if (ENGINE_ENABLE_HIP)
-  target_sources(gufo_qwen3_tts PRIVATE
+  target_sources(mbufo_qwen3_tts PRIVATE
     hip/encoder_ops.hip
     hip/speech_decoder_ops.hip
     hip/talker_ops.hip)
-  target_compile_definitions(gufo_qwen3_tts PRIVATE ENGINE_ENABLE_HIP=1)
-  target_link_libraries(gufo_qwen3_tts PUBLIC
+  target_compile_definitions(mbufo_qwen3_tts PRIVATE ENGINE_ENABLE_HIP=1)
+  target_link_libraries(mbufo_qwen3_tts PUBLIC
     hip::host
     roc::hipblas
     roc::rocblas)

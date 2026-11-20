@@ -14,7 +14,7 @@
 #include "src/models/qwen/hip/ops/swiglu.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 template<std::uint32_t WavesPerBlock>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
@@ -589,5 +589,5 @@ void LaunchFusedSwiGLUGEMV(const void* gate_w, core::GgmlType gate_type,
       gate_w, gate_type, up_w, up_type, x, out, intermediate_size, hidden_size);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

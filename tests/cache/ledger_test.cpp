@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-using namespace gufo::cache;
+using namespace mbufo::cache;
 
 namespace {
 constexpr auto Free = ResourceCategory::kBackingFree;

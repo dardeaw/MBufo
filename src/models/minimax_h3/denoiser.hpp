@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_MINIMAX_H3_DENOISER_HPP_
-#define GUFO_MODELS_MINIMAX_H3_DENOISER_HPP_
+#ifndef MBUFO_MODELS_MINIMAX_H3_DENOISER_HPP_
+#define MBUFO_MODELS_MINIMAX_H3_DENOISER_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -12,7 +12,7 @@
 #include "src/models/minimax_h3/runtime.hpp"
 #include "src/models/minimax_h3/sampling.hpp"
 
-namespace gufo::minimax_h3 {
+namespace mbufo::minimax_h3 {
 
 inline constexpr std::size_t kH3TextConditionWidth = 5120;
 inline constexpr std::size_t kH3VideoLatentChannels = 24;
@@ -120,6 +120,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::minimax_h3
+}  // namespace mbufo::minimax_h3
 
-#endif  // GUFO_MODELS_MINIMAX_H3_DENOISER_HPP_
+#endif  // MBUFO_MODELS_MINIMAX_H3_DENOISER_HPP_

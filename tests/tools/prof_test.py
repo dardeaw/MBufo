@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tools" / "prof" / "prof.py"
-SPEC = importlib.util.spec_from_file_location("gufo_prof", SCRIPT)
+SPEC = importlib.util.spec_from_file_location("mbufo_prof", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("failed to load profiler module")
 prof = importlib.util.module_from_spec(SPEC)
@@ -22,20 +22,20 @@ SPEC.loader.exec_module(prof)
 for quant in (12, 13, 23):
     symbol = (
         f"SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, "
-        f"(gufo::core::GgmlType){quant}, 1ul, 12u, 1ul>"
+        f"(mbufo::core::GgmlType){quant}, 1ul, 12u, 1ul>"
     )
-    assert prof.short(f"void gufo::hip::{symbol}(void const*, float*)") == (
-        symbol.replace("gufo::", "")
+    assert prof.short(f"void mbufo::hip::{symbol}(void const*, float*)") == (
+        symbol.replace("mbufo::", "")
     )
     anonymous = prof.short(
-        f"void gufo::hip::(anonymous namespace)::{symbol}(void const*, float*)"
+        f"void mbufo::hip::(anonymous namespace)::{symbol}(void const*, float*)"
     )
-    assert anonymous == symbol.replace("gufo::", "")
+    assert anonymous == symbol.replace("mbufo::", "")
 
 assert prof.stage_of(
     prof.short(
-        "void gufo::hip::(anonymous namespace)::HalfPrefillGemmKernel"
-        "<256, 256, (gufo::core::GgmlType)13, true>(void const*, float*)"
+        "void mbufo::hip::(anonymous namespace)::HalfPrefillGemmKernel"
+        "<256, 256, (mbufo::core::GgmlType)13, true>(void const*, float*)"
     ),
     prof.STAGE_MAPS["qwen"],
 ) == "gemm: quant x fp16 prefill"

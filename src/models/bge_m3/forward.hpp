@@ -15,8 +15,8 @@
 // floating-point summation order is concerned -- see the determinism test,
 // which pins same-thread-count bit equality, and the HF cosine check, which
 // is the real correctness bar.
-#ifndef GUFO_MODELS_BGE_M3_FORWARD_HPP_
-#define GUFO_MODELS_BGE_M3_FORWARD_HPP_
+#ifndef MBUFO_MODELS_BGE_M3_FORWARD_HPP_
+#define MBUFO_MODELS_BGE_M3_FORWARD_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -26,7 +26,7 @@
 #include "src/models/bge_m3/config.hpp"
 #include "src/models/bge_m3/weights.hpp"
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 
 /// F32 mirror of the weight table (one exact upcast per tensor at model
 /// load; CPU and HIP prefill both consume these).
@@ -96,6 +96,6 @@ struct BgeM3Scratch {
     std::uint32_t pad_id, BgeM3Scratch& scratch,
     std::span<float> hidden_out) noexcept;
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3
 
-#endif  // GUFO_MODELS_BGE_M3_FORWARD_HPP_
+#endif  // MBUFO_MODELS_BGE_M3_FORWARD_HPP_

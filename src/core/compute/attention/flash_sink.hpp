@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_COMPUTE_ATTENTION_FLASH_SINK_HPP_
-#define GUFO_CORE_COMPUTE_ATTENTION_FLASH_SINK_HPP_
+#ifndef MBUFO_CORE_COMPUTE_ATTENTION_FLASH_SINK_HPP_
+#define MBUFO_CORE_COMPUTE_ATTENTION_FLASH_SINK_HPP_
 
 // F16-KV flash attention with per-head sinks for head_dim == 64 (gpt-oss):
 //   * FlashSinkPrefill: Q-blocked tiled prefill. Each block serves QB=8
@@ -22,7 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::core::compute::flash_sink {
+namespace mbufo::core::compute::flash_sink {
 
 /// Queries per prefill block.
 inline constexpr std::uint32_t kFlashSinkQb = 8;
@@ -65,6 +65,6 @@ bool FlashSinkDecode(const float* q, const __half* k_cache,
                      hipStream_t stream, float* partials,
                      std::size_t partials_bytes);
 
-}  // namespace gufo::core::compute::flash_sink
+}  // namespace mbufo::core::compute::flash_sink
 
-#endif  // GUFO_CORE_COMPUTE_ATTENTION_FLASH_SINK_HPP_
+#endif  // MBUFO_CORE_COMPUTE_ATTENTION_FLASH_SINK_HPP_

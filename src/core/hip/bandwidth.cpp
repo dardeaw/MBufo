@@ -12,7 +12,7 @@
 #include <hip/hip_runtime.h>
 #endif
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 #ifdef ENGINE_ENABLE_HIP
 
@@ -212,4 +212,4 @@ std::vector<BandwidthPathResult> MeasureHipBandwidth(
 
 #endif
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

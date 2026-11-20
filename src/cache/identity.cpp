@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace gufo::cache {
+namespace mbufo::cache {
 namespace {
 
 std::span<const std::uint8_t> PrefixInputIdentity(
@@ -53,4 +53,4 @@ bool InputIdentity::Matches(const InputIdentity& other, Rows count) const {
   return std::ranges::equal(At(count), other.At(count));
 }
 
-}  // namespace gufo::cache
+}  // namespace mbufo::cache

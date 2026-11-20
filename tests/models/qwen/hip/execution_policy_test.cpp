@@ -6,7 +6,7 @@
 #include <iostream>
 
 int main() {
-  using namespace gufo::hip;
+  using namespace mbufo::hip;
   const auto production = QwenExecutionPolicy::Production();
   assert(production.UsesFp16AttentionKv());
   assert(!production.UsesBf16RecurrentState());

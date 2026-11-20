@@ -12,7 +12,7 @@
 #include <string>
 #include <utility>
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 namespace {
 
 #if !defined(ENGINE_ENABLE_HIP)
@@ -349,4 +349,4 @@ AllocationBenchmarkReport RunHipAllocationBenchmark(
 }
 #endif
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

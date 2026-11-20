@@ -11,7 +11,7 @@
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/forward.hpp"
 
-namespace gufo::speculative {
+namespace mbufo::speculative {
 namespace {
 
 models::QwenTensorRef TensorRef(const core::GgufReader& reader,
@@ -288,4 +288,4 @@ float QwenMtpReference::ComputeLogit(std::uint32_t token_id) const noexcept {
   return result;
 }
 
-}  // namespace gufo::speculative
+}  // namespace mbufo::speculative

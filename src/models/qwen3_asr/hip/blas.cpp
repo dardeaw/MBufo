@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 namespace {
 
 constexpr float kAlpha = 1.0F;
@@ -254,6 +254,6 @@ bool GemmLt::Run(const void* a_bf16, const void* x_bf16, float* y,
   return true;
 }
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
 #endif

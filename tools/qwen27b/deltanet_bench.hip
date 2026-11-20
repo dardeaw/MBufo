@@ -85,7 +85,7 @@ void ExpectExact(const std::vector<float>& reference,
 }
 
 void Run(unsigned rows, unsigned iterations, unsigned seed) {
-  using gufo::hip::DeltaNetRecurrenceKernel;
+  using mbufo::hip::DeltaNetRecurrenceKernel;
   constexpr unsigned heads = 48, key_heads = 16, dim = 128, layers = 48;
   constexpr std::size_t inner = heads * dim;
   constexpr std::size_t conv = 2 * key_heads * dim + inner;

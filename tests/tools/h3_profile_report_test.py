@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "tools" / "gufo" / "h3_profile_report.py"
+MODULE_PATH = ROOT / "tools" / "mbufo" / "h3_profile_report.py"
 SPEC = importlib.util.spec_from_file_location("h3_profile_report", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -210,7 +210,7 @@ with tempfile.TemporaryDirectory() as directory:
     run = root / "000-exact"
     run.mkdir()
     profile = {
-        "schema": "gufo.minimax-h3-profile-run.v1",
+        "schema": "mbufo.minimax-h3-profile-run.v1",
         "preset": "exact",
         "binary_sha256": MODULE.LEGACY_SCALAR_BINARY_SHA256,
         "parameters": {},

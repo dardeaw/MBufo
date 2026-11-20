@@ -27,7 +27,7 @@
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 namespace detail {
 
 // W8A8 tiled-activation layout, verbatim from the kernel family that writes
@@ -60,7 +60,7 @@ void W8A8GemmWave64Core(const void* w, const void* x_tiled, float* out,
                         hipStream_t stream) {
   const dim3 grid(static_cast<unsigned>((batch + 127) / 128),
                   static_cast<unsigned>((m + 127) / 128));
-  gufo::hip::WKQuantA8BlockedWmmaGEMMKernel<128, 128, 2, 4, 1,
+  mbufo::hip::WKQuantA8BlockedWmmaGEMMKernel<128, 128, 2, 4, 1,
                                             core::GgmlType::kQ8_0, 64>
       <<<grid, 256, 0, stream>>>(w, x_tiled, out, batch, m, k);
 }
@@ -69,7 +69,7 @@ hipError_t PrepareW8A8GemmWave64Core() {
   hipFuncAttributes attributes{};
   return hipFuncGetAttributes(
       &attributes, reinterpret_cast<const void*>(
-                       gufo::hip::WKQuantA8BlockedWmmaGEMMKernel<
+                       mbufo::hip::WKQuantA8BlockedWmmaGEMMKernel<
                            128, 128, 2, 4, 1, core::GgmlType::kQ8_0, 64>));
 }
 
@@ -91,7 +91,7 @@ __launch_bounds__(256) __global__
   }
   const int num_kb = static_cast<int>(k / 32);
   const auto* w_row =
-      static_cast<const gufo::hip::Q8_0Block*>(w) + (row * num_kb);
+      static_cast<const mbufo::hip::Q8_0Block*>(w) + (row * num_kb);
   const std::size_t tl = tok % detail::kQ8ActTileTokens;
   float t[kMaxSteps];
   float dw[kMaxSteps];
@@ -101,7 +101,7 @@ __launch_bounds__(256) __global__
     t[s] = 0.0F;
     dw[s] = 0.0F;
     if (kb < num_kb) {
-      const gufo::hip::Q8_0Block& blk = w_row[kb];
+      const mbufo::hip::Q8_0Block& blk = w_row[kb];
       int qs[8];
       __builtin_memcpy(qs, blk.qs, sizeof(qs));
       const auto* tile = detail::Q8ActTile(
@@ -165,6 +165,6 @@ bool W8A8GemmVarlen(const void* w, const void* x_tiled, float* out,
   return true;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // defined(ENGINE_ENABLE_HIP)

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_ENGINE_ADAPTER_HPP_
-#define GUFO_MODELS_QWEN_ENGINE_ADAPTER_HPP_
+#ifndef MBUFO_MODELS_QWEN_ENGINE_ADAPTER_HPP_
+#define MBUFO_MODELS_QWEN_ENGINE_ADAPTER_HPP_
 
 // Qwen3.8-27B adapter: exposes the session-less QwenGpuExecutor through the
 // L0/L1 engine abstraction (EngineModel / SpeculativeSession).
@@ -77,12 +77,13 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/engine/attention_contract.hpp"
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 /// Load-time options for the 27B registry model. Zero/empty fields keep
 /// engine defaults (full native context, f16 KV); "q8" selects the shared
@@ -188,7 +189,7 @@ class Qwen27BEngineSession final : public core::engine::SpeculativeSession,
   std::vector<float> logits_;
 };
 
-class Qwen27BEngineModel final : public core::engine::EngineModel {
+class Qwen27BEngineModel final : public core::engine::EngineModel, public core::engine::AttentionCapable {
  public:
   [[nodiscard]] static std::shared_ptr<Qwen27BEngineModel> Load(
       const std::string& model_path, const Qwen27BModelOptions& options,
@@ -206,6 +207,8 @@ class Qwen27BEngineModel final : public core::engine::EngineModel {
   [[nodiscard]] std::size_t ResidentBytes() const noexcept override;
   // No native name exists on QwenGpuModel; returns the load path.
   [[nodiscard]] std::string ModelName() const override;
+  [[nodiscard]] core::engine::AttentionGeometry AttentionGeometryInfo() const override;
+  [[nodiscard]] core::engine::AttentionKernelInfo AttentionKernelsInfo() const override;
 
   // L0-external 27B pass-throughs (unchanged engine semantics).
   [[nodiscard]] std::string Decode(
@@ -229,8 +232,50 @@ class Qwen27BEngineModel final : public core::engine::EngineModel {
   hip::QwenExecutionPolicy policy_;
 };
 
-}  // namespace gufo::models::qwen
+/// Registry engine "qwen35moe": the routed-MoE Qwen models (Qwen3.5 / 3.6 35B-A3B and kin). The runner is the same QwenGpuModel +
+/// QwenGpuExecutor as the dense 27B engine (the executor already handles routed-MoE layers), so this class wraps a Qwen27BEngineModel and
+/// forwards everything; what it adds is the engine KIND: it refuses a dense GGUF, is registered with EngineBackendInfo::moe, and implements
+/// MoeCapable (the MoE contract, core/engine/moe_contract.hpp). The dense "qwen3.8-27b" engine, in turn, refuses an MoE GGUF.
+class QwenMoeEngineModel final : public core::engine::EngineModel, public core::engine::MoeCapable, public core::engine::AttentionCapable {
+ public:
+  [[nodiscard]] static std::shared_ptr<QwenMoeEngineModel> Load(
+      const std::string& model_path, const Qwen27BModelOptions& options,
+      std::string* error_msg = nullptr);
+
+  [[nodiscard]] std::unique_ptr<core::engine::EngineSession> CreateSession(
+      std::string* error_msg = nullptr) override;
+
+  [[nodiscard]] std::vector<std::int32_t> Tokenize(
+      std::string_view text, bool add_bos) const override;
+  [[nodiscard]] std::uint32_t VocabSize() const noexcept override;
+  [[nodiscard]] std::uint32_t MaxContext() const noexcept override;
+  [[nodiscard]] std::size_t ResidentBytes() const noexcept override;
+  [[nodiscard]] std::string ModelName() const override;
+  [[nodiscard]] core::engine::AttentionGeometry AttentionGeometryInfo() const override;
+  [[nodiscard]] core::engine::AttentionKernelInfo AttentionKernelsInfo() const override;
+  [[nodiscard]] core::engine::MoeGeometry MoeGeometryInfo() const override;
+  [[nodiscard]] core::engine::MoeKernelInfo MoeKernelsInfo() const override;
+
+  // Pass-throughs of the underlying Qwen engine (unchanged semantics).
+  [[nodiscard]] std::string Decode(std::span<const std::int32_t> tokens) const;
+  [[nodiscard]] bool IsStopToken(std::int32_t token) const noexcept;
+  [[nodiscard]] std::int32_t EosToken() const noexcept;
+  [[nodiscard]] bool HasVision() const noexcept;
+  [[nodiscard]] const std::shared_ptr<Qwen27BEngineModel>& inner() const noexcept { return inner_; }
+
+ private:
+  explicit QwenMoeEngineModel(std::shared_ptr<Qwen27BEngineModel> inner) : inner_(std::move(inner)) {}
+
+  std::shared_ptr<Qwen27BEngineModel> inner_;
+};
+
+/// The MoE contract declaration of a loaded Qwen GPU model (the registry engine and mbufo serve share it). Dense Qwen models report
+/// moe_layers == 0.
+[[nodiscard]] core::engine::MoeGeometry DescribeQwenMoeGeometry(const hip::QwenGpuModel& model);
+[[nodiscard]] core::engine::MoeKernelInfo DescribeQwenMoeKernels();
+
+}  // namespace mbufo::models::qwen
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // GUFO_MODELS_QWEN_ENGINE_ADAPTER_HPP_
+#endif  // MBUFO_MODELS_QWEN_ENGINE_ADAPTER_HPP_

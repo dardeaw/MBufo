@@ -19,7 +19,7 @@
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/models/llama/kernels/kernels.hpp"
 
-namespace gufo::models::llama {
+namespace mbufo::models::llama {
 namespace {
 
 // Prefill chunk (tokens per Forward); LLAMA_PREFILL_CHUNK overrides it (16..8192) for tuning.
@@ -943,4 +943,4 @@ std::int32_t Session::SampleGreedy() {
   return tok;
 }
 
-}  // namespace gufo::models::llama
+}  // namespace mbufo::models::llama

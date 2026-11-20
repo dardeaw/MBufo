@@ -1,15 +1,15 @@
 """Functional tier shared by the suites: `full` runs every transport combination.
 
 The `pr` tier keeps every case but trims its transport matrix. The runner sets
-GUFO_FUNCTIONAL_TIER for each suite process; manual runs default to `full`.
+MBUFO_FUNCTIONAL_TIER for each suite process; manual runs default to `full`.
 """
 
 import os
 
 
-TIER = os.environ.get("GUFO_FUNCTIONAL_TIER", "full")
+TIER = os.environ.get("MBUFO_FUNCTIONAL_TIER", "full")
 if TIER not in ("pr", "full"):
-    raise ValueError(f"GUFO_FUNCTIONAL_TIER must be pr or full, not {TIER!r}")
+    raise ValueError(f"MBUFO_FUNCTIONAL_TIER must be pr or full, not {TIER!r}")
 
 
 def streaming_modes():

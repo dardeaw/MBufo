@@ -15,8 +15,8 @@
 // The HIP prefill twins stay in the model directories; only this scalar
 // math is shared -- it runs on the host even for device prefills (a
 // 1024-wide head is microseconds on CPU).
-#ifndef GUFO_CORE_RERANK_SCORE_HPP_
-#define GUFO_CORE_RERANK_SCORE_HPP_
+#ifndef MBUFO_CORE_RERANK_SCORE_HPP_
+#define MBUFO_CORE_RERANK_SCORE_HPP_
 
 #include <algorithm>
 #include <cmath>
@@ -27,7 +27,7 @@
 #include <span>
 #include <vector>
 
-namespace gufo::core::rerank {
+namespace mbufo::core::rerank {
 
 // Logistic sigmoid: maps a raw relevance logit to (0, 1).
 [[nodiscard]] inline float Sigmoid(float logit) noexcept {
@@ -94,6 +94,6 @@ namespace gufo::core::rerank {
   return order;
 }
 
-}  // namespace gufo::core::rerank
+}  // namespace mbufo::core::rerank
 
-#endif  // GUFO_CORE_RERANK_SCORE_HPP_
+#endif  // MBUFO_CORE_RERANK_SCORE_HPP_

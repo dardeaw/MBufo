@@ -172,15 +172,15 @@ clang-tools, ICU, curl, libpng, libjpeg, libwebp and OpenSSL. Production library
 configuration used the production package's `inputsFrom` dependency shell.
 
 ```sh
-cmake --preset cpu-test -DGUFO_BUILD_TOOLS=ON
+cmake --preset cpu-test -DMBUFO_BUILD_TOOLS=ON
 cmake --build --preset cpu-test --target cache_retention_test cache_retention_replay cache_retention_bench --parallel 4
 ctest --preset cpu-test -R '^cache_(retention|slot|checkpoint|ledger|adapter|adapter_lifecycle|prefix_index|boundary)_test$' --output-on-failure
 cmake --preset cpu-sanitizer
 cmake --build --preset cpu-sanitizer --target cache_retention_test cache_slot_test cache_checkpoint_test cache_ledger_test cache_adapter_test cache_adapter_lifecycle_test cache_prefix_index_test --parallel 4
 ctest --preset cpu-sanitizer -R '^cache_(retention|slot|checkpoint|ledger|adapter|adapter_lifecycle|prefix_index|boundary)_test$' --output-on-failure
 cmake --build --preset pr --parallel 4
-cmake --preset release -DGUFO_BUILD_TOOLS=OFF
-cmake --build --preset release --target gufo_cache --parallel 4
+cmake --preset release -DMBUFO_BUILD_TOOLS=OFF
+cmake --build --preset release --target mbufo_cache --parallel 4
 nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
 ```
 
@@ -188,15 +188,15 @@ After following the RFC's archive recovery/checksum instructions, run for each
 `fn`/`q27` and `w1`/`w2`/`w3`/`w4` pair:
 
 ```sh
-python3 tests/cache/retention_trace.py "$CACHE_EXP_DIR/results" fn w1 > /tmp/gufo-card07-fn-w1.tokens
-build/cpu-test/tests/cache/cache_retention_replay /tmp/gufo-card07-fn-w1.csv < /tmp/gufo-card07-fn-w1.tokens
+python3 tests/cache/retention_trace.py "$CACHE_EXP_DIR/results" fn w1 > /tmp/mbufo-card07-fn-w1.tokens
+build/cpu-test/tests/cache/cache_retention_replay /tmp/mbufo-card07-fn-w1.csv < /tmp/mbufo-card07-fn-w1.tokens
 build/cpu-test/tests/cache/cache_retention_bench
 ```
 
 All eight focused CPU and ASan/UBSan tests, all 49 hosted PR checks, the
 production release cache library, shared formatting and diff whitespace checks
 passed. Reports and generated token/CSV/summary artifacts remain in ignored
-`build/` directories or `/tmp/gufo-card07-*`. No GPU/model qualification is
+`build/` directories or `/tmp/mbufo-card07-*`. No GPU/model qualification is
 claimed because serving behavior is unchanged.
 
 ## Done when
@@ -260,9 +260,9 @@ supersedes this original, invalid harness evidence from `7de22156`:
 | q27/w3 | 60 | 125 | 16 | 72 | 23344317312 | 53 | 60 / 18 |
 | q27/w4 | 33 | 97 | 0 | 0 | 20686749440 | 41 | 33 / 11 |
 
-The original summary and CSV logs remain in `/tmp/gufo-card07-initial-replay/`;
-corrected files are `/tmp/gufo-card07-replay-summary.json` and
-`/tmp/gufo-card07-{fn,q27}-{w1,w2,w3,w4}.csv`. This is a correction of CPU replay
+The original summary and CSV logs remain in `/tmp/mbufo-card07-initial-replay/`;
+corrected files are `/tmp/mbufo-card07-replay-summary.json` and
+`/tmp/mbufo-card07-{fn,q27}-{w1,w2,w3,w4}.csv`. This is a correction of CPU replay
 ownership, not an inference performance result. The initial focused clang-tidy
 check also identified missing deleted special members on the event sink; these
 are fixed, and focused tidy passes.
@@ -302,7 +302,7 @@ inferred branch remains protected afterward; an exact learned point's refused
 retry reports the original retry role/rank; and a permitted history replacement
 with another eligible record still preserves learned status. Both the third
 review's old/new scratch reproductions and the branch-loss example are retained
-under `/tmp/gufo-pr503-r3-*`. The fixed policy is validated with the focused
+under `/tmp/mbufo-pr503-r3-*`. The fixed policy is validated with the focused
 ordinary/sanitizer test, production library rebuild and the final hosted suite.
 The archived baseline stays below its 128-record limit and is unaffected.
 

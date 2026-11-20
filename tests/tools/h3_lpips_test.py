@@ -10,7 +10,7 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "tools" / "gufo" / "h3_preset_quality.py"
+MODULE_PATH = ROOT / "tools" / "mbufo" / "h3_preset_quality.py"
 sys.path.insert(0, str(MODULE_PATH.parents[1]))
 SPEC = importlib.util.spec_from_file_location("h3_preset_quality", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None

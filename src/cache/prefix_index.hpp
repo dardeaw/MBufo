@@ -1,5 +1,5 @@
-#ifndef GUFO_CACHE_PREFIX_INDEX_HPP_
-#define GUFO_CACHE_PREFIX_INDEX_HPP_
+#ifndef MBUFO_CACHE_PREFIX_INDEX_HPP_
+#define MBUFO_CACHE_PREFIX_INDEX_HPP_
 
 #include <memory>
 #include <span>
@@ -8,7 +8,7 @@
 #include "src/cache/checkpoint.hpp"
 #include "src/cache/disk.hpp"
 
-namespace gufo::cache {
+namespace mbufo::cache {
 struct IndexEntryId {
   std::uint64_t value{};
   bool operator==(const IndexEntryId&) const = default;
@@ -142,5 +142,5 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
-}  // namespace gufo::cache
+}  // namespace mbufo::cache
 #endif

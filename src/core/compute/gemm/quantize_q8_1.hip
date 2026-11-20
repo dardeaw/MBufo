@@ -30,7 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 
-namespace gufo::core::compute::gemm::preq {
+namespace mbufo::core::compute::gemm::preq {
 
 constexpr int kPreqQK8_1 = 32;
 constexpr int kPreqBlockSize = 256;
@@ -111,10 +111,10 @@ __launch_bounds__(kPreqBlockSize, 1) static __global__ void quantize_q8_1_row(
   y[ib].ds = make_half2(d, d * sumq);
 }
 
-}  // namespace gufo::core::compute::gemm::preq
+}  // namespace mbufo::core::compute::gemm::preq
 
 // ---- Model-agnostic launcher (mirrors qfn_mmq_quantize_q8_1) ----
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 
 std::size_t PreqQ81RowPad(std::size_t k) {
   constexpr std::size_t pad = preq::kPreqRowPad;
@@ -185,4 +185,4 @@ bool LaunchNarrowQ80Prequant(const void* weights, const float* x_f32,
                                stride, stream);
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm

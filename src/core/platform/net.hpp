@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_PLATFORM_NET_HPP_
-#define GUFO_CORE_PLATFORM_NET_HPP_
+#ifndef MBUFO_CORE_PLATFORM_NET_HPP_
+#define MBUFO_CORE_PLATFORM_NET_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -25,7 +25,7 @@
 #include <unistd.h>
 #endif
 
-namespace gufo::net {
+namespace mbufo::net {
 
 #if defined(_WIN32)
 using Socket = SOCKET;
@@ -68,6 +68,6 @@ bool SetSendTimeout(Socket socket, int timeout_ms) noexcept;
 /// set, -1 means the query failed.
 long long SocketRecvTimeoutMs(Socket socket) noexcept;
 
-}  // namespace gufo::net
+}  // namespace mbufo::net
 
-#endif  // GUFO_CORE_PLATFORM_NET_HPP_
+#endif  // MBUFO_CORE_PLATFORM_NET_HPP_

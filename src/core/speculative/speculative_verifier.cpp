@@ -14,7 +14,7 @@
 
 #include "src/core/sampling.hpp"
 
-namespace gufo::speculative {
+namespace mbufo::speculative {
 namespace {
 
 constexpr std::array<std::uint8_t, 8> kVerifierPersistentMagic = {
@@ -1503,5 +1503,5 @@ tokenization::TokenId SpeculativeVerifier::Prime(
   return first_token;
 }
 
-}  // namespace gufo::speculative
+}  // namespace mbufo::speculative
 #endif  // defined(ENGINE_ENABLE_HIP)

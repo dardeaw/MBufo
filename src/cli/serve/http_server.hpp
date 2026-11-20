@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_HTTP_SERVER_HPP_
-#define GUFO_SERVER_HTTP_SERVER_HPP_
+#ifndef MBUFO_SERVER_HTTP_SERVER_HPP_
+#define MBUFO_SERVER_HTTP_SERVER_HPP_
 
 #include <algorithm>
 #include <atomic>
@@ -18,7 +18,7 @@
 #include "src/cli/serve/model_registry.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 class ModelAdminService;
 class VideoJobService;
@@ -223,6 +223,6 @@ inline void RecordServerMetrics(const TextGenerationBackend::Result& result) {
   RecordRequestMetrics(result);
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_HTTP_SERVER_HPP_
+#endif  // MBUFO_SERVER_HTTP_SERVER_HPP_

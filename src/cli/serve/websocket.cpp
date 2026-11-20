@@ -12,7 +12,7 @@
 #include "src/core/platform/net.hpp"
 #include "src/core/utf8.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 constexpr std::size_t kMaximumMessage = 4U << 20;
 constexpr std::size_t kMaximumQueue = 8U << 20;
@@ -322,4 +322,4 @@ void WebSocket::ReadLoop() {
   MarkClosed();
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

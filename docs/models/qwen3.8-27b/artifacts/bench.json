@@ -1,5 +1,5 @@
 {
-  "schema": "gufo-model-bench/1",
+  "schema": "mbufo-model-bench/1",
   "category": "llm",
   "model": {
     "id": "Qwen3.8-27B",
@@ -31,7 +31,7 @@
   "speculative": {
     "mode": "dflash2",
     "label": "DFlash2",
-    "gufo_args": [
+    "mbufo_args": [
       "--speculative",
       "dflash2",
       "--dflash-model",
@@ -215,7 +215,7 @@
       "mode": "ar"
     }
   },
-  "gufo": {
+  "mbufo": {
     "serve": [],
     "llm": [
       "--think",

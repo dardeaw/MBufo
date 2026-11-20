@@ -10,7 +10,7 @@ import tempfile
 def main():
     binary = sys.argv[1]
     env = {key: value for key, value in os.environ.items()
-           if key not in {"HOST", "PORT", "GUFO_HOST", "GUFO_PORT"}}
+           if key not in {"HOST", "PORT", "MBUFO_HOST", "MBUFO_PORT"}}
 
     def check(args, status, message):
         result = subprocess.run([binary, *args], env=env, text=True,
@@ -144,7 +144,7 @@ def main():
     # startup log says the file is armed.
     assert "--trace" in help_text
     check(["serve", "tts", "--trace", "trace.jsonl"], 2, "Unknown option")
-    check(load + ["--trace", "/nonexistent-gufo-dir/trace.jsonl"], 2,
+    check(load + ["--trace", "/nonexistent-mbufo-dir/trace.jsonl"], 2,
           "cannot open --trace file")
     with tempfile.TemporaryDirectory() as directory:
         trace = os.path.join(directory, "trace.jsonl")

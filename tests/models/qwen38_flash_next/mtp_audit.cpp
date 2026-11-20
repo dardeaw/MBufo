@@ -21,7 +21,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 #include "src/models/qwen38_flash_next/reference.hpp"
 
-namespace q = gufo::models::qwen38_flash_next;
+namespace q = mbufo::models::qwen38_flash_next;
 namespace {
 void Require(bool ok, const std::string& message) {
   if (!ok)
@@ -80,7 +80,7 @@ void Compare(std::span<const float> actual, std::span<const float> expected,
 
 void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
               const q::ModelWeights& weights, const q::MtpWeights& mtp,
-              const gufo::tokenization::QwenTokenizer& tokenizer,
+              const mbufo::tokenization::QwenTokenizer& tokenizer,
               const std::filesystem::path& path) {
   const auto& c = exec.config();
   const auto stream = exec.stream();
@@ -128,33 +128,33 @@ void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
   std::array<std::unique_ptr<q::ReferenceModel>, 2> references;
   std::array<std::int32_t, 2> next{42, 43};
   auto vision =
-      gufo::models::qwen::vision::Encoder::Open(path, {}, c.hidden_size);
+      mbufo::models::qwen::vision::Encoder::Open(path, {}, c.hidden_size);
   for (unsigned sequence = 0; sequence < 2; ++sequence) {
     sessions[sequence] =
-        exec.CreateSession(gufo::core::SessionMode::kSpeculative, 64, &error);
+        exec.CreateSession(mbufo::core::SessionMode::kSpeculative, 64, &error);
     serial[sequence] =
-        exec.CreateSession(gufo::core::SessionMode::kSpeculative, 64, &error);
+        exec.CreateSession(mbufo::core::SessionMode::kSpeculative, 64, &error);
     references[sequence] = std::make_unique<q::ReferenceModel>(
         weights, nullptr, 64, q::ReferenceModel::Storage::kDecode);
     Require(sessions[sequence] && serial[sequence], error);
-    gufo::models::qwen::vision::RopeLayout rope;
+    mbufo::models::qwen::vision::RopeLayout rope;
     if (sequence == 1) {
       Require(vision != nullptr,
               "MTP image oracle requires the vision sidecar");
-      auto prompt = std::make_shared<gufo::models::qwen::vision::Prompt>();
+      auto prompt = std::make_shared<mbufo::models::qwen::vision::Prompt>();
       rope.images.push_back({0, 2, 2});
       prompt->rope = rope;
-      gufo::core::Image pixels;
+      mbufo::core::Image pixels;
       pixels.width = pixels.height = 64;
       pixels.pixels.assign(64 * 64 * 3, 127);
       prompt->images.push_back(
-          {std::make_shared<const gufo::core::Image>(std::move(pixels)),
+          {std::make_shared<const mbufo::core::Image>(std::move(pixels)),
            rope.images.front()});
       sessions[sequence]->ConfigureVision(prompt, vision, stream);
       serial[sequence]->ConfigureVision(prompt, vision, stream);
     }
     auto origin =
-        exec.CreateSession(gufo::core::SessionMode::kSpeculative, 64, &error);
+        exec.CreateSession(mbufo::core::SessionMode::kSpeculative, 64, &error);
     Require(origin != nullptr, error);
     const auto encoded = tokenizer.Encode(
         sequence == 0
@@ -175,7 +175,7 @@ void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
                        hipMemcpyHostToDevice, stream));
     for (unsigned step = 0; step < 4; ++step) {
       const std::int32_t token = sequence == 1 && step < 3
-                                     ? gufo::models::qwen::vision::kImageToken
+                                     ? mbufo::models::qwen::vision::kImageToken
                                      : 42 + step + sequence;
       Trace cpu(c), gpu(c), replay(c);
       q::MtpCandidateLogits candidates;
@@ -286,7 +286,7 @@ void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
   for (const bool kv_only : {false, true}) {
     for (const auto chunk : {1U, 8U, 9U, 32U, 33U}) {
       auto replay_session =
-          exec.CreateSession(gufo::core::SessionMode::kSpeculative, 64, &error);
+          exec.CreateSession(mbufo::core::SessionMode::kSpeculative, 64, &error);
       Require(replay_session != nullptr, error);
       for (unsigned offset = 0; offset < replay_rows; offset += chunk) {
         const auto count = std::min(chunk, replay_rows - offset);
@@ -387,9 +387,9 @@ void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
     Require(count > 32, "catch-up audit requires --batch greater than 32");
     const unsigned rounds = c.indexer_top_k / count + 2;
     const unsigned capacity = rounds * (count + 1) + 1;
-    auto full = exec.CreateSession(gufo::core::SessionMode::kSpeculative,
+    auto full = exec.CreateSession(mbufo::core::SessionMode::kSpeculative,
                                    capacity, &error);
-    auto tail = exec.CreateSession(gufo::core::SessionMode::kSpeculative,
+    auto tail = exec.CreateSession(mbufo::core::SessionMode::kSpeculative,
                                    capacity, &error);
     Require(full && tail, error);
     std::vector<float> hidden(std::size_t(count) * c.HcDim());
@@ -461,7 +461,7 @@ void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
 // on large cohorts can outlive the first pass after changing width.
 // Timings never enter the production sampler at runtime.
 void AuditMtpCosts(q::rocm::Executor& exec,
-                   const gufo::tokenization::QwenTokenizer& tokenizer,
+                   const mbufo::tokenization::QwenTokenizer& tokenizer,
                    std::span<const std::uint32_t> depths,
                    std::span<const std::uint32_t> concurrencies,
                    bool sampled_head) {
@@ -482,7 +482,7 @@ void AuditMtpCosts(q::rocm::Executor& exec,
     std::vector<std::int32_t> prefix(prefix_size);
     for (std::size_t i = 0; i < prefix.size(); ++i)
       prefix[i] = pattern[i % pattern.size()];
-    auto base = exec.CreateSession(gufo::core::SessionMode::kSpeculative,
+    auto base = exec.CreateSession(mbufo::core::SessionMode::kSpeculative,
                                    capacity, &error);
     Require(base != nullptr, error);
     for (std::size_t offset = 0; offset < prefix.size();) {
@@ -514,7 +514,7 @@ void AuditMtpCosts(q::rocm::Executor& exec,
       const unsigned count = concurrency;
       for (unsigned i = 0; i < count; ++i) {
         sessions.push_back(exec.CreateSession(
-            gufo::core::SessionMode::kSpeculative, capacity, &error));
+            mbufo::core::SessionMode::kSpeculative, capacity, &error));
         Require(sessions.back() != nullptr, error);
         q::rocm::Executor::SnapshotInfo info;
         Require(exec.RestoreSnapshot(*sessions.back(), common, &info, &error),
@@ -564,11 +564,11 @@ void AuditMtpCosts(q::rocm::Executor& exec,
             chains[i].push_back(anchors[i]);
           const auto proposal_start = Clock::now();
           std::array<q::MtpCandidateLogits, 8> candidates;
-          std::vector<gufo::sampling::SamplerState> samplers;
+          std::vector<mbufo::sampling::SamplerState> samplers;
           std::array<std::uint64_t, 8> random{};
           for (unsigned i = 0; sampled_head && i < concurrency; ++i) {
             samplers.emplace_back(
-                gufo::sampling::SamplingConfig{.temperature = 0.7F,
+                mbufo::sampling::SamplingConfig{.temperature = 0.7F,
                                                .top_k = 20,
                                                .top_p = 0.8F,
                                                .seed = 31,

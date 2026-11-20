@@ -1,4 +1,4 @@
-"""Selection invariants; these tests never load weights or start Gufo."""
+"""Selection invariants; these tests never load weights or start MBufo."""
 
 import copy
 import json

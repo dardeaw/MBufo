@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_HIP_TEXT_OPS_HPP_
-#define GUFO_MODELS_QWEN3_ASR_HIP_TEXT_OPS_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_HIP_TEXT_OPS_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_HIP_TEXT_OPS_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 
 /// Reproduces the Qwen3 BF16 q/k RMSNorm, RoPE, value rounding, and optional
 /// float32 KV-cache write in one dispatch.
@@ -138,7 +138,7 @@ void LaunchTextArgmax(const float* logits, std::uint32_t* output_token,
 /// Float count LaunchTextArgmax() needs for its grid-wide scratch.
 [[nodiscard]] std::size_t TextArgmaxScratchElements();
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 #endif
 
-#endif  // GUFO_MODELS_QWEN3_ASR_HIP_TEXT_OPS_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_HIP_TEXT_OPS_HPP_

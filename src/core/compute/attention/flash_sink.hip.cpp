@@ -19,7 +19,7 @@
 
 #include "src/core/compute/attention/flash_sink.hpp"
 
-namespace gufo::core::compute::flash_sink {
+namespace mbufo::core::compute::flash_sink {
 namespace {
 
 constexpr unsigned kThreadsPrefill = 256;  // 8 waves, one query each
@@ -460,6 +460,6 @@ bool FlashSinkDecode(const float* q, const __half* k_cache,
   return true;
 }
 
-}  // namespace gufo::core::compute::flash_sink
+}  // namespace mbufo::core::compute::flash_sink
 
 #endif  // ENGINE_ENABLE_HIP

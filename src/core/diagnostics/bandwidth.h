@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_DIAGNOSTICS_BANDWIDTH_H_
-#define GUFO_CORE_DIAGNOSTICS_BANDWIDTH_H_
+#ifndef MBUFO_CORE_DIAGNOSTICS_BANDWIDTH_H_
+#define MBUFO_CORE_DIAGNOSTICS_BANDWIDTH_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +9,7 @@
 
 #include "src/core/diagnostics/fingerprint.h"
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 struct BandwidthOptions {
   std::vector<std::string> backends{"cpu", "hip"};
@@ -58,6 +58,6 @@ struct BandwidthReport {
 [[nodiscard]] BandwidthReport RunBandwidthBenchmark(
     const BandwidthOptions& options, const MachineFingerprint& fingerprint);
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics
 
-#endif  // GUFO_CORE_DIAGNOSTICS_BANDWIDTH_H_
+#endif  // MBUFO_CORE_DIAGNOSTICS_BANDWIDTH_H_

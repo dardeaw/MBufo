@@ -15,7 +15,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace mbufo::models::qwen38_flash_next::rocm {
 namespace {
 
 constexpr std::uint32_t kBatchSessions = 32;
@@ -28,13 +28,13 @@ constexpr std::uint32_t kMaxBatchItemRows = 1024;
 constexpr std::uint32_t kDecodeRows = 8;
 
 namespace {
-// Mixed-batch attention (on by default; GUFO_MIXED_BATCH=0 opts out): one
+// Mixed-batch attention (on by default; MBUFO_MIXED_BATCH=0 opts out): one
 // WmmaMixedAttention over packed decode + prefill-chunk rows instead of
 // per-item launches. Validated envelope: decode bit-exact, chunk family
 // noise (see docs/MIXED_BATCH.md); any refusal falls back to legacy cores.
 bool UseMixedBatch() {
   static const bool on = [] {
-    const char* e = std::getenv("GUFO_MIXED_BATCH");
+    const char* e = std::getenv("MBUFO_MIXED_BATCH");
     return e == nullptr || e[0] != '0';
   }();
   return on;
@@ -44,60 +44,60 @@ bool UseMixedBatch() {
   return e != nullptr && e[0] != '\0' && e[0] != '0';
 }
 // Speculative (MTP verify) items join the packed mixed attention by default;
-// GUFO_MIXED_SPEC=0 keeps them on per-item cores. Measured on current code:
+// MBUFO_MIXED_SPEC=0 keeps them on per-item cores. Measured on current code:
 // verify chains match the per-item cores to 2e-6 (F16 kernel) and byte for
 // byte (blocked q8/q4), with C2/C4 acceptance unchanged. The earlier 92%->46%
 // collapse came from the retired WmmaMixedAttention route.
-// GUFO_MIXED_CHECK=1 also runs the per-item cores on the same rows and logs
-// the largest output difference per layer. GUFO_MIXED_LOG=1 prints one line
+// MBUFO_MIXED_CHECK=1 also runs the per-item cores on the same rows and logs
+// the largest output difference per layer. MBUFO_MIXED_LOG=1 prints one line
 // per mixed launch.
 bool MixedSpec() {
   static const bool on = [] {
-    const char* e = std::getenv("GUFO_MIXED_SPEC");
+    const char* e = std::getenv("MBUFO_MIXED_SPEC");
     return e == nullptr || e[0] == '\0' || e[0] != '0';
   }();
   return on;
 }
 bool MixedCheck() {
-  static const bool on = EnvOn("GUFO_MIXED_CHECK");
+  static const bool on = EnvOn("MBUFO_MIXED_CHECK");
   return on;
 }
 bool MixedLog() {
-  static const bool on = EnvOn("GUFO_MIXED_LOG");
+  static const bool on = EnvOn("MBUFO_MIXED_LOG");
   return on;
 }
 // int8 WMMA mixed path (blocked K/V read directly, no F16 staging).
-// Gated behind GUFO_KV_I8 (separate from GUFO_KV_WMMA so single-session
+// Gated behind MBUFO_KV_I8 (separate from MBUFO_KV_WMMA so single-session
 // routing is untouched during validation); only the int8 codec layout is
 // supported (E4M3 bytes are not int8 codes, so kFp8 keeps staging).
-// Default on (GUFO_KV_I8 unset or nonzero); GUFO_KV_I8=0 restores staging.
+// Default on (MBUFO_KV_I8 unset or nonzero); MBUFO_KV_I8=0 restores staging.
 bool UseWmmaI8() {
   static const bool on = [] {
-    const char* e = std::getenv("GUFO_KV_I8");
+    const char* e = std::getenv("MBUFO_KV_I8");
     return e == nullptr || e[0] == '\0' || e[0] != '0';
   }();
   return on;
 }
 [[nodiscard]] std::uint32_t MixedKvKeyBytes() {
-  const char* q4 = std::getenv("GUFO_KV_Q4");
+  const char* q4 = std::getenv("MBUFO_KV_Q4");
   const bool is_q4 = q4 != nullptr && *q4 != '\0' && *q4 != '0';
   return is_q4 ? kKvKey4BitBlockBytes : kKvKeyBlockBytes;
 }
 [[nodiscard]] std::uint32_t MixedKvValueBytes() {
-  const char* v4 = std::getenv("GUFO_KV_V4");
+  const char* v4 = std::getenv("MBUFO_KV_V4");
   const bool is_v4 = v4 != nullptr && *v4 != '\0' && *v4 != '0';
   return is_v4 ? kKvValue4BitBlockBytes : kKvKeyBlockBytes;
 }
 [[nodiscard]] float MixedKvKeyRange(KvFormat format) {
   if (format == KvFormat::kFp8)
     return 448.0F;
-  const char* q4 = std::getenv("GUFO_KV_Q4");
+  const char* q4 = std::getenv("MBUFO_KV_Q4");
   return (q4 != nullptr && *q4 != '\0' && *q4 != '0') ? 7.0F : 127.0F;
 }
 [[nodiscard]] float MixedKvValueRange(KvFormat format) {
   if (format == KvFormat::kFp8)
     return 448.0F;
-  const char* v4 = std::getenv("GUFO_KV_V4");
+  const char* v4 = std::getenv("MBUFO_KV_V4");
   return (v4 != nullptr && *v4 != '\0' && *v4 != '0') ? 7.0F : 127.0F;
 }
 }  // namespace
@@ -919,9 +919,9 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
   // next Combine when out == s_.block_out, but ForwardBatch follows with
   // CombineBatch, which does not fold it; the epilogue therefore runs here.
   // (That missed fold is what dropped the whole MoE output in the earlier
-  // whole-batch WMMA attempt.) GUFO_BATCH_WMMA_MOE=0 keeps the vec tiles.
+  // whole-batch WMMA attempt.) MBUFO_BATCH_WMMA_MOE=0 keeps the vec tiles.
   static const bool batch_wmma_moe = [] {
-    const char* e = std::getenv("GUFO_BATCH_WMMA_MOE");
+    const char* e = std::getenv("MBUFO_BATCH_WMMA_MOE");
     return e == nullptr || e[0] == '\0' || e[0] != '0';
   }();
   if (batch_wmma_moe && rows > 64 && WmmaExperts(l, rows)) {
@@ -1067,18 +1067,18 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   // arithmetic (row-wise mixers, combines and MoE over every row in the
   // prefill phase; its own attention / GDN with fused projections), while
   // the leading decode / verify items keep their batched per-item cores in
-  // the decode phase. GUFO_BATCH_WIDE_CHUNK=0 keeps the decode-family path.
+  // the decode phase. MBUFO_BATCH_WIDE_CHUNK=0 keeps the decode-family path.
   //
   // Cost of merging, measured 2026-11-15 (rocprofv3 --kernel-trace
   // --hip-runtime-trace; passes sliced at hipStreamSynchronize). A 512-row
   // chunk plus 3 decoders' 6 verify rows takes 506 ms of GPU time against 454 ms
-  // for the same chunk step with GUFO_MIXED_MTP=0 (another pair: 516 vs 462).
+  // for the same chunk step with MBUFO_MIXED_MTP=0 (another pair: 516 vs 462).
   // Breakdown of the first pair: routed GEMM +14, mul_mat_vec_q_dense +12
   // (new kernel: the decode rows likely re-stream the dense weights through
   // the MMQ GEMV), W8A8 +7 and GDN +4 (launch counts double: 384 vs 192 and
   // 288 vs 144, the decode rows run their own pass), prefill attention +6
   // (only +1.5 in the second pair), HC combine +3, the rest +6. A standalone
-  // pp512 is 410-415 ms (`gufo bench -p 512`, MTP on or off), so the merged
+  // pp512 is 410-415 ms (`mbufo bench -p 512`, MTP on or off), so the merged
   // step sits 70-100 ms above "chunk plus a few rows"; alternating mode also
   // pays a separate ~100 ms decode step, so merging wins only ~0-30 ms of GPU
   // time per step and its value is the smoother ITL. One decoder with 6 rows
@@ -1086,7 +1086,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   // decode phase existing, not the decoder count. Running the decode rows
   // through the chunk's own projection GEMMs would remove most of it (about
   // 4-5% of the step) but changes the verify rows' numerics; not done.
-  // Re-measuring this: `gufo serve --sessions 4` (with 2 the third concurrent
+  // Re-measuring this: `mbufo serve --sessions 4` (with 2 the third concurrent
   // request gets 503); wait for the loader's load_completed log line
   // (/v1/models answers earlier); start 3 streaming decoders, then a
   // ~10K-token prompt whose first line is a unique nonce (otherwise the prefix
@@ -1096,7 +1096,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   // holds ~100 GB, so stop it first and make sure it is started again; match
   // the test process by its port, not by its binary name.
   static const bool wide_chunk_enabled = [] {
-    const char* e = std::getenv("GUFO_BATCH_WIDE_CHUNK");
+    const char* e = std::getenv("MBUFO_BATCH_WIDE_CHUNK");
     return e == nullptr || e[0] == '\0' || e[0] != '0';
   }();
   const std::size_t chunk_index = items.size() - 1;
@@ -1301,7 +1301,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       std::uint32_t gdn_active = 0;
       // Mixed-batch attention: all items must be dense rows (sparse batches
       // keep the per-item cores). Speculative verify chains are included
-      // unless GUFO_MIXED_SPEC=0 (see MixedSpec()).
+      // unless MBUFO_MIXED_SPEC=0 (see MixedSpec()).
       bool use_mixed =
           !wide && !l.linear && UseMixedBatch() && items.size() >= 2 &&
           (MixedSpec() ||
@@ -1429,7 +1429,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           UseScratch(base);
         } else {
           // Unified mixed-batch attention (§4.1): the caller only knows the
-          // core interface (gufo::core::compute::mixed_batch). F16 rows —
+          // core interface (mbufo::core::compute::mixed_batch). F16 rows —
           // plain caches or blocked caches via F16 staging — fuse in one
           // varlen launch; blocked-direct (i8) rows are refused by the
           // launcher (non-SWA geometry) and take the legacy cores below.
@@ -1437,7 +1437,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           // use_mixed above) and stay on legacy by design: the packed mixed
           // row family differs from the single-session family the MTP draft
           // was built against (docs/MIXED_BATCH.md P1).
-          namespace mb = ::gufo::core::compute::mixed_batch;
+          namespace mb = ::mbufo::core::compute::mixed_batch;
           mb::MixedBlk ublks[kBatchSessions];
           const std::uint32_t qdim = c.AttentionQDim();
           const auto codec = i8_mixed ? mb::MixedKvCodec::kQ8
@@ -1760,4 +1760,4 @@ bool Executor::SelectBatchLogits(std::uint32_t offset, std::uint32_t rows,
   return true;
 }
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace mbufo::models::qwen38_flash_next::rocm

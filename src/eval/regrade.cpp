@@ -1,6 +1,6 @@
 #include "src/eval/regrade.hpp"
 
-namespace gufo::eval {
+namespace mbufo::eval {
 
 RegradeSummary RegradeTrace(const EvalTraceReport& report) noexcept {
   RegradeSummary summary;
@@ -24,4 +24,4 @@ RegradeSummary RegradeTrace(const EvalTraceReport& report) noexcept {
   return summary;
 }
 
-}  // namespace gufo::eval
+}  // namespace mbufo::eval

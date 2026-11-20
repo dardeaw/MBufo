@@ -1,6 +1,6 @@
 # DeepSeek V4 Flash quality
 
-**DSpark matches Gufo AR on the retained greedy checks, including C>1.
+**DSpark matches MBufo AR on the retained greedy checks, including C>1.
 Official target-model parity is not yet established.** The Flash 0731 mixed IQ2/Q2/Q8
 weights and DSpark sidecar are [pinned](artifacts/model-identities.json).
 
@@ -18,7 +18,7 @@ Evidence: [DSpark sampling/replay](artifacts/dspark-sampling.json),
 [boundary/HTTP checks](artifacts/indexer-boundary.json),
 [qualification](artifacts/quality-qualification.json) and
 [formula audit](artifacts/prefill-formula-audit.json).
-Gufo-path agreement cannot detect shared target errors. Sampled DSpark need not
+MBufo-path agreement cannot detect shared target errors. Sampled DSpark need not
 match AR's same-seed sequence; replay requires the same execution configuration
 and schedule. The build-sensitive target differences remain under investigation.
 Ask before rerunning the 75-question capability set.

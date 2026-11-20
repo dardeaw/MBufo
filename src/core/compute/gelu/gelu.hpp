@@ -11,15 +11,15 @@
 //                   pins both against closed forms and the local torch check
 //                   confirms exact-erf is the one matching bge-m3).
 // Pure functions over caller memory; no allocation, no state.
-#ifndef GUFO_CORE_COMPUTE_GELU_GELU_HPP_
-#define GUFO_CORE_COMPUTE_GELU_GELU_HPP_
+#ifndef MBUFO_CORE_COMPUTE_GELU_GELU_HPP_
+#define MBUFO_CORE_COMPUTE_GELU_GELU_HPP_
 
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 
-namespace gufo::core::gelu {
+namespace mbufo::core::gelu {
 
 enum class GeluMode : std::uint8_t {
   /// Exact erf form; the bge-m3 / XLM-R `hidden_act: "gelu"` choice.
@@ -60,6 +60,6 @@ enum class GeluMode : std::uint8_t {
   return false;
 }
 
-}  // namespace gufo::core::gelu
+}  // namespace mbufo::core::gelu
 
-#endif  // GUFO_CORE_COMPUTE_GELU_GELU_HPP_
+#endif  // MBUFO_CORE_COMPUTE_GELU_GELU_HPP_

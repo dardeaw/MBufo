@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace gufo::crypto {
+namespace mbufo::crypto {
 namespace {
 
 std::string DigestHex(const std::array<std::uint8_t, 32>& digest) {
@@ -85,4 +85,4 @@ std::string Sha256FileHex(const std::filesystem::path& path) {
   return hasher.FinishHex();
 }
 
-}  // namespace gufo::crypto
+}  // namespace mbufo::crypto

@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_WEBSOCKET_HPP_
-#define GUFO_SERVER_WEBSOCKET_HPP_
+#ifndef MBUFO_SERVER_WEBSOCKET_HPP_
+#define MBUFO_SERVER_WEBSOCKET_HPP_
 
 #include <atomic>
 #include <chrono>
@@ -13,7 +13,7 @@
 
 #include "src/cli/serve/http_server.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 // One reader owns frame parsing; inference consumes a bounded message queue.
 // The reader handles close/ping even while inference or socket output is busy.
@@ -54,5 +54,5 @@ bool IsWebSocketUpgrade(const HttpRequest& request);
 HttpResponse UpgradeWebSocket(const HttpRequest& request,
                               std::function<void(WebSocket&)> handler);
 
-}  // namespace gufo::server
-#endif  // GUFO_SERVER_WEBSOCKET_HPP_
+}  // namespace mbufo::server
+#endif  // MBUFO_SERVER_WEBSOCKET_HPP_

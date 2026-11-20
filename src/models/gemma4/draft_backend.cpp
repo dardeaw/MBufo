@@ -14,7 +14,7 @@
 #include "src/core/speculative/draft_registry.hpp"
 #include "src/models/gemma4/engine.hpp"
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 
 speculative::DraftProposal GemmaMtpDraftBackend::Propose(
     std::span<const tokenization::TokenId> prompt_tokens,
@@ -103,4 +103,4 @@ const bool kGemmaMtpDraftRegistered = RegisterGemmaMtpDraftBackend();
 
 }  // namespace
 
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4

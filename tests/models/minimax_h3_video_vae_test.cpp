@@ -10,7 +10,7 @@
 
 namespace {
 
-namespace h3 = gufo::minimax_h3;
+namespace h3 = mbufo::minimax_h3;
 
 int failures = 0;
 

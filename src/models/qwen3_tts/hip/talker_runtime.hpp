@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_TTS_HIP_TALKER_RUNTIME_HPP_
-#define GUFO_MODELS_QWEN3_TTS_HIP_TALKER_RUNTIME_HPP_
+#ifndef MBUFO_MODELS_QWEN3_TTS_HIP_TALKER_RUNTIME_HPP_
+#define MBUFO_MODELS_QWEN3_TTS_HIP_TALKER_RUNTIME_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -12,7 +12,7 @@
 #include "src/models/qwen3_tts/prompt.hpp"
 #include "src/models/qwen3_tts/synthesis.hpp"
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 
 struct TalkerPrefillOutput {
   std::vector<float> logits;
@@ -20,7 +20,7 @@ struct TalkerPrefillOutput {
   std::vector<float> layer0_output;
 };
 
-using TalkerPromptOutput = ::gufo::models::qwen3_tts::PromptOutput;
+using TalkerPromptOutput = ::mbufo::models::qwen3_tts::PromptOutput;
 using CustomVoicePromptOutput = TalkerPromptOutput;
 
 struct VoiceClonePromptInput {
@@ -153,6 +153,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
-#endif  // GUFO_MODELS_QWEN3_TTS_HIP_TALKER_RUNTIME_HPP_
+#endif  // MBUFO_MODELS_QWEN3_TTS_HIP_TALKER_RUNTIME_HPP_

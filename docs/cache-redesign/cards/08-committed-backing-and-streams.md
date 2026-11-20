@@ -95,7 +95,7 @@ device-to-host or host-to-device pieces and records one final event. Callers
 must freeze sources and retain buffers through completion; sources on other
 streams require caller ordering before submission.
 
-The HIP implementation is a separate `gufo_cache_hip` library. The common cache
+The HIP implementation is a separate `mbufo_cache_hip` library. The common cache
 package keeps its CPU-only dependency boundary. These primitives remain
 disconnected from production serving until card 19; spill/disk use belongs to
 cards 09/12.
@@ -110,7 +110,7 @@ GCC 15.3.0, HIP Clang 22.0.0, ROCm 7.2.3 (HIP runtime 70253211).
 nix develop -c cmake --preset gpu-test
 nix develop -c cmake --build --preset gpu-test --target cache_backing_test cache_ledger_test --parallel 4
 nix develop -c ctest --preset gpu-full -R '^cache_(backing|ledger|boundary)_test$' --output-on-failure
-nix develop -c cmake --preset release -DGUFO_BUILD_TOOLS=ON
+nix develop -c cmake --preset release -DMBUFO_BUILD_TOOLS=ON
 nix develop -c cmake --build --preset release --target cache_backing_bench --parallel 4
 nix develop -c build/release/cache_backing_bench
 ```

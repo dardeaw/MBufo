@@ -37,8 +37,8 @@ void Expect(bool condition, std::string_view message) {
 }
 
 void TestLengthController() {
-  using gufo::speculative::DFlashDraftPolicy;
-  using gufo::speculative::DFlashLengthController;
+  using mbufo::speculative::DFlashDraftPolicy;
+  using mbufo::speculative::DFlashLengthController;
   DFlashLengthController fixed(DFlashDraftPolicy::kFixed, 7);
   fixed.Observe(0, 7);
   Expect(fixed.Choose(100) == 7 && fixed.Choose(3) == 3 && fixed.Choose(0) == 0,
@@ -244,11 +244,11 @@ void TestLengthController() {
 }
 
 void TestConcurrentBlocks(
-    const std::shared_ptr<const gufo::hip::QwenGpuModel>& target_model,
-    const std::shared_ptr<const gufo::hip::QwenDFlashGpuModel>& draft_model) {
-  using namespace gufo::hip;
-  using gufo::speculative::DraftProposal;
-  using Token = gufo::tokenization::TokenId;
+    const std::shared_ptr<const mbufo::hip::QwenGpuModel>& target_model,
+    const std::shared_ptr<const mbufo::hip::QwenDFlashGpuModel>& draft_model) {
+  using namespace mbufo::hip;
+  using mbufo::speculative::DraftProposal;
+  using Token = mbufo::tokenization::TokenId;
   std::string error;
   auto target = QwenGpuExecutor::Create(target_model, &error, 128);
   Expect(target != nullptr, error);
@@ -434,8 +434,8 @@ void TestConcurrentBlocks(
         .max_context = 128,
         .max_draft_tokens = 7,
         .policy = index % 2 == 0
-                      ? gufo::speculative::DFlashDraftPolicy::kAdaptive
-                      : gufo::speculative::DFlashDraftPolicy::kFixed};
+                      ? mbufo::speculative::DFlashDraftPolicy::kAdaptive
+                      : mbufo::speculative::DFlashDraftPolicy::kFixed};
     backends[index] =
         QwenDFlashGpuDraftBackend::Create(draft_model, policy, &error);
     Expect(backends[index] != nullptr, error);
@@ -457,10 +457,10 @@ void TestConcurrentBlocks(
            "concurrent backend snapshot size");
     return bytes;
   };
-  std::vector<gufo::sampling::SamplerState> samplers;
+  std::vector<mbufo::sampling::SamplerState> samplers;
   samplers.reserve(backends.size());
   for (std::size_t index = 0; index < backends.size(); ++index) {
-    gufo::sampling::SamplingConfig config{
+    mbufo::sampling::SamplingConfig config{
         .temperature = temperatures[index],
         .top_k = index % 2 ? 4 : 20,
         .top_p = index % 3 ? 0.8F : 1.0F,
@@ -476,11 +476,11 @@ void TestConcurrentBlocks(
   for (std::size_t round = 0; round < 2; ++round) {
     std::array<DraftProposal, 8> expected;
     std::array<std::vector<std::uint8_t>, 8> expected_state;
-    std::array<std::unique_ptr<gufo::speculative::IDraftBackendSnapshot>, 8>
+    std::array<std::unique_ptr<mbufo::speculative::IDraftBackendSnapshot>, 8>
         initial_state;
     const auto initial_rng = rng;
     auto expected_rng = rng;
-    std::vector<gufo::speculative::DraftProposalRequest> requests;
+    std::vector<mbufo::speculative::DraftProposalRequest> requests;
     std::array<std::size_t, 8> accepted{};
     for (std::size_t index = 0; index < backends.size(); ++index) {
       auto& backend = *backends[index];
@@ -588,12 +588,12 @@ void TestConcurrentBlocks(
 }
 
 void CaptureReferenceTrace(
-    const std::shared_ptr<const gufo::hip::QwenGpuModel>& target_model,
-    const std::shared_ptr<const gufo::hip::QwenDFlashGpuModel>& draft_model,
+    const std::shared_ptr<const mbufo::hip::QwenGpuModel>& target_model,
+    const std::shared_ptr<const mbufo::hip::QwenDFlashGpuModel>& draft_model,
     const std::filesystem::path& directory) {
   Expect(std::filesystem::create_directories(directory),
          "trace destination must be new");
-  const gufo::hip::DFlashTrace write = [&](std::string_view name,
+  const mbufo::hip::DFlashTrace write = [&](std::string_view name,
                                            std::span<const float> data) {
     std::ofstream file(directory / (std::string(name) + ".f32"),
                        std::ios::binary);
@@ -602,7 +602,7 @@ void CaptureReferenceTrace(
     Expect(file.good(), "write draft trace");
   };
   std::string error;
-  auto target = gufo::hip::QwenGpuExecutor::Create(target_model, &error, 128);
+  auto target = mbufo::hip::QwenGpuExecutor::Create(target_model, &error, 128);
   Expect(target != nullptr, error);
   const auto& config = draft_model->GetDFlashConfig();
   auto tokens = target->GetTokenizer().Encode(
@@ -614,12 +614,12 @@ void CaptureReferenceTrace(
   const auto features = target->GetPromptHiddenStates();
   write("target_features", features);
   auto draft =
-      gufo::hip::QwenDFlashGpuExecutor::Create(draft_model, 128, &error);
+      mbufo::hip::QwenDFlashGpuExecutor::Create(draft_model, 128, &error);
   Expect(draft != nullptr, error);
   Expect(draft->InjectTargetContext(features, 0, tokens.size(), write),
          "inject real target features");
   std::vector<float> probabilities, confidences;
-  std::vector<gufo::tokenization::TokenId> candidates;
+  std::vector<mbufo::tokenization::TokenId> candidates;
   const std::array<float, 7> uniforms{0.13F, 0.37F, 0.71F, 0.21F,
                                       0.59F, 0.83F, 0.43F};
   const auto proposed =
@@ -628,10 +628,10 @@ void CaptureReferenceTrace(
   write("probabilities", probabilities);
   write("selected_probabilities", confidences);
   write("uniforms", uniforms);
-  auto metadata = gufo::json::Value::object();
+  auto metadata = mbufo::json::Value::object();
   const auto array = [&](const char* key, const auto& values) {
     auto& result = metadata[key];
-    result = gufo::json::Value::array();
+    result = mbufo::json::Value::array();
     for (const auto value : values)
       result.push_back(static_cast<double>(value));
   };
@@ -653,15 +653,15 @@ void CaptureReferenceTrace(
 }
 
 void CaptureAcceptanceTrace(
-    const std::shared_ptr<const gufo::hip::QwenGpuModel>& target_model,
-    const std::shared_ptr<const gufo::hip::QwenDFlashGpuModel>& draft_model,
+    const std::shared_ptr<const mbufo::hip::QwenGpuModel>& target_model,
+    const std::shared_ptr<const mbufo::hip::QwenDFlashGpuModel>& draft_model,
     const char* input_path, const char* output_path) {
-  using gufo::json::Value;
-  using Token = gufo::tokenization::TokenId;
+  using mbufo::json::Value;
+  using Token = mbufo::tokenization::TokenId;
   std::ifstream input(input_path);
   Expect(input.good(), "open acceptance trace request");
   const auto request =
-      gufo::json::parse(std::string(std::istreambuf_iterator<char>(input), {}));
+      mbufo::json::parse(std::string(std::istreambuf_iterator<char>(input), {}));
   const auto text = request.member_str("prompt");
   const auto* input_messages = request.find("messages");
   const auto limit = request.member_size("max_tokens", 128);
@@ -671,10 +671,10 @@ void CaptureAcceptanceTrace(
   std::string rendered = text;
   if (const auto* raw = request.find("raw");
       raw == nullptr || !raw->as_bool()) {
-    std::vector<gufo::tokenization::ChatMessage> messages{
-        {gufo::tokenization::ChatRole::kSystem,
+    std::vector<mbufo::tokenization::ChatMessage> messages{
+        {mbufo::tokenization::ChatRole::kSystem,
          "You are a helpful, respectful, and honest assistant.", "", ""},
-        {gufo::tokenization::ChatRole::kUser, text, "", ""},
+        {mbufo::tokenization::ChatRole::kUser, text, "", ""},
     };
     if (input_messages != nullptr) {
       messages.clear();
@@ -683,13 +683,13 @@ void CaptureAcceptanceTrace(
         Expect(role == "system" || role == "user" || role == "assistant",
                "acceptance trace supports text conversation roles");
         messages.push_back(
-            {role == "system"      ? gufo::tokenization::ChatRole::kSystem
-             : role == "assistant" ? gufo::tokenization::ChatRole::kAssistant
-                                   : gufo::tokenization::ChatRole::kUser,
+            {role == "system"      ? mbufo::tokenization::ChatRole::kSystem
+             : role == "assistant" ? mbufo::tokenization::ChatRole::kAssistant
+                                   : mbufo::tokenization::ChatRole::kUser,
              message.member_str("content"), "", ""});
       }
     }
-    const auto chat = gufo::tokenization::QwenChatTemplate::Render(
+    const auto chat = mbufo::tokenization::QwenChatTemplate::Render(
         messages, {.add_generation_prompt = true, .enable_thinking = false});
     Expect(chat.has_value(), "render acceptance trace prompt");
     rendered = *chat;
@@ -701,13 +701,13 @@ void CaptureAcceptanceTrace(
   Expect(capacity <= 65536, "bounded acceptance trace context");
   std::string error;
   auto executor =
-      gufo::hip::QwenGpuExecutor::Create(target_model, &error, capacity);
+      mbufo::hip::QwenGpuExecutor::Create(target_model, &error, capacity);
   Expect(executor != nullptr, error);
-  auto backend = gufo::hip::QwenDFlashGpuDraftBackend::Create(
+  auto backend = mbufo::hip::QwenDFlashGpuDraftBackend::Create(
       draft_model, {.max_context = capacity, .max_draft_tokens = 7}, &error);
   Expect(backend != nullptr, error);
   auto* inspect = backend.get();
-  gufo::speculative::SpeculativeVerifier verifier(
+  mbufo::speculative::SpeculativeVerifier verifier(
       *executor, std::move(backend),
       {.max_draft_tokens = 7,
        .initial_draft_tokens = 7,
@@ -722,7 +722,7 @@ void CaptureAcceptanceTrace(
          "acceptance trace serializes the full draft state");
   // Rebuild from the same captured features before target restore clears the
   // capture buffer. This isolates draft priming from target prefill arithmetic.
-  auto rebuilt = gufo::hip::QwenDFlashGpuDraftBackend::Create(
+  auto rebuilt = mbufo::hip::QwenDFlashGpuDraftBackend::Create(
       draft_model, {.max_context = capacity, .max_draft_tokens = 7}, &error);
   Expect(rebuilt != nullptr, error);
   const auto features = executor->GetPromptHiddenStates();
@@ -774,7 +774,7 @@ void CaptureAcceptanceTrace(
   // single expensive target prefill for every arm.
   for (const int arm : {0, 1, 2}) {
     executor->RestoreSnapshot(*target_prefix);
-    gufo::speculative::SpeculativeVerifier rebuilt_verifier(
+    mbufo::speculative::SpeculativeVerifier rebuilt_verifier(
         *executor, *rebuilt,
         {.max_draft_tokens = 7,
          .initial_draft_tokens = 7,
@@ -839,14 +839,14 @@ void CaptureAcceptanceTrace(
 }
 
 void TestGreedyLookupGate(
-    const std::shared_ptr<const gufo::hip::QwenDFlashGpuModel>& model) {
-  using Token = gufo::tokenization::TokenId;
-  using Policy = gufo::speculative::DFlashDraftPolicy;
+    const std::shared_ptr<const mbufo::hip::QwenDFlashGpuModel>& model) {
+  using Token = mbufo::tokenization::TokenId;
+  using Policy = mbufo::speculative::DFlashDraftPolicy;
   const auto width = model->GetDFlashConfig().target_layer_ids.size() *
                      model->GetConfig().hidden_size;
   for (const auto policy : {Policy::kAdaptive, Policy::kFixed}) {
     std::string error;
-    auto backend = gufo::hip::QwenDFlashGpuDraftBackend::Create(
+    auto backend = mbufo::hip::QwenDFlashGpuDraftBackend::Create(
         model, {.max_context = 256, .max_draft_tokens = 7, .policy = policy},
         &error);
     Expect(backend != nullptr, error);
@@ -899,10 +899,10 @@ void TestGreedyLookupGate(
 }
 
 void TestHistoryLookup(
-    const std::shared_ptr<const gufo::hip::QwenDFlashGpuModel>& model) {
-  using Token = gufo::tokenization::TokenId;
+    const std::shared_ptr<const mbufo::hip::QwenDFlashGpuModel>& model) {
+  using Token = mbufo::tokenization::TokenId;
   std::string error;
-  auto backend = gufo::hip::QwenDFlashGpuDraftBackend::Create(
+  auto backend = mbufo::hip::QwenDFlashGpuDraftBackend::Create(
       model, {.max_context = 256, .max_draft_tokens = 7}, &error);
   Expect(backend != nullptr, error);
   const auto width = model->GetDFlashConfig().target_layer_ids.size() *
@@ -1014,9 +1014,9 @@ int main(int argc, const char* const* argv) {
   try {
     TestLengthController();
     const char* base_path =
-        argc > 1 ? argv[1] : std::getenv("GUFO_QWEN27B_MODEL");
+        argc > 1 ? argv[1] : std::getenv("MBUFO_QWEN27B_MODEL");
     const char* draft_path =
-        argc > 2 ? argv[2] : std::getenv("GUFO_QWEN27B_DFLASH_MODEL");
+        argc > 2 ? argv[2] : std::getenv("MBUFO_QWEN27B_DFLASH_MODEL");
     if (base_path == nullptr || draft_path == nullptr) {
       std::cout << "qwen_dflash_gpu_test: skipped "
                    "(pass base and DFlash GGUF paths)\n";
@@ -1024,21 +1024,21 @@ int main(int argc, const char* const* argv) {
     }
 
     std::string error;
-    auto base_owner = gufo::core::GgufReader::OpenFile(base_path, &error);
+    auto base_owner = mbufo::core::GgufReader::OpenFile(base_path, &error);
     Expect(base_owner != nullptr, error);
-    auto dflash_owner = gufo::core::GgufReader::OpenFile(draft_path, &error);
+    auto dflash_owner = mbufo::core::GgufReader::OpenFile(draft_path, &error);
     Expect(dflash_owner != nullptr, error);
 
-    std::shared_ptr<const gufo::core::GgufReader> base_reader(
+    std::shared_ptr<const mbufo::core::GgufReader> base_reader(
         std::move(base_owner));
-    std::shared_ptr<const gufo::core::GgufReader> dflash_reader(
+    std::shared_ptr<const mbufo::core::GgufReader> dflash_reader(
         std::move(dflash_owner));
 
     auto target_model =
-        gufo::hip::QwenGpuModel::CreateFromGguf(base_reader, &error);
+        mbufo::hip::QwenGpuModel::CreateFromGguf(base_reader, &error);
     Expect(target_model != nullptr, error);
 
-    auto dflash_model = gufo::hip::QwenDFlashGpuModel::Create(
+    auto dflash_model = mbufo::hip::QwenDFlashGpuModel::Create(
         dflash_reader, target_model, &error);
     Expect(dflash_model != nullptr, error);
 
@@ -1058,12 +1058,12 @@ int main(int argc, const char* const* argv) {
     if (argc == 4 && std::string_view(argv[3]) == "--concurrency-only")
       return 0;
 
-    gufo::hip::QwenDFlashGpuDraftConfig config{
+    mbufo::hip::QwenDFlashGpuDraftConfig config{
         .max_context = 512,
         .max_draft_tokens = 8,
-        .policy = gufo::speculative::DFlashDraftPolicy::kAdaptive,
+        .policy = mbufo::speculative::DFlashDraftPolicy::kAdaptive,
     };
-    auto backend = gufo::hip::QwenDFlashGpuDraftBackend::Create(dflash_model,
+    auto backend = mbufo::hip::QwenDFlashGpuDraftBackend::Create(dflash_model,
                                                                 config, &error);
     Expect(backend != nullptr, error);
 
@@ -1074,7 +1074,7 @@ int main(int argc, const char* const* argv) {
         dflash_model->GetDFlashConfig().target_layer_ids.size() *
         target_model->GetConfig().hidden_size;
     Expect(feature_width > 0, "DFlash target feature width");
-    const std::vector<gufo::tokenization::TokenId> prompt = {1, 2, 3};
+    const std::vector<mbufo::tokenization::TokenId> prompt = {1, 2, 3};
     std::vector<float> prompt_features(prompt.size() * feature_width);
     for (std::size_t index = 0; index < prompt_features.size(); ++index) {
       prompt_features[index] =
@@ -1104,7 +1104,7 @@ int main(int argc, const char* const* argv) {
                overwritten == payload,
            "DFlash persistent snapshot depends on previous destination bytes");
 
-    auto corrupt_backend = gufo::hip::QwenDFlashGpuDraftBackend::Create(
+    auto corrupt_backend = mbufo::hip::QwenDFlashGpuDraftBackend::Create(
         dflash_model, config, &error);
     Expect(corrupt_backend != nullptr, error);
     auto corrupt_payload = payload;
@@ -1118,12 +1118,12 @@ int main(int argc, const char* const* argv) {
     Expect(rejected_corruption,
            "DFlash persistent restore rejects a malformed header");
 
-    auto restored = gufo::hip::QwenDFlashGpuDraftBackend::Create(
+    auto restored = mbufo::hip::QwenDFlashGpuDraftBackend::Create(
         dflash_model, config, &error);
     Expect(restored != nullptr, error);
     restored->RestorePersistentSnapshot(payload);
 
-    const std::vector<gufo::tokenization::TokenId> continued_prompt = {1, 2, 3,
+    const std::vector<mbufo::tokenization::TokenId> continued_prompt = {1, 2, 3,
                                                                        4};
     const auto uninterrupted =
         backend->Propose(continued_prompt, continued_prompt.size(), 4);
@@ -1140,7 +1140,7 @@ int main(int argc, const char* const* argv) {
     // sampled continuation. A reset-on-restore bug would change the block size,
     // the proposal distribution and the RNG frontier.
     backend->UpdateTargetHidden(pending_features);
-    const std::vector<gufo::tokenization::TokenId> next_prompt{1, 2, 3, 4, 5};
+    const std::vector<mbufo::tokenization::TokenId> next_prompt{1, 2, 3, 4, 5};
     const auto rejected = backend->Propose(next_prompt, next_prompt.size(), 7);
     Expect(!rejected.tokens.empty(), "adaptive controller continues drafting");
     backend->AcceptFeedback({}, 6);
@@ -1152,14 +1152,14 @@ int main(int argc, const char* const* argv) {
         learned->SerializePersistent(learned_payload) == learned_payload.size(),
         "serialize learned controller state");
     const auto persistent_bytes_for =
-        [](const gufo::hip::QwenDFlashGpuDraftBackend& source) {
+        [](const mbufo::hip::QwenDFlashGpuDraftBackend& source) {
           const auto saved = source.Snapshot();
           std::vector<std::uint8_t> bytes(saved->PersistentPayloadBytes());
           Expect(saved->SerializePersistent(bytes) == bytes.size(),
                  "serialize complete controller snapshot");
           return bytes;
         };
-    const std::vector<gufo::tokenization::TokenId> final_prompt{1, 2, 3,
+    const std::vector<mbufo::tokenization::TokenId> final_prompt{1, 2, 3,
                                                                 4, 5, 6};
     std::uint64_t source_rng = 73;
     const auto expected = backend->ProposeSampled(
@@ -1190,7 +1190,7 @@ int main(int argc, const char* const* argv) {
     std::uint64_t reused_rng = 73;
     const auto reused = restored->ProposeSampled(
         final_prompt, final_prompt.size(), 7, 0.8F, &reused_rng);
-    auto cold = gufo::hip::QwenDFlashGpuDraftBackend::Create(dflash_model,
+    auto cold = mbufo::hip::QwenDFlashGpuDraftBackend::Create(dflash_model,
                                                              config, &error);
     Expect(cold != nullptr, error);
     auto complete_features = prompt_features;
@@ -1224,7 +1224,7 @@ int main(int argc, const char* const* argv) {
     const auto window = dflash_model->GetDFlashConfig().sliding_window;
     const auto capacity = std::min<std::uint32_t>(
         262144, dflash_model->GetConfig().context_length);
-    auto executor = gufo::hip::QwenDFlashGpuExecutor::Create(dflash_model,
+    auto executor = mbufo::hip::QwenDFlashGpuExecutor::Create(dflash_model,
                                                              capacity, &error);
     Expect(executor != nullptr, error);
     const auto& draft_config = dflash_model->GetConfig();
@@ -1283,7 +1283,7 @@ int main(int argc, const char* const* argv) {
             complete_payload == wrapped_payload,
         "skipping expired chunks preserves the complete history byte for byte");
     // Shared projection must preserve each ring when a chunk crosses its end.
-    auto peer = gufo::hip::QwenDFlashGpuExecutor::Create(dflash_model, capacity,
+    auto peer = mbufo::hip::QwenDFlashGpuExecutor::Create(dflash_model, capacity,
                                                          &error);
     Expect(peer != nullptr, error);
     const auto crossing_position = window - 3U;
@@ -1294,7 +1294,7 @@ int main(int argc, const char* const* argv) {
            "prime a context immediately before ring wrap");
     const auto crossing = executor->SaveSnapshot();
     peer->RestoreSnapshot(*crossing);
-    const std::array<gufo::hip::QwenDFlashContextRequest, 2> crossing_requests{
+    const std::array<mbufo::hip::QwenDFlashContextRequest, 2> crossing_requests{
         {{executor.get(),
           rows.subspan(crossing_position * feature_width, 10U * feature_width),
           crossing_position,
@@ -1303,7 +1303,7 @@ int main(int argc, const char* const* argv) {
           rows.subspan(crossing_position * feature_width, 13U * feature_width),
           crossing_position,
           {}}}};
-    const auto serialize = [](const gufo::hip::QwenDFlashGpuExecutor& value) {
+    const auto serialize = [](const mbufo::hip::QwenDFlashGpuExecutor& value) {
       const auto snapshot = value.SaveSnapshot();
       std::vector<std::uint8_t> bytes(snapshot->PersistentPayloadBytes());
       Expect(snapshot->SerializePersistent(bytes) == bytes.size(),
@@ -1320,7 +1320,7 @@ int main(int argc, const char* const* argv) {
       crossing_payloads[index] = serialize(*request.executor);
       request.executor->RestoreSnapshot(*crossing);
     }
-    gufo::hip::QwenDFlashGpuExecutor::InjectTargetContextBatch(
+    mbufo::hip::QwenDFlashGpuExecutor::InjectTargetContextBatch(
         crossing_requests);
     for (std::size_t index = 0; index < crossing_requests.size(); ++index) {
       Expect(serialize(*crossing_requests[index].executor) ==

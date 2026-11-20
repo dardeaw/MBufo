@@ -27,7 +27,7 @@
 
 #include "src/core/quant/ggml_dequant.hpp"
 
-namespace gufo::core {
+namespace mbufo::core {
 
 namespace {
 
@@ -1065,4 +1065,4 @@ std::optional<ModelConfig> GgufReader::ExtractModelConfig(
   return config;
 }
 
-}  // namespace gufo::core
+}  // namespace mbufo::core

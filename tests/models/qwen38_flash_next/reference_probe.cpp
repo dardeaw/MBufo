@@ -32,7 +32,7 @@
 #include "src/models/qwen38_flash_next/reference.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
-namespace q = gufo::models::qwen38_flash_next;
+namespace q = mbufo::models::qwen38_flash_next;
 
 namespace {
 
@@ -51,7 +51,7 @@ std::vector<std::int32_t> ParseTokens(const std::string& text) {
 }
 
 void PrintTop(const std::vector<float>& logits,
-              const gufo::tokenization::QwenTokenizer& tokenizer,
+              const mbufo::tokenization::QwenTokenizer& tokenizer,
               std::uint32_t top) {
   std::vector<std::uint32_t> order(logits.size());
   std::iota(order.begin(), order.end(), 0U);
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
   }
 
   std::string error;
-  auto reader = gufo::core::GgufReader::OpenFile(model_path, &error);
+  auto reader = mbufo::core::GgufReader::OpenFile(model_path, &error);
   if (!reader) {
     std::fprintf(stderr, "open failed: %s\n", error.c_str());
     return 1;
@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   auto tokenizer =
-      gufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &error);
+      mbufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &error);
   if (!tokenizer) {
     std::fprintf(stderr, "tokenizer failed: %s\n", error.c_str());
     return 1;

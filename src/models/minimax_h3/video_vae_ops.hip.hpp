@@ -1,12 +1,12 @@
-#ifndef GUFO_MODELS_MINIMAX_H3_VIDEO_VAE_OPS_HIP_HPP_
-#define GUFO_MODELS_MINIMAX_H3_VIDEO_VAE_OPS_HIP_HPP_
+#ifndef MBUFO_MODELS_MINIMAX_H3_VIDEO_VAE_OPS_HIP_HPP_
+#define MBUFO_MODELS_MINIMAX_H3_VIDEO_VAE_OPS_HIP_HPP_
 
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
 
-namespace gufo::minimax_h3::video_vae_ops {
+namespace mbufo::minimax_h3::video_vae_ops {
 
 static __global__ void AddBiasKernel(float* values, const float* bias,
                                      std::uint32_t rows, std::uint32_t width) {
@@ -557,6 +557,6 @@ inline void LaunchUnpackRgb(const float* projected, const std::int32_t* frames,
                      frame_count, tile_height, tile_width, output_frames);
 }
 
-}  // namespace gufo::minimax_h3::video_vae_ops
+}  // namespace mbufo::minimax_h3::video_vae_ops
 
-#endif  // GUFO_MODELS_MINIMAX_H3_VIDEO_VAE_OPS_HIP_HPP_
+#endif  // MBUFO_MODELS_MINIMAX_H3_VIDEO_VAE_OPS_HIP_HPP_

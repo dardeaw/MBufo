@@ -38,17 +38,17 @@ not be required to serve requests.
 
 ## Single Executable and Model Configuration
 
-The deployed product is one `gufo` executable. Supported model graphs,
+The deployed product is one `mbufo` executable. Supported model graphs,
 tokenizers and HIP kernels are compiled into it.
 
 The executable provides subcommands rather than separate inference binaries:
 
 ```text
-gufo serve
-gufo chat
-gufo prompt
-gufo video
-gufo transcribe
+mbufo serve
+mbufo chat
+mbufo prompt
+mbufo video
+mbufo transcribe
 ```
 
 `chat` and `prompt` are transport adapters over the same scheduler and may
@@ -119,12 +119,12 @@ Sources: [Qwen27B](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
 [DeepSeek 0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/7872f01b1d1fe23eabc4c98b48bffcef5a386062/README.md),
 [DeepSeek thinking defaults](https://api-docs.deepseek.com/guides/thinking_mode).
 DeepSeek's 0.95 top-p is its agentic recommendation; neutral penalties and
-disabled unspecified filters are Gufo defaults.
+disabled unspecified filters are MBufo defaults.
 
 ```sh
 nix build
 
-./result/bin/gufo serve \
+./result/bin/mbufo serve \
   --host 127.0.0.1 \
   --port 8080 \
   --sessions 1 \
@@ -143,9 +143,9 @@ Server-Timing: ttft;dur=<milliseconds>, inter_token;dur=<milliseconds>
 ```
 
 When `stream_options.include_usage` is enabled, the terminal Chat Completions
-usage chunk also includes a namespaced `usage.gufo` object. It reports
+usage chunk also includes a namespaced `usage.mbufo` object. It reports
 privacy-safe scheduler and stage metrics used by
-`tools/serving/gufo-serving-bench.py`: queue, prefill, decode, TTFT and ITL timing;
+`tools/serving/mbufo-serving-bench.py`: queue, prefill, decode, TTFT and ITL timing;
 actual prefill work; cache use; logical concurrency; physical execution width;
 and the executed plan. Prompts, generated text, local paths, request IDs, and
 token IDs are excluded.
@@ -257,11 +257,11 @@ changing, removing or moving an earlier image invalidates checkpoints after it.
 New images get a checkpoint before assistant framing so later turns do not
 encode or prefill them again.
 With `preserve_thinking=false`, a new user turn removes reasoning from the
-preceding tool cycle. Gufo retains the state before that cycle and processes
+preceding tool cycle. MBufo retains the state before that cycle and processes
 its changed suffix again.
 
 A loaded Qwen vision sidecar is prepared while the model loads, before the RAM
-cache is sized and before readiness: Gufo hashes the complete sidecar for image
+cache is sized and before readiness: MBufo hashes the complete sidecar for image
 cache identities and uploads the encoder weights, so neither happens in the
 first image request and admission's free device memory already excludes them.
 The weights stay resident even if no image arrives, including a sidecar
@@ -334,11 +334,11 @@ for as long as the processes live. Queues are claimed on a process's first HIP
 dispatch and never released — neither `hipStreamDestroy` nor `hipDeviceReset`
 gives one back — so the count is fixed at startup, and the first dispatch costs
 two queues whatever the configuration. Four HIP processes is therefore the
-ceiling on one device, gufo or otherwise.
+ceiling on one device, mbufo or otherwise.
 
 Each server reads the queues already in use from
 `/sys/class/kfd/kfd/proc/*/queues/*/type`, which is world-readable and so
-includes processes gufo does not own, then exports `GPU_MAX_HW_QUEUES` before
+includes processes mbufo does not own, then exports `GPU_MAX_HW_QUEUES` before
 loading a model and logs a `queue_budget` event. That event is INFO-tier and
 follows `--log-level` like the rest of the startup diagnostics; the
 `queue_budget_exceeded` warning below is WARN-tier:
@@ -383,7 +383,7 @@ For an ASCII Qwen response that reaches the cap, N generated reasoning tokens
 precede `</think>`. A natural end can use fewer tokens, and completing a UTF-8
 character can require more. A Qwen `<tool_call>` also ends reasoning. The budget
 covers the initial reasoning phase. Later `<think>` spellings remain literal
-answer or tool-argument data, consistent with Gufo's response framing.
+answer or tool-argument data, consistent with MBufo's response framing.
 
 Chat and Responses also accept llama.cpp's older `thinking_budget_tokens`
 spelling for existing clients; a non-null `reasoning_budget_tokens` takes
@@ -442,7 +442,7 @@ Pass the supported GGUF or safetensors directory through `--model`, with the
 matching projector or speculative sidecar where needed. Loaders validate
 tensor inventory, dimensions, quantization and tokenizer metadata. Model
 artifacts supply weights and metadata; executable kernels and templates are
-compiled into Gufo. See [model cards](models/README.md) for concrete paths
+compiled into MBufo. See [model cards](models/README.md) for concrete paths
 and supported modes.
 
 ## Process and State Ownership
@@ -480,7 +480,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
 | `DELETE` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 
-Use `gufo serve image --model SNAPSHOT_DIR` for
+Use `mbufo serve image --model SNAPSHOT_DIR` for
 [Qwen-Image-2.1](models/qwen-image-2.1/README.md). Generation accepts JSON;
 editing accepts multipart PNG/JPEG references. Both return base64 PNG data
 and work through llama-swap's image routes.
@@ -491,11 +491,11 @@ Qwen3-TTS serving is enabled with a dedicated model process. All three 12Hz
 fields that are required:
 
 ```sh
-./result/bin/gufo serve --port 8080 tts \
+./result/bin/mbufo serve --port 8080 tts \
   --model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-CustomVoice
 ```
 
-Start ASR separately with `gufo serve asr --model DIR`. Both speech
+Start ASR separately with `mbufo serve asr --model DIR`. Both speech
 commands accept `--model`, `--context`, and `--served-model-name`, plus the
 shared HTTP options. Context defaults are 4096 for TTS and 1024 per chunk
 for ASR. Route separate model processes through llama-swap when one public
@@ -517,7 +517,7 @@ so clients select a speaker by name instead of uploading a reference clip on
 every request:
 
 ```sh
-./result/bin/gufo serve tts \
+./result/bin/mbufo serve tts \
   --model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_eng=/persist/models/audio/clear-english-voice.wav \
   --voice narrator_ita=/persist/models/audio/clear-italian-voice.wav
@@ -528,7 +528,7 @@ every request:
 appear before or after its matching `--voice`:
 
 ```sh
-./result/bin/gufo serve tts \
+./result/bin/mbufo serve tts \
   --model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_ita=/persist/models/audio/clear-italian-voice.wav \
   --voice-text "narrator_ita=Questo racconto e' cresciuto..." \
@@ -579,7 +579,7 @@ event, while WebSocket speech reports an error without `audio.done`.
 Qwen3-ASR serving uses its own model process:
 
 ```sh
-./result/bin/gufo serve asr \
+./result/bin/mbufo serve asr \
   --model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision>
 ```
 
@@ -599,7 +599,7 @@ a five-second socket timeout. Native generation observes close/disconnect;
 no per-server streaming flag or extra model is required.
 
 The MiniMax H3 subset follows the asynchronous OpenAI-style video resource
-shape and is versioned independently as `gufo.video-api.v1`. Its supported
+shape and is versioned independently as `mbufo.video-api.v1`. Its supported
 fields, frozen presets, queue behavior, and deliberate conditioning
 omissions are documented in the [H3 upstream contract](models/minimax-h3/QUALITY.md).
 Create requests accept both `application/json` and OpenAI-client-compatible
@@ -610,7 +610,7 @@ H3 accepts `seconds` as a JSON number or string (including multipart), at
 and rounded up to the official VAE grid (`17n + 5`), within upstream's
 15-second ceiling: 5 → 124 frames, 10 → 243, 14 → 345. The maximum is
 `14.375` seconds (345 frames); `15` would round to 362 frames and is rejected,
-as upstream does. An explicit `gufo.frames` must match the aligned duration.
+as upstream does. An explicit `mbufo.frames` must match the aligned duration.
 The one-second/22-frame diagnostic extension remains available.
 The encoder accepts at most 4,096 tokens after tokenization and normalization.
 There is no 4,096-byte prompt limit. HTTP request bodies remain bounded by
@@ -639,7 +639,7 @@ sampling controls. Message content supports
 `input_text` and `input_image` with an `image_url` (HTTPS or a data URL).
 Image uploads accept PNG, JPEG and WebP. Base64 data URLs also accept
 `image/jpg`, mixed-case media types/`base64`, and parameters such as `name=`.
-Clients supply the complete conversation, including prior Gufo `output` items
+Clients supply the complete conversation, including prior MBufo `output` items
 when retaining reasoning. Replay `function_call` items with their `call_id`,
 then supply `function_call_output` items using the same ID. Function tools use
 the flat `{type:"function",name,parameters,strict}` shape. The Responses API
@@ -789,7 +789,7 @@ ordinary continuation.
   characters and may use any of them except a space, `<`, `>`, `"` and `\`,
   which frame a rendered call; dotted and namespaced names such as
   `github.create_issue` are accepted. OpenAI itself documents a narrower set
-  for this field, so a name outside `[A-Za-z0-9_-]` is portable to gufo but not
+  for this field, so a name outside `[A-Za-z0-9_-]` is portable to mbufo but not
   to every OpenAI-compatible service. Historical names in assistant
   `tool_calls` and Responses `function_call` items are preserved verbatim,
   including Unicode and names absent from the current tools. This does not
@@ -889,7 +889,7 @@ and token limits. `logprobs: false`, empty `logit_bias`,
 Actual log probabilities, token biases and audio output remain unsupported
 and return explicit errors.
 
-llama.cpp sampler fields that gufo does not implement (`mirostat`,
+llama.cpp sampler fields that mbufo does not implement (`mirostat`,
 `mirostat_tau`, `mirostat_eta`, `typical_p`, `tfs_z`, `dynatemp_range`,
 `dynatemp_exponent`, `top_n_sigma`, `xtc_probability`, `xtc_threshold`,
 `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_penalty_last_n` and
@@ -918,7 +918,7 @@ streaming, images and concurrent requests. Reasoning stays separate from JSON
 and counts toward the output budget. Changing the schema changes the cache prefix.
 
 Every schema and tool grammar uses one token vocabulary per loaded model.
-Gufo prepares it automatically while the model loads, before readiness, and
+MBufo prepares it automatically while the model loads, before readiness, and
 every constrained request reuses it. This moves a one-time CPU cost from the
 first constrained request to startup (Flash-Next: 248,320 tokens, about 30 ms).
 The vocabulary stays resident even if no request is constrained. The startup
@@ -958,7 +958,7 @@ of assertions are unsupported.
 Function `strict:true` constrains tool arguments independently of the response
 schema. Chat Completions and Responses preserve the supplied parameter schema
 when `strict` is omitted, `null` or `false`, matching llama.cpp's schema
-handling. Optional fields stay optional; Gufo does not add them to `required`
+handling. Optional fields stay optional; MBufo does not add them to `required`
 or force the model to invent default values. To require every field, list them
 in `required` and use `strict:true` with a closed object schema.
 With `tool_choice: "auto"`, the model may call a tool or give a final answer;
@@ -1037,13 +1037,13 @@ only IPv6 loopback clients. TLS termination belongs in a reverse proxy.
 
 Request bodies, prompts, generated text and credentials are not logged.
 
-Tool definitions and generated tool calls are treated as data. `gufo`
+Tool definitions and generated tool calls are treated as data. `mbufo`
 never executes tools, shell commands, URLs, or generated code.
 
 The HTTP transport currently uses a wildcard CORS origin and the same listener
 and API key for inference and metrics.
 
-`gufo eval` and `tools/serving/gufo-serving-bench.py` send `OPENAI_API_KEY`
+`mbufo eval` and `tools/serving/mbufo-serving-bench.py` send `OPENAI_API_KEY`
 as the bearer credential when it is set.
 
 ## Lifecycle and limits
@@ -1072,7 +1072,7 @@ service is ready, then reports `status` and the active model. Both read the
 recorded device state without performing GPU work on each poll. HTTP model replacement and persistent Responses
 conversations are not implemented.
 
-While `gufo serve llm` loads its model and walks the disk cache tier, the port
+While `mbufo serve llm` loads its model and walks the disk cache tier, the port
 already answers every request, `/health` included, with 503
 `{"error":{"message":"Loading model","type":"unavailable_error","code":"loading"}}`
 and `Retry-After: 1`, as llama-server does. A refused connection therefore
@@ -1107,7 +1107,7 @@ loss permanent for the process:
   `{"status":"device_lost","error":{...,"code":"device_lost"}}`;
 - every text-backend `POST` route, including unimplemented stubs that would
   otherwise answer 501, returns 503 `device_lost` without reaching the device;
-- `gufo serve` logs `event=device_lost_shutdown`, runs the `SIGTERM` shutdown
+- `mbufo serve` logs `event=device_lost_shutdown`, runs the `SIGTERM` shutdown
   and exits with status 75 (`EX_TEMPFAIL`), also when an external `SIGTERM`
   stops it after the loss. Teardown can block on the dead device, so the
   process exits with status 75 after 10 s regardless.
@@ -1120,7 +1120,7 @@ checkpoint capture completing or the idle wait returning. When the scheduler has
 happens for `MS`, it logs
 `event=device_lost remedy=restart reason=scheduler made no progress for <MS> ms`
 and follows the lost-device path above, including the exit with status 75 and
-the `gufo_device_lost_total` increment. This covers a hang on the scheduler
+the `mbufo_device_lost_total` increment. This covers a hang on the scheduler
 thread, in a capture the scheduler is waiting for, and in the idle device
 probe. Detection takes between `MS` and about 1.5 times `MS`. Requests already
 in flight end when the process exits. The default, 0, disables the check;
@@ -1141,13 +1141,13 @@ commit, so long prefills and queue waits keep sending bytes. Explicit
 `return_progress: true` sends headers immediately and adds live prefill
 progress.
 
-`/metrics` exposes `gufo_device_lost_total`, incremented once per confirmed
+`/metrics` exposes `mbufo_device_lost_total`, incremented once per confirmed
 context loss, including idle detection. It stays unchanged for recoverable
 errors and pending probes. The counter resets when the process restarts; the
 fatal loss log and supervisor exit status remain useful when a metrics scrape
 misses the brief period before exit.
 
-`gufo diagnose` inspects system availability in a separate process. It cannot
+`mbufo diagnose` inspects system availability in a separate process. It cannot
 validate the serving process's existing HIP context; use the serving health
 endpoints and a supervisor restart policy for this failure mode.
 
@@ -1178,14 +1178,14 @@ speculative verification rounds (`llamacpp:spec_decode_num_drafts_total`),
 proposed and accepted draft tokens
 (`llamacpp:spec_decode_num_draft_tokens_total`,
 `llamacpp:spec_decode_num_accepted_tokens_total`), proposed and accepted
-prompt-lookup copies (`gufo_spec_lookup_tokens_total`,
-`gufo_spec_lookup_accepted_tokens_total`), and raises
+prompt-lookup copies (`mbufo_spec_lookup_tokens_total`,
+`mbufo_spec_lookup_accepted_tokens_total`), and raises
 `llamacpp:n_tokens_max` to its prompt plus generated tokens. A request counts
 even if the client disconnects before reading it; requests that fail in the
 scheduler, such as on a deadline or a runner error, add none of these.
 `llamacpp:kv_cache_usage_ratio` is the in-flight prompt and generated tokens
 over sessions times context; retained cache entries are not counted.
-`Server-Timing`, generation `timings`, and Chat Completions `usage.gufo`
+`Server-Timing`, generation `timings`, and Chat Completions `usage.mbufo`
 provide request-level measurements.
 
 `GET /slots` (alias `/v1/slots`) lists one llama-server slot per `--sessions`
@@ -1205,7 +1205,7 @@ Slots and metrics are separate snapshots; requests can advance between polls.
 llama-server tooling can record which model, build and settings answered it.
 `?model=` is accepted and not required. `model_alias` is the served model
 name, `model_path` is `--model`, `build_info`
-the version and revision `gufo --version` prints, `total_slots` the
+the version and revision `mbufo --version` prints, `total_slots` the
 `--sessions` count, `default_generation_settings.n_ctx` the per-session context
 and `default_generation_settings.params` the sampling a request without
 sampling fields gets, with `n_predict` and `max_tokens` -1 when no default
@@ -1215,7 +1215,7 @@ loaded. Fields the server cannot report are omitted rather than sent as zero.
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed
 tokens; `cache_n` counts reused tokens. llama-swap uses these fields on every
-turn. Gufo-specific details stay in `usage.gufo`.
+turn. MBufo-specific details stay in `usage.mbufo`.
 
 TODO: retained-cache KV metrics, a validated administrative reload/drain
 interface, and in-process recovery after device reset or suspend/resume.
@@ -1278,7 +1278,7 @@ identity is the exception: scheduler admission lines name a client by the peer
 address of its socket (`client_id=127.0.0.1` on the default loopback bind), so a
 public `--host` writes client IP addresses into the debug tier.
 
-Pass `--log-progress` to `gufo serve llm` to log each prefill chunk, each
+Pass `--log-progress` to `mbufo serve llm` to log each prefill chunk, each
 50-token decode boundary, and the final decode remainder. Each line includes the
 request ID, completed and total tokens, percentage, current speed and average
 speed. Speculative requests also include accepted and proposed drafts. Progress
@@ -1290,7 +1290,7 @@ flag.
 
 Some failures only show in the content itself, such as tool-call markup leaking
 into `content` or a history that the template renders differently. For those,
-start `gufo serve llm` with `--trace <PATH>`. The server appends one JSON
+start `mbufo serve llm` with `--trace <PATH>`. The server appends one JSON
 object per line to `PATH` and logs `event=trace_enabled` at WARN. A new file is
 created readable and writable by its owner only; an existing file keeps its
 permissions. A path that cannot be opened fails startup before the model loads.
@@ -1394,6 +1394,6 @@ facts through six turns, with streaming and memory-cache reuse.
 DSpark's short boundary check is available without the complete serving suite:
 
 ```sh
-# Set GUFO_DEEPSEEK_V4_FLASH_MODEL and GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL first.
+# Set MBUFO_DEEPSEEK_V4_FLASH_MODEL and MBUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL first.
 nix develop -c build/gpu-test/tests/models/deepseek_v4_flash/ds4_serving_test --dspark-eos
 ```

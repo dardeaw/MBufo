@@ -20,7 +20,7 @@ def ask(p, mt=48):
     r = urllib.request.urlopen(urllib.request.Request(
         "http://127.0.0.1:%s/v1/chat/completions" % port, body, {"Content-Type": "application/json"}), timeout=1800)
     d = json.loads(r.read())
-    u = d["usage"]; g = u.get("gufo", {})
+    u = d["usage"]; g = u.get("mbufo", {})
     txt = d["choices"][0]["message"].get("content") or ""
     return {"label": label, "ctx": u["prompt_tokens"], "gen": u["completion_tokens"],
             "decode_tps": round(u.get("completion_tokens_per_second", 0), 2),

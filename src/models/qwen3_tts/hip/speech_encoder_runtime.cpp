@@ -22,7 +22,7 @@
 #include "src/models/qwen3_tts/hip/speech_decoder_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 namespace {
 
 constexpr std::size_t kSampleRate = 24000;
@@ -609,11 +609,11 @@ bool SpeechEncoderHipRuntime::Encode(const AudioBuffer& audio,
   }
 }
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
 #else
 
-namespace gufo::models::qwen3_tts::hip {
+namespace mbufo::models::qwen3_tts::hip {
 
 struct SpeechEncoderHipRuntime::Impl {};
 
@@ -637,6 +637,6 @@ bool SpeechEncoderHipRuntime::Encode(const AudioBuffer&, SpeechEncoderOutput*,
   return false;
 }
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace mbufo::models::qwen3_tts::hip
 
 #endif

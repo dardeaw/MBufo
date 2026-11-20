@@ -7,7 +7,7 @@
 
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 __global__ void BatchedSSMPostNormGateKernel(
     const float* __restrict__ raw_out, const float* __restrict__ ssm_norm,
@@ -61,5 +61,5 @@ __global__ void BatchedSSMPostNormGateKernel(
   }
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

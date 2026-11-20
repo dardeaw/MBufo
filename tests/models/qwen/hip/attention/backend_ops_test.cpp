@@ -89,7 +89,7 @@ void TestBatchedAttentionEquivalence() {
 
   // Sequential
   for (std::size_t t = 0; t < batch; ++t) {
-    gufo::hip::LaunchAttention(
+    mbufo::hip::LaunchAttention(
         d_q + t * num_heads * head_dim, d_k + t * num_kv_heads * head_dim,
         d_v + t * num_kv_heads * head_dim, d_gate + t * num_heads * head_dim,
         d_cache_seq, d_cache_seq + total_k, nullptr, nullptr,
@@ -98,11 +98,11 @@ void TestBatchedAttentionEquivalence() {
   }
 
   // Batched
-  gufo::hip::LaunchBatchedAttention(d_q, d_k, d_v, d_gate, d_cache_batch,
+  mbufo::hip::LaunchBatchedAttention(d_q, d_k, d_v, d_gate, d_cache_batch,
                                     d_cache_batch + total_k, nullptr, nullptr,
                                     d_out_batch, 0, 0, batch, max_context,
                                     num_heads, num_kv_heads, head_dim);
-  gufo::hip::LaunchBatchedAttentionGemm(
+  mbufo::hip::LaunchBatchedAttentionGemm(
       hipblas_handle, d_q, d_k, d_v, d_gate, d_cache_gemm,
       d_cache_gemm + total_k, nullptr, nullptr, d_scores, d_out_gemm, 0, 0,
       batch, max_context, num_heads, num_kv_heads, head_dim);
@@ -214,7 +214,7 @@ void TestAttentionBackendEquivalence() {
                       2 * cache_elements * sizeof(hip_bfloat16)));
 
   for (std::size_t token = 0; token < batch; ++token) {
-    gufo::hip::LaunchAttention(d_q + token * attention_width,
+    mbufo::hip::LaunchAttention(d_q + token * attention_width,
                                d_k + token * kv_width, d_v + token * kv_width,
                                d_gate + token * attention_width, d_cache_seq,
                                d_cache_seq + cache_elements, nullptr, nullptr,
@@ -222,7 +222,7 @@ void TestAttentionBackendEquivalence() {
                                static_cast<std::uint32_t>(token), max_context,
                                num_heads, num_kv_heads, head_dim);
   }
-  const bool tile_launched = gufo::hip::LaunchBatchedAttentionTile(
+  const bool tile_launched = mbufo::hip::LaunchBatchedAttentionTile(
       d_q, d_k, d_v, d_gate, d_cache_tile, d_cache_tile + cache_elements,
       d_cache_tile_f16,
       static_cast<std::uint16_t*>(d_cache_tile_f16) + cache_elements,
@@ -231,7 +231,7 @@ void TestAttentionBackendEquivalence() {
     std::cerr << "Tiled attention rejected the Qwen shape\n";
     std::abort();
   }
-  const bool launched = gufo::hip::LaunchQwenWmmaAttention(
+  const bool launched = mbufo::hip::LaunchQwenWmmaAttention(
       d_q, d_k, d_v, d_gate, d_cache_wmma, d_cache_wmma + cache_elements,
       d_cache_wmma_f16,
       static_cast<std::uint16_t*>(d_cache_wmma_f16) + cache_elements,
@@ -297,13 +297,13 @@ void TestAttentionBackendEquivalence() {
                       2 * cache_elements * sizeof(hip_bfloat16)));
   HIP_CHECK(hipMemset(d_out_tile, 0, q_size * sizeof(float)));
   constexpr std::size_t chunk_size = batch / 2;
-  const bool first_chunk_launched = gufo::hip::LaunchBatchedAttentionTile(
+  const bool first_chunk_launched = mbufo::hip::LaunchBatchedAttentionTile(
       d_q, d_k, d_v, d_gate, d_cache_tile, d_cache_tile + cache_elements,
       d_cache_tile_f16,
       static_cast<std::uint16_t*>(d_cache_tile_f16) + cache_elements,
       d_out_tile, 0, 0, chunk_size, max_context, num_heads, num_kv_heads,
       head_dim);
-  const bool second_chunk_launched = gufo::hip::LaunchBatchedAttentionTile(
+  const bool second_chunk_launched = mbufo::hip::LaunchBatchedAttentionTile(
       d_q + chunk_size * attention_width, d_k + chunk_size * kv_width,
       d_v + chunk_size * kv_width, d_gate + chunk_size * attention_width,
       d_cache_tile, d_cache_tile + cache_elements, d_cache_tile_f16,
@@ -360,9 +360,9 @@ void TestAttentionBackendEquivalence() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+      mbufo::test::GateHipDevice(mbufo::test::HipDeviceRequirement::kOptional,
                                 "Qwen attention backend ops test");
-  if (device_status != gufo::test::kHipTestSuccess) {
+  if (device_status != mbufo::test::kHipTestSuccess) {
     return device_status;
   }
 

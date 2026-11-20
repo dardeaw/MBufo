@@ -13,7 +13,7 @@
 #include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 
-namespace gufo::models::qwen_image_21::hip {
+namespace mbufo::models::qwen_image_21::hip {
 namespace {
 
 using B = hip_bfloat16;
@@ -1342,4 +1342,4 @@ void Runtime::Synchronize() {
   Check(hipStreamSynchronize(stream_));
 }
 
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace mbufo::models::qwen_image_21::hip

@@ -9,10 +9,10 @@
 
 #include "src/models/qwen/control_tokens.hpp"
 
-using gufo::tokenization::kImEnd;
+using mbufo::tokenization::kImEnd;
 
 void TestSyntheticGeneration() {
-  gufo::core::ModelConfig config;
+  mbufo::core::ModelConfig config;
   config.architecture = "qwen35";
   config.num_layers = 1;
   config.hidden_size = 4;
@@ -41,13 +41,13 @@ void TestSyntheticGeneration() {
   std::vector<float> out_w(config.vocab_size * config.hidden_size, 0.1F);
 
   auto make_ref =
-      [](const std::vector<float>& v) -> gufo::models::QwenTensorRef {
+      [](const std::vector<float>& v) -> mbufo::models::QwenTensorRef {
     return {.data = v.data(),
-            .type = gufo::core::GgmlType::kF32,
+            .type = mbufo::core::GgmlType::kF32,
             .num_elements = v.size()};
   };
 
-  gufo::models::QwenModelWeights weights;
+  mbufo::models::QwenModelWeights weights;
   weights.config = config;
   weights.token_embd = make_ref(embd);
   weights.output_norm = make_ref(norm);
@@ -67,26 +67,26 @@ void TestSyntheticGeneration() {
   const std::vector<std::string> vocab = {
       "<unk>", "hello", "world", "!", "a", "b", "c", std::string(kImEnd)};
   const std::vector<std::string> merges = {};
-  const std::unordered_map<std::string, gufo::tokenization::TokenId> specials =
+  const std::unordered_map<std::string, mbufo::tokenization::TokenId> specials =
       {
           {std::string(kImEnd), 7},
       };
 
-  auto tokenizer = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+  auto tokenizer = mbufo::tokenization::QwenTokenizer::CreateFromVocabulary(
       vocab, merges, specials);
   assert(tokenizer != nullptr);
 
-  gufo::models::QwenGenerator generator(std::move(weights),
+  mbufo::models::QwenGenerator generator(std::move(weights),
                                         std::move(tokenizer), 32);
 
-  const std::vector<gufo::tokenization::TokenId> prompt = {1,
+  const std::vector<mbufo::tokenization::TokenId> prompt = {1,
                                                            2};  // "hello world"
-  gufo::models::GenerationOptions gen_opts;
+  mbufo::models::GenerationOptions gen_opts;
   gen_opts.max_new_tokens = 4;
 
-  std::vector<gufo::tokenization::TokenId> generated;
+  std::vector<mbufo::tokenization::TokenId> generated;
   auto out = generator.Generate(
-      prompt, gen_opts, [&](gufo::tokenization::TokenId tok, std::string_view) {
+      prompt, gen_opts, [&](mbufo::tokenization::TokenId tok, std::string_view) {
         generated.push_back(tok);
         return true;
       });

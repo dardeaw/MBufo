@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 
-from gufo.control_tokens import kEndOfText, kImEnd, kImStart  # noqa: E402
+from mbufo.control_tokens import kEndOfText, kImEnd, kImStart  # noqa: E402
 
 from metrics import validate_tool_events
 from tier import streaming_modes
@@ -816,8 +816,8 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
         details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
         tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
         assert details["cached_tokens"] == 0, usage
-        if "gufo" in usage:
-            assert usage["gufo"]["prefill_tokens"] == tokens, usage
+        if "mbufo" in usage:
+            assert usage["mbufo"]["prefill_tokens"] == tokens, usage
 
     for strict in (True, False):
         parameters = deepcopy(schema)

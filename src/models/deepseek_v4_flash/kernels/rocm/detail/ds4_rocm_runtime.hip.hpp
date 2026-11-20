@@ -1,12 +1,12 @@
 static const void *g_model_host_base;
 static uint64_t g_model_registered_size;
 /* Placement for this model load, decided once from the registered weight size
- * against the device heap; see gufo::hip::WeightAllocator. */
-static std::unique_ptr<gufo::hip::WeightAllocator> g_model_weight_alloc;
+ * against the device heap; see mbufo::hip::WeightAllocator. */
+static std::unique_ptr<mbufo::hip::WeightAllocator> g_model_weight_alloc;
 static int g_model_fd = -1;
 static const void *g_model_fd_host_base;
 static int g_model_cache_full;
-static std::unique_ptr<gufo::hip::WeightUpload> g_model_uploader;
+static std::unique_ptr<mbufo::hip::WeightUpload> g_model_uploader;
 static hipblasHandle_t g_hipblas;
 static int g_hipblas_ready;
 /* Strix Halo detection. The optimized prefill routes below are scored on
@@ -351,8 +351,8 @@ static void hip_q8_f16_cache_budget_notice(
     if (g_q8_f16_budget_notice_printed) return;
     g_q8_f16_budget_notice_printed = 1;
     if (limit_bytes != UINT64_MAX && free_bytes == 0 && total_bytes == 0 && reserve_bytes == 0) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
+        mbufo::server::Logger::LogFormatted(
+                mbufo::server::LogLevel::kWarn, "ds4",
                 "q8 fp16 cache %s; using q8 kernels "
                 "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB)",
                 reason,
@@ -360,8 +360,8 @@ static void hip_q8_f16_cache_budget_notice(
                 (double)g_q8_f16_bytes / 1073741824.0,
                 (double)limit_bytes / 1073741824.0);
     } else if (limit_bytes == UINT64_MAX) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
+        mbufo::server::Logger::LogFormatted(
+                mbufo::server::LogLevel::kWarn, "ds4",
                 "q8 fp16 cache %s; using q8 kernels "
                 "(request=%.2f MiB cached=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)",
                 reason,
@@ -371,8 +371,8 @@ static void hip_q8_f16_cache_budget_notice(
                 (double)reserve_bytes / 1073741824.0,
                 (double)total_bytes / 1073741824.0);
     } else {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
+        mbufo::server::Logger::LogFormatted(
+                mbufo::server::LogLevel::kWarn, "ds4",
                 "q8 fp16 cache %s; using q8 kernels "
                 "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)",
                 reason,
@@ -398,8 +398,8 @@ static int hip_q8_f16_cache_has_budget(uint64_t request_bytes, const char *label
     size_t total_b = 0;
     hipError_t err = hipMemGetInfo(&free_b, &total_b);
     if (err != hipSuccess) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
+        mbufo::server::Logger::LogFormatted(
+                mbufo::server::LogLevel::kWarn, "ds4",
                 "q8 fp16 cache memory query failed: %s; using q8 kernels",
                 hipGetErrorString(err));
         (void)hipGetLastError();
@@ -421,8 +421,8 @@ static int hip_q8_f16_cache_has_budget(uint64_t request_bytes, const char *label
 
 static void hip_q8_f16_cache_disable_after_failure(const char *what, uint64_t request_bytes) {
     if (!g_q8_f16_disabled_after_oom) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
+        mbufo::server::Logger::LogFormatted(
+                mbufo::server::LogLevel::kWarn, "ds4",
                 "q8 fp16 cache disabled after %s "
                 "(request=%.2f MiB cached=%.2f GiB); using q8 kernels",
                 what ? what : "allocation failure",
@@ -504,8 +504,8 @@ static const __half *hip_q8_f16_ptr(
     __half *dev = NULL;
     hipError_t err = hipMalloc(&dev, (size_t)out_bytes);
     if (err != hipSuccess) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
+        mbufo::server::Logger::LogFormatted(
+                mbufo::server::LogLevel::kWarn, "ds4",
                 "q8 fp16 cache alloc failed (%.2f MiB): %s",
                 (double)out_bytes / 1048576.0, hipGetErrorString(err));
         hip_q8_f16_cache_disable_after_failure("allocation failure", out_bytes);
@@ -561,8 +561,8 @@ static const __half *hip_q8_f16_transpose_ptr(
     __half *dev = NULL;
     hipError_t err = hipMalloc(&dev, (size_t)out_bytes);
     if (err != hipSuccess) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
+        mbufo::server::Logger::LogFormatted(
+                mbufo::server::LogLevel::kWarn, "ds4",
                 "q8 fp16 transpose cache alloc failed (%.2f MiB): %s",
                 (double)out_bytes / 1048576.0, hipGetErrorString(err));
         hip_q8_f16_cache_disable_after_failure("transpose allocation failure", out_bytes);
@@ -592,8 +592,8 @@ static const __half *hip_q8_f16_transpose_ptr(
 
 static int hip_ok(hipError_t err, const char *what) {
     if (err == hipSuccess) return 1;
-    gufo::server::Logger::LogFormatted(
-        gufo::server::LogLevel::kError, "ds4", "%s failed: %s", what,
+    mbufo::server::Logger::LogFormatted(
+        mbufo::server::LogLevel::kError, "ds4", "%s failed: %s", what,
         hipGetErrorString(err));
     return 0;
 }
@@ -625,8 +625,8 @@ static void hip_model_load_progress_note(uint64_t cached_bytes) {
         g_model_load_progress_next = (g_model_load_progress_tty ? 2ull : 16ull) *
                                      1024ull * 1024ull * 1024ull;
         g_model_load_progress_last = now;
-        gufo::server::Logger::LogFormatted(
-            gufo::server::LogLevel::kInfo, "ds4",
+        mbufo::server::Logger::LogFormatted(
+            mbufo::server::LogLevel::kInfo, "ds4",
             "loading model tensors into device cache");
     }
 
@@ -637,8 +637,8 @@ static void hip_model_load_progress_note(uint64_t cached_bytes) {
 
     // One milestone line per step instead of an in-place carriage return: the
     // shared logger owns the line format and applies the level threshold.
-    gufo::server::Logger::LogFormatted(
-        gufo::server::LogLevel::kInfo, "ds4",
+    mbufo::server::Logger::LogFormatted(
+        mbufo::server::LogLevel::kInfo, "ds4",
         "loading model tensors %.2f GiB cached",
         (double)cached_bytes / 1073741824.0);
     g_model_load_progress_last = now;
@@ -674,20 +674,20 @@ static void hip_model_staging_release(void) {
  * to managed memory, leaving the heap for session state, which is what the
  * heap is for.
  *
- * gufo::hip::WeightAllocator makes the decision and allocates coarse-grain
+ * mbufo::hip::WeightAllocator makes the decision and allocates coarse-grain
  * managed memory, so the GPU caches weight pages the way it caches hipMalloc
  * memory. */
-static gufo::hip::WeightAllocator *hip_model_weight_allocator(void) {
+static mbufo::hip::WeightAllocator *hip_model_weight_allocator(void) {
   if (!g_model_weight_alloc) {
-    g_model_weight_alloc = std::make_unique<gufo::hip::WeightAllocator>(
+    g_model_weight_alloc = std::make_unique<mbufo::hip::WeightAllocator>(
         g_model_registered_size);
-    if (g_model_weight_alloc->placement() == gufo::hip::Placement::kManaged) {
+    if (g_model_weight_alloc->placement() == mbufo::hip::Placement::kManaged) {
       fprintf(stderr,
               DS4_GPU_LOG_PREFIX
               "weights (%.2f GiB) do not fit the device heap above its "
               "%.2f GiB dispatch reserve; placing them in managed memory\n",
               (double)g_model_registered_size / 1073741824.0,
-              (double)gufo::hip::kDispatchReserve / 1073741824.0);
+              (double)mbufo::hip::kDispatchReserve / 1073741824.0);
     }
   }
   return g_model_weight_alloc.get();
@@ -730,12 +730,12 @@ static const char *hip_model_range_ptr_from_fd(
     }
     std::string error;
     if (!g_model_uploader) {
-        const gufo::core::GgufMappedRegion region{
+        const mbufo::core::GgufMappedRegion region{
             .data = model_map,
             .size = static_cast<size_t>(g_model_registered_size),
             .file_descriptor = g_model_fd,
         };
-        g_model_uploader = gufo::hip::WeightUpload::Create({&region, 1}, &error);
+        g_model_uploader = mbufo::hip::WeightUpload::Create({&region, 1}, &error);
     }
     if (!g_model_uploader ||
         !g_model_uploader->Copy(0, offset, bytes, dev, &error) ||
@@ -778,8 +778,8 @@ extern "C" int ds4_gpu_init(void) {
     hipDeviceProp_t prop;
     if (hipGetDeviceProperties(&prop, dev) == hipSuccess) {
         g_rocm_gfx1151 = prop.major == 11 && prop.minor == 5;
-        gufo::server::Logger::LogFormatted(
-            gufo::server::LogLevel::kInfo, "ds4",
+        mbufo::server::Logger::LogFormatted(
+            mbufo::server::LogLevel::kInfo, "ds4",
             "backend initialized on %s (sm_%d%d)", prop.name, prop.major,
             prop.minor);
     }
@@ -800,8 +800,8 @@ extern "C" int ds4_gpu_init(void) {
      * and short resumed batches keep the kernels the pinned trajectory was
      * recorded against. */
     g_rocm_mmq_ready = g_rocm_gfx1151 && ds4_mmq_init(dev) == 0;
-    gufo::server::Logger::LogFormatted(
-        gufo::server::LogLevel::kInfo, "ds4", "native MMQ %s",
+    mbufo::server::Logger::LogFormatted(
+        mbufo::server::LogLevel::kInfo, "ds4", "native MMQ %s",
         g_rocm_mmq_ready ? "enabled" : "unavailable");
     return 1;
 }
@@ -953,7 +953,7 @@ extern "C" int ds4_gpu_tensor_snapshot_read(const ds4_gpu_tensor* tensor,
       bytes > tensor->bytes - offset)
     return 0;
   try {
-    thread_local gufo::hip::SnapshotTransfer transfer;
+    thread_local mbufo::hip::SnapshotTransfer transfer;
     transfer.Copy(data, static_cast<const char*>(tensor->ptr) + offset, bytes);
     return 1;
   } catch (const std::exception&) {

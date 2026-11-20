@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gufo.control_tokens import kImEnd, kImStart  # noqa: E402
+from mbufo.control_tokens import kImEnd, kImStart  # noqa: E402
 
 
 GENERATED_RE = re.compile(
@@ -42,7 +42,7 @@ QWEN_SYSTEM_PROMPT = "You are a helpful, respectful, and honest assistant."
 def parse_token_trace(stderr: str, tokens: int) -> str:
     trace = TOKEN_TRACE_RE.search(stderr)
     if trace is None or int(trace.group("count")) != tokens:
-        raise RuntimeError("missing or incomplete emitted-token trace; rebuild gufo")
+        raise RuntimeError("missing or incomplete emitted-token trace; rebuild mbufo")
     return trace.group("sha256")
 
 
@@ -165,7 +165,7 @@ def autoregressive_key(args: argparse.Namespace, prompt: str) -> str:
         "command": build_prompt_command(args, prompt, speculative=False),
         "environment": {
             key: value for key, value in os.environ.items()
-            if key.startswith(("GUFO_", "HIP_", "ROCR_", "HSA_"))
+            if key.startswith(("MBUFO_", "HIP_", "ROCR_", "HSA_"))
         },
     }
     return hashlib.sha256(
@@ -177,7 +177,7 @@ def load_autoregressive_cache(path: Path | None) -> dict[str, dict]:
     if path is None or not path.exists():
         return {}
     document = json.loads(path.read_text(encoding="utf-8"))
-    if document.get("schema") != "gufo.ar-cache.v1":
+    if document.get("schema") != "mbufo.ar-cache.v1":
         return {}
     entries = document.get("entries", {})
     return entries if isinstance(entries, dict) else {}
@@ -188,7 +188,7 @@ def store_autoregressive_cache(path: Path | None, cache: dict[str, dict]) -> Non
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"schema": "gufo.ar-cache.v1", "entries": cache}, indent=1),
+        json.dumps({"schema": "mbufo.ar-cache.v1", "entries": cache}, indent=1),
         encoding="utf-8",
     )
 
@@ -425,7 +425,7 @@ def main() -> int:
         "| prompt | category | exact | AR tok/s | speculative tok/s | "
         "speedup | support acceptance | positional | full blocks | attempts | "
         "skipped | avg support |"
-        + (" llama.cpp tok/s | llama/Gufo exact |" if args.llama_binary else "")
+        + (" llama.cpp tok/s | llama/MBufo exact |" if args.llama_binary else "")
     )
     print(
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
@@ -667,7 +667,7 @@ def main() -> int:
         Path(args.json_path).write_text(
             json.dumps(
                 {
-                    "schema": "gufo.speculative-corpus-report.v1",
+                    "schema": "mbufo.speculative-corpus-report.v1",
                     "label": args.label,
                     "binary": os.path.realpath(args.binary),
                     "llama_binary": (

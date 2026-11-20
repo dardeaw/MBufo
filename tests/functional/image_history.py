@@ -160,11 +160,11 @@ def run(args, command):
                         rows.append(row)
                         with (args.output / "requests.jsonl").open("a") as output:
                             output.write(json.dumps(row) + "\n")
-                        print(kind, count, repeat, usage["gufo"]["queue_ms"], flush=True)
+                        print(kind, count, repeat, usage["mbufo"]["queue_ms"], flush=True)
                         if repeat:
                             assert usage["cached_tokens"] == usage["prompt_tokens"], row
-                            assert usage["gufo"]["prefill_tokens"] == 0, row
-                            assert usage["gufo"]["component_cache"]["reuse"] == "ram", row
+                            assert usage["mbufo"]["prefill_tokens"] == 0, row
+                            assert usage["mbufo"]["component_cache"]["reuse"] == "ram", row
                             assert result["choices"] == rows[-2]["response"]["choices"], row
                             if kind != "text" and row["image_cache"] is not None:
                                 previous = rows[-2]["image_cache"]
@@ -189,10 +189,10 @@ def run(args, command):
             repeats = selected[1:]
             summary.append({"kind": kind, "turns": count,
                             "prompt_tokens": repeats[0]["response"]["usage"]["prompt_tokens"],
-                            "cold_queue_ms": selected[0]["response"]["usage"]["gufo"]["queue_ms"],
-                            "queue_ms": [r["response"]["usage"]["gufo"]["queue_ms"] for r in repeats],
+                            "cold_queue_ms": selected[0]["response"]["usage"]["mbufo"]["queue_ms"],
+                            "queue_ms": [r["response"]["usage"]["mbufo"]["queue_ms"] for r in repeats],
                             "median_queue_ms": statistics.median(
-                                r["response"]["usage"]["gufo"]["queue_ms"] for r in repeats),
+                                r["response"]["usage"]["mbufo"]["queue_ms"] for r in repeats),
                             "image_cache": repeats[-1]["image_cache"]})
     save(args.output / "summary.json", summary)
 
@@ -211,7 +211,7 @@ def main():
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1:3] != ["serve", "llm"]:
-        parser.error("pass gufo serve llm and its model/cache options after --")
+        parser.error("pass mbufo serve llm and its model/cache options after --")
     if args.repeats < 1:
         parser.error("--repeats must be positive")
     if args.fresh_encoding and (args.turns != [1] or args.kind != ["1080p"]):

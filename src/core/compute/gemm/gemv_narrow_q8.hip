@@ -102,7 +102,7 @@
 
 #define NARROW_Q8_WARP_SIZE 32
 
-namespace gufo::core::compute::gemm::narrow_q8 {
+namespace mbufo::core::compute::gemm::narrow_q8 {
 
 using std::min;
 
@@ -395,7 +395,7 @@ __launch_bounds__(32 * token_waves, 1) static __global__
 // clang-format on
 
 
-}  // namespace gufo::core::compute::gemm::narrow_q8
+}  // namespace mbufo::core::compute::gemm::narrow_q8
 
 // ---- Model-agnostic launcher (ungated narrow decode only) ----
 //
@@ -404,7 +404,7 @@ __launch_bounds__(32 * token_waves, 1) static __global__
 // plain reduction, cheaper stores). The single-row latency specialization
 // (M <= 64, K % 5120 == 0), the fused gate, HC/matrix geometries and N > 8
 // batch tiles are out of contract -- the caller keeps its legacy path there.
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 
 bool LaunchNarrowQ80Decode(const void* weights, const void* input,
                                   float* output, std::size_t k,
@@ -667,7 +667,7 @@ void mul_mat_vec_q8_rowadd(const void* __restrict__ weights,
 
 // Prequant helpers live in quantize_q8_1.hip (same static lib); forward
 // declarations keep this TU free of the model-facing gemm.hpp. Already
-// inside namespace gufo::core::compute::gemm here.
+// inside namespace mbufo::core::compute::gemm here.
 std::size_t PreqQ81RowPad(std::size_t k);
 std::size_t PreqQ81Bytes(std::size_t n, std::size_t k);
 int PrequantizeQ8_1(const float* x_f32, void* x_q8, std::size_t n,
@@ -728,7 +728,7 @@ bool LaunchNarrowQ80PrequantRowAdd(const void* weights, const float* x_f32,
   return true;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #undef QK8_0
 #undef QK8_1

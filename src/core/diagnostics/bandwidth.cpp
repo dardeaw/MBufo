@@ -12,7 +12,7 @@
 
 #include "src/core/diagnostics/bandwidth_run.hpp"
 
-namespace gufo::diagnostics {
+namespace mbufo::diagnostics {
 
 namespace {
 
@@ -321,4 +321,4 @@ BandwidthReport RunBandwidthBenchmark(const BandwidthOptions& options,
   return report;
 }
 
-}  // namespace gufo::diagnostics
+}  // namespace mbufo::diagnostics

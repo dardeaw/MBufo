@@ -60,7 +60,7 @@
 #include "src/models/qwen/hip/ops/prefill_fp16.hpp"
 #include "src/models/bge_m3/engine.hpp"
 
-namespace gufo::models::bge_m3 {
+namespace mbufo::models::bge_m3 {
 namespace {
 
 // ---------------------------------------------------------------- kernels
@@ -483,13 +483,13 @@ inline constexpr int kAutotuneBitwiseMaxTokens = 64;
 // Leg-3 step 2: flash floor. n <= 128 keeps the SGEMM+softmax path
 // (short-prompt bitwise identity, and small scores stay cache-resident);
 // above it the fused online-softmax WMMA kernel removes the scores
-// materialization. GUFO_BGE_FLASH=0 forces the legacy path (A/B control).
+// materialization. MBUFO_BGE_FLASH=0 forces the legacy path (A/B control).
 inline constexpr int kFlashMinTokens = 128;
 
 // Leg-3 step 3: whole-prefill HIP graph replay. The short-prefill profile
 // is flat vs n (n=8 and n=56 both ~22ms): ~360 launches dominate, so one
 // replay launch removes the bottleneck with zero numeric change (same
-// kernels, same order -> short stays bitwise-identical). GUFO_BGE_GRAPH=0
+// kernels, same order -> short stays bitwise-identical). MBUFO_BGE_GRAPH=0
 // disables capture/replay (A/B control).
 
 bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
@@ -497,14 +497,14 @@ bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
                     const hipblasLtMatmulHeuristicResult_t* candidates,
                     int count, int m, int n, int k,
                     hipblasLtMatmulAlgo_t* best_algo) {
-  // GUFO_BGE_NO_TUNE=1: A/B control -- legacy first-pick, no timing.
-  // GUFO_BGE_TUNE_ONLY="m1xk1,m2xk2,...": tune only those (m,k) families,
+  // MBUFO_BGE_NO_TUNE=1: A/B control -- legacy first-pick, no timing.
+  // MBUFO_BGE_TUNE_ONLY="m1xk1,m2xk2,...": tune only those (m,k) families,
   // legacy first-pick for the rest (per-shape bisection).
-  static const bool kNoTune = (std::getenv("GUFO_BGE_NO_TUNE") != nullptr &&
-                               std::getenv("GUFO_BGE_NO_TUNE")[0] == '1');
+  static const bool kNoTune = (std::getenv("MBUFO_BGE_NO_TUNE") != nullptr &&
+                               std::getenv("MBUFO_BGE_NO_TUNE")[0] == '1');
   static const std::string kTuneOnly =
-      (std::getenv("GUFO_BGE_TUNE_ONLY") != nullptr)
-          ? std::getenv("GUFO_BGE_TUNE_ONLY")
+      (std::getenv("MBUFO_BGE_TUNE_ONLY") != nullptr)
+          ? std::getenv("MBUFO_BGE_TUNE_ONLY")
           : std::string();
   const bool kShapeAllowed =
       kTuneOnly.empty() ||
@@ -633,7 +633,7 @@ bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
   hipFree(tb);
   hipFree(tc);
   *best_algo = candidates[best_u].algo;
-  if (std::getenv("GUFO_BGE_TUNE_LOG") != nullptr) {
+  if (std::getenv("MBUFO_BGE_TUNE_LOG") != nullptr) {
     std::fprintf(stderr,
                  "[bge-tune] m=%d n=%d k=%d usable=%d pick=%d ms=%.3f%s\n", m,
                  n, k, usable_count, best_u, best_ms,
@@ -735,7 +735,7 @@ bool ProjGemm(hipblasLtHandle_t handle, BlasLtPlanCache& plans, const void* w,
   if (w_type == core::GgmlType::kF16) {
     return BlasLtGemm(handle, plans, w, x, y, m, n, k, stream);
   }
-  gufo::hip::LaunchBatchedQuantGEMMFp16(w_type, w, x, y,
+  mbufo::hip::LaunchBatchedQuantGEMMFp16(w_type, w, x, y,
                                         static_cast<std::size_t>(n),
                                         static_cast<std::size_t>(m),
                                         static_cast<std::size_t>(k), stream);
@@ -932,7 +932,7 @@ void InitHipState(EngineModel& model) {
     if (embd_f16 == nullptr || embd_f32 == nullptr) {
       ok = false;
     } else {
-      gufo::hip::LaunchFloatToFp16(embd_f32, embd_f16, f32.token_embd.size(),
+      mbufo::hip::LaunchFloatToFp16(embd_f32, embd_f16, f32.token_embd.size(),
                                    state->stream);
       w.token_embd = embd_f16;
     }
@@ -1096,10 +1096,10 @@ bool EngineModel::RunEncoderBody(HipState& st, const BgeM3Config& config,
     QkvSplitBiasKernel<<<blocks(3 * nn * hdim), kBlock, 0, st.stream>>>(
         q, k, v, layer.q_b, layer.k_b, layer.v_b, qh, kh, vh, nn, hh, hdd);
     const bool kUseFlash =
-        std::getenv("GUFO_BGE_FLASH") == nullptr ||
-        std::getenv("GUFO_BGE_FLASH")[0] != '0';
+        std::getenv("MBUFO_BGE_FLASH") == nullptr ||
+        std::getenv("MBUFO_BGE_FLASH")[0] != '0';
     if (kUseFlash && nn > kFlashMinTokens) {
-      if (!gufo::core::compute::flash_f16::FlashF16DenseMha(
+      if (!mbufo::core::compute::flash_f16::FlashF16DenseMha(
               qh, kh, vh, st.context, static_cast<std::uint32_t>(nn),
               static_cast<std::uint32_t>(hh), static_cast<std::uint32_t>(hdd),
               kScale, st.stream)) {
@@ -1564,4 +1564,4 @@ std::optional<ClsHiddenBatchResult> HipClsHiddenBatch(
   return result;
 }
 
-}  // namespace gufo::models::bge_m3
+}  // namespace mbufo::models::bge_m3

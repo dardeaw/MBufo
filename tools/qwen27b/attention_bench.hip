@@ -14,7 +14,7 @@
 #include "tests/models/qwen/hip/support/device_buffer.hpp"
 
 namespace {
-using gufo::test::DeviceBuffer;
+using mbufo::test::DeviceBuffer;
 
 void RunNormRoPE() {
   constexpr unsigned dim = 128, kv_heads = 8;
@@ -33,15 +33,15 @@ void RunNormRoPE() {
       DeviceBuffer<float> dq(q), dk(k), dw(w), qa(q), qb(q), ka(k), kb(k);
       const auto separate = [&] {
         if (heads != 0)
-          gufo::hip::LaunchBatchedPerHeadRMSNorm(dq.data(), dw.data(),
+          mbufo::hip::LaunchBatchedPerHeadRMSNorm(dq.data(), dw.data(),
                                                  qa.data(), rows, heads, dim);
-        gufo::hip::LaunchBatchedPerHeadRMSNorm(dk.data(), dw.data(), ka.data(),
+        mbufo::hip::LaunchBatchedPerHeadRMSNorm(dk.data(), dw.data(), ka.data(),
                                                rows, kv_heads, dim);
-        gufo::hip::LaunchBatchedRoPE(qa.data(), ka.data(), rows, heads,
+        mbufo::hip::LaunchBatchedRoPE(qa.data(), ka.data(), rows, heads,
                                      kv_heads, dim, dim, 4096, 10000000.0F);
       };
       const auto fused = [&] {
-        gufo::hip::LaunchBatchedFusedQKNormRoPEKvWrite(
+        mbufo::hip::LaunchBatchedFusedQKNormRoPEKvWrite(
             dq.data(), dk.data(), dk.data(), dw.data(), dw.data(), qb.data(),
             kb.data(), nullptr, nullptr, nullptr, nullptr, 0, 4096, rows, 0,
             heads, kv_heads, dim, dim, 10000000.0F);
@@ -95,7 +95,7 @@ void RunAttention() {
   DeviceBuffer<float> dq(q), dg(g), dc(cache), out(q.size()), ref(q.size());
   DeviceBuffer<__half> dh(half);
   DeviceBuffer<float> scratch(
-      8 * gufo::hip::detail::DecodeAttentionScratchElements(heads, dim));
+      8 * mbufo::hip::detail::DecodeAttentionScratchElements(heads, dim));
   hipEvent_t begin, end;
   HIP_CHECK(hipEventCreate(&begin));
   HIP_CHECK(hipEventCreate(&end));
@@ -105,7 +105,7 @@ void RunAttention() {
         for (unsigned start : {0, 127, 2048, 4088, 4092, 4096, 8192}) {
           auto scalar = [&] {
             for (unsigned row = 0; row < rows; ++row)
-              gufo::hip::LaunchAttention(
+              mbufo::hip::LaunchAttention(
                   dq.data() + row * width, nullptr, nullptr,
                   gate ? dg.data() + row * width : nullptr,
                   fp16 ? nullptr : dc.data(), fp16 ? nullptr : dc.data(),
@@ -114,7 +114,7 @@ void RunAttention() {
                   kvheads, dim, nullptr, scratch.data(), true);
           };
           auto batched = [&] {
-            gufo::hip::LaunchCausalDecodeAttention(
+            mbufo::hip::LaunchCausalDecodeAttention(
                 dq.data(), gate ? dg.data() : nullptr,
                 fp16 ? nullptr : dc.data(), fp16 ? nullptr : dc.data(),
                 fp16 ? dh.data() : nullptr, fp16 ? dh.data() : nullptr,

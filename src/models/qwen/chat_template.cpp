@@ -20,7 +20,7 @@
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
-namespace gufo::tokenization {
+namespace mbufo::tokenization {
 
 std::size_t RenderedPromptBoundBytes(std::uint32_t context_tokens) noexcept {
   constexpr std::size_t kFloor = 1024ULL * 1024ULL;
@@ -941,4 +941,4 @@ std::optional<std::vector<TokenId>> QwenChatTemplate::RenderAndTokenize(
                         content_spans, tok_opts);
 }
 
-}  // namespace gufo::tokenization
+}  // namespace mbufo::tokenization

@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_QUANT_GGML_DEQUANT_HPP_
-#define GUFO_CORE_QUANT_GGML_DEQUANT_HPP_
+#ifndef MBUFO_CORE_QUANT_GGML_DEQUANT_HPP_
+#define MBUFO_CORE_QUANT_GGML_DEQUANT_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -8,7 +8,7 @@
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::quant {
+namespace mbufo::quant {
 
 // Canonical quantized block layouts. These are the authoritative field
 // layouts for the dequant/dot paths. Relocated verbatim from the internal
@@ -287,6 +287,6 @@ float DotProductQ3_0_ROCMFPX(const void* row_data, std::span<const float> vec,
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,
                      std::size_t k);
 
-}  // namespace gufo::quant
+}  // namespace mbufo::quant
 
-#endif  // GUFO_CORE_QUANT_GGML_DEQUANT_HPP_
+#endif  // MBUFO_CORE_QUANT_GGML_DEQUANT_HPP_

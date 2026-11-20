@@ -1,5 +1,5 @@
-#ifndef GUFO_SERVER_STOP_SEQUENCES_HPP_
-#define GUFO_SERVER_STOP_SEQUENCES_HPP_
+#ifndef MBUFO_SERVER_STOP_SEQUENCES_HPP_
+#define MBUFO_SERVER_STOP_SEQUENCES_HPP_
 
 #include <algorithm>
 #include <cstddef>
@@ -12,7 +12,7 @@
 
 #include "src/core/json.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 
 inline constexpr std::size_t kMaxStopSequences = 64;
 inline constexpr std::size_t kMaxStopSequenceBytes = 4096;
@@ -128,6 +128,6 @@ private:
   std::optional<std::size_t> match_;
 };
 
-}  // namespace gufo::server
+}  // namespace mbufo::server
 
-#endif  // GUFO_SERVER_STOP_SEQUENCES_HPP_
+#endif  // MBUFO_SERVER_STOP_SEQUENCES_HPP_

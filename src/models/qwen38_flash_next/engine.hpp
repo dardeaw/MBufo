@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_
+#ifndef MBUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_
+#define MBUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -22,11 +22,11 @@
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
-namespace gufo::core {
+namespace mbufo::core {
 class GgufReader;
 }
 
-namespace gufo::models::qwen38_flash_next {
+namespace mbufo::models::qwen38_flash_next {
 
 struct ModelWeights;
 struct MtpWeights;
@@ -66,7 +66,7 @@ class Session;
 class SessionSnapshot;
 class FlashNextMtpDraftBackend;
 
-/// Gufo-owned API over the ROCm runtime: one resident model, any number of
+/// MBufo-owned API over the ROCm runtime: one resident model, any number of
 /// sessions with shared projection batches and independent context state.
 class Model final : public std::enable_shared_from_this<Model> {
 public:
@@ -97,7 +97,7 @@ public:
   [[nodiscard]] std::uint32_t DecodeConcurrency() const noexcept {
     return options_.decode_concurrency;
   }
-  /// MTP confidence gate (GUFO_MTP_GATE_P, default 0 = off; >0 enables): a
+  /// MTP confidence gate (MBUFO_MTP_GATE_P, default 0 = off; >0 enables): a
   /// draft chain stops extending once a position's top-1 candidate mass
   /// falls below this. Pure speculation-depth policy; verification math
   /// is untouched, so greedy output stays byte-identical.
@@ -106,9 +106,9 @@ public:
   [[nodiscard]] bool KvCacheBlocked() const noexcept {
     return options_.kv_cache_quant != "f16";
   }
-  /// Packed 4-bit key grid (GUFO_KV_Q4); only the blocked Q8 codec has it.
+  /// Packed 4-bit key grid (MBUFO_KV_Q4); only the blocked Q8 codec has it.
   [[nodiscard]] bool KvKey4Bit() const noexcept;
-  /// Packed 4-bit value grid (GUFO_KV_V4); only the blocked Q8 codec has it.
+  /// Packed 4-bit value grid (MBUFO_KV_V4); only the blocked Q8 codec has it.
   [[nodiscard]] bool KvValue4Bit() const noexcept;
   /// Raw KV precision selector ("f16" / "q8"). Part of cache identity,
   /// so snapshots must never be mixed across formats.
@@ -117,6 +117,7 @@ public:
   }
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] const Config& config() const noexcept;
+  [[nodiscard]] const ModelWeights& weights() const noexcept { return *weights_; }
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
     return *tokenizer_;
   }
@@ -432,6 +433,6 @@ private:
   friend class Session;
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace mbufo::models::qwen38_flash_next
 
-#endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_
+#endif  // MBUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_

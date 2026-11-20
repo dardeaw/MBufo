@@ -6,7 +6,7 @@
 #include "src/models/minimax_h3/dense.hip.hpp"
 #include "src/models/minimax_h3/dit.hpp"
 #include "src/models/minimax_h3/dit_ops.hip.hpp"
-namespace gufo::minimax_h3::dit_ops {
+namespace mbufo::minimax_h3::dit_ops {
 namespace {
 __device__ hip_bfloat16 Bf16(float x) {
   return hip_bfloat16(x);
@@ -101,7 +101,7 @@ __global__ void PackedAdaLn(const std::uint16_t* input,
   }
 }
 
-// Adapted from Gufo's Qwen-Image kernel. Packed BF16 operands feed WMMA
+// Adapted from MBufo's Qwen-Image kernel. Packed BF16 operands feed WMMA
 // directly, with the pinned projection's increasing-K FP32 accumulation.
 // Packing replaces the original weight buffer rather than retaining a copy.
 template<bool Tail>
@@ -493,4 +493,4 @@ void LaunchAttentionOutput(const std::uint16_t* packed_weight,
   LaunchHiddenProjection(packed_weight, packed_input, output, rows,
                          kDitAttentionWidth, stream);
 }
-}  // namespace gufo::minimax_h3::dit_ops
+}  // namespace mbufo::minimax_h3::dit_ops

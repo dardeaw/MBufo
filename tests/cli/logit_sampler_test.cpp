@@ -27,7 +27,7 @@ void TestGreedySelectsFiniteArgmaxWithoutAdvancingRng() {
       -1.0F, 5.0F, std::numeric_limits<float>::quiet_NaN(), 2.0F};
   std::uint64_t rng_state = 1234;
 
-  const auto token = gufo::sampling::SampleLogits(logits, 0.0F, &rng_state);
+  const auto token = mbufo::sampling::SampleLogits(logits, 0.0F, &rng_state);
 
   Expect(token == 1, "greedy sampling selects the finite argmax");
   Expect(rng_state == 1234, "greedy sampling does not consume RNG state");
@@ -35,7 +35,7 @@ void TestGreedySelectsFiniteArgmaxWithoutAdvancingRng() {
 
 void TestDefaultConfigPreservesGreedyDecoding() {
   const std::array<float, 4> logits = {-1.0F, 5.0F, 3.0F, 2.0F};
-  gufo::sampling::SamplerState sampler;
+  mbufo::sampling::SamplerState sampler;
 
   const auto before = sampler.rng_state();
   const auto token = sampler.Sample(logits);
@@ -46,7 +46,7 @@ void TestDefaultConfigPreservesGreedyDecoding() {
 }
 
 void TestExternalArgmaxRequiresAppliedPenalties() {
-  using gufo::sampling::SamplerState;
+  using mbufo::sampling::SamplerState;
   const std::array<float, 2> logits{1.0F, 0.75F};
   SamplerState sampler({.presence_penalty = 1.5F});
   sampler.Accept(0);
@@ -67,8 +67,8 @@ void TestTemperatureSamplingIsDeterministicAndNonGreedy() {
   for (std::uint64_t seed = 1; seed <= 128; ++seed) {
     auto left_state = seed;
     auto right_state = seed;
-    const auto left = gufo::sampling::SampleLogits(logits, 1.0F, &left_state);
-    const auto right = gufo::sampling::SampleLogits(logits, 1.0F, &right_state);
+    const auto left = mbufo::sampling::SampleLogits(logits, 1.0F, &left_state);
+    const auto right = mbufo::sampling::SampleLogits(logits, 1.0F, &right_state);
     Expect(left == right && left_state == right_state,
            "temperature sampling is reproducible from the same RNG state");
     saw_first = saw_first || left == 0;
@@ -81,11 +81,11 @@ void TestTemperatureSamplingIsDeterministicAndNonGreedy() {
 
 void TestTopKFiltersTheCandidateSet() {
   const std::array<float, 5> logits = {5.0F, 4.0F, 3.0F, 2.0F, 1.0F};
-  gufo::sampling::SamplingConfig config;
+  mbufo::sampling::SamplingConfig config;
   config.temperature = 1.0F;
   config.top_k = 2;
 
-  const auto distribution = gufo::sampling::BuildDistribution(logits, config);
+  const auto distribution = mbufo::sampling::BuildDistribution(logits, config);
 
   Expect(distribution.entries().size() == 2,
          "top-k retains exactly k candidates");
@@ -97,11 +97,11 @@ void TestTopKFiltersTheCandidateSet() {
 
 void TestTopPFiltersByCumulativeProbability() {
   const std::array<float, 3> logits = {3.0F, 2.0F, 1.0F};
-  gufo::sampling::SamplingConfig config;
+  mbufo::sampling::SamplingConfig config;
   config.temperature = 1.0F;
   config.top_p = 0.7F;
 
-  const auto distribution = gufo::sampling::BuildDistribution(logits, config);
+  const auto distribution = mbufo::sampling::BuildDistribution(logits, config);
 
   Expect(distribution.entries().size() == 2,
          "top-p retains the smallest cumulative-probability prefix");
@@ -110,7 +110,7 @@ void TestTopPFiltersByCumulativeProbability() {
   config.top_p = 0.0F;
   for (const auto floor : {0U, 1U, 2U}) {
     config.min_keep = floor;
-    const auto zero = gufo::sampling::BuildDistribution(logits, config);
+    const auto zero = mbufo::sampling::BuildDistribution(logits, config);
     Expect(zero.entries().size() == std::max(floor, 1U),
            "top-p zero preserves the minimum token count");
     Expect(zero.best_token() == 0, "top-p zero keeps the highest probability");
@@ -119,11 +119,11 @@ void TestTopPFiltersByCumulativeProbability() {
 
 void TestMinPFiltersRelativeToTheBestToken() {
   const std::array<float, 3> logits = {3.0F, 2.4F, 1.0F};
-  gufo::sampling::SamplingConfig config;
+  mbufo::sampling::SamplingConfig config;
   config.temperature = 1.0F;
   config.min_p = 0.5F;
 
-  const auto distribution = gufo::sampling::BuildDistribution(logits, config);
+  const auto distribution = mbufo::sampling::BuildDistribution(logits, config);
 
   Expect(distribution.entries().size() == 2,
          "min-p retains candidates above the relative threshold");
@@ -133,14 +133,14 @@ void TestMinPFiltersRelativeToTheBestToken() {
 
 void TestMinKeepProvidesAFilterFloor() {
   const std::array<float, 4> logits = {5.0F, 4.0F, 3.0F, 2.0F};
-  gufo::sampling::SamplingConfig config;
+  mbufo::sampling::SamplingConfig config;
   config.temperature = 1.0F;
   config.top_k = 1;
   config.top_p = 0.1F;
   config.min_p = 0.99F;
   config.min_keep = 3;
 
-  const auto distribution = gufo::sampling::BuildDistribution(logits, config);
+  const auto distribution = mbufo::sampling::BuildDistribution(logits, config);
 
   Expect(distribution.entries().size() == 3,
          "min-keep prevents enabled filters from shrinking below its floor");
@@ -155,14 +155,14 @@ void TestTemperatureBeforeProbabilityFilters() {
     logits[1] = -1.0F;
     logits[2] = -2.0F;
     for (const bool nucleus : {false, true}) {
-      gufo::sampling::SamplingConfig config{.temperature = 0.5F, .seed = 42};
+      mbufo::sampling::SamplingConfig config{.temperature = 0.5F, .seed = 42};
       if (nucleus)
         config.top_p = 0.8F;
       else
         config.min_p = 0.2F;
-      gufo::sampling::SamplerState sampler(config);
+      mbufo::sampling::SamplerState sampler(config);
       for (const auto distribution :
-           {gufo::sampling::BuildDistribution(logits, config),
+           {mbufo::sampling::BuildDistribution(logits, config),
             sampler.Distribution(logits)}) {
         Expect(distribution.entries().size() == 1 &&
                    distribution.probability(0) == 1.0,
@@ -177,8 +177,8 @@ void TestTemperatureBeforeProbabilityFilters() {
       config.min_p = nucleus ? 0.0F : 0.5F;
       const double first = 1.0 / (1.0 + std::exp(-0.5));
       for (const auto distribution :
-           {gufo::sampling::BuildDistribution(logits, config),
-            gufo::sampling::SamplerState(config).Distribution(logits)}) {
+           {mbufo::sampling::BuildDistribution(logits, config),
+            mbufo::sampling::SamplerState(config).Distribution(logits)}) {
         Expect(
             distribution.entries().size() == 2 &&
                 std::abs(distribution.probability(0) - first) < 1e-12 &&
@@ -191,12 +191,12 @@ void TestTemperatureBeforeProbabilityFilters() {
 
 void TestRepeatPenaltyUsesCommittedHistory() {
   const std::array<float, 3> logits = {2.0F, 1.0F, 0.0F};
-  const std::array<gufo::sampling::TokenId, 1> history = {0};
-  gufo::sampling::SamplingConfig config;
+  const std::array<mbufo::sampling::TokenId, 1> history = {0};
+  mbufo::sampling::SamplingConfig config;
   config.repeat_penalty = 3.0F;
 
   const auto distribution =
-      gufo::sampling::BuildDistribution(logits, config, history);
+      mbufo::sampling::BuildDistribution(logits, config, history);
 
   Expect(distribution.best_token() == 1,
          "repeat penalty can demote a recently used token");
@@ -204,32 +204,32 @@ void TestRepeatPenaltyUsesCommittedHistory() {
 
 void TestFrequencyAndPresencePenaltiesUseCounts() {
   const std::array<float, 2> logits = {2.0F, 1.4F};
-  const std::array<gufo::sampling::TokenId, 2> history = {0, 0};
+  const std::array<mbufo::sampling::TokenId, 2> history = {0, 0};
 
-  gufo::sampling::SamplingConfig frequency_config;
+  mbufo::sampling::SamplingConfig frequency_config;
   frequency_config.frequency_penalty = 0.4F;
   const auto frequency_distribution =
-      gufo::sampling::BuildDistribution(logits, frequency_config, {}, history);
+      mbufo::sampling::BuildDistribution(logits, frequency_config, {}, history);
   Expect(frequency_distribution.best_token() == 1,
          "frequency penalty scales with occurrence count");
 
-  gufo::sampling::SamplingConfig presence_config;
+  mbufo::sampling::SamplingConfig presence_config;
   presence_config.presence_penalty = 0.7F;
   const auto presence_distribution =
-      gufo::sampling::BuildDistribution(logits, presence_config, {}, history);
+      mbufo::sampling::BuildDistribution(logits, presence_config, {}, history);
   Expect(presence_distribution.best_token() == 1,
          "presence penalty applies once when a token is present");
 }
 
 void TestRepeatWindowIsBounded() {
   const std::array<float, 2> logits = {2.0F, 2.1F};
-  const std::array<gufo::sampling::TokenId, 2> history = {0, 1};
-  gufo::sampling::SamplingConfig config;
+  const std::array<mbufo::sampling::TokenId, 2> history = {0, 1};
+  mbufo::sampling::SamplingConfig config;
   config.repeat_penalty = 2.0F;
   config.repeat_last_n = 1;
 
   const auto distribution =
-      gufo::sampling::BuildDistribution(logits, config, history);
+      mbufo::sampling::BuildDistribution(logits, config, history);
 
   Expect(distribution.best_token() == 0,
          "repeat-last-n excludes tokens outside the configured window");
@@ -237,15 +237,15 @@ void TestRepeatWindowIsBounded() {
 
 void TestFastGreedyMatchesNormalizedPenaltyRoute() {
   const std::array<float, 5> logits = {3.0F, 2.9F, 2.8F, 2.7F, 2.6F};
-  const std::array<gufo::sampling::TokenId, 4> history = {0, 0, 1, 3};
-  gufo::sampling::SamplingConfig config;
+  const std::array<mbufo::sampling::TokenId, 4> history = {0, 0, 1, 3};
+  mbufo::sampling::SamplingConfig config;
   config.repeat_penalty = 1.5F;
   config.frequency_penalty = 0.2F;
   config.presence_penalty = 0.1F;
-  gufo::sampling::SamplerState sampler(config, history);
+  mbufo::sampling::SamplerState sampler(config, history);
 
   const auto expected =
-      gufo::sampling::BuildDistribution(logits, config, history).best_token();
+      mbufo::sampling::BuildDistribution(logits, config, history).best_token();
   const auto actual = sampler.Sample(logits);
 
   Expect(actual == expected,
@@ -254,7 +254,7 @@ void TestFastGreedyMatchesNormalizedPenaltyRoute() {
 
 void TestFastTopKSamplingNeverEscapesSelectedSet() {
   const std::array<float, 6> logits = {8.0F, 7.0F, 1.0F, 0.0F, -1.0F, -2.0F};
-  gufo::sampling::SamplingConfig config;
+  mbufo::sampling::SamplingConfig config;
   config.temperature = 1.0F;
   config.top_k = 2;
 
@@ -262,7 +262,7 @@ void TestFastTopKSamplingNeverEscapesSelectedSet() {
   bool saw_second = false;
   for (std::int64_t seed = 1; seed <= 256; ++seed) {
     config.seed = seed;
-    gufo::sampling::SamplerState sampler(config);
+    mbufo::sampling::SamplerState sampler(config);
     const auto token = sampler.Sample(logits);
     Expect(token <= 1, "top-k fast route retains only selected candidates");
     saw_first = saw_first || token == 0;
@@ -274,13 +274,13 @@ void TestFastTopKSamplingNeverEscapesSelectedSet() {
 
 void TestFastMinPSamplingNeverEscapesRelativeThreshold() {
   const std::array<float, 4> logits = {3.0F, 2.5F, 1.0F, -4.0F};
-  gufo::sampling::SamplingConfig config;
+  mbufo::sampling::SamplingConfig config;
   config.temperature = 1.0F;
   config.min_p = 0.5F;
 
   for (std::int64_t seed = 1; seed <= 256; ++seed) {
     config.seed = seed;
-    gufo::sampling::SamplerState sampler(config);
+    mbufo::sampling::SamplerState sampler(config);
     Expect(sampler.Sample(logits) <= 1,
            "min-p linear route rejects tokens below the relative threshold");
   }
@@ -288,12 +288,12 @@ void TestFastMinPSamplingNeverEscapesRelativeThreshold() {
 
 void TestSeedAndStateAreRequestLocal() {
   const std::array<float, 3> logits = {0.0F, 0.0F, 0.0F};
-  gufo::sampling::SamplingConfig config;
+  mbufo::sampling::SamplingConfig config;
   config.temperature = 1.0F;
   config.seed = 42;
   config.repeat_last_n = 2;
-  gufo::sampling::SamplerState left(config);
-  gufo::sampling::SamplerState right(config);
+  mbufo::sampling::SamplerState left(config);
+  mbufo::sampling::SamplerState right(config);
 
   for (int sample = 0; sample < 16; ++sample) {
     Expect(left.Sample(logits) == right.Sample(logits),
@@ -310,9 +310,9 @@ void TestSeedAndStateAreRequestLocal() {
 
 void TestDistributionIsNormalized() {
   const std::array<float, 4> logits = {2.0F, 1.0F, 0.0F, -1.0F};
-  gufo::sampling::SamplingConfig config;
+  mbufo::sampling::SamplingConfig config;
   config.temperature = 0.8F;
-  const auto distribution = gufo::sampling::BuildDistribution(logits, config);
+  const auto distribution = mbufo::sampling::BuildDistribution(logits, config);
   double sum = 0.0;
   for (const auto& entry : distribution.entries()) {
     sum += entry.value;
@@ -322,7 +322,7 @@ void TestDistributionIsNormalized() {
 }
 
 void TestGreedySparsePenaltyWalk() {
-  using namespace gufo::sampling;
+  using namespace mbufo::sampling;
   std::vector<float> logits(16385);
   for (std::size_t i = 0; i < logits.size(); ++i)
     logits[i] = float(int((i * 7919) % 65521) - 32768) / 32768;
@@ -357,7 +357,7 @@ void TestSamplingFailsClosedOnInvalidInputs() {
   bool empty_rejected = false;
   try {
     std::uint64_t rng_state = 1;
-    (void)gufo::sampling::SampleLogits({}, 1.0F, &rng_state);
+    (void)mbufo::sampling::SampleLogits({}, 1.0F, &rng_state);
   } catch (const std::invalid_argument&) {
     empty_rejected = true;
   }
@@ -366,7 +366,7 @@ void TestSamplingFailsClosedOnInvalidInputs() {
   bool missing_rng_rejected = false;
   try {
     const std::array<float, 2> logits = {0.0F, 1.0F};
-    (void)gufo::sampling::SampleLogits(logits, 1.0F, nullptr);
+    (void)mbufo::sampling::SampleLogits(logits, 1.0F, nullptr);
   } catch (const std::invalid_argument&) {
     missing_rng_rejected = true;
   }
@@ -378,7 +378,7 @@ void TestSamplingFailsClosedOnInvalidInputs() {
         std::numeric_limits<float>::quiet_NaN(),
         -std::numeric_limits<float>::infinity()};
     std::uint64_t rng_state = 1;
-    (void)gufo::sampling::SampleLogits(logits, 1.0F, &rng_state);
+    (void)mbufo::sampling::SampleLogits(logits, 1.0F, &rng_state);
   } catch (const std::runtime_error&) {
     non_finite_rejected = true;
   }
@@ -386,7 +386,7 @@ void TestSamplingFailsClosedOnInvalidInputs() {
 
   bool invalid_config_rejected = false;
   try {
-    gufo::sampling::SamplingConfig config;
+    mbufo::sampling::SamplingConfig config;
     config.top_p = -0.01F;
     config.Validate();
   } catch (const std::invalid_argument&) {
@@ -399,7 +399,7 @@ void TestZeroDrawAndNonFiniteCandidates() {
   // Inverse xorshift state whose next 53-bit uniform is exactly zero.
   constexpr std::uint64_t zero_draw_state = UINT64_C(0x98d76a164d99a710);
   const std::array<float, 3> cold_logits{-1000.0F, 0.0F, -1.0F};
-  gufo::sampling::SamplerState sampler({.temperature = 1.0F, .seed = 0});
+  mbufo::sampling::SamplerState sampler({.temperature = 1.0F, .seed = 0});
   sampler.SetRngState(zero_draw_state);
   Expect(sampler.Sample(cold_logits) == 1,
          "zero draw must not select underflowed zero probability");
@@ -408,10 +408,10 @@ void TestZeroDrawAndNonFiniteCandidates() {
       std::numeric_limits<float>::infinity(), 0.0F,
       -std::numeric_limits<float>::infinity()};
   for (const auto seed : {0, 73, 808}) {
-    gufo::sampling::SamplerState masked({.temperature = 1.0F, .seed = seed});
+    mbufo::sampling::SamplerState masked({.temperature = 1.0F, .seed = seed});
     auto rng = masked.rng_state();
     const auto expected =
-        gufo::sampling::BuildDistribution(masked_logits, masked.config())
+        mbufo::sampling::BuildDistribution(masked_logits, masked.config())
             .Sample(&rng);
     Expect(masked.Sample(masked_logits) == expected,
            "linear CPU sampling must ignore nonfinite candidates");
@@ -420,25 +420,25 @@ void TestZeroDrawAndNonFiniteCandidates() {
 
 void TestStrategyReplayAgainstReference() {
   const std::array<float, 5> logits{0.4F, 2.0F, -1.0F, 1.1F, -0.3F};
-  for (const auto& test : gufo::test::QwenSamplingCases()) {
+  for (const auto& test : mbufo::test::QwenSamplingCases()) {
     for (const auto seed : {0, 1, 73, 808}) {
       auto config = test.config;
       config.seed = seed;
-      std::vector<gufo::sampling::TokenId> history{1, 1, 2, 3};
-      gufo::sampling::SamplerState sampler(config, history);
-      std::vector<gufo::sampling::TokenId> generated;
+      std::vector<mbufo::sampling::TokenId> history{1, 1, 2, 3};
+      mbufo::sampling::SamplerState sampler(config, history);
+      std::vector<mbufo::sampling::TokenId> generated;
       auto replay = sampler;
       for (int step = 0; step < 16; ++step) {
-        const auto distribution = gufo::sampling::BuildDistribution(
+        const auto distribution = mbufo::sampling::BuildDistribution(
             logits, config, history, generated);
-        std::vector<gufo::sampling::Probability> ordered(
+        std::vector<mbufo::sampling::Probability> ordered(
             distribution.entries().begin(), distribution.entries().end());
         if (config.top_k == 0 && config.top_p == 1.0F &&
             !(config.min_p > 0.0F && config.min_keep > 1)) {
-          std::ranges::sort(ordered, {}, &gufo::sampling::Probability::token);
+          std::ranges::sort(ordered, {}, &mbufo::sampling::Probability::token);
         }
         auto rng = sampler.rng_state();
-        double threshold = gufo::sampling::Uniform(&rng);
+        double threshold = mbufo::sampling::Uniform(&rng);
         auto expected = distribution.best_token();
         if (config.temperature > 0.0F) {
           for (const auto& entry : ordered) {
@@ -461,16 +461,16 @@ void TestStrategyReplayAgainstReference() {
 
 void TestFilteredDistributionAgainstFullSort() {
   std::vector<float> logits(4099);
-  const std::array<gufo::sampling::TokenId, 6> history{8, 8, 8, 11, 17, 29};
+  const std::array<mbufo::sampling::TokenId, 6> history{8, 8, 8, 11, 17, 29};
   for (bool concentrated : {false, true}) {
     for (std::size_t i = 0; i < logits.size(); ++i)
       logits[i] = concentrated ? -(float)((i * 73) % logits.size()) * 0.2F
                                : std::sin((float)i * 0.7F);
-    for (const auto& test : gufo::test::QwenSamplingCases()) {
-      gufo::sampling::SamplerState sampler(test.config, history);
+    for (const auto& test : mbufo::test::QwenSamplingCases()) {
+      mbufo::sampling::SamplerState sampler(test.config, history);
       const auto rng = sampler.rng_state();
       const auto expected =
-          gufo::sampling::BuildDistribution(logits, test.config, history);
+          mbufo::sampling::BuildDistribution(logits, test.config, history);
       const auto actual = sampler.Distribution(logits);
       const auto positive = std::ranges::count_if(
           expected.entries(), [](const auto& e) { return e.value > 0; });
@@ -495,24 +495,24 @@ void TestBlockSkippedTopKAgainstFullSort() {
   logits[640] = std::numeric_limits<float>::infinity();
   logits[641] = -std::numeric_limits<float>::infinity();
   logits[69999] = 9.0F;
-  const std::array<gufo::sampling::TokenId, 7> history{
+  const std::array<mbufo::sampling::TokenId, 7> history{
       3, 700, 701, 33333, 50000, 69999, 70000};
-  for (const gufo::sampling::SamplingConfig config :
-       {gufo::sampling::SamplingConfig{
+  for (const mbufo::sampling::SamplingConfig config :
+       {mbufo::sampling::SamplingConfig{
             .temperature = 1.0F, .top_k = 64, .top_p = 0.95F},
-        gufo::sampling::SamplingConfig{.temperature = 1.0F, .top_k = 1},
-        gufo::sampling::SamplingConfig{.temperature = 0.7F, .top_k = 300},
-        gufo::sampling::SamplingConfig{.temperature = 1.0F,
+        mbufo::sampling::SamplingConfig{.temperature = 1.0F, .top_k = 1},
+        mbufo::sampling::SamplingConfig{.temperature = 0.7F, .top_k = 300},
+        mbufo::sampling::SamplingConfig{.temperature = 1.0F,
                                        .top_k = 64,
                                        .repeat_penalty = 1.3F,
                                        .presence_penalty = -9.0F},
-        gufo::sampling::SamplingConfig{.temperature = 0.8F,
+        mbufo::sampling::SamplingConfig{.temperature = 0.8F,
                                        .top_k = 20,
                                        .repeat_penalty = 0.5F,
                                        .frequency_penalty = 2.0F}}) {
-    gufo::sampling::SamplerState sampler(config, history);
+    mbufo::sampling::SamplerState sampler(config, history);
     sampler.Accept(std::span(history).first(3));
-    const auto expected = gufo::sampling::BuildDistribution(
+    const auto expected = mbufo::sampling::BuildDistribution(
         logits, config, history, std::span(history).first(3));
     const auto actual = sampler.Distribution(logits);
     Expect(actual.entries().size() == expected.entries().size(),
@@ -525,13 +525,13 @@ void TestBlockSkippedTopKAgainstFullSort() {
 
 void TestDeferredResidualReplay() {
   const std::array<float, 3> logits{100.0F, -100.0F, -100.0F};
-  gufo::sampling::SamplerState sampler({.temperature = 1.0F, .seed = 7});
+  mbufo::sampling::SamplerState sampler({.temperature = 1.0F, .seed = 7});
   // A retained residual must win over a fresh draw, even when that fresh
   // draw would almost certainly select a different token.
   sampler.DeferSample(2);
   const auto rng = sampler.rng_state();
   auto copied = sampler;
-  gufo::sampling::SamplerState assigned;
+  mbufo::sampling::SamplerState assigned;
   assigned = sampler;
   bool duplicate_rejected = false;
   try {
@@ -540,7 +540,7 @@ void TestDeferredResidualReplay() {
     duplicate_rejected = true;
   }
   Expect(duplicate_rejected, "pending residual cannot be overwritten");
-  gufo::sampling::SamplerState published({.temperature = 1.0F});
+  mbufo::sampling::SamplerState published({.temperature = 1.0F});
   published.Accept(1);
   published.CopyDrawStateFrom(sampler);
   Expect(published.history().size() == 1 && published.history()[0] == 1,
@@ -564,12 +564,12 @@ void TestCanonicalTargetDistribution() {
   logits[0] = 0;
   logits[17] = -1;
   logits[4098] = -2;
-  for (const auto& test : gufo::test::QwenSamplingCases()) {
+  for (const auto& test : mbufo::test::QwenSamplingCases()) {
     for (float temperature : {0.5F, 0.99999994F, 2.0F}) {
       auto config = test.config;
       config.temperature = temperature;
       config.seed = 19;
-      gufo::sampling::SamplerState sampler(config);
+      mbufo::sampling::SamplerState sampler(config);
       for (unsigned step = 0; step < 16; ++step) {
         const auto distribution = sampler.Distribution(logits);
         auto rng = sampler.rng_state();
@@ -583,8 +583,8 @@ void TestCanonicalTargetDistribution() {
 }
 
 void TestResponsePenaltyScope() {
-  using gufo::sampling::SamplerState;
-  using gufo::sampling::TokenId;
+  using mbufo::sampling::SamplerState;
+  using mbufo::sampling::TokenId;
   const std::array<float, 3> logits{3, 2, 1};
   SamplerState sampler({.temperature = 1,
                         .seed = 7,
@@ -598,7 +598,7 @@ void TestResponsePenaltyScope() {
   sampler.Accept(std::vector<TokenId>(80, 2));
   const std::array<float, 3> expected_logits{1.75F, 2, -39.25F};
   const auto expected =
-      gufo::sampling::BuildDistribution(expected_logits, {.temperature = 1});
+      mbufo::sampling::BuildDistribution(expected_logits, {.temperature = 1});
   for (const auto token : {0U, 1U, 2U})
     Expect(std::abs(sampler.Distribution(logits).probability(token) -
                     expected.probability(token)) < 1e-12,
@@ -623,8 +623,8 @@ int main() {
   for (std::uint64_t seed = 1; seed < 100; ++seed) {
     auto state = seed;
     auto reference = seed;
-    const auto bits = gufo::sampling::NextRandom(&reference);
-    const double draw = gufo::sampling::Uniform(&state);
+    const auto bits = mbufo::sampling::NextRandom(&reference);
+    const double draw = mbufo::sampling::Uniform(&state);
     Expect(draw >= 0 && draw < 1 && state == reference,
            "uniform stays half-open and consumes one RNG word");
     Expect(draw == static_cast<double>(bits >> 11) * 0x1.0p-53,

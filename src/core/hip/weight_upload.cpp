@@ -19,7 +19,7 @@
 
 #include "src/core/hip/host_allocations.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 namespace {
 
 constexpr std::size_t kAlignment = 4096;
@@ -259,4 +259,4 @@ bool WeightUpload::Finish(std::string* error) {
   return s.Status(error);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip

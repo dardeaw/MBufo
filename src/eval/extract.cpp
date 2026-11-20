@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace gufo::eval {
+namespace mbufo::eval {
 namespace {
 
 std::string Lower(std::string_view value) {
@@ -377,4 +377,4 @@ std::string_view ExtractionStatusName(ExtractionStatus status) noexcept {
   return "unknown";
 }
 
-}  // namespace gufo::eval
+}  // namespace mbufo::eval

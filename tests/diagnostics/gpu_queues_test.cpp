@@ -25,7 +25,7 @@ class FakeKfd {
 public:
   FakeKfd()
       : root_(std::filesystem::temp_directory_path() /
-              ("gufo-queues-" + std::to_string(::getpid()))) {
+              ("mbufo-queues-" + std::to_string(::getpid()))) {
     std::filesystem::remove_all(root_);
     std::filesystem::create_directories(proc_root());
   }
@@ -63,11 +63,11 @@ private:
   std::filesystem::path root_;
 };
 
-using gufo::diagnostics::kComputeQueueBudget;
-using gufo::diagnostics::PlanQueues;
-using gufo::diagnostics::QueryQueueCensus;
-using gufo::diagnostics::QueueCensus;
-using gufo::diagnostics::QueueProfile;
+using mbufo::diagnostics::kComputeQueueBudget;
+using mbufo::diagnostics::PlanQueues;
+using mbufo::diagnostics::QueryQueueCensus;
+using mbufo::diagnostics::QueueCensus;
+using mbufo::diagnostics::QueueProfile;
 
 void CensusCountsComputeQueuesAcrossProcesses() {
   FakeKfd kfd;
@@ -81,7 +81,7 @@ void CensusCountsComputeQueuesAcrossProcesses() {
 
 void CensusIsEmptyWithoutKfd() {
   const auto census =
-      QueryQueueCensus(std::filesystem::temp_directory_path() / "gufo-absent");
+      QueryQueueCensus(std::filesystem::temp_directory_path() / "mbufo-absent");
   Expect(census.compute_queues == 0, "absent KFD reports no queues");
   Expect(census.processes == 0, "absent KFD reports no processes");
 }
@@ -177,7 +177,7 @@ void OperatorValuePastTheBudgetIsWarned() {
   Expect(plan.may_exceed_budget,
          "the operator's own cap does not fit and is warned about");
 
-  const auto line = gufo::diagnostics::DescribeQueuePressure(plan);
+  const auto line = mbufo::diagnostics::DescribeQueuePressure(plan);
   Expect(line.find("adds_up_to=5") != std::string::npos,
          "the warning carries the upper bound that does not fit");
   Expect(line.find("cap=operator:4") != std::string::npos,
@@ -193,7 +193,7 @@ void UnparseableOperatorValueFallsBackToTheFloor() {
   Expect(plan.expected_queues == 2, "only the floor can be reasoned about");
   Expect(!plan.may_exceed_budget, "the floor fits beside five queues");
 
-  const auto line = gufo::diagnostics::DescribeQueuePlan("tts", plan);
+  const auto line = mbufo::diagnostics::DescribeQueuePlan("tts", plan);
   Expect(line.find("expected_max=unknown") != std::string::npos,
          "an unparseable value bounds nothing");
 }
@@ -218,7 +218,7 @@ void EmptyOperatorValueIsIgnored() {
 void PlanIsDescribedForTheLog() {
   const QueueCensus empty;
   const auto plan = PlanQueues(QueueProfile::kText, empty, nullptr);
-  const auto line = gufo::diagnostics::DescribeQueuePlan("llm", plan);
+  const auto line = mbufo::diagnostics::DescribeQueuePlan("llm", plan);
   Expect(line.find("event=queue_budget") != std::string::npos,
          "log line carries the event name");
   Expect(line.find("kind=llm") != std::string::npos, "log line carries a kind");
@@ -230,7 +230,7 @@ void PlanIsDescribedForTheLog() {
 void OperatorPlanDoesNotPredictAQueueCount() {
   const QueueCensus empty;
   const auto plan = PlanQueues(QueueProfile::kText, empty, "4");
-  const auto line = gufo::diagnostics::DescribeQueuePlan("llm", plan);
+  const auto line = mbufo::diagnostics::DescribeQueuePlan("llm", plan);
   Expect(line.find("cap=operator:4") != std::string::npos,
          "an operator setting is named in the log with its value");
   Expect(line.find("expected_max=5") != std::string::npos,

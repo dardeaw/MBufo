@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_GEMM_ROUTE_HPP_
-#define GUFO_MODELS_QWEN_GEMM_ROUTE_HPP_
+#ifndef MBUFO_MODELS_QWEN_GEMM_ROUTE_HPP_
+#define MBUFO_MODELS_QWEN_GEMM_ROUTE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +13,7 @@
 // (src/core/compute/gemm/gemm_dispatcher.hpp, DecideQwenDecodeRoute).
 // ResolveQwenGemmRoute below now serves CPU paths, the prefill-legacy fine
 // triage and the kernel benchmark only.
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 
 enum class QwenGemmMode : std::uint8_t {
   kCpu,
@@ -89,7 +89,7 @@ struct QwenGemmFormatCapabilities {
     case core::GgmlType::kQ4_0_ROCMFP4_FAST:
     case core::GgmlType::kQ8_K:
       return {.quantized = true,
-              .block_elements = ::gufo::quant::QuantizedBlockElements(type),
+              .block_elements = ::mbufo::quant::QuantizedBlockElements(type),
               .cpu_direct = true,
               .hip_decode_direct = true,
               .hip_prefill_direct = true};
@@ -244,6 +244,6 @@ struct QwenGemmResolution {
                                       : QwenGemmRoute::kHipBf16Baseline256};
 }
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 
-#endif  // GUFO_MODELS_QWEN_GEMM_ROUTE_HPP_
+#endif  // MBUFO_MODELS_QWEN_GEMM_ROUTE_HPP_

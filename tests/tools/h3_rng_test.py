@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools" / "gufo"))
+sys.path.insert(0, str(ROOT / "tools" / "mbufo"))
 
 from h3_rng import NormalRng
 

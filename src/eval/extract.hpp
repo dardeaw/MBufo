@@ -1,5 +1,5 @@
-#ifndef GUFO_EVAL_EXTRACT_HPP_
-#define GUFO_EVAL_EXTRACT_HPP_
+#ifndef MBUFO_EVAL_EXTRACT_HPP_
+#define MBUFO_EVAL_EXTRACT_HPP_
 
 #include <cstdint>
 #include <string>
@@ -7,7 +7,7 @@
 
 #include "src/eval/dataset.hpp"
 
-namespace gufo::eval {
+namespace mbufo::eval {
 
 enum class ExtractionStatus : std::uint8_t {
   kFound,
@@ -37,6 +37,6 @@ struct GradeResult {
 [[nodiscard]] std::string_view ExtractionStatusName(
     ExtractionStatus status) noexcept;
 
-}  // namespace gufo::eval
+}  // namespace mbufo::eval
 
-#endif  // GUFO_EVAL_EXTRACT_HPP_
+#endif  // MBUFO_EVAL_EXTRACT_HPP_

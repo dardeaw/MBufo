@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::models::qwen3_asr::tokenization {
+namespace mbufo::models::qwen3_asr::tokenization {
 
 namespace {
 
@@ -405,4 +405,4 @@ bool BpeTokenizer::IsSpecialToken(TokenId id) const noexcept {
   return is_special_token_.contains(id);
 }
 
-}  // namespace gufo::models::qwen3_asr::tokenization
+}  // namespace mbufo::models::qwen3_asr::tokenization

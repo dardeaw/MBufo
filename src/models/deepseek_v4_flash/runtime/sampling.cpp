@@ -27,12 +27,12 @@ int ds4_sample_top_p_min_p(const float* logits, uint32_t vocabulary_size,
   // Keep one definition of target sampling, including finite-value handling
   // and temperature-before-filtering. The native API reports failure as -1.
   try {
-    const gufo::sampling::SamplingConfig config{.temperature = temperature,
+    const mbufo::sampling::SamplingConfig config{.temperature = temperature,
                                                 .top_k = top_k,
                                                 .top_p = top_p,
                                                 .min_p = min_p};
     return static_cast<int>(
-        gufo::sampling::BuildDistribution({logits, vocabulary_size}, config)
+        mbufo::sampling::BuildDistribution({logits, vocabulary_size}, config)
             .Sample(rng_state));
   } catch (const std::exception&) {
     return -1;

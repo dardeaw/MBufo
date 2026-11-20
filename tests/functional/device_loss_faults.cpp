@@ -21,7 +21,7 @@ std::atomic<bool> failed{false};
 std::atomic<void*> probe_stream{nullptr};
 
 std::string Path(std::string_view name) {
-  const auto* directory = std::getenv("GUFO_TEST_DEVICE_LOSS_DIR");
+  const auto* directory = std::getenv("MBUFO_TEST_DEVICE_LOSS_DIR");
   return directory ? std::string(directory) + "/" + std::string(name) : "";
 }
 bool Exists(std::string_view name) {

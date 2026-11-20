@@ -16,13 +16,13 @@
 
 #include "src/core/quant/ggml_dequant.hpp"
 
-namespace q = gufo::models::qwen38_flash_next;
+namespace q = mbufo::models::qwen38_flash_next;
 
 namespace {
 std::unique_ptr<q::NgramTable> OpenTable(const std::filesystem::path& path,
                                          std::uint64_t offset,
                                          std::uint64_t rows, std::uint32_t dim,
-                                         gufo::core::GgmlType type,
+                                         mbufo::core::GgmlType type,
                                          std::string* error) {
   const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   auto table = q::NgramTable::Open(fd, offset, rows, dim, type, error);
@@ -135,7 +135,7 @@ void TestTable() {
   }
   std::string error;
   auto table =
-      OpenTable(path, offset, rows, dim, gufo::core::GgmlType::kBF16, &error);
+      OpenTable(path, offset, rows, dim, mbufo::core::GgmlType::kBF16, &error);
   Check(table != nullptr, error.c_str());
   if (table) {
     table->ReserveGather(32769);
@@ -235,7 +235,7 @@ void TestTable() {
     // Valid row metadata with a truncated backing file must fail at the
     // read boundary, then allow another gather to use the same readers.
     auto truncated = OpenTable(path, offset, rows + 1, dim,
-                               gufo::core::GgmlType::kBF16, &error);
+                               mbufo::core::GgmlType::kBF16, &error);
     Check(truncated != nullptr, error.c_str());
     if (truncated) {
       Check(truncated->StartRead(bad, out), "missing row gather starts");
@@ -282,7 +282,7 @@ void TestQuantizedRows() {
   }
   std::string error;
   auto table =
-      OpenTable(path, offset, rows, dim, gufo::core::GgmlType::kIQ4_NL, &error);
+      OpenTable(path, offset, rows, dim, mbufo::core::GgmlType::kIQ4_NL, &error);
   Check(table != nullptr, error.c_str());
   if (table) {
     const auto gather = [&](std::span<const std::uint32_t> ids) {
@@ -342,7 +342,7 @@ void TestDistantRows() {
   }
   std::string error;
   auto table = OpenTable(path, offset, last + 2, dim,
-                         gufo::core::GgmlType::kBF16, &error);
+                         mbufo::core::GgmlType::kBF16, &error);
   Check(table != nullptr, error.c_str());
   if (table) {
     std::vector<std::uint32_t> ids(80);
@@ -388,7 +388,7 @@ void TestReplacedPath() {
   }
   std::string error;
   auto table =
-      q::NgramTable::Open(fd, 0, 1, 1, gufo::core::GgmlType::kBF16, &error);
+      q::NgramTable::Open(fd, 0, 1, 1, mbufo::core::GgmlType::kBF16, &error);
   ::close(fd);
   Check(table != nullptr, "open original descriptor after path replacement");
   std::array<std::uint32_t, 1> ids{0};
@@ -413,7 +413,7 @@ void TestCounters() {
   }
   std::string error;
   auto table =
-      OpenTable(path, 0, rows, dim, gufo::core::GgmlType::kBF16, &error);
+      OpenTable(path, 0, rows, dim, mbufo::core::GgmlType::kBF16, &error);
   Check(table != nullptr, error.c_str());
   if (table) {
     const auto balanced = [](const q::NgramTotals& t) {
@@ -504,7 +504,7 @@ void TestFp3Rows() {
   }
   std::string error;
   auto table = OpenTable(path, offset, rows, dim,
-                         gufo::core::GgmlType::kQ3_0_ROCMFPX, &error);
+                         mbufo::core::GgmlType::kQ3_0_ROCMFPX, &error);
   Check(table != nullptr, error.c_str());
   if (table) {
     const std::array<std::uint32_t, 6> ids{0, 7, 128, 7, 0, 32};
@@ -539,9 +539,10 @@ void TestFp3Rows() {
 // Real v2q8 PLE table: decode sampled rows (including the last row of a
 // 22.4 GB table) against a plain-read + CPU-reference oracle.
 void TestFp3RealFile() {
-  const char* path =
-      "/mnt/nvme-data/gufo-models/qwen3.8-rocmfp4/v2q8/"
-      "Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8.gguf";
+  const char* models_dir = std::getenv("MBUFO_MODELS_DIR");
+  const std::string path_str = std::string(models_dir != nullptr ? models_dir : "models") +
+                               "/qwen3.8-rocmfp4/v2q8/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8.gguf";
+  const char* path = path_str.c_str();
   if (!std::filesystem::exists(path)) {
     std::printf("ROCmFP3 real file skipped (missing)\n");
     return;
@@ -551,7 +552,7 @@ void TestFp3RealFile() {
   constexpr std::uint32_t dim = 160;
   std::string error;
   auto table = OpenTable(path, offset, rows, dim,
-                         gufo::core::GgmlType::kQ3_0_ROCMFPX, &error);
+                         mbufo::core::GgmlType::kQ3_0_ROCMFPX, &error);
   Check(table != nullptr, error.c_str());
   if (!table)
     return;
@@ -570,7 +571,7 @@ void TestFp3RealFile() {
     Check(std::fseek(f, static_cast<long>(at), SEEK_SET) == 0, "real seek");
     Check(std::fread(bytes, 1, sizeof(bytes), f) == sizeof(bytes), "real read");
     std::vector<float> ref(dim, 0.0F);
-    gufo::quant::DequantizeQ3_0_ROCMFPX(bytes, ref.data(), dim);
+    mbufo::quant::DequantizeQ3_0_ROCMFPX(bytes, ref.data(), dim);
     for (std::uint32_t col = 0; col < dim; ++col) {
       if (out[i * dim + col] != ref[col]) {
         std::printf("row %u col %u got %.9g want %.9g\n", ids[i], col,

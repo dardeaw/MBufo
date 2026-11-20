@@ -6,7 +6,7 @@
 
 #include "src/models/qwen/hip/blocked_q8.hpp"
 
-namespace gufo::hip {
+namespace mbufo::hip {
 
 // Elementwise SiLU gate for the blocked-Q8 decode read: the shared
 // direct-read kernel has no gate input, while the F16 decode kernels fuse
@@ -40,5 +40,5 @@ void LaunchSigmoidGateMultiply(float* out, const float* gate, std::size_t n,
                      stream, out, gate, n);
 }
 
-}  // namespace gufo::hip
+}  // namespace mbufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)

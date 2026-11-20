@@ -21,7 +21,7 @@ int main() {
   const auto page_size = ::sysconf(_SC_PAGESIZE);
   assert(page_size > 0);
 #endif
-  gufo::platform::PrefaultMappedRange(memory + 1, bytes - 1);
+  mbufo::platform::PrefaultMappedRange(memory + 1, bytes - 1);
   // A fault in a later chunk must be reported after all workers have joined.
   auto* protected_page = memory + (16ULL << 20) + page_size;
 #if defined(_WIN32)
@@ -33,7 +33,7 @@ int main() {
 #endif
   bool failed = false;
   try {
-    gufo::platform::PrefaultMappedRange(memory, bytes);
+    mbufo::platform::PrefaultMappedRange(memory, bytes);
   } catch (const std::system_error& error) {
     failed = true;
 #if defined(_WIN32)

@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include "src/core/compute/gemm/gemm.hpp"
+#include "src/core/compute/attention/flash_wmma_large.hpp"
 #include "src/models/gemma4/kernels/kernels.hpp"
 #include "src/core/compute/attention/blocked_kv.hpp"
 #include "src/models/gemma4/weights.hpp"
@@ -9,7 +10,7 @@
 #include <hip/hip_fp16.h>
 #include <hipblas/hipblas.h>
 
-namespace gufo::models::gemma4 {
+namespace mbufo::models::gemma4 {
 namespace kernels {
 namespace {
 // NOTE: host wrappers for kernels defined in this file live after the
@@ -222,6 +223,54 @@ __global__ void RmsNormAddKernel(const float* __restrict__ x,
       dst[i] = (dst[i] + src[i] * scale * g) * post_scale;
     }
   }
+}
+
+// Fused RmsNormAdd (post-norm + residual add, as RmsNormAddKernel with post_scale == 1) followed by the next RmsNorm of
+// the updated residual (as RmsNormKernel): same per-thread element order and the same two reductions as the separate
+// kernels, so the result is bit-identical; saves one launch and one round trip of the residual.
+__global__ void RmsNormAddNormKernel(const float* __restrict__ x, const float* __restrict__ gamma,
+                                     float* __restrict__ residual_inout, const float* __restrict__ gamma2,
+                                     float* __restrict__ normed, std::uint32_t dim, float eps, float post_scale) {
+  const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
+  const float* src = x + base;
+  float* dst = residual_inout + base;
+  float* out = normed + base;
+  __shared__ float shared[kThreads / 32];
+  float sum = 0.0F;
+  for (std::uint32_t i = threadIdx.x; i < dim; i += blockDim.x) {
+    const float v = src[i];
+    sum += v * v;
+  }
+  sum = WaveSum(sum);
+  if ((threadIdx.x & 31) == 0) shared[threadIdx.x >> 5] = sum;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float v = threadIdx.x < (blockDim.x >> 5) ? shared[threadIdx.x] : 0.0F;
+    v = WaveSum(v);
+    if (threadIdx.x == 0) shared[0] = v;
+  }
+  __syncthreads();
+  const float scale = rsqrtf(shared[0] / static_cast<float>(dim) + eps);
+  float sum2 = 0.0F;
+  for (std::uint32_t i = threadIdx.x; i < dim; i += blockDim.x) {
+    const float g = gamma != nullptr ? gamma[i] : 1.0F;
+    const float r = post_scale == 1.0F ? dst[i] + src[i] * scale * g : (dst[i] + src[i] * scale * g) * post_scale;
+    dst[i] = r;
+    sum2 += r * r;
+  }
+  for (std::uint32_t off = 16; off > 0; off >>= 1) sum2 += __shfl_down_sync(0xffffffffull, sum2, off);
+  __syncthreads();  // everyone has read shared[0]
+  if ((threadIdx.x & 31) == 0) shared[threadIdx.x / 32] = sum2;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float v = threadIdx.x < blockDim.x / 32 ? shared[threadIdx.x] : 0.0F;
+    for (std::uint32_t off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffull, v, off);
+    if (threadIdx.x == 0) shared[0] = v;
+  }
+  __syncthreads();
+  const float scale2 = rsqrtf(shared[0] / static_cast<float>(dim) + eps);
+  for (std::uint32_t i = threadIdx.x; i < dim; i += blockDim.x)
+    out[i] = dst[i] * scale2 * (gamma2 != nullptr ? gamma2[i] : 1.0F);
 }
 
 // Compute partial dot product for one wave lane over [k0, k0 + tile_k).
@@ -1344,6 +1393,223 @@ __global__ void __launch_bounds__(256) AttentionSplitKMultiKernel(
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Row-chunk decode attention for the global layers (d == 512, 8 query heads per kv head, no sliding window; F16 KV).
+// The split of one query row depends only on that row's own length n_kv: chunk = max(kRcChunkBase, ceil(n_kv / kRcTargetSplits)
+// rounded up to 32) keys, ceil(n_kv / chunk) splits. A row therefore gives the same result alone (decode) and inside a verify
+// batch, and the split count follows the length (about kRcTargetSplits splits however long the context is).
+//  * block = 4 waves of one (kv head, token, split); the chunk's 32-key tiles are dealt round-robin to the waves, so the key
+//    scores are lane-per-key (one dot product per lane and head, no per-key wave reduction) instead of one wave per key;
+//  * a key row (1 KB) is streamed in 32-element pieces of four 16-byte loads and dotted with the 8 query rows from LDS;
+//  * the PV pass loads four value rows before it consumes them.
+// Each wave keeps its own online-softmax state; wave 0 folds the waves in fixed order (one LDS buffer, one wave at a time so
+// that LDS does not limit the resident blocks) before the block writes its partial. The partials use the layout of
+// AttentionSplitKKernel, so AttentionSplitKMergeKernel folds them (dead splits write m = -inf, l = 0 and are skipped).
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ float RcWaveMax(float v) {  // max is order-independent, so a plain butterfly is exact
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) v = fmaxf(v, __shfl_xor(v, offset));
+  return v;
+}
+constexpr std::uint32_t kRcWaves = 4;
+constexpr std::uint32_t kRcChunkBase = 128;
+constexpr std::uint32_t kRcTargetSplits = 30;
+
+__host__ __device__ constexpr std::uint32_t RcChunkKeys(std::uint32_t n_kv) {
+  const std::uint32_t c = ((n_kv + kRcTargetSplits - 1u) / kRcTargetSplits + 31u) / 32u * 32u;
+  return c > kRcChunkBase ? c : kRcChunkBase;
+}
+__host__ __device__ constexpr std::uint32_t RcSplits(std::uint32_t n_kv) {
+  const std::uint32_t c = RcChunkKeys(n_kv);
+  return (n_kv + c - 1u) / c;
+}
+
+template <std::uint32_t kQ>
+__global__ void __launch_bounds__(32 * kRcWaves) AttentionRowChunkF16Kernel(
+    const float* __restrict__ q, const __half* __restrict__ k_cache, const __half* __restrict__ v_cache,
+    float* __restrict__ partial_ml, float* __restrict__ partial_acc, std::uint32_t query_pos, std::uint32_t kv_len,
+    std::uint32_t heads, std::uint32_t kv_stride, std::uint32_t splits) {
+  constexpr std::uint32_t kD = 512, kU = 8;
+  const std::uint32_t kvh = blockIdx.x, t = blockIdx.y, s = blockIdx.z;
+  const std::uint32_t tid = threadIdx.x, lane = tid & 31u, wave = tid >> 5;
+  const std::uint32_t pos_q = query_pos + t;
+  const std::uint32_t n_kv = (pos_q + 1u < kv_len) ? (pos_q + 1u) : kv_len;
+  const std::uint32_t chunk = RcChunkKeys(n_kv);
+  const std::uint32_t k_beg = s * chunk;
+  const std::size_t h_base = static_cast<std::size_t>(t) * heads + kvh * kQ;
+  if (k_beg >= n_kv) {  // uniform over the block: this split is past the row's end
+    if (tid < kQ) {
+      partial_ml[((h_base + tid) * splits + s) * 2u] = -INFINITY;
+      partial_ml[((h_base + tid) * splits + s) * 2u + 1u] = 0.0F;
+    }
+    return;
+  }
+  std::uint32_t k_end = k_beg + chunk;
+  if (k_end > n_kv) k_end = n_kv;
+
+  __shared__ __attribute__((aligned(16))) float qsm[kQ][kD];
+  __shared__ float wsm[kRcWaves][kQ][32];
+  __shared__ __attribute__((aligned(16))) float mrg[kQ][kD + 2];
+  for (std::uint32_t i = tid; i < kQ * kD; i += 32 * kRcWaves) {
+    const std::uint32_t hh = i / kD, d = i % kD;
+    qsm[hh][d] = q[(h_base + hh) * kD + d];
+  }
+  __syncthreads();
+
+  float m[kQ], l[kQ];
+  float2 acc[kQ][kU];
+#pragma unroll
+  for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+    m[hh] = -INFINITY;
+    l[hh] = 0.0F;
+#pragma unroll
+    for (std::uint32_t u = 0; u < kU; ++u) acc[hh][u] = make_float2(0.0F, 0.0F);
+  }
+
+  const std::uint32_t n_tiles = (k_end - k_beg + 31u) / 32u;
+  for (std::uint32_t it = 0; it * kRcWaves < n_tiles; ++it) {
+    const std::uint32_t tile = it * kRcWaves + wave;
+    const std::uint32_t base = k_beg + tile * 32u;
+    const bool tile_live = tile < n_tiles;
+    const std::uint32_t j = base + lane;
+    const bool valid = tile_live && j < k_end;
+    float score[kQ];
+#pragma unroll
+    for (std::uint32_t hh = 0; hh < kQ; ++hh) score[hh] = -INFINITY;
+    if (valid) {
+      float dot[kQ];
+#pragma unroll
+      for (std::uint32_t hh = 0; hh < kQ; ++hh) dot[hh] = 0.0F;
+      const __half* krow = k_cache + static_cast<std::size_t>(j) * kv_stride + kvh * kD;
+#pragma unroll 1
+      for (std::uint32_t b = 0; b < kD / 32; ++b) {
+        float kv[32];
+#pragma unroll
+        for (std::uint32_t c4 = 0; c4 < 4; ++c4) {
+          const uint4 u = *reinterpret_cast<const uint4*>(krow + b * 32 + c4 * 8);
+          const float2 f0 = __half22float2(*reinterpret_cast<const __half2*>(&u.x));
+          const float2 f1 = __half22float2(*reinterpret_cast<const __half2*>(&u.y));
+          const float2 f2 = __half22float2(*reinterpret_cast<const __half2*>(&u.z));
+          const float2 f3 = __half22float2(*reinterpret_cast<const __half2*>(&u.w));
+          kv[c4 * 8 + 0] = f0.x; kv[c4 * 8 + 1] = f0.y; kv[c4 * 8 + 2] = f1.x; kv[c4 * 8 + 3] = f1.y;
+          kv[c4 * 8 + 4] = f2.x; kv[c4 * 8 + 5] = f2.y; kv[c4 * 8 + 6] = f3.x; kv[c4 * 8 + 7] = f3.y;
+        }
+#pragma unroll
+        for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+          float a = dot[hh];
+#pragma unroll
+          for (int e = 0; e < 32; e += 4) {
+            const float4 qq = *reinterpret_cast<const float4*>(&qsm[hh][b * 32 + e]);
+            a = fmaf(qq.x, kv[e], a);
+            a = fmaf(qq.y, kv[e + 1], a);
+            a = fmaf(qq.z, kv[e + 2], a);
+            a = fmaf(qq.w, kv[e + 3], a);
+          }
+          dot[hh] = a;
+        }
+      }
+#pragma unroll
+      for (std::uint32_t hh = 0; hh < kQ; ++hh) score[hh] = dot[hh];
+    }
+#pragma unroll
+    for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+      const float m_tile = RcWaveMax(score[hh]);
+      const float m_new = m[hh] > m_tile ? m[hh] : m_tile;
+      const float corr = (m[hh] == -INFINITY) ? 0.0F : expf(m[hh] - m_new);
+      const float w = valid ? expf(score[hh] - m_new) : 0.0F;
+      l[hh] = l[hh] * corr + WaveSum(w);
+#pragma unroll
+      for (std::uint32_t u = 0; u < kU; ++u) {
+        acc[hh][u].x *= corr;
+        acc[hh][u].y *= corr;
+      }
+      wsm[wave][hh][lane] = w;
+      m[hh] = m_new;
+    }
+    __syncthreads();
+    const std::uint32_t cnt = !tile_live ? 0u : (k_end - base < 32u ? k_end - base : 32u);
+    for (std::uint32_t jj = 0; jj < cnt; jj += 4) {
+      float2 vv[4][kU];
+#pragma unroll
+      for (std::uint32_t k4 = 0; k4 < 4; ++k4) {
+        if (jj + k4 < cnt) {
+          const __half* vrow = v_cache + static_cast<std::size_t>(base + jj + k4) * kv_stride + kvh * kD;
+#pragma unroll
+          for (std::uint32_t u = 0; u < kU; ++u)
+            vv[k4][u] = __half22float2(*reinterpret_cast<const __half2*>(vrow + 2 * lane + 64 * u));
+        }
+      }
+#pragma unroll
+      for (std::uint32_t k4 = 0; k4 < 4; ++k4) {
+        if (jj + k4 < cnt) {
+#pragma unroll
+          for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+            const float wj = wsm[wave][hh][jj + k4];
+#pragma unroll
+            for (std::uint32_t u = 0; u < kU; ++u) {
+              acc[hh][u].x = fmaf(wj, vv[k4][u].x, acc[hh][u].x);
+              acc[hh][u].y = fmaf(wj, vv[k4][u].y, acc[hh][u].y);
+            }
+          }
+        }
+      }
+    }
+    __syncthreads();  // wsm is rewritten by the next tile
+  }
+
+  // Fold the waves in fixed order: waves 1..3 each hand their state to wave 0 through one LDS buffer.
+  for (std::uint32_t w2 = 1; w2 < kRcWaves; ++w2) {
+    if (wave == w2) {
+#pragma unroll
+      for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+        if (lane == 0) {
+          mrg[hh][0] = m[hh];
+          mrg[hh][1] = l[hh];
+        }
+#pragma unroll
+        for (std::uint32_t u = 0; u < kU; ++u) {
+          mrg[hh][2 + 64 * u + 2 * lane] = acc[hh][u].x;
+          mrg[hh][2 + 64 * u + 2 * lane + 1] = acc[hh][u].y;
+        }
+      }
+    }
+    __syncthreads();
+    if (wave == 0) {
+#pragma unroll
+      for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+        const float m2 = mrg[hh][0], l2 = mrg[hh][1];
+        const float m_new = m[hh] > m2 ? m[hh] : m2;
+        const float c1 = (m[hh] == -INFINITY) ? 0.0F : expf(m[hh] - m_new);
+        const float c2 = (m2 == -INFINITY) ? 0.0F : expf(m2 - m_new);
+        l[hh] = l[hh] * c1 + l2 * c2;
+#pragma unroll
+        for (std::uint32_t u = 0; u < kU; ++u) {
+          const float ax = mrg[hh][2 + 64 * u + 2 * lane], ay = mrg[hh][2 + 64 * u + 2 * lane + 1];
+          acc[hh][u].x = acc[hh][u].x * c1 + ax * c2;
+          acc[hh][u].y = acc[hh][u].y * c1 + ay * c2;
+        }
+        m[hh] = m_new;
+      }
+    }
+    __syncthreads();
+  }
+  if (wave != 0) return;
+#pragma unroll
+  for (std::uint32_t hh = 0; hh < kQ; ++hh) {
+    const std::size_t idx = (h_base + hh) * splits + s;
+    if (lane == 0) {
+      partial_ml[idx * 2u] = m[hh];
+      partial_ml[idx * 2u + 1u] = l[hh];
+    }
+#pragma unroll
+    for (std::uint32_t u = 0; u < kU; ++u) {
+      partial_acc[idx * kD + 64 * u + 2 * lane] = acc[hh][u].x;
+      partial_acc[idx * kD + 64 * u + 2 * lane + 1] = acc[hh][u].y;
+    }
+  }
+}
+
 __global__ void __launch_bounds__(128) AttentionSplitKMergeKernel(
     const float* __restrict__ partial_ml, const float* __restrict__ partial_acc,
     float* __restrict__ out, std::uint32_t heads, std::uint32_t d,
@@ -1940,6 +2206,32 @@ void LayerScale(float* out, float scale, std::size_t count,
                      stream, out, scale, count);
 }
 
+__global__ void AddScaledKernel(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ out,
+                                std::size_t count, float scale) {
+  const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < count) out[i] = (a[i] + b[i]) * scale;
+}
+
+__global__ void GeluMulStridedKernel(const float* __restrict__ g, const float* __restrict__ ple, float* __restrict__ out,
+                                     std::uint32_t dim, std::size_t ple_stride, std::size_t ple_offset) {
+  const std::uint32_t t = blockIdx.y;
+  const std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= dim) return;
+  out[static_cast<std::size_t>(t) * dim + i] =
+      GeluTanhOne(g[static_cast<std::size_t>(t) * dim + i]) * ple[t * ple_stride + ple_offset + i];
+}
+
+void AddScaled(const float* a, const float* b, float* out, std::size_t count, float scale, hipStream_t stream) {
+  if (count == 0) return;
+  hipLaunchKernelGGL(AddScaledKernel, dim3(static_cast<unsigned>((count + 255) / 256)), dim3(256), 0, stream, a, b, out, count, scale);
+}
+
+void GeluMulStrided(const float* g, const float* ple, float* out, std::uint32_t n_rows, std::uint32_t dim,
+                    std::size_t ple_stride, std::size_t ple_offset, hipStream_t stream) {
+  if (n_rows == 0 || dim == 0) return;
+  hipLaunchKernelGGL(GeluMulStridedKernel, dim3((dim + 255) / 256, n_rows), dim3(256), 0, stream, g, ple, out, dim, ple_stride, ple_offset);
+}
+
 void RmsNorm(const float* x, const float* gamma, float* out,
              std::uint32_t n_rows, std::uint32_t dim, float eps,
              hipStream_t stream) {
@@ -1954,6 +2246,13 @@ void RmsNormAdd(const float* x, const float* gamma, float* residual_inout,
   if (n_rows == 0 || dim == 0) return;
   hipLaunchKernelGGL(RmsNormAddKernel, dim3(n_rows), dim3(kThreads), 0, stream,
                      x, gamma, residual_inout, dim, eps, post_scale);
+}
+
+void RmsNormAddNorm(const float* x, const float* gamma, float* residual_inout, const float* gamma2, float* normed,
+                    std::uint32_t n_rows, std::uint32_t dim, float eps, float post_scale, hipStream_t stream) {
+  if (n_rows == 0 || dim == 0) return;
+  hipLaunchKernelGGL(RmsNormAddNormKernel, dim3(n_rows), dim3(kThreads), 0, stream, x, gamma, residual_inout, gamma2,
+                     normed, dim, eps, post_scale);
 }
 
 void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
@@ -1980,7 +2279,10 @@ void AttentionCross(const float* q, const __half* k_cache,
   const bool splitk_shape =
       (n_tokens <= 8u) && (getenv("GEMMA4_NO_SPLITK_ATTN") == nullptr) &&
       ((d == 256u && heads == 16u && kv_heads == 8u) ||
-       (d == 512u && heads == 16u && kv_heads == 2u));
+       (d == 512u && heads == 16u && kv_heads == 2u) ||
+       // E-models (8 query heads): only the row-chunk kernel serves them (it is templated on the group size)
+       (d == 512u && kv_heads != 0u && heads % kv_heads == 0u && (heads / kv_heads == 8u || heads / kv_heads == 4u) &&
+        window == 0u && getenv("GEMMA4_NO_ROWCHUNK_ATTN") == nullptr));
   if (splitk_shape) {
     const std::uint32_t pos_last = query_pos + n_tokens - 1u;
     const std::uint32_t hi_max =
@@ -1998,9 +2300,12 @@ void AttentionCross(const float* q, const __half* k_cache,
     if (splits < 1u) splits = 1u;
     if (splits > 64u) splits = 64u;
 
+    // Global layers (d == 512, window 0): row-chunk kernel (GEMMA4_NO_ROWCHUNK_ATTN=1 keeps the per-key kernels below).
+    const bool row_chunk = d == 512u && kv_heads != 0u && (heads / kv_heads == 8u || heads / kv_heads == 4u) &&
+                           heads % kv_heads == 0u && window == 0u && getenv("GEMMA4_NO_ROWCHUNK_ATTN") == nullptr;
     static float* s_partial_ml = nullptr;
     static float* s_partial_acc = nullptr;
-    if (splits > 1u && (s_partial_ml == nullptr || s_partial_acc == nullptr)) {
+    if ((splits > 1u || row_chunk) && (s_partial_ml == nullptr || s_partial_acc == nullptr)) {
       constexpr std::size_t kMaxMl = 8ull * 16ull * 64ull * 2ull;
       constexpr std::size_t kMaxAcc = 8ull * 16ull * 64ull * 512ull;
       void* p_ml = nullptr;
@@ -2016,6 +2321,26 @@ void AttentionCross(const float* q, const __half* k_cache,
       }
     }
 
+    if (row_chunk && s_partial_ml != nullptr && s_partial_acc != nullptr) {
+      std::uint32_t rc_splits = 1u;
+      for (std::uint32_t t = 0; t < n_tokens; ++t) {
+        const std::uint32_t pos_t = query_pos + t;
+        const std::uint32_t hi_t = (pos_t + 1u < kv_len) ? (pos_t + 1u) : kv_len;
+        if (hi_t != 0u && RcSplits(hi_t) > rc_splits) rc_splits = RcSplits(hi_t);
+      }
+      if (heads / kv_heads == 8u) {
+        hipLaunchKernelGGL((AttentionRowChunkF16Kernel<8>), dim3(kv_heads, n_tokens, rc_splits), dim3(32 * kRcWaves), 0,
+                           stream, q, k_cache, v_cache, s_partial_ml, s_partial_acc, query_pos, kv_len, heads, kv_stride,
+                           rc_splits);
+      } else {
+        hipLaunchKernelGGL((AttentionRowChunkF16Kernel<4>), dim3(kv_heads, n_tokens, rc_splits), dim3(32 * kRcWaves), 0,
+                           stream, q, k_cache, v_cache, s_partial_ml, s_partial_acc, query_pos, kv_len, heads, kv_stride,
+                           rc_splits);
+      }
+      hipLaunchKernelGGL(AttentionSplitKMergeKernel, dim3(heads, n_tokens), dim3(128), 0, stream, s_partial_ml,
+                         s_partial_acc, out, heads, d, rc_splits);
+      return;
+    }
     if (multi_splitk) {
       if (d == 256u) {
         const dim3 mgrid(1u, splits, kv_heads);
@@ -2089,7 +2414,18 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
       sp2 -= lo;
     }
   }
-  if (getenv("GEMMA4_ATTN_NO_WMMA") == nullptr) {
+  // The WMMA prefill kernels are compiled for one head geometry (16 query heads over 8 kv heads at d = 256, over 2 at d = 512);
+  // any other model (Gemma 4 E2B/E4B: 8 heads) takes the generic GQA kernel below.
+  const bool wmma_geometry = heads == 16u && ((d <= 256 && kv_heads == 8u) || (d > 256 && kv_heads == 2u));
+  // Every other geometry with a wide head (E-models: 8 heads over 2 / 1 kv heads): the generic large-head WMMA flash kernel
+  // (core flash_wmma_large; GEMMA4_NO_LARGE_WMMA=1 keeps the scalar GQA kernel below).
+  if (!wmma_geometry && getenv("GEMMA4_NO_LARGE_WMMA") == nullptr && kv_stride == kv_heads * d &&
+      core::compute::flash_wmma_large::IsFlashWmmaLargeSupported(heads, kv_heads, d) &&
+      core::compute::flash_wmma_large::FlashWmmaLargePrefill(q, k2, v2, out, n_tokens, sp2, heads, kv_heads, d, window,
+                                                             1.0F, stream)) {
+    return;
+  }
+  if (wmma_geometry && getenv("GEMMA4_ATTN_NO_WMMA") == nullptr) {
     if (d <= 256) {
       if (wmma::AttentionWmma(q, k2, v2, out, n_tokens, sp2, d,
                               kv_stride, window, stream))
@@ -2130,13 +2466,13 @@ void StoreBlockedKv(const float* k_rows, const float* v_rows,
       (key_block_bytes != 34 && key_block_bytes != 18) ||
       (value_block_bytes != 34 && value_block_bytes != 18))
     return;
-  namespace blocked = gufo::core::compute::blocked_kv;
+  namespace blocked = mbufo::core::compute::blocked_kv;
   const std::uint32_t kv_width = kv_heads * d;
   // k_rows/v_rows hold the final K/V rows (post RMS-norm, post-RoPE), the
   // same values StoreKv would write as F16. Quantize keeps the post-RoPE K
   // per-32-block scale the shared layout requires. The 4-bit grids use the
-  // narrower range 7 study hook (same convention as flash-next GUFO_KV_Q4 /
-  // GUFO_KV_V4); the 8-bit grid keeps range 127.
+  // narrower range 7 study hook (same convention as flash-next MBUFO_KV_Q4 /
+  // MBUFO_KV_V4); the 8-bit grid keeps range 127.
   blocked::QuantizeKvRows(k_rows, kv_width, d, k_cache, kv_width, kv_heads, d,
                           n_tokens, blocked::KvCodec::kQ8,
                           key_block_bytes == 34 ? 127.0F : 7.0F,
@@ -2160,7 +2496,7 @@ void AttentionBlocked(const float* q, const std::uint8_t* k_cache,
       (key_block_bytes != 34 && key_block_bytes != 18) ||
       (value_block_bytes != 34 && value_block_bytes != 18))
     return;
-  namespace blocked = gufo::core::compute::blocked_kv;
+  namespace blocked = mbufo::core::compute::blocked_kv;
   // Gemma 4 sets f_attention_scale = 1.0 (no 1/sqrt(d) in the WMMA, split-K
   // or scalar kernels); the shared kernel defaults to 1/sqrt(d), so the
   // scale is passed explicitly. Direct read: fused dequant on the blocked
@@ -4073,4 +4409,4 @@ void BuildRoutedTiles(const std::int32_t* routed_bounds,
 }
 
 }  // namespace kernels
-}  // namespace gufo::models::gemma4
+}  // namespace mbufo::models::gemma4

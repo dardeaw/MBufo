@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_ADAPTER_HPP_
-#define GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_ADAPTER_HPP_
+#ifndef MBUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_ADAPTER_HPP_
+#define MBUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_ADAPTER_HPP_
 
 // DeepSeek V4 Flash adapter: exposes deepseek_v4_flash::Model/Session through the L0/L1 engine abstraction
 // (EngineModel / SpeculativeSession / SnapshotCapable) and registers the "deepseek_v4_flash" engine.
@@ -28,10 +28,12 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/engine/attention_contract.hpp"
 #include "src/core/engine/engine_batch.hpp"
+#include "src/core/gguf_reader.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 
-namespace gufo::models::deepseek_v4_flash {
+namespace mbufo::models::deepseek_v4_flash {
 
 class DeepSeekEngineSession final : public core::engine::SpeculativeSession, public core::engine::SnapshotCapable {
  public:
@@ -70,7 +72,7 @@ class DeepSeekEngineSession final : public core::engine::SpeculativeSession, pub
   mutable bool logits_valid_{false};
 };
 
-class DeepSeekEngineModel final : public core::engine::EngineModel {
+class DeepSeekEngineModel final : public core::engine::EngineModel, public core::engine::MoeCapable, public core::engine::AttentionCapable {
  public:
   [[nodiscard]] static std::shared_ptr<DeepSeekEngineModel> Load(const std::string& model_path,
                                                                  const ModelOptions& options,
@@ -83,6 +85,10 @@ class DeepSeekEngineModel final : public core::engine::EngineModel {
   [[nodiscard]] std::uint32_t MaxContext() const noexcept override;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept override;
   [[nodiscard]] std::string ModelName() const override;
+  [[nodiscard]] core::engine::AttentionGeometry AttentionGeometryInfo() const override;
+  [[nodiscard]] core::engine::AttentionKernelInfo AttentionKernelsInfo() const override;
+  [[nodiscard]] core::engine::MoeGeometry MoeGeometryInfo() const override;
+  [[nodiscard]] core::engine::MoeKernelInfo MoeKernelsInfo() const override;
 
   [[nodiscard]] std::string DecodeToken(std::int32_t token) const;
   [[nodiscard]] bool IsStopToken(std::int32_t token) const;
@@ -93,8 +99,15 @@ class DeepSeekEngineModel final : public core::engine::EngineModel {
 
   std::shared_ptr<Model> model_;
   std::size_t resident_bytes_{0};
+  core::engine::MoeGeometry moe_geometry_;
+  core::engine::AttentionGeometry attention_geometry_;
 };
 
-}  // namespace gufo::models::deepseek_v4_flash
+/// The MoE contract declaration of a DeepSeek GGUF (also what mbufo serve checks when it loads one).
+[[nodiscard]] core::engine::MoeGeometry DescribeMoeGeometry(const core::GgufReader& reader);
+[[nodiscard]] core::engine::AttentionGeometry DescribeAttentionGeometry(const core::GgufReader& reader);
+[[nodiscard]] core::engine::MoeKernelInfo DescribeMoeKernels();
 
-#endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_ADAPTER_HPP_
+}  // namespace mbufo::models::deepseek_v4_flash
+
+#endif  // MBUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_ADAPTER_HPP_

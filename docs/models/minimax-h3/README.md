@@ -2,7 +2,7 @@
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
-Gufo runs the text-only FL2VA path on Linux gfx1151: prompt encoding, the
+MBufo runs the text-only FL2VA path on Linux gfx1151: prompt encoding, the
 50-block BF16 transformer, F32 Euler integration, VisualVAE, AudioVAE, and
 MP4 composition. Model code lives in
 [`src/models/minimax_h3`](../../../src/models/minimax_h3).
@@ -20,7 +20,7 @@ loading, planning, progress, and media composition.
 | License SHA-256 | `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44` |
 
 The operator obtains the checkpoint and accepts its terms independently.
-Gufo distributes engine code and binaries, without H3 weights, tokenizer
+MBufo distributes engine code and binaries, without H3 weights, tokenizer
 payloads, converted weights, or private authorization documents. Build,
 installation, and server startup do not download this model.
 See [third-party notices](../../../THIRD_PARTY_NOTICES.md) for the model and
@@ -34,7 +34,7 @@ nix develop -c hf download MiniMaxAI/MiniMax-H3 \
   --include LICENSE README.md model_index.json "FL2VA/**" \
   --local-dir /var/llms/huggingface/MiniMax-H3
 
-nix develop -c python3 tools/h3/gufo-h3-manifest.py \
+nix develop -c python3 tools/h3/mbufo-h3-manifest.py \
   --model-root /var/llms/huggingface/MiniMax-H3 \
   --verify src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
 ```
@@ -47,7 +47,7 @@ unsupported, or unsafe shard paths fail loading.
 
 ## CLI and server
 
-Build with `nix build` and use `result/bin/gufo`. The presets are frozen in
+Build with `nix build` and use `result/bin/mbufo`. The presets are frozen in
 [`generation.cpp`](../../../src/models/minimax_h3/generation.cpp):
 
 | Preset | Internal canvas | Output canvas | Sigma points / transitions | Active blocks | Velocity reuse interval |
@@ -68,7 +68,7 @@ The CLI's `dev` preset uses the real 22-frame latent window, decodes frames
 0, 11, and 21, and skips audio/muxing:
 
 ```sh
-./result/bin/gufo video \
+./result/bin/mbufo video \
   --model /var/llms/huggingface/MiniMax-H3 \
   --preset dev --seed 42 --frames-dir /tmp/h3-preview --profile \
   "A red fox walking through snow"
@@ -83,10 +83,10 @@ the default is `row-parallel`.
 Start a video-only server:
 
 ```sh
-./result/bin/gufo serve \
+./result/bin/mbufo serve \
   --host 127.0.0.1 --port 8080 \
   --video-model /var/llms/huggingface/MiniMax-H3 \
-  --video-root /var/llms/huggingface/gufo-h3-jobs --video-ttl 3600
+  --video-root /var/llms/huggingface/mbufo-h3-jobs --video-ttl 3600
 ```
 
 `POST /v1/videos` accepts JSON or multipart form data. For example:
@@ -97,7 +97,7 @@ Start a video-only server:
   "prompt": "A red fox walking through snow",
   "size": "512x512",
   "seconds": 5,
-  "gufo": {"seed": 42}
+  "mbufo": {"seed": 42}
 }
 ```
 
@@ -109,8 +109,8 @@ encoder enforces **4,096 tokens after tokenization and NFC normalization**.
 The HTTP byte budget is a separate request-resource limit.
 
 The API's `dev` preset requires `size: "256x256"` and
-`gufo.output_format: "ppm"` and returns one selected frame. An explicit
-`gufo.frames` must match the aligned duration. Unsupported conditioning and
+`mbufo.output_format: "ppm"` and returns one selected frame. An explicit
+`mbufo.frames` must match the aligned duration. Unsupported conditioning and
 conflicting preset/model selections are rejected.
 
 One worker executes H3 jobs, with one additional queued job; excess admissions

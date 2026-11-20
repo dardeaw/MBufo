@@ -1,12 +1,12 @@
 # MBufo
 
-A specialized fork of [gufo](https://github.com/gufo-org/gufo) engineered for AMD Strix Halo (`gfx1151`), built as a **fair, multi-models, high-concurrency inference engine for production workloads**.
+A specialized fork of [mbufo](https://github.com/gufo-org/gufo) engineered for AMD Strix Halo (`gfx1151`), built as a **fair, multi-models, high-concurrency inference engine for production workloads**.
 
 > [繁體中文版](README.zh-Hant.md) · [简体中文版](README.zh-CN.md)
 
 <img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/8021186d-c066-4fa6-bd84-0d908c1164eb" />
 
-Upstream gufo is tuned for single-stream peak throughput. MBufo addresses the operational reality of production serving: how a single Strix Halo node sustains 16+ concurrent streams under heavy load while offering up to 256K context per session. MBufo achieves this through three core pillars: **fair scheduling under load (§1)**, **low-precision compute that drastically cuts cost and memory (§2)**, and **comprehensive GGUF coverage across 13 model families on a single port (§3)**. The engine primitives, compute kernels, and foundations originate from upstream; sincere thanks to gufo-org and all community contributors.
+Upstream gufo is tuned for single-stream peak throughput. MBufo addresses the operational reality of production serving: how a single Strix Halo node sustains 16+ concurrent streams under heavy load while offering up to 256K context per session. MBufo achieves this through three core pillars: **fair scheduling under load (§1)**, **low-precision compute that drastically cuts cost and memory (§2)**, and **comprehensive GGUF coverage across 19 model families on a single port (§3)**. The engine primitives, compute kernels, and foundations originate from upstream; sincere thanks to gufo-org and all community contributors.
 
 **Contents:** [Key Highlights](#mbufo-key-highlights) ·
 [§1 High Concurrency Architecture](#1-high-concurrency-architecture) ·
@@ -27,7 +27,7 @@ Upstream gufo is tuned for single-stream peak throughput. MBufo addresses the op
 | --- | --- | --- |
 | **Instant Response** | **Short-request TTFT 0.7 s** | An anti-starvation fairness scheduler guarantees that short queries arriving during massive 250K-token prefill batches begin generating in 0.7 seconds with bit-exact greedy outputs. |
 | **Memory Efficiency** | **KV memory cut by ~50%** | The Blocked-Q8 cache holds a 262,144-token session in just 3.42 GB (compared to 6.44 GB for F16), with 4-bit value/key options reaching down to 1.81 GB. |
-| **Unified Serving** | **13 GGUF model families** | A single HTTP port dynamically hosts and routes chat models, MoE, embeddings, and cross-encoders with zero-downtime hot swapping. |
+| **Unified Serving** | **19 GGUF model families** | A single HTTP port dynamically hosts and routes chat models, MoE, embeddings, and cross-encoders with zero-downtime hot swapping. |
 
 ---
 
@@ -49,7 +49,7 @@ MBufo merges the prefill chunk and decode rows into a single `ForwardBatch` and 
 - **Sustained utilization**: Reaches 99% GPU utilization under 16 concurrent streams with 100% bit-exact outputs and zero errors.
 - **Expanded batch envelope**: Scales up to 32 sessions and 1024 rows.
 
-> Mixed batching changes when operations execute without modifying model semantics. It is enabled by default; setting `GUFO_MIXED_BATCH=0` reverts to traditional scheduling. Architectural invariants and validation details are documented in [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md).
+> Mixed batching changes when operations execute without modifying model semantics. It is enabled by default; setting `MBUFO_MIXED_BATCH=0` reverts to traditional scheduling. Architectural invariants and validation details are documented in [docs/MIXED_BATCH.md](docs/MIXED_BATCH.md).
 
 ### DecodeBatch & Split-K Attention
 
@@ -78,7 +78,7 @@ Benchmarked on identical hardware after warmup across concurrency levels 1 / 2 /
 | Engine | Total TPS | Per-Session TPS | Fairness A / B |
 | --- | --- | --- | --- |
 | A (Halogen) | 85 / 82 / 75 / 88 | 85 / 41 / 25 / 22 | 322 / 1140 |
-| B (gufo upstream) | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
+| B (mbufo upstream) | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
 | **C (MBufo)** | **66 / 83 / 110 / 129** | **66 / 42 / 38 / 33** | **19 / 187** |
 
 MBufo demonstrates superior linear scaling under multi-stream load (scaling smoothly up to 129 TPS with minimal per-session dropoff) while maintaining the best fairness scores.
@@ -119,7 +119,7 @@ MBufo abstracts Blocked-Q8 KV into modular codecs, allowing Key and Value axes t
 | --- | --- | --- | --- | --- |
 | `f16` | Baseline | 2048 B | 6.44 GB | Unquantized reference KV cache. |
 | `q8` | **Recommended** | 1088 B | 3.42 GB | Blocked 8-bit, optimal quality and speed. |
-| `q8` + `GUFO_KV_V4=1` | Manual (K8V4) | 832 B | 2.62 GB | 4-bit Value, 8-bit Key. |
+| `q8` + `MBUFO_KV_V4=1` | Manual (K8V4) | 832 B | 2.62 GB | 4-bit Value, 8-bit Key. |
 | `q8` + both flags | Manual (K4V4) | 576 B | 1.81 GB | 4-bit Key and Value for extreme memory constraints. |
 
 - **Recommended: `q8`**: Provides full bit-level numerical integrity while cutting KV memory in half.
@@ -157,23 +157,29 @@ Identical weights, release build, greedy decoding; positive values denote MBufo 
 
 ### Supported Model Families
 
-A single HTTP port hosts and routes across all 13 supported families:
+A single HTTP port hosts and routes across all 19 supported families:
 
 | Model | Parameters | HTTP Serving | Evaluation | Speculative Draft | Architecture Highlights |
 | --- | --- | --- | --- | --- | --- |
 | **Qwen3.8 Flash-Next** (Primary) | 30B-A3B MoE | Supported | Pilot | MTP | ROCmFP4-FAST / UD-Q4_K_XL, Blocked-Q8 KV |
 | **Qwen3.8 27B** | 27B Dense | Supported | Pilot | DFlash2 (inc. Q8) | Dense + MoE paths; UD-Q4_K_XL recommended |
 | **Gemma 4 26B-A4B** | 26B-A4B | Supported | Verified | MTP (F16 mirror) | Native tool use, SWA shared Q8 layers |
+| **Gemma 4 E4B / E2B** | 4B / 2B effective (per-layer embeddings) | Supported | Verified | — | Q4_0 QAT; PLE (Q6_K gather), shared-KV layers, 8 heads x d256/d512, WMMA large-head prefill |
 | **Gemma-4-12B** | 12B Dense | Bench | — | — | K-quant preconversion & WMMA Q8 prefill |
 | **Qwen3.5-35B-A3B** | 35B-A3B MoE | Engine | — | — | qwen35moe pipeline support |
 | **Qwen3.6-35B-A3B** | 35B-A3B MoE | Engine | — | — | Q6_K→Q8_0 loading, Split-K decode MoE |
 | **GPT-OSS 20B / 120B** | 20B / 117B MoE | Supported | Pilot | — | Native MXFP4 GEMM; zero-copy streaming for 120B |
 | **Muse Glimmer 30B** | 30B | Supported | Prompt | DFlash (~89%) | ATEM tool calling, W8A8 / Q8_0 execution |
 | **Llama-3.1-8B** | 8B Dense | Supported | Adapter | — | Standard dense GQA support |
+| **DeepSeek V4 Flash** | MoE (IQ2/Q2/Q8 mixed GGUF) | Supported | Quality limits documented | DSpark | MLA decode, ds4-parity kernels, ~81 GiB resident |
 | **Qwen3-Embedding-0.6B** | 0.6B | Supported (`/v1/embeddings`) | — | — | Single-prefill pooled executor |
 | **bge-m3** | 0.6B XLM-R | Supported (`/v1/embeddings`) | Encoder | — | CLS pooling, Q4_K_M loader, hipBLASLt autotune |
 | **bge-reranker-v2-m3** | Cross-Encoder | Supported (`/v1/reranking`) | ScoreBatch | — | BERT dispatch, padded batching |
 | **Qwen3-Reranker** | Cross-Encoder | Supported (`/v1/reranking`) | Scoring | — | Qwen dispatch, shared scoring heads |
+| **Qwen3-ASR 1.7B** | 1.7B | Supported (audio transcription) | — | — | BF16 safetensors, deterministic greedy decoding |
+| **Qwen3-TTS 12Hz 1.7B** | 1.7B | Supported (speech synthesis) | — | — | BF16 safetensors, F32 waveform decoder |
+| **Qwen-Image-2.1** | Diffusion transformer | Supported (image generation / editing) | — | — | BF16 safetensors, Qwen3-VL prompt encoder, RGBA VAE |
+| **MiniMax H3** | 50-block BF16 transformer | Supported (video, text-only FL2VA) | — | — | HIP transformer, VisualVAE / AudioVAE, MP4 composition |
 
 ### Production Multi-Model Co-Residency & `/admin` Control Plane
 
@@ -184,10 +190,10 @@ Running `serve llm --multi-model` turns MBufo into a **multi-model co-resident s
 - **Embedded `/admin` Web UI Dashboard**: Open `http://<host>:<port>/admin` in any browser for:
   - **Sticky Unified Memory & VRAM Gate**: Real-time Strix Halo UMA breakdown (per-model footprint, KV/system pools, safety reserve) and single-line hover preview showing whether any catalog model fits alongside currently loaded models or requires LRU eviction.
   - **Live Session Slot Telemetry**: Inspect per-model session slots (`BUSY` / `IDLE`, cached KV tokens, idle duration), switch the Primary Default model with one click, or eject models gracefully.
-  - **Local GGUF Catalog (`/admin/catalog`)**: Automatically scans `GUFO_MODELS_DIR` (or model parent directories), groups multi-shard GGUFs, and auto-pairs Vision `mmproj` and `MTP`/`DFlash2` draft sidecars.
+  - **Local GGUF Catalog (`/admin/catalog`)**: Automatically scans `MBUFO_MODELS_DIR` (or model parent directories), groups multi-shard GGUFs, and auto-pairs Vision `mmproj` and `MTP`/`DFlash2` draft sidecars.
   - **Built-in Streaming Playground**: Test concurrent routing across loaded models in real time with TTFT and decode tok/s metrics.
-- **Zero-Model Standby Startup**: Launch `gufo serve llm --multi-model -p 8741` *without* `--model` (~86 MiB RSS) to start an empty control plane and load models on demand from `/admin`.
-- **Memory Safety & Graceful Draining**: `/admin/load` enforces a UMA safety reserve (`GUFO_MULTI_SAFETY_MIB`, default `2048` MiB). When memory is full, idle non-primary models are **LRU-evicted** automatically (or rejected with `409 insufficient_memory` if `"allow_evict": false`); the primary default model is protected. Ejected models drain in-flight requests before freeing GPU memory.
+- **Zero-Model Standby Startup**: Launch `mbufo serve llm --multi-model -p 8741` *without* `--model` (~86 MiB RSS) to start an empty control plane and load models on demand from `/admin`.
+- **Memory Safety & Graceful Draining**: `/admin/load` enforces a UMA safety reserve (`MBUFO_MULTI_SAFETY_MIB`, default `2048` MiB). When memory is full, idle non-primary models are **LRU-evicted** automatically (or rejected with `409 insufficient_memory` if `"allow_evict": false`); the primary default model is protected. Ejected models drain in-flight requests before freeing GPU memory.
 
 #### Available Endpoints
 
@@ -211,12 +217,12 @@ Running `serve llm --multi-model` turns MBufo into a **multi-model co-resident s
 ### 1. Launch Primary Inference Engine (Qwen3.8 Flash-Next)
 
 ```sh
-./build/release/gufo serve llm \
+./build/release/mbufo serve llm \
   --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
   --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
   --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
   --speculative mtp --think off \
-  --served-model-name gufo-qwen3.8-flash-next \
+  --served-model-name mbufo-qwen3.8-flash-next \
   --sessions 2 -c 262144 --kv-quant q8 -p 8741
 ```
 
@@ -224,16 +230,16 @@ Running `serve llm --multi-model` turns MBufo into a **multi-model co-resident s
 
 ```sh
 # Option A: Start with a primary model + enable multi-model router & /admin UI on :8741
-./build/release/gufo serve llm --multi-model \
+./build/release/mbufo serve llm --multi-model \
   --model models/qwen3.8-rocmfp4/v2q8k/Qwen3.8-Flash-Next-ROCmFP4-FAST-v2q8k.gguf \
   --mmproj models/qwen3.8-flash-next/mmproj-BF16.gguf \
   --mtp-model models/qwen3.8-flash-next/MTP/agentionai-MTP-Q8_0.gguf \
   --speculative mtp --think off \
-  --served-model-name gufo-qwen3.8-flash-next \
+  --served-model-name mbufo-qwen3.8-flash-next \
   --sessions 2 -c 262144 --kv-quant q8 -i 0.0.0.0 -p 8741
 
 # Option B: Zero-VRAM standby mode (no initial model; load everything from http://localhost:8741/admin)
-GUFO_MODELS_DIR=/mnt/nvme-data/gufo-models ./build/release/gufo serve llm --multi-model -i 0.0.0.0 -p 8741
+MBUFO_MODELS_DIR=/path/to/models ./build/release/mbufo serve llm --multi-model -i 0.0.0.0 -p 8741
 ```
 
 Open **`http://localhost:8741/admin`** in your browser to inspect Strix Halo unified memory, browse discovered GGUFs, hot-load co-resident models, and test live routing.
@@ -258,7 +264,7 @@ curl http://localhost:8741/admin/load \
 # Query both co-resident models simultaneously on the same port (:8741)
 curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "gufo-qwen3.8-flash-next", "messages": [{"role": "user", "content": "Hello from Flash-Next!"}]}'
+  -d '{"model": "mbufo-qwen3.8-flash-next", "messages": [{"role": "user", "content": "Hello from Flash-Next!"}]}'
 
 curl http://localhost:8741/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -334,7 +340,7 @@ Target environment: Linux x86-64 on AMD Strix Halo (`gfx1151`). Build commands a
 ```sh
 cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 cmake --build --preset release --parallel 4
-./build/release/gufo diagnose
+./build/release/mbufo diagnose
 ```
 
 ### Build Dependencies
@@ -376,4 +382,4 @@ For container configurations and system tuning, refer to the [upstream build gui
 
 Upstream gufo is licensed under the MIT License. Notices for adapted code and dependencies are maintained in [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and `licenses/`.
 
-MBufo is an optimized fork of [gufo](https://github.com/gufo-org/gufo) (gufo-org and community contributors). Sincere thanks to the upstream developers whose work on Q8 KV caching, int8 WMMA, and speculative foundations made this project possible.
+MBufo is an optimized fork of [mbufo](https://github.com/gufo-org/gufo) (gufo-org and community contributors). Sincere thanks to the upstream developers whose work on Q8 KV caching, int8 WMMA, and speculative foundations made this project possible.

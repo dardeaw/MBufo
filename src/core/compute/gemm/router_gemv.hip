@@ -21,7 +21,7 @@
 
 #include "src/core/compute/gemm/gemm.hpp"
 
-namespace gufo::core::compute::gemm {
+namespace mbufo::core::compute::gemm {
 namespace {
 
 constexpr std::uint32_t kRouterTileExperts = 32;
@@ -175,6 +175,6 @@ bool LaunchRouterStaggerGemv(const float* x, const float* w, float* out,
   return true;
 }
 
-}  // namespace gufo::core::compute::gemm
+}  // namespace mbufo::core::compute::gemm
 
 #endif  // defined(ENGINE_ENABLE_HIP)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TOOLS = ROOT / "tools" / "gufo"
+TOOLS = ROOT / "tools" / "mbufo"
 sys.path.insert(0, str(TOOLS))
 SPEC = importlib.util.spec_from_file_location(
     "h3_denoiser_golden", TOOLS / "h3_denoiser_golden.py"

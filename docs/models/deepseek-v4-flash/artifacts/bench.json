@@ -1,5 +1,5 @@
 {
-  "schema": "gufo-model-bench/1",
+  "schema": "mbufo-model-bench/1",
   "category": "llm",
   "model": {
     "id": "DeepSeek-V4-Flash",
@@ -25,7 +25,7 @@
   "speculative": {
     "mode": "dspark",
     "label": "DSpark",
-    "gufo_args": [
+    "mbufo_args": [
       "--dspark-model",
       "{dspark}"
     ],
@@ -207,7 +207,7 @@
       "mode": "ar"
     }
   },
-  "gufo": {
+  "mbufo": {
     "serve": [],
     "llm": [
       "--think",

@@ -11,7 +11,7 @@
 
 #include "src/models/qwen3_asr/hip/text_ops.hpp"
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 namespace {
 
 // Preserve the descending shared-memory sum tree. Once only the first wave
@@ -966,6 +966,6 @@ std::size_t TextArgmaxScratchElements() {
   return 2 * kArgmaxBlocks;
 }
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
 #endif

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_ASR_HIP_AUDIO_ENCODER_RUNTIME_HPP_
-#define GUFO_MODELS_QWEN3_ASR_HIP_AUDIO_ENCODER_RUNTIME_HPP_
+#ifndef MBUFO_MODELS_QWEN3_ASR_HIP_AUDIO_ENCODER_RUNTIME_HPP_
+#define MBUFO_MODELS_QWEN3_ASR_HIP_AUDIO_ENCODER_RUNTIME_HPP_
 
 #include <cstddef>
 #include <functional>
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace gufo::models::qwen3_asr::hip {
+namespace mbufo::models::qwen3_asr::hip {
 
 struct AudioEncoderOutput {
   // Float32 view of BF16 activations, row-major [tokens, 1024].
@@ -68,6 +68,6 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace gufo::models::qwen3_asr::hip
+}  // namespace mbufo::models::qwen3_asr::hip
 
-#endif  // GUFO_MODELS_QWEN3_ASR_HIP_AUDIO_ENCODER_RUNTIME_HPP_
+#endif  // MBUFO_MODELS_QWEN3_ASR_HIP_AUDIO_ENCODER_RUNTIME_HPP_

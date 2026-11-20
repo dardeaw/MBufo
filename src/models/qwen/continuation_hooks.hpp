@@ -1,10 +1,10 @@
-#ifndef GUFO_MODELS_QWEN_CONTINUATION_HOOKS_HPP_
-#define GUFO_MODELS_QWEN_CONTINUATION_HOOKS_HPP_
+#ifndef MBUFO_MODELS_QWEN_CONTINUATION_HOOKS_HPP_
+#define MBUFO_MODELS_QWEN_CONTINUATION_HOOKS_HPP_
 
 #include <cstdint>
 #include <memory>
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 namespace vision {
 struct Prompt;
 struct RopeLayout;
@@ -88,5 +88,5 @@ public:
 private:
   ContinuationHooks* hooks_;
 };
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen
 #endif

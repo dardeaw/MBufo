@@ -47,7 +47,7 @@ def normalize(streamed):
                 streamed["finish"], streamed["finish"]),
             "usage": {"prompt_tokens": total, "cached_tokens": cached,
                       "completion_tokens": usage["output_tokens"],
-                      "gufo": {"prefill_tokens": total - cached}}}
+                      "mbufo": {"prefill_tokens": total - cached}}}
 
 
 def call_signature(result, messages=False):

@@ -1,5 +1,5 @@
-#ifndef GUFO_CORE_PLATFORM_SHUTDOWN_SIGNAL_HPP_
-#define GUFO_CORE_PLATFORM_SHUTDOWN_SIGNAL_HPP_
+#ifndef MBUFO_CORE_PLATFORM_SHUTDOWN_SIGNAL_HPP_
+#define MBUFO_CORE_PLATFORM_SHUTDOWN_SIGNAL_HPP_
 
 #include <csignal>
 
@@ -7,7 +7,7 @@
 #include <cstring>
 #endif
 
-namespace gufo::platform {
+namespace mbufo::platform {
 
 /// RAII install of a process shutdown handler (SIGINT/SIGTERM on POSIX,
 /// CTRL_C/CTRL_CLOSE/CTRL_LOGOFF/CTRL_SHUTDOWN console events on Windows).
@@ -50,6 +50,6 @@ inline void IgnoreSocketPipeSignal() noexcept {
 #endif
 }
 
-}  // namespace gufo::platform
+}  // namespace mbufo::platform
 
-#endif  // GUFO_CORE_PLATFORM_SHUTDOWN_SIGNAL_HPP_
+#endif  // MBUFO_CORE_PLATFORM_SHUTDOWN_SIGNAL_HPP_

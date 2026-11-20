@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-namespace gufo::models::qwen {
+namespace mbufo::models::qwen {
 namespace {
 
 [[nodiscard]] float SigmoidF(float x) noexcept {
@@ -143,4 +143,4 @@ void MoeForwardCpu(const core::ModelConfig& config,
   }
 }
 
-}  // namespace gufo::models::qwen
+}  // namespace mbufo::models::qwen

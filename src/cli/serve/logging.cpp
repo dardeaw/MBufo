@@ -17,7 +17,7 @@
 #include <sstream>
 #include <string>
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 std::mutex& LogMutex() {
@@ -196,4 +196,4 @@ void Logger::LogRequest(std::string_view id, std::string_view method,
   Log(level, "http", message.str());
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

@@ -5,7 +5,7 @@ Polls health, readiness and generation from process start. While loading,
 every answer must be llama-server's 503 `Loading model`, `/health` included:
 pollers such as llama-swap and `run.py` treat a 200 health check as ready.
 After the handoff the real server must answer health, readiness and a
-generation. The runner owns the port; pass a production `gufo serve llm`
+generation. The runner owns the port; pass a production `mbufo serve llm`
 command after `--`. Add `--cache-disk DIR` to include a disk-tier walk.
 """
 
@@ -163,7 +163,7 @@ def main():
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1] != "serve" or "llm" not in command:
-        parser.error("pass a production gufo serve llm command after --")
+        parser.error("pass a production mbufo serve llm command after --")
     for flag in ("--host", "--port", "--api-key", "--served-model-name"):
         if option(command, flag) is not None:
             parser.error(f"the runner owns {flag}; omit it")

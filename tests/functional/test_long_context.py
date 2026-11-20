@@ -19,7 +19,7 @@ class ReplayChecked(Exception):
 def response(cached, prefilled):
     return {"text": '{"keyword":"LANTERN"}', "reasoning": "", "finish": "stop",
             "tools": [], "usage": {"prompt_tokens": 3143, "cached_tokens": cached,
-                                   "gufo": {"prefill_tokens": prefilled}}}
+                                   "mbufo": {"prefill_tokens": prefilled}}}
 
 
 def refusal(reason="byte_capacity", tokens=3143):

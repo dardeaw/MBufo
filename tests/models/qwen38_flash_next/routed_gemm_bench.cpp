@@ -27,7 +27,7 @@
 
 namespace {
 
-namespace q = gufo::models::qwen38_flash_next::rocm;
+namespace q = mbufo::models::qwen38_flash_next::rocm;
 
 constexpr std::uint32_t kExperts = 512;
 constexpr std::uint32_t kUsed = 10;

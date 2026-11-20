@@ -16,7 +16,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
-namespace q = gufo::models::qwen38_flash_next::rocm;
+namespace q = mbufo::models::qwen38_flash_next::rocm;
 namespace {
 
 // The model's indexer: 4 heads of 128, 4-token blocks, a 2048-token budget.
@@ -264,8 +264,8 @@ void CheckPooling(unsigned start, unsigned capacity, float factor = 1.0F) {
   constexpr float theta = 1000000.0F, eps = 1e-6F;
   const auto yarn =
       factor == 1.0F
-          ? gufo::models::qwen38_flash_next::YarnRope{}
-          : gufo::models::qwen38_flash_next::MakeYarnRope(
+          ? mbufo::models::qwen38_flash_next::YarnRope{}
+          : mbufo::models::qwen38_flash_next::MakeYarnRope(
                 {.factor = factor, .original_context = 262144}, rotary, theta);
   const auto raw = MakeValues((start + tokens) * kDim, 0x31415926U, 1.0F);
   const auto gamma = MakeValues(kDim, 0x27182818U, 1.0F);

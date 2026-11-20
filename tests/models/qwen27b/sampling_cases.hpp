@@ -1,12 +1,12 @@
-#ifndef GUFO_TESTS_QWEN27B_SAMPLING_CASES_HPP_
-#define GUFO_TESTS_QWEN27B_SAMPLING_CASES_HPP_
+#ifndef MBUFO_TESTS_QWEN27B_SAMPLING_CASES_HPP_
+#define MBUFO_TESTS_QWEN27B_SAMPLING_CASES_HPP_
 
 #include <string_view>
 #include <vector>
 
 #include "src/core/sampling.hpp"
 
-namespace gufo::test {
+namespace mbufo::test {
 
 struct SamplingCase {
   std::string_view name;
@@ -75,6 +75,6 @@ inline std::vector<SamplingCase> QwenSamplingCases() {
   return cases;
 }
 
-}  // namespace gufo::test
+}  // namespace mbufo::test
 
 #endif

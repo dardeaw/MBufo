@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_LLAMA_ENGINE_ADAPTER_HPP_
-#define GUFO_MODELS_LLAMA_ENGINE_ADAPTER_HPP_
+#ifndef MBUFO_MODELS_LLAMA_ENGINE_ADAPTER_HPP_
+#define MBUFO_MODELS_LLAMA_ENGINE_ADAPTER_HPP_
 
 // Llama pilot adapter: exposes the existing llama::Model/Session through
 // the L0/L1 engine abstraction (EngineModel / SpeculativeSession).
@@ -16,10 +16,11 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/engine/attention_contract.hpp"
 #include "src/core/engine/engine_batch.hpp"
 #include "src/models/llama/engine.hpp"
 
-namespace gufo::models::llama {
+namespace mbufo::models::llama {
 
 class LlamaEngineSession final : public core::engine::SpeculativeSession {
  public:
@@ -54,7 +55,7 @@ class LlamaEngineSession final : public core::engine::SpeculativeSession {
   std::unique_ptr<Session> inner_;
 };
 
-class LlamaEngineModel final : public core::engine::EngineModel {
+class LlamaEngineModel final : public core::engine::EngineModel, public core::engine::AttentionCapable {
  public:
   [[nodiscard]] static std::shared_ptr<LlamaEngineModel> Load(
       const std::string& model_path, const ModelOptions& options,
@@ -71,6 +72,8 @@ class LlamaEngineModel final : public core::engine::EngineModel {
   [[nodiscard]] std::uint32_t MaxContext() const noexcept override;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept override;
   [[nodiscard]] std::string ModelName() const override;
+  [[nodiscard]] core::engine::AttentionGeometry AttentionGeometryInfo() const override;
+  [[nodiscard]] core::engine::AttentionKernelInfo AttentionKernelsInfo() const override;
 
   // L0-external llama pass-throughs (unchanged llama semantics).
   [[nodiscard]] std::string Decode(
@@ -86,6 +89,6 @@ class LlamaEngineModel final : public core::engine::EngineModel {
   std::shared_ptr<Model> model_;
 };
 
-}  // namespace gufo::models::llama
+}  // namespace mbufo::models::llama
 
-#endif  // GUFO_MODELS_LLAMA_ENGINE_ADAPTER_HPP_
+#endif  // MBUFO_MODELS_LLAMA_ENGINE_ADAPTER_HPP_

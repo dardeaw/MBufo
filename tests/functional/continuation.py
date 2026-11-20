@@ -91,7 +91,7 @@ def digest(result):
 
 def metrics(result):
     usage = result["usage"]
-    detail = usage["gufo"]
+    detail = usage["mbufo"]
     return {"cached": usage["cached_tokens"], "prefill": detail["prefill_tokens"],
             "ttft_ms": detail["ttft_ms"], "disk": detail["cache_disk_hit"],
             "accepted": usage.get("draft_tokens_accepted", 0),

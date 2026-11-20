@@ -3,9 +3,9 @@
 Regenerates `tests/fixtures/llama_cpp_tool_grammar.json`, which
 `json_constraint_test` replays: for 86 tool schemas and 4 candidate outputs per
 schema, the verdict of llama.cpp's own Qwen3-Coder and DeepSeek tool grammars
-(its GBNF engine, `tool_choice: "required"`) beside Gufo's. Every disagreement
+(its GBNF engine, `tool_choice: "required"`) beside MBufo's. Every disagreement
 must match a reviewed reason in `golden.py`. This fixture covers its listed
-cases, not complete grammar or parser equivalence. Gufo retains string
+cases, not complete grammar or parser equivalence. MBufo retains string
 constraints and exact schema keys; llama.cpp permits repeated optional
 parameters and trims surrounding spaces from parsed keys.
 
@@ -14,15 +14,15 @@ OUT=$(mktemp -d)
 python3 tools/llama_parity/cases.py "$OUT"
 # In a llama.cpp checkout built with build-rocm (or any build with libllama-common):
 g++ -std=c++17 -Icommon -Iinclude -Iggml/include -Ivendor -Isrc \
-  /path/to/gufo/tools/llama_parity/llama_probe.cpp -Lbuild-rocm/bin \
+  /path/to/mbufo/tools/llama_parity/llama_probe.cpp -Lbuild-rocm/bin \
   -lllama-common -lllama -lggml -lggml-base -Wl,-rpath,$PWD/build-rocm/bin -o "$OUT/llama_probe"
 "$OUT/llama_probe" QWEN38_FLASH_NEXT.gguf "$OUT/cases_qwen.tsv" > "$OUT/llama_qwen.tsv" 2>/dev/null
 "$OUT/llama_probe" DEEPSEEK_V4_FLASH.gguf "$OUT/cases_deepseek.tsv" > "$OUT/llama_deepseek.tsv" 2>/dev/null
-# In this tree, after `cmake --build --preset cpu-test --target gufo_core`:
-g++ -std=c++20 -I. tools/llama_parity/gufo_probe.cpp build/cpu-test/libgufo_core.a \
-  $(pkg-config --libs icu-uc icu-i18n) -o "$OUT/gufo_probe"
-"$OUT/gufo_probe" "$OUT/cases_qwen.tsv" qwen required > "$OUT/gufo_qwen.tsv"
-"$OUT/gufo_probe" "$OUT/cases_deepseek.tsv" ds required > "$OUT/gufo_deepseek.tsv"
+# In this tree, after `cmake --build --preset cpu-test --target mbufo_core`:
+g++ -std=c++20 -I. tools/llama_parity/mbufo_probe.cpp build/cpu-test/libmbufo_core.a \
+  $(pkg-config --libs icu-uc icu-i18n) -o "$OUT/mbufo_probe"
+"$OUT/mbufo_probe" "$OUT/cases_qwen.tsv" qwen required > "$OUT/mbufo_qwen.tsv"
+"$OUT/mbufo_probe" "$OUT/cases_deepseek.tsv" ds required > "$OUT/mbufo_deepseek.tsv"
 python3 tools/llama_parity/golden.py "$OUT" LLAMA_CPP_REVISION \
   tests/fixtures/llama_cpp_tool_grammar.json
 ```

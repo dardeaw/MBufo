@@ -58,7 +58,7 @@
 #include "src/models/qwen/chat_template.hpp"
 #include "src/core/rerank_score.hpp"
 
-namespace gufo::server {
+namespace mbufo::server {
 namespace {
 
 std::atomic<int> shutdown_signal{0};
@@ -747,7 +747,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
           (field == "text" || field == "reasoning" || field == "tools" ||
            field == "tool_choice" || field == "parallel_tool_calls" ||
            // include is a standard Responses field (for example encrypted
-           // reasoning); gufo keeps no server-side conversation, so its value
+           // reasoning); mbufo keeps no server-side conversation, so its value
            // is accepted and ignored.
            field == "include"))) {
       return InvalidCompatibilityRequest("request field '" + field +
@@ -793,7 +793,7 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     model["id"] = id;
     model["object"] = "model";
     model["created"] = Now();
-    model["owned_by"] = "gufo";
+    model["owned_by"] = "mbufo";
     if (backend->max_context() > 0)
       model["context_length"] =
           static_cast<std::size_t>(backend->max_context());
@@ -887,7 +887,7 @@ HttpResponse RegistryModels(const ModelRegistry& registry,
     model["id"] = info.id;
     model["object"] = "model";
     model["created"] = Now();
-    model["owned_by"] = "gufo";
+    model["owned_by"] = "mbufo";
     if (info.max_context > 0)
       model["context_length"] = static_cast<std::size_t>(info.max_context);
     json::Value input_modalities = json::Value::array();
@@ -1755,9 +1755,9 @@ double KvCacheUsageRatio(const TextGenerationBackend& b) {
 HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
   std::ostringstream out;
   out << std::setprecision(std::numeric_limits<double>::max_digits10);
-  out << "# HELP gufo_device_lost_total Confirmed GPU context losses\n"
-      << "# TYPE gufo_device_lost_total counter\n"
-      << "gufo_device_lost_total "
+  out << "# HELP mbufo_device_lost_total Confirmed GPU context losses\n"
+      << "# TYPE mbufo_device_lost_total counter\n"
+      << "mbufo_device_lost_total "
       << detail::DeviceLostTotal().load(std::memory_order_relaxed) << "\n";
   out << "# HELP llamacpp:prompt_tokens_total Total prompt tokens processed, "
          "excluding cache hits\n"
@@ -1803,15 +1803,15 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
       << "llamacpp:spec_decode_num_accepted_tokens_total "
       << detail::TotalDraftAcceptedTokens().load(std::memory_order_relaxed)
       << "\n"
-      << "# HELP gufo_spec_lookup_tokens_total Total prompt-lookup copies "
+      << "# HELP mbufo_spec_lookup_tokens_total Total prompt-lookup copies "
          "proposed\n"
-      << "# TYPE gufo_spec_lookup_tokens_total counter\n"
-      << "gufo_spec_lookup_tokens_total "
+      << "# TYPE mbufo_spec_lookup_tokens_total counter\n"
+      << "mbufo_spec_lookup_tokens_total "
       << detail::TotalLookupTokens().load(std::memory_order_relaxed) << "\n"
-      << "# HELP gufo_spec_lookup_accepted_tokens_total Total prompt-lookup "
+      << "# HELP mbufo_spec_lookup_accepted_tokens_total Total prompt-lookup "
          "copies accepted\n"
-      << "# TYPE gufo_spec_lookup_accepted_tokens_total counter\n"
-      << "gufo_spec_lookup_accepted_tokens_total "
+      << "# TYPE mbufo_spec_lookup_accepted_tokens_total counter\n"
+      << "mbufo_spec_lookup_accepted_tokens_total "
       << detail::TotalLookupAcceptedTokens().load(std::memory_order_relaxed)
       << "\n"
       << "# HELP llamacpp:prompt_tokens_seconds Prompt processing speed in "
@@ -2809,4 +2809,4 @@ void HttpServer::handle_connection(int client_fd) {
   (void)device_lost();
 }
 
-}  // namespace gufo::server
+}  // namespace mbufo::server

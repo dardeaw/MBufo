@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN_SSM_HPP_
-#define GUFO_MODELS_QWEN_SSM_HPP_
+#ifndef MBUFO_MODELS_QWEN_SSM_HPP_
+#define MBUFO_MODELS_QWEN_SSM_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +9,7 @@
 #include "src/core/model_config.hpp"
 #include "src/models/qwen/state.hpp"
 
-namespace gufo::models {
+namespace mbufo::models {
 
 /// Gated DeltaNet recurrent state cache across sequence positions for all SSM
 /// layers.
@@ -110,6 +110,6 @@ void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
                 std::span<float> ssm_out_scratch,
                 std::span<float> out) noexcept;
 
-}  // namespace gufo::models
+}  // namespace mbufo::models
 
-#endif  // GUFO_MODELS_QWEN_SSM_HPP_
+#endif  // MBUFO_MODELS_QWEN_SSM_HPP_

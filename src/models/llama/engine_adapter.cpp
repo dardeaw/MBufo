@@ -5,7 +5,7 @@
 
 #include <utility>
 
-namespace gufo::models::llama {
+namespace mbufo::models::llama {
 
 LlamaEngineSession::LlamaEngineSession(std::shared_ptr<Model> model,
                                        std::unique_ptr<Session> inner)
@@ -122,6 +122,30 @@ std::size_t LlamaEngineModel::ResidentBytes() const noexcept {
   return model_->ResidentBytes();
 }
 
+
+core::engine::AttentionGeometry DescribeAttentionGeometry(const Model& model) {
+  const auto& c = model.weights().config;
+  core::engine::AttentionGeometry g;
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    core::engine::AttentionGroup a;
+    a.heads = c.num_heads;
+    a.kv_heads = c.num_kv_heads;
+    a.head_dim = c.head_dim;
+    g.AddLayer(a);
+  }
+  return g;
+}
+
+core::engine::AttentionKernelInfo DescribeAttentionKernels() {
+  core::engine::AttentionKernelInfo k;
+  k.decode = {core::engine::AttentionKernelOrigin::kCore, "core attention dispatcher (blocked split-K for Q8 KV, F16 split-K)", "", "", false};
+  k.prefill = {core::engine::AttentionKernelOrigin::kCore, "core attention dispatcher (flash WMMA GQA)", "", "", false};
+  return k;
+}
+
+core::engine::AttentionGeometry LlamaEngineModel::AttentionGeometryInfo() const { return DescribeAttentionGeometry(*model_); }
+core::engine::AttentionKernelInfo LlamaEngineModel::AttentionKernelsInfo() const { return DescribeAttentionKernels(); }
+
 std::string LlamaEngineModel::ModelName() const {
   return model_->ModelName();
 }
@@ -156,4 +180,4 @@ const core::engine::EngineRegistrar kRegisterLlamaEngine(
 
 }  // namespace
 
-}  // namespace gufo::models::llama
+}  // namespace mbufo::models::llama

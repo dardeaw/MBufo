@@ -1,12 +1,12 @@
-#ifndef GUFO_CORE_GGUF_IDENTITY_HPP_
-#define GUFO_CORE_GGUF_IDENTITY_HPP_
+#ifndef MBUFO_CORE_GGUF_IDENTITY_HPP_
+#define MBUFO_CORE_GGUF_IDENTITY_HPP_
 
 #include <string>
 #include <string_view>
 
 #include "src/core/gguf_reader.hpp"
 
-namespace gufo::core {
+namespace mbufo::core {
 
 /// Scheme tag for full-content GGUF identities.
 inline constexpr std::string_view kGgufIdentityScheme = "gguf-sha256-v1";
@@ -18,6 +18,6 @@ inline constexpr std::string_view kGgufIdentityScheme = "gguf-sha256-v1";
 /// Throws if the mapped artifact changes while its identity is computed.
 [[nodiscard]] std::string GgufIdentityHex(const GgufReader& reader);
 
-}  // namespace gufo::core
+}  // namespace mbufo::core
 
-#endif  // GUFO_CORE_GGUF_IDENTITY_HPP_
+#endif  // MBUFO_CORE_GGUF_IDENTITY_HPP_

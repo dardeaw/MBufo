@@ -544,8 +544,8 @@ static void parse_tensors(ds4_model *m, ds4_cursor *c) {
         if (!cursor_u64(c, &t->rel_offset)) ds4_die(c->error);
 
         if (!tensor_nbytes(t->type, t->elements, &t->bytes)) {
-            gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
+            mbufo::server::Logger::LogFormatted(
+                mbufo::server::LogLevel::kWarn, "ds4",
                 "warning: tensor %.*s has unsupported GGUF type %u",
                 (int)t->name.len, t->name.ptr, t->type);
         }
@@ -685,8 +685,8 @@ static bool accelerator_cache_model_tensors(const ds4_model *m) {
     if (!cache_ok || !upload_ok) return false;
     if (cached != 0) {
         const double t1 = ds4_now_seconds();
-        gufo::server::Logger::LogFormatted(
-            gufo::server::LogLevel::kInfo, "ds4",
+        mbufo::server::Logger::LogFormatted(
+            mbufo::server::LogLevel::kInfo, "ds4",
             "ROCm startup model cache prepared %.2f GiB of tensor spans in "
             "%.3fs",
             (double)cached / 1073741824.0, t1 - t0);
@@ -1553,7 +1553,7 @@ static bool dspark_cache_tensors(const ds4_dspark_model *d) {
     const double start = ds4_now_seconds();
     // Expose disk queue depth before copying into the managed arena. Serial
     // mmap faults otherwise make the small sidecar a long, silent load phase.
-    gufo::core::PrefaultMappedRange(m->map + m->tensor_data_pos,
+    mbufo::core::PrefaultMappedRange(m->map + m->tensor_data_pos,
                                   m->size - m->tensor_data_pos);
     uint64_t total = 0;
     for (uint64_t i = 0; i < m->n_tensors; i++) {
@@ -1577,8 +1577,8 @@ static bool dspark_cache_tensors(const ds4_dspark_model *d) {
             return false;
         }
     }
-    gufo::server::Logger::LogFormatted(
-            gufo::server::LogLevel::kInfo, "ds4",
+    mbufo::server::Logger::LogFormatted(
+            mbufo::server::LogLevel::kInfo, "ds4",
             "DSpark support model cached %.2f GiB of tensor spans in %.3fs",
             (double)total / 1073741824.0, ds4_now_seconds() - start);
     return true;
@@ -1604,8 +1604,8 @@ int ds4_dspark_open(ds4_dspark_model **out, const char *path) {
         return 1;
       }
 
-    gufo::server::Logger::LogFormatted(
-            gufo::server::LogLevel::kInfo, "ds4",
+    mbufo::server::Logger::LogFormatted(
+            mbufo::server::LogLevel::kInfo, "ds4",
             "DSpark support model loaded stages=%u block=%u markov_rank=%u "
             "noise_token=%u target_layers=%u",
             d->n_stages,

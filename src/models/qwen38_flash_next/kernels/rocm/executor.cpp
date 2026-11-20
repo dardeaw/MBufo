@@ -29,7 +29,7 @@
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
-namespace gufo::models::qwen38_flash_next::rocm {
+namespace mbufo::models::qwen38_flash_next::rocm {
 namespace {
 
 using core::GgmlType;
@@ -208,21 +208,21 @@ public:
 
 /// Block scale numerator for value rows. Values are far less sensitive than
 /// keys, so int8 keys with a narrower value grid is the one lever left for a
-/// smaller cache. `GUFO_KV_V4` packs values on a 4-bit grid (range 7); it is a
+/// smaller cache. `MBUFO_KV_V4` packs values on a 4-bit grid (range 7); it is a
 /// study hook, off unless set, and only meaningful for the int8 codec.
 [[nodiscard]] bool KvValueIs4Bit(KvFormat format) {
   if (format != KvFormat::kQ8)
     return false;
-  const char* v4 = std::getenv("GUFO_KV_V4");
+  const char* v4 = std::getenv("MBUFO_KV_V4");
   return v4 != nullptr && *v4 != '\0' && *v4 != '0';
 }
 
-/// Block scale numerator for key rows. `GUFO_KV_Q4` drops keys onto the same
+/// Block scale numerator for key rows. `MBUFO_KV_Q4` drops keys onto the same
 /// 4-bit grid values use, which is the K4V4 question; off unless set.
 [[nodiscard]] bool KvKeyIs4Bit(KvFormat format) {
   if (format != KvFormat::kQ8)
     return false;
-  const char* q4 = std::getenv("GUFO_KV_Q4");
+  const char* q4 = std::getenv("MBUFO_KV_Q4");
   return q4 != nullptr && *q4 != '\0' && *q4 != '0';
 }
 
@@ -246,7 +246,7 @@ public:
   return KvValueIs4Bit(format) ? kKvValue4BitBlockBytes : kKvKeyBlockBytes;
 }
 
-/// Blocked-cache WMMA attention mode (GUFO_KV_I8):
+/// Blocked-cache WMMA attention mode (MBUFO_KV_I8):
 ///   2 (default, unset) reads the blocked K/V in place and dequantizes them
 ///     to F16 in registers; outputs equal the F16 staging route byte for
 ///     byte, without the context-sized staging copy.
@@ -254,7 +254,7 @@ public:
 ///   0 restores the transient F16 staging route.
 /// Only the int8 codec layout qualifies.
 [[nodiscard]] std::uint32_t WmmaI8Mode() {
-  const char* e = std::getenv("GUFO_KV_I8");
+  const char* e = std::getenv("MBUFO_KV_I8");
   if (e == nullptr || *e == '\0')
     return 2U;
   if (e[0] == '0')
@@ -338,7 +338,7 @@ public:
   /// A transfer on a stream of its own, reused across transfers: creating a
   /// stream can stall for milliseconds, and a shared stream would make a
   /// capture wait for a peer's bulk materialization.
-  [[nodiscard]] std::unique_ptr<gufo::hip::SnapshotTransfer> Transfer() {
+  [[nodiscard]] std::unique_ptr<mbufo::hip::SnapshotTransfer> Transfer() {
     hipStream_t stream = nullptr;
     {
       std::lock_guard lock(streams_mutex_);
@@ -350,7 +350,7 @@ public:
     if (stream == nullptr)
       CheckStatus(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking),
                   "snapshot transfer stream");
-    return std::make_unique<gufo::hip::SnapshotTransfer>(
+    return std::make_unique<mbufo::hip::SnapshotTransfer>(
         stream, [owner = shared_from_this()](hipStream_t done) {
           std::lock_guard lock(owner->streams_mutex_);
           owner->free_streams_.push_back(done);
@@ -482,7 +482,7 @@ struct SnapshotRegistry {
 void SnapshotState::Preserve(std::uint32_t position, std::uint32_t mtp_position,
                              std::uint32_t blocks, std::uint32_t mtp_blocks,
                              bool detach) const {
-  std::unique_ptr<gufo::hip::SnapshotTransfer> transfer;
+  std::unique_ptr<mbufo::hip::SnapshotTransfer> transfer;
   for (auto& region : regions_) {
     auto rows = region.draft ? mtp_position : position;
     if (region.pooled)
@@ -690,7 +690,7 @@ void SnapshotRegistry::Preserve(std::uint32_t position,
     available.clear();
   }
   std::size_t block_index = 0;
-  std::unique_ptr<gufo::hip::SnapshotTransfer> transfer;
+  std::unique_ptr<mbufo::hip::SnapshotTransfer> transfer;
   for (auto& copy : copies) {
     for (auto begin = copy.begin; begin < copy.end;) {
       if (block_index < available.size() &&
@@ -1035,7 +1035,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     return nullptr;
   // The first greedy verification otherwise resolves the shared argmax
   // module on the decode path. Preparation launches no trial kernels.
-  if (e->has_mtp() && !Check(gufo::hip::PrepareBatchedGPUArgmax(),
+  if (e->has_mtp() && !Check(mbufo::hip::PrepareBatchedGPUArgmax(),
                              "MTP argmax preparation", error_msg))
     return nullptr;
   if (!Check(hipStreamCreate(&e->stream_), "hipStreamCreate", error_msg)) {
@@ -1388,7 +1388,7 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
         at.v_cache_kv = Alloc<std::uint8_t>(
             a, static_cast<std::size_t>(max_context) * kv_value_row, error_msg,
             &s->allocated_bytes_);
-        // The in-place blocked attention modes (GUFO_KV_I8) never read the
+        // The in-place blocked attention modes (MBUFO_KV_I8) never read the
         // F16 staging copy; EnsureKvStaging still allocates it on demand
         // for any caller that does, so skip the context-sized reservation.
         if (WmmaI8Mode() == 0) {
@@ -2729,7 +2729,7 @@ bool Executor::EnsureKvStaging(Session& session, Session::AttentionState& s,
       return false;
     }
     s.kv_stage_valid_ = need;
-    if (const char* dump = std::getenv("GUFO_KV_STAGE")) {
+    if (const char* dump = std::getenv("MBUFO_KV_STAGE")) {
       // Offline audit hook: append the f16 staging rows dequantized by this
       // call so they can be compared against the blocked cache of the same run
       // (no CPU/GPU divergence confound). Header: u32 need, kv_row, base.
@@ -2868,7 +2868,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     }
   }
 
-  if (const char* ref = std::getenv("GUFO_KV_REF")) {
+  if (const char* ref = std::getenv("MBUFO_KV_REF")) {
     if (n_tokens > 0 && pos != nullptr) {
       std::uint32_t base_pos = 0;
       if (hipStreamSynchronize(stream_) == hipSuccess &&
@@ -2994,7 +2994,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // AttentionKv -- the 24/2/256 geometry matches no WMMA/Split-K kernel),
   // so the consult is the policy choke point, not a behavior change.
   if (!is_verify && !sparse && checkpoint_tokens == 0 && mask == nullptr) {
-    namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+    namespace attn_disp = ::mbufo::core::compute::attention_dispatcher;
     attn_disp::AttentionDispatchInput attn_in;
     attn_in.q_len = n_tokens;
     attn_in.kv_len = start_pos + n_tokens;
@@ -3119,7 +3119,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                                 c.head_dim, c.compress_ratio, stream_, last));
   };
   const auto dump_attn = [&](std::uint32_t rows) {
-    if (const char* dump = std::getenv("GUFO_ATTN_OUT")) {
+    if (const char* dump = std::getenv("MBUFO_ATTN_OUT")) {
       const std::uint32_t qd = c.AttentionQDim();
       const std::size_t bytes = std::size_t{rows} * qd * sizeof(float);
       void* host = std::malloc(2 * bytes);
@@ -3164,7 +3164,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // below, unchanged); F16, verify and the rest stay legacy. Split-K now
   // instantiates <Q8,128> (heads <= 32), but this geometry (24/2/256)
   // still routes below, so behavior is unchanged.
-  namespace attn_disp = ::gufo::core::compute::attention_dispatcher;
+  namespace attn_disp = ::mbufo::core::compute::attention_dispatcher;
   attn_disp::AttentionDispatchPolicy attn_policy =
       attn_disp::AttentionDispatchPolicy::WithEnvDefaults();
   attn_disp::AttentionDispatchInput attn_in;
@@ -3187,7 +3187,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   attn_in.is_verify = is_verify;
   const attn_disp::AttentionRoute attn_route =
       attn_disp::RouteAttention(attn_in, attn_policy);
-  if (const char* attn_diag = std::getenv("GUFO_ATTN_DIAG")) {
+  if (const char* attn_diag = std::getenv("MBUFO_ATTN_DIAG")) {
     (void)attn_diag;
     std::fprintf(stderr, "[attn-dispatch] flash-next q=%u kv=%u d=%u route=%s\n",
                  n_tokens, start_pos + n_tokens, c.head_dim,
@@ -3203,11 +3203,11 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   bool wmma_used = false;
   if (KvBlocked(options_.kv_format)) {
     // Wide batches used to ride the tensor cores via transient F16 staging.
-    // The staging route is gated behind GUFO_KV_WMMA until its prefill numerics
+    // The staging route is gated behind MBUFO_KV_WMMA until its prefill numerics
     // match the fused blocked kernel: the offline audit measured KL 0.63 at
     // position 0 through staging versus 0.03 through the fused kernel for the
     // same cache bytes, so correctness takes the fused path by default.
-    static const bool wmma_enabled = std::getenv("GUFO_KV_WMMA") != nullptr;
+    static const bool wmma_enabled = std::getenv("MBUFO_KV_WMMA") != nullptr;
     wmma_used = wmma_enabled && !split && wmma_kv(0, n_tokens, last_only);
     if (!wmma_used) {
       rocm::AttentionKv(s_.q, s.k_cache_kv, s.v_cache_kv, mask, mask_words_,
@@ -3228,7 +3228,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   const std::uint32_t q_dim = c.AttentionQDim();
   const std::size_t ctx_count = static_cast<std::size_t>(n_tokens) * q_dim;
 
-  if (const char* dump = std::getenv("GUFO_ATTN_OUT")) {
+  if (const char* dump = std::getenv("MBUFO_ATTN_OUT")) {
     if (n_tokens > 0) {
       const std::size_t bytes = ctx_count * sizeof(float);
       void* host = std::malloc(2 * bytes);
@@ -3260,7 +3260,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   if (!wmma_used) {
     SigmoidMul(s_.ctx, s_.attn_gate, ctx_count, stream_);
   }
-  if (const char* gdump = std::getenv("GUFO_ATTN_GATED")) {
+  if (const char* gdump = std::getenv("MBUFO_ATTN_GATED")) {
     if (n_tokens > 0) {
       const std::size_t gbytes = ctx_count * sizeof(float);
       (void)hipStreamSynchronize(stream_);
@@ -4723,7 +4723,7 @@ bool Executor::RestoreSnapshot(Session& session,
   // recording them, just as they would in a fresh execution slot.
   std::erase_if(session.warmed_,
                 [&](const auto key) { return !session.graphs_.contains(key); });
-  std::unique_ptr<gufo::hip::SnapshotTransfer> fork_transfer;
+  std::unique_ptr<mbufo::hip::SnapshotTransfer> fork_transfer;
   const auto upload = [&](void* device, const std::uint8_t* source,
                           std::uint64_t bytes, const char* what,
                           hipMemcpyKind kind = hipMemcpyHostToDevice) {
@@ -4940,7 +4940,7 @@ bool Executor::GreedyMtpPredictions(std::span<ArgmaxCandidate> predictions,
         reinterpret_cast<PenaltyArgmaxCandidate*>(s_.mtp_scratch_ids),
         s_.mtp_argmax, rows, vocab, stream_);
   } else {
-    gufo::hip::LaunchBatchedGPUArgmax(
+    mbufo::hip::LaunchBatchedGPUArgmax(
         VerificationLogits(), s_.mtp_ids, rows, vocab,
         {reinterpret_cast<float*>(s_.mtp_scratch_ids),
          MtpCandidateWorkspaceSize(vocab)},
@@ -5345,4 +5345,4 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
                  draft_subset ? &session : nullptr, error_msg);
 }
 
-}  // namespace gufo::models::qwen38_flash_next::rocm
+}  // namespace mbufo::models::qwen38_flash_next::rocm
