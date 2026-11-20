@@ -395,6 +395,6 @@ cmake --build --preset release --parallel 4
 
 ## 授權與致謝
 
-上游 mbufo 採用 MIT 授權條款；第三方函式庫授權聲明詳見 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 與 `licenses/`。模型權重檔案依其各原始發布者之許可協議規範。
+上游 gufo 採用 MIT 授權條款；第三方函式庫授權聲明詳見 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 與 `licenses/`。模型權重檔案依其各原始發布者之許可協議規範。
 
 MBufo 作為 [mbufo](https://github.com/gufo-org/gufo)（gufo-org 及社群貢獻者）的優化衍生版本，在此感謝開源社群奠定的深厚基礎。
