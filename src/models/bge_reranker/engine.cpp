@@ -210,33 +210,58 @@ std::optional<std::vector<float>> EngineSession::ScoreBatch(
   const auto& encoder = model_->Encoder();
   const std::size_t hidden = model_->Head().hidden_size;
 #ifdef ENGINE_ENABLE_HIP
-  if (use_hip && !batch_disabled && !batch.empty() &&
-      batch.size() * lmax <= bge_m3::kBgeM3Leg1MaxTokens) {
-    // Device fast path (F16 and K-quant weights share the ProjGemm dispatch,
-    // so the Q4 file and the F16 file both batch here).
-    auto cls = bge_m3::HipClsHiddenBatch(encoder, batch,
-                                         model_->Config().pad_token_id,
-                                         error_msg);
-    if (!cls.has_value()) {
-      return std::nullopt;
-    }
-    if (cls->cls.size() != batch.size()) {
-      return refuse("bge-reranker ScoreBatch: batch CLS count mismatch");
-    }
-    std::vector<float> scores;
-    scores.reserve(batch.size());
-    for (const auto& cls_row : cls->cls) {
-      if (cls_row.size() != hidden) {
-        return refuse("bge-reranker ScoreBatch: CLS hidden size mismatch");
+  if (use_hip && !batch_disabled && !batch.empty() && lmax <= bge_m3::kBgeM3HipMaxTokens) {
+    // Device fast path (F16 and K-quant weights share the ProjGemm dispatch). Documents are sorted by length and cut
+    // into chunks whose padded shape (see BgeBatchBpad / BgeBatchLpad) fits the device arena, so short and long
+    // documents are not padded to each other; scores go back to the original order.
+    std::vector<std::size_t> order(batch.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+      return batch[a].size() < batch[b].size();
+    });
+    std::vector<float> scores(batch.size(), 0.0F);
+    double total_ms = 0.0;
+    std::size_t pos = 0;
+    while (pos < order.size()) {
+      std::size_t end = pos;
+      std::size_t chunk_lmax = 0;
+      while (end < order.size()) {
+        const std::size_t l = std::max(chunk_lmax, batch[order[end]].size());
+        const std::size_t count = end - pos + 1;
+        if (count > 128 ||
+            bge_m3::BgeBatchBpad(count) * bge_m3::BgeBatchLpad(l) > bge_m3::kBgeM3HipMaxRows) {
+          break;
+        }
+        chunk_lmax = l;
+        ++end;
       }
-      const float logit = core::rerank::SequenceHeadLogit(
-          std::span<const float>(cls_row.data(), cls_row.size()),
-          model_->Head().dense_w, model_->Head().dense_b,
-          model_->Head().out_w, model_->Head().out_b);
-      scores.push_back(core::rerank::Sigmoid(logit));
+      if (end == pos) end = pos + 1;  // a single oversized sequence still runs alone
+      std::vector<std::vector<std::uint32_t>> chunk;
+      chunk.reserve(end - pos);
+      for (std::size_t i = pos; i < end; ++i) chunk.push_back(batch[order[i]]);
+      auto cls = bge_m3::HipClsHiddenBatch(encoder, chunk, model_->Config().pad_token_id, error_msg);
+      if (!cls.has_value()) {
+        return std::nullopt;
+      }
+      if (cls->cls.size() != chunk.size()) {
+        return refuse("bge-reranker ScoreBatch: batch CLS count mismatch");
+      }
+      for (std::size_t i = 0; i < chunk.size(); ++i) {
+        const auto& cls_row = cls->cls[i];
+        if (cls_row.size() != hidden) {
+          return refuse("bge-reranker ScoreBatch: CLS hidden size mismatch");
+        }
+        const float logit = core::rerank::SequenceHeadLogit(
+            std::span<const float>(cls_row.data(), cls_row.size()),
+            model_->Head().dense_w, model_->Head().dense_b,
+            model_->Head().out_w, model_->Head().out_b);
+        scores[order[pos + i]] = core::rerank::Sigmoid(logit);
+      }
+      total_ms += cls->prefill_ms;
+      pos = end;
     }
     if (total_prefill_ms != nullptr)
-      *total_prefill_ms = cls->prefill_ms;
+      *total_prefill_ms = total_ms;
     if (prompt_tokens != nullptr)
       *prompt_tokens = tokens;
     return scores;

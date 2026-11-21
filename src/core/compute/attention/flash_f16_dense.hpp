@@ -35,6 +35,20 @@ namespace mbufo::core::compute::flash_f16 {
                                     std::uint32_t head_dim, float scale,
                                     hipStream_t stream);
 
+/// Same kernel over a length-padded tile: every [n_rows][head_dim] tile has `n_rows` as its row stride (the padded
+/// length), but only the first `n_valid` rows are real. Pad keys are not attended, pad query rows write zeros, and the
+/// key sweep stops at `n_valid`, so cost follows the real length while shapes can be bucketed.
+[[nodiscard]] bool FlashF16DenseMhaPadded(const float* q, const float* k, const float* v, float* out,
+                                          std::uint32_t n_rows, std::uint32_t n_valid, std::uint32_t heads,
+                                          std::uint32_t head_dim, float scale, hipStream_t stream);
+
+/// Batched variant for padded multi-sequence encoders: tiles are [(batch * heads)][n_rows][head_dim] (tile index =
+/// b * heads + h) and sequence b has `lens[b]` real rows (device pointer, lens[b] <= n_rows).
+[[nodiscard]] bool FlashF16DenseMhaBatched(const float* q, const float* k, const float* v, float* out,
+                                           std::uint32_t batch, std::uint32_t n_rows, const std::uint32_t* lens,
+                                           std::uint32_t heads, std::uint32_t head_dim, float scale,
+                                           hipStream_t stream);
+
 }  // namespace mbufo::core::compute::flash_f16
 
 #endif  // MBUFO_CORE_COMPUTE_ATTENTION_FLASH_F16_DENSE_HPP_

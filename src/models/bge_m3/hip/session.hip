@@ -42,6 +42,9 @@
 #include <hipblaslt/hipblaslt.h>
 
 #include <array>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <chrono>
 #include <cstdio>
 #include <cmath>
@@ -421,15 +424,18 @@ __global__ void ResidualLnKernel(const __half* __restrict__ x,
 // out[i] = GELU-exact(x[i] + bias[i % cols]).
 __device__ inline float GeluExactDevice(float x);
 
+// `exact` keeps the double-precision erf (short prompts are bitwise-guarded against the reference); longer inputs use the
+// single-precision erff, whose error (~1 ulp) is far below the F16 rounding of the result.
 __global__ void BiasGeluKernel(const float* __restrict__ x,
                                const float* __restrict__ bias,
-                               __half* __restrict__ out, int rows, int cols) {
+                               __half* __restrict__ out, int rows, int cols, int exact) {
   const std::size_t idx =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const std::size_t total = static_cast<std::size_t>(rows) * cols;
   if (idx >= total) return;
-  out[idx] = __half(GeluExactDevice(
-      x[idx] + bias[idx % static_cast<std::size_t>(cols)]));
+  const float v = x[idx] + bias[idx % static_cast<std::size_t>(cols)];
+  out[idx] = __half(exact != 0 ? GeluExactDevice(v)
+                               : 0.5F * v * (1.0F + erff(v * 0.70710678118654752440F)));
 }
 
 // Device twin of core::gelu::GeluExact: the core helper is host-only
@@ -492,11 +498,52 @@ inline constexpr int kFlashMinTokens = 128;
 // kernels, same order -> short stays bitwise-identical). MBUFO_BGE_GRAPH=0
 // disables capture/replay (A/B control).
 
+// Tuned picks survive restarts: (m, n, k) -> index into the heuristic candidate list, appended to a text file
+// (MBUFO_TUNE_CACHE, default ~/.cache/mbufo/bge_tune_v1.txt). A later process skips the timing runs for every shape it has
+// seen; a stale or unusable index just falls back to tuning.
+std::mutex& PickMutex() { static std::mutex m; return m; }
+std::map<std::array<int, 3>, int>& PickMap() {
+  static std::map<std::array<int, 3>, int> map = [] {
+    std::map<std::array<int, 3>, int> loaded;
+    const char* path_env = std::getenv("MBUFO_TUNE_CACHE");
+    const char* home = std::getenv("HOME");
+    const std::string path = path_env != nullptr ? std::string(path_env)
+                             : home != nullptr   ? std::string(home) + "/.cache/mbufo/bge_tune_v1.txt"
+                                                 : std::string();
+    if (!path.empty()) {
+      std::ifstream in(path);
+      int m = 0, n = 0, k = 0, idx = 0;
+      while (in >> m >> n >> k >> idx) loaded[{m, n, k}] = idx;
+    }
+    return loaded;
+  }();
+  return map;
+}
+void PickStore(int m, int n, int k, int idx) {
+  const std::lock_guard<std::mutex> lock(PickMutex());
+  PickMap()[{m, n, k}] = idx;
+  const char* path_env = std::getenv("MBUFO_TUNE_CACHE");
+  const char* home = std::getenv("HOME");
+  const std::string path = path_env != nullptr ? std::string(path_env)
+                           : home != nullptr   ? std::string(home) + "/.cache/mbufo/bge_tune_v1.txt"
+                                               : std::string();
+  if (path.empty()) return;
+  std::error_code ec;
+  std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+  std::ofstream out(path, std::ios::app);
+  out << m << ' ' << n << ' ' << k << ' ' << idx << '\n';
+}
+int PickLookup(int m, int n, int k) {
+  const std::lock_guard<std::mutex> lock(PickMutex());
+  const auto it = PickMap().find({m, n, k});
+  return it == PickMap().end() ? -1 : it->second;
+}
+
 bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
                     const BlasLtPlan& plan,
                     const hipblasLtMatmulHeuristicResult_t* candidates,
                     int count, int m, int n, int k,
-                    hipblasLtMatmulAlgo_t* best_algo) {
+                    hipblasLtMatmulAlgo_t* best_algo, int* pick_idx = nullptr) {
   // MBUFO_BGE_NO_TUNE=1: A/B control -- legacy first-pick, no timing.
   // MBUFO_BGE_TUNE_ONLY="m1xk1,m2xk2,...": tune only those (m,k) families,
   // legacy first-pick for the rest (per-shape bisection).
@@ -532,6 +579,7 @@ bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
   if (usable_count == 0) return false;
   if (kNoTune || !kShapeAllowed || usable_count == 1 || stream == nullptr) {
     *best_algo = candidates[usable_idx[0]].algo;
+    if (pick_idx != nullptr) *pick_idx = usable_idx[0];
     return true;
   }
   const std::size_t a_elems = static_cast<std::size_t>(m) * k;
@@ -547,6 +595,7 @@ bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
     if (tb != nullptr) hipFree(tb);
     if (tc != nullptr) hipFree(tc);
     *best_algo = candidates[usable_idx[0]].algo;
+    if (pick_idx != nullptr) *pick_idx = usable_idx[0];
     return true;
   }
   constexpr unsigned kFillBlock = 256;
@@ -561,6 +610,7 @@ bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
     hipFree(tb);
     hipFree(tc);
     *best_algo = candidates[usable_idx[0]].algo;
+    if (pick_idx != nullptr) *pick_idx = usable_idx[0];
     return true;
   }
   const auto run = [&](const hipblasLtMatmulAlgo_t& algo) {
@@ -598,6 +648,7 @@ bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
       hipFree(tb);
       hipFree(tc);
       *best_algo = candidates[usable_idx[0]].algo;
+    if (pick_idx != nullptr) *pick_idx = usable_idx[0];
       return true;
     }
   }
@@ -633,6 +684,7 @@ bool BlasLtTuneAlgo(hipblasLtHandle_t handle, hipStream_t stream,
   hipFree(tb);
   hipFree(tc);
   *best_algo = candidates[best_u].algo;
+  if (pick_idx != nullptr) *pick_idx = best_u;
   if (std::getenv("MBUFO_BGE_TUNE_LOG") != nullptr) {
     std::fprintf(stderr,
                  "[bge-tune] m=%d n=%d k=%d usable=%d pick=%d ms=%.3f%s\n", m,
@@ -680,10 +732,18 @@ bool BlasLtMakePlan(hipblasLtHandle_t handle, hipStream_t stream, int m, int n,
     return false;
   }
   hipblasLtMatmulAlgo_t algo{};
+  const int saved = PickLookup(m, n, k);
+  if (saved >= 0 && saved < count && candidates[saved].state == HIPBLAS_STATUS_SUCCESS &&
+      candidates[saved].workspaceSize == 0) {
+    plan.algo = candidates[saved].algo;  // tuned in an earlier process: no timing runs
+    return true;
+  }
+  int pick = -1;
   if (!BlasLtTuneAlgo(handle, stream, plan, candidates.data(), count, m, n,
-                      k, &algo)) {
+                      k, &algo, &pick)) {
     return false;
   }
+  if (pick >= 0) PickStore(m, n, k, pick);
   plan.algo = algo;
   return true;
 }
@@ -791,6 +851,7 @@ struct EngineModel::HipState {
   // once. Single-run benching and first server requests then observe
   // steady-state speed on gfx1151 (first-touch/library warmup is ~8ms).''
   std::set<int> warmed_ns;
+  int n_valid{0};  // real tokens of the current (possibly length-bucketed) prefill
   // Activations live in F16 (hidden/normed/merged/ffn_inter); GEMM I/O
   // boundaries and the attention path stay F32:
   __half *hidden{nullptr}, *normed{nullptr};
@@ -984,7 +1045,7 @@ void InitHipState(EngineModel& model) {
     state->error =
         "bge-m3 HIP: F16 projection upload failed (non-F16 storage?)";
   }
-  const std::size_t max_seq = kBgeM3Leg1MaxTokens;
+  const std::size_t max_seq = kBgeM3HipMaxRows;
   const std::size_t h = f32.config.hidden_size;
   const std::size_t heads = f32.config.num_attention_heads;
   const std::size_t hd = h / heads;
@@ -995,7 +1056,7 @@ void InitHipState(EngineModel& model) {
   state->ffn_inter = AllocHalf(max_seq * inter, owned);
   state->qkv = AllocScratch(3 * max_seq * h, owned);
   state->split = AllocScratch(3 * heads * max_seq * hd, owned);
-  state->scores = AllocScratch(heads * max_seq * max_seq, owned);
+  state->scores = AllocScratch(heads * static_cast<std::size_t>(kFlashMinTokens) * kFlashMinTokens, owned);
   state->context = AllocScratch(heads * max_seq * hd, owned);
   state->proj = AllocScratch(max_seq * h, owned);
   state->ffn_up_out = AllocScratch(max_seq * inter, owned);
@@ -1099,8 +1160,9 @@ bool EngineModel::RunEncoderBody(HipState& st, const BgeM3Config& config,
         std::getenv("MBUFO_BGE_FLASH") == nullptr ||
         std::getenv("MBUFO_BGE_FLASH")[0] != '0';
     if (kUseFlash && nn > kFlashMinTokens) {
-      if (!mbufo::core::compute::flash_f16::FlashF16DenseMha(
+      if (!mbufo::core::compute::flash_f16::FlashF16DenseMhaPadded(
               qh, kh, vh, st.context, static_cast<std::uint32_t>(nn),
+              static_cast<std::uint32_t>(st.n_valid),
               static_cast<std::uint32_t>(hh), static_cast<std::uint32_t>(hdd),
               kScale, st.stream)) {
         { body_error = "flash attention"; return false; };
@@ -1135,7 +1197,7 @@ bool EngineModel::RunEncoderBody(HipState& st, const BgeM3Config& config,
       { body_error = "ffn_up gemm"; return false; };
     }
     BiasGeluKernel<<<blocks(nn * ninter), kBlock, 0, st.stream>>>(
-        st.ffn_up_out, layer.up_b, st.ffn_inter, nn, ninter);
+        st.ffn_up_out, layer.up_b, st.ffn_inter, nn, ninter, st.n_valid <= kAutotuneBitwiseMaxTokens ? 1 : 0);
     if (!ProjGemm(st.blaslt, st.plans, layer.down_w, layer.down_type,
                   st.ffn_inter, st.ffn_out, hdim, nn, ninter, st.stream)) {
       { body_error = "ffn_down gemm"; return false; };
@@ -1172,17 +1234,27 @@ bool EngineModel::PrefillToHidden(EngineModel& model,
   const std::size_t heads = config.num_attention_heads;
   const std::size_t hd = h / heads;
   const std::size_t inter = config.intermediate_size;
-  if (n == 0 || n > kBgeM3Leg1MaxTokens) {
-    return refuse("bge-m3 HIP prefill: sequence length out of leg-1 window");
+  if (n == 0 || n > kBgeM3HipMaxTokens) {
+    return refuse("bge-m3 HIP prefill: sequence length out of the device window");
+  }
+  // Shape bucketing: above the exact short path the GEMMs run on a padded row count (about 12% steps), so a stream of
+  // requests with different lengths reuses a small set of tuned plans instead of tuning and warming every new length.
+  // Pad keys are masked in the flash kernel; only row 0 (CLS) is read back.
+  std::size_t n_pad = n;
+  if (n > static_cast<std::size_t>(kFlashMinTokens)) {
+    std::size_t p2 = 1;
+    while (p2 * 2 <= n) p2 *= 2;
+    const std::size_t step = std::max<std::size_t>(32, p2 / 8);
+    n_pad = std::min<std::size_t>((n + step - 1) / step * step, kBgeM3HipMaxTokens);
   }
   if (!BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(h),
-                         static_cast<int>(n), static_cast<int>(h),
+                         static_cast<int>(n_pad), static_cast<int>(h),
                          st.stream) ||
       !BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(inter),
-                         static_cast<int>(n), static_cast<int>(h),
+                         static_cast<int>(n_pad), static_cast<int>(h),
                          st.stream) ||
       !BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(h),
-                         static_cast<int>(n), static_cast<int>(inter),
+                         static_cast<int>(n_pad), static_cast<int>(inter),
                          st.stream)) {
     return refuse("bge-m3 HIP prefill failed at autotune warmup");
   }
@@ -1190,7 +1262,8 @@ bool EngineModel::PrefillToHidden(EngineModel& model,
   auto fail = [&](const std::string& what) {
     return refuse("bge-m3 HIP prefill failed at " + what);
   };
-  const int nn = static_cast<int>(n);
+  const int nn = static_cast<int>(n_pad);
+  st.n_valid = static_cast<int>(n);
   const int hh = static_cast<int>(heads);
   const int hdd = static_cast<int>(hd);
   const int hdim = static_cast<int>(h);
@@ -1200,7 +1273,9 @@ bool EngineModel::PrefillToHidden(EngineModel& model,
       return refuse("bge-m3 HIP prefill: token id out of vocabulary");
     }
   }
-  if (hipMemcpy(st.ids, ids.data(), n * sizeof(std::uint32_t),
+  std::vector<std::uint32_t> padded_ids(n_pad, ids[n - 1]);  // pad rows only need a valid id
+  std::copy(ids.begin(), ids.end(), padded_ids.begin());
+  if (hipMemcpy(st.ids, padded_ids.data(), n_pad * sizeof(std::uint32_t),
                 hipMemcpyHostToDevice) != hipSuccess) {
     return fail("embed ids upload");
   }
@@ -1359,23 +1434,13 @@ bool EngineModel::RunEncoderBatchBody(HipState& st, const BgeM3Config& config,
     }
     BatchQkvSplitBiasKernel<<<blocks(3 * nn * hdim), kBlock, 0, st.stream>>>(
         q, k, v, layer.q_b, layer.k_b, layer.v_b, qh, kh, vh, bb, ll, hh, hdd);
-    if (hipblasSgemmStridedBatched(
-            st.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, ll, ll, hdd, &kScale, kh,
-            hdd, stride_qkv, qh, hdd, stride_qkv, &kZero, st.scores, ll,
-            stride_scores,
-            static_cast<int>(tiles)) != HIPBLAS_STATUS_SUCCESS) {
-      { body_error = "batch attention scores gemm"; return false; };
-    }
-    BatchMaskScoresKernel<<<blocks(tiles * ll * ll), kBlock, 0, st.stream>>>(
-        st.scores, st.lens, bb, hh, ll);
-    SoftmaxRowsKernel<<<tiles * static_cast<unsigned>(ll), kBlock, 0,
-                        st.stream>>>(st.scores, tiles * ll, ll);
-    if (hipblasSgemmStridedBatched(
-            st.blas, HIPBLAS_OP_N, HIPBLAS_OP_N, hdd, ll, ll, &kOne, vh, hdd,
-            stride_qkv, st.scores, ll, stride_scores, &kZero, st.context,
-            hdd, stride_qkv,
-            static_cast<int>(tiles)) != HIPBLAS_STATUS_SUCCESS) {
-      { body_error = "batch attention context gemm"; return false; };
+    // One flash launch over every (sequence, head) tile with the exact per-sequence key mask: no scores tiles.
+    if (!mbufo::core::compute::flash_f16::FlashF16DenseMhaBatched(
+            qh, kh, vh, st.context, static_cast<std::uint32_t>(bb),
+            static_cast<std::uint32_t>(ll), st.lens,
+            static_cast<std::uint32_t>(hh), static_cast<std::uint32_t>(hdd),
+            kScale, st.stream)) {
+      { body_error = "batch flash attention"; return false; };
     }
     BatchMergeHeadsKernel<<<blocks(bb * ll * hdim), kBlock, 0, st.stream>>>(
         st.context, st.merged, bb, ll, hh, hdd);
@@ -1391,7 +1456,7 @@ bool EngineModel::RunEncoderBatchBody(HipState& st, const BgeM3Config& config,
       { body_error = "batch ffn_up gemm"; return false; };
     }
     BiasGeluKernel<<<blocks(nn * ninter), kBlock, 0, st.stream>>>(
-        st.ffn_up_out, layer.up_b, st.ffn_inter, nn, ninter);
+        st.ffn_up_out, layer.up_b, st.ffn_inter, nn, ninter, st.n_valid <= kAutotuneBitwiseMaxTokens ? 1 : 0);
     if (!ProjGemm(st.blaslt, st.plans, layer.down_w, layer.down_type,
                   st.ffn_inter, st.ffn_out, hdim, nn, ninter, st.stream)) {
       { body_error = "batch ffn_down gemm"; return false; };
@@ -1431,16 +1496,19 @@ bool EngineModel::PrefillBatchToHidden(
   if (pad_id >= config.vocab_size) {
     return refuse("bge-m3 HIP batch prefill: pad id out of vocabulary");
   }
-  std::size_t L = 0;
+  std::size_t Lreal = 0;
   for (const auto& row : batch) {
     if (row.empty()) {
       return refuse("bge-m3 HIP batch prefill: empty row in batch");
     }
-    if (row.size() > L) {
-      L = row.size();
+    if (row.size() > Lreal) {
+      Lreal = row.size();
     }
   }
-  const std::size_t N = B * L;
+  // Bucketed shape (see config.hpp): padded rows are masked, padded sequences have length 1 and are never read back.
+  const std::size_t Bp = BgeBatchBpad(B);
+  const std::size_t L = BgeBatchLpad(Lreal);
+  const std::size_t N = Bp * L;
   const std::size_t h = config.hidden_size;
   const std::size_t heads = config.num_attention_heads;
   const std::size_t hd = h / heads;
@@ -1448,8 +1516,7 @@ bool EngineModel::PrefillBatchToHidden(
   // Buffer capacity: row arenas hold max_seq rows and the scores tiles need
   // B * L * L <= max_seq * max_seq; both hold when N <= max_seq. Larger
   // batches are the caller's sequential-fallback case, never grown here.
-  if (L == 0 || L > kBgeM3Leg1MaxTokens || N > kBgeM3Leg1MaxTokens ||
-      B * L * L > kBgeM3Leg1MaxTokens * kBgeM3Leg1MaxTokens) {
+  if (L == 0 || L > kBgeM3HipMaxTokens || N > kBgeM3HipMaxRows) {
     return refuse("bge-m3 HIP batch prefill: batch exceeds the device arena");
   }
   if (!BlasLtEnsureTuned(st.blaslt, st.plans, static_cast<int>(h),
@@ -1467,14 +1534,15 @@ bool EngineModel::PrefillBatchToHidden(
   auto fail = [&](const std::string& what) {
     return refuse("bge-m3 HIP batch prefill failed at " + what);
   };
-  const int bb = static_cast<int>(B);
+  const int bb = static_cast<int>(Bp);
   const int ll = static_cast<int>(L);
+  st.n_valid = static_cast<int>(Lreal);
   const int hh = static_cast<int>(heads);
   const int hdd = static_cast<int>(hd);
   const int hdim = static_cast<int>(h);
   const int ninter = static_cast<int>(inter);
   std::vector<std::uint32_t> flat_ids(N, pad_id);
-  std::vector<std::uint32_t> lens(B, 0);
+  std::vector<std::uint32_t> lens(Bp, 1);
   for (std::size_t b = 0; b < B; ++b) {
     const auto& row = batch[b];
     lens[b] = static_cast<std::uint32_t>(row.size());
@@ -1489,7 +1557,7 @@ bool EngineModel::PrefillBatchToHidden(
                 hipMemcpyHostToDevice) != hipSuccess) {
     return fail("embed ids upload");
   }
-  if (hipMemcpy(st.lens, lens.data(), B * sizeof(std::uint32_t),
+  if (hipMemcpy(st.lens, lens.data(), Bp * sizeof(std::uint32_t),
                 hipMemcpyHostToDevice) != hipSuccess) {
     return fail("batch lens upload");
   }
@@ -1538,24 +1606,24 @@ std::optional<ClsHiddenBatchResult> HipClsHiddenBatch(
   const std::lock_guard<std::mutex> lock(mutable_model.hip_->mutex);
   const std::size_t h = mutable_model.Config().hidden_size;
   const std::size_t B = batch.size();
-  std::size_t L = 0;
+  std::size_t Lreal = 0;
   for (const auto& row : batch) {
-    if (row.size() > L) {
-      L = row.size();
+    if (row.size() > Lreal) {
+      Lreal = row.size();
     }
   }
-  // One download of the [B, L, h] F16 hidden block; the B CLS rows
-  // (row b * L + 0) upcast on receipt.
-  std::vector<__half> hidden_h(B * L * h);
-  if (hipMemcpy(hidden_h.data(), mutable_model.hip_->hidden,
-                B * L * h * sizeof(__half),
-                hipMemcpyDeviceToHost) != hipSuccess) {
+  const std::size_t L = BgeBatchLpad(Lreal);
+  // Only the B real CLS rows (row b * L) come back: one strided copy of h halves per sequence.
+  std::vector<__half> cls_rows(B * h);
+  if (hipMemcpy2D(cls_rows.data(), h * sizeof(__half), mutable_model.hip_->hidden,
+                  L * h * sizeof(__half), h * sizeof(__half), B,
+                  hipMemcpyDeviceToHost) != hipSuccess) {
     return refuse("bge-m3 HIP batch prefill failed at hidden download");
   }
   ClsHiddenBatchResult result;
   result.cls.resize(B, std::vector<float>(h));
   for (std::size_t b = 0; b < B; ++b) {
-    const __half* cls_h = hidden_h.data() + (b * L) * h;
+    const __half* cls_h = cls_rows.data() + b * h;
     for (std::size_t d = 0; d < h; ++d) {
       result.cls[b][d] = __half2float(cls_h[d]);
     }

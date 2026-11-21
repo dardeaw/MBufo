@@ -35,6 +35,16 @@ namespace mbufo::models::bge_m3 {
 /// explicitly (bge-m3 trains to 8192, which a later leg can enable).
 inline constexpr std::uint32_t kBgeM3Leg1MaxTokens = 2048;
 
+/// Device path: one sequence may use the model's whole native window, and the activation arenas hold this many rows
+/// (one long sequence or a padded batch of B x L rows).
+inline constexpr std::uint32_t kBgeM3HipMaxTokens = 8192;
+inline constexpr std::uint32_t kBgeM3HipMaxRows = 16384;
+
+/// Shape buckets of a padded batch: the GEMMs see B x L rows, so L rounds up to a multiple of 16 and B (above 8) to a
+/// multiple of 8; callers group documents by length so the padding stays small.
+inline constexpr std::size_t BgeBatchLpad(std::size_t l) { return (l + 15) / 16 * 16; }
+inline constexpr std::size_t BgeBatchBpad(std::size_t b) { return b <= 8 ? b : (b + 7) / 8 * 8; }
+
 /// bge-m3 architectural configuration (XLM-RoBERTa, encoder-only).
 struct BgeM3Config {
   std::uint32_t num_layers{24};

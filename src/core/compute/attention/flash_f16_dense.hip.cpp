@@ -62,7 +62,7 @@ constexpr std::uint32_t kPStride = kKeys + 8;
 __launch_bounds__(256, 2) __global__ void FlashF16DenseKernel(
     const float* __restrict__ q, const float* __restrict__ k,
     const float* __restrict__ v, float* __restrict__ out, std::uint32_t n,
-    float scale) {
+    float scale, const std::uint32_t* __restrict__ lens, std::uint32_t n_valid_in) {
   const std::uint32_t tid = threadIdx.x;
   const std::uint32_t lane = tid & 31u;
   const std::uint32_t wave = tid >> 5u;
@@ -70,14 +70,28 @@ __launch_bounds__(256, 2) __global__ void FlashF16DenseKernel(
   const std::uint32_t half_id = lane >> 4u;
   const std::uint32_t head = blockIdx.y;
   const std::uint32_t query_start = blockIdx.x * kRows;
+  // `n` is the row stride of every [n][head_dim] tile (the padded length); only the first `n_valid` rows of a tile are
+  // real: pad keys are never attended and pad query rows write zeros. One tile per (batch row, head); the batch row
+  // comes from blockIdx.z and brings its own length when `lens` is given.
+  const std::uint32_t bz = blockIdx.z;
+  const std::uint32_t n_valid = lens != nullptr ? lens[bz] : n_valid_in;
+  const std::size_t tile = static_cast<std::size_t>(bz) * gridDim.y + head;
+  if (query_start >= n_valid) {
+    float* oh0 = out + tile * n * kHeadDim;
+    for (std::uint32_t i = tid; i < kRows * kHeadDim; i += 256u) {
+      const std::uint32_t r = query_start + i / kHeadDim;
+      if (r < n) oh0[static_cast<std::size_t>(r) * kHeadDim + i % kHeadDim] = 0.0F;
+    }
+    return;
+  }
 
   const float* qh =
-      q + static_cast<std::size_t>(head) * n * kHeadDim;
+      q + tile * n * kHeadDim;
   const float* kh =
-      k + static_cast<std::size_t>(head) * n * kHeadDim;
+      k + tile * n * kHeadDim;
   const float* vh =
-      v + static_cast<std::size_t>(head) * n * kHeadDim;
-  float* oh = out + static_cast<std::size_t>(head) * n * kHeadDim;
+      v + tile * n * kHeadDim;
+  float* oh = out + tile * n * kHeadDim;
 
   __shared__ __half q_lds[kRows][kQStride];
   __shared__ __half k_lds[kKeys][kKStride];
@@ -93,7 +107,7 @@ __launch_bounds__(256, 2) __global__ void FlashF16DenseKernel(
     const std::uint32_t c = i % kHeadDim;
     const std::uint32_t qr = query_start + r;
     const float val =
-        (qr < n) ? qh[static_cast<std::size_t>(qr) * kHeadDim + c] * scale
+        (qr < n_valid) ? qh[static_cast<std::size_t>(qr) * kHeadDim + c] * scale
                  : 0.0F;
     q_lds[r][c] = __half(val);
   }
@@ -118,7 +132,7 @@ __launch_bounds__(256, 2) __global__ void FlashF16DenseKernel(
   float running_max = -INFINITY;
   float running_sum = 0.0F;
 
-  const std::uint32_t n_key_tiles = (n + kKeys - 1u) / kKeys;
+  const std::uint32_t n_key_tiles = (n_valid + kKeys - 1u) / kKeys;
   for (std::uint32_t kb = 0; kb < n_key_tiles; ++kb) {
     const std::uint32_t key_start = kb * kKeys;
     // Stage K tile.
@@ -127,7 +141,7 @@ __launch_bounds__(256, 2) __global__ void FlashF16DenseKernel(
       const std::uint32_t c = i % kHeadDim;
       const std::uint32_t kr = key_start + r;
       const float val =
-          (kr < n) ? kh[static_cast<std::size_t>(kr) * kHeadDim + c] : 0.0F;
+          (kr < n_valid) ? kh[static_cast<std::size_t>(kr) * kHeadDim + c] : 0.0F;
       k_lds[r][c] = __half(val);
     }
     // Stage V tile transposed (lane owns key tid%32, dims (tid/32)*8+i).
@@ -138,7 +152,7 @@ __launch_bounds__(256, 2) __global__ void FlashF16DenseKernel(
 #pragma unroll
       for (std::uint32_t i = 0; i < 8u; ++i) {
         const float val =
-            (kr < n)
+            (kr < n_valid)
                 ? vh[static_cast<std::size_t>(kr) * kHeadDim + v_slice + i]
                 : 0.0F;
         v_lds[v_slice + i][v_key] = __half(val);
@@ -165,7 +179,7 @@ __launch_bounds__(256, 2) __global__ void FlashF16DenseKernel(
       const std::uint32_t rg = tid / kSoftmaxLanes;
       const std::uint32_t seg = tid % kSoftmaxLanes;
       const std::uint32_t qr = query_start + rg;
-      const bool row_live = qr < n;
+      const bool row_live = qr < n_valid;
       const std::uint32_t rb = rg / 16u;
       const std::uint32_t row = rg % 16u;
       float part_max = -INFINITY;
@@ -174,7 +188,7 @@ __launch_bounds__(256, 2) __global__ void FlashF16DenseKernel(
       for (std::uint32_t m = 0; m < kPerLane; ++m) {
         const std::uint32_t col = seg * kPerLane + m;
         const std::uint32_t kc = key_start + col;
-        const bool valid = row_live && kc < n;
+        const bool valid = row_live && kc < n_valid;
         const std::uint32_t tile = (col / 16u) * kRowBlocks + rb;
         vals[m] =
             valid ? (s_lds[0][tile][row][col % 16u] +
@@ -245,9 +259,13 @@ __launch_bounds__(256, 2) __global__ void FlashF16DenseKernel(
     const std::uint32_t row = 2u * i + half_id;
     const std::uint32_t qr = query_start + rb_o * 16u + row;
     if (qr >= n) continue;
-    const float denominator = row_sum[rb_o * 16u + row];
     const std::size_t off =
         static_cast<std::size_t>(qr) * kHeadDim + dim_o * 16u + sub;
+    if (qr >= n_valid) {
+      oh[off] = 0.0F;
+      continue;
+    }
+    const float denominator = row_sum[rb_o * 16u + row];
     oh[off] = (denominator > 0.0F) ? (o_acc[i] / denominator) : 0.0F;
   }
 }
@@ -264,7 +282,32 @@ bool FlashF16DenseMha(const float* q, const float* k, const float* v,
   }
   const dim3 grid((n + kRows - 1u) / kRows, heads);
   hipLaunchKernelGGL(FlashF16DenseKernel, grid, dim3(256), 0, stream, q, k, v,
-                     out, n, scale);
+                     out, n, scale, static_cast<const std::uint32_t*>(nullptr), n);
+  return true;
+}
+
+bool FlashF16DenseMhaPadded(const float* q, const float* k, const float* v, float* out, std::uint32_t n_rows,
+                            std::uint32_t n_valid, std::uint32_t heads, std::uint32_t head_dim, float scale,
+                            hipStream_t stream) {
+  if (q == nullptr || k == nullptr || v == nullptr || out == nullptr || n_rows == 0 || n_valid == 0 ||
+      n_valid > n_rows || heads == 0 || head_dim != kHeadDim) {
+    return false;
+  }
+  const dim3 grid((n_rows + kRows - 1u) / kRows, heads);
+  hipLaunchKernelGGL(FlashF16DenseKernel, grid, dim3(256), 0, stream, q, k, v, out, n_rows, scale,
+                     static_cast<const std::uint32_t*>(nullptr), n_valid);
+  return true;
+}
+
+bool FlashF16DenseMhaBatched(const float* q, const float* k, const float* v, float* out, std::uint32_t batch,
+                             std::uint32_t n_rows, const std::uint32_t* lens, std::uint32_t heads,
+                             std::uint32_t head_dim, float scale, hipStream_t stream) {
+  if (q == nullptr || k == nullptr || v == nullptr || out == nullptr || lens == nullptr || batch == 0 ||
+      n_rows == 0 || heads == 0 || head_dim != kHeadDim || batch > 65535u) {
+    return false;
+  }
+  const dim3 grid((n_rows + kRows - 1u) / kRows, heads, batch);
+  hipLaunchKernelGGL(FlashF16DenseKernel, grid, dim3(256), 0, stream, q, k, v, out, n_rows, scale, lens, n_rows);
   return true;
 }
 

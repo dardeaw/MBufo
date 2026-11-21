@@ -7075,7 +7075,7 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
                 impl_->bge_embed_model.get());
       }
       auto encoded = impl_->bge_embed_model->Tokenizer().Encode(
-          text, models::bge_m3::kBgeM3Leg1MaxTokens);
+          text, models::bge_m3::kBgeM3HipMaxTokens);
       if (!encoded.has_value()) {
         return refuse("bge-m3 tokenize failed or input exceeds context window");
       }

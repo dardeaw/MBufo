@@ -56,9 +56,9 @@ std::optional<EngineSession::SyncResult> EngineSession::Sync(
   if (ids.empty()) {
     return refuse("bge-m3 Sync: empty id sequence");
   }
-  if (ids.size() > kBgeM3Leg1MaxTokens) {
+  if (ids.size() > (use_hip ? kBgeM3HipMaxTokens : kBgeM3Leg1MaxTokens)) {
     return refuse("bge-m3 Sync: " + std::to_string(ids.size()) +
-                  " tokens exceeds the leg-1 window");
+                  " tokens exceeds the window");
   }
 #ifdef ENGINE_ENABLE_HIP
   if (use_hip) {
