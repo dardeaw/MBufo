@@ -150,16 +150,33 @@ MBufo 主張精度與效能之間的平衡需經嚴格量測。推薦基準配�
 
 ### 效能對比 llama.cpp（gfx1151 實測）
 
-相同權重、Release 建置、貪婪解碼；正值代表 MBufo 領先幅度：
+相同權重、貪婪解碼、Release 建置，在同一台 Strix Halo 節點上對 llama.cpp `5d9e5ac30` 重新實測。MBufo 經由 HTTP 服務端測量，數字含分詞與請求開銷；llama.cpp 使用 `llama-bench` / `llama-server`，並取其最佳批次大小。Prefill 為約 2K token 的冷提示；Decode 為約 2K token 上下文下的生成速度；均未開啟投機解碼。正值代表 MBufo 更快。
 
-| 模型與任務 | Prefill 領先幅度 | Decode 表現 | 備註與測試條件 |
-| --- | --- | --- | --- |
-| **Flash-Next** | **+52%** | 持平或更優 | 冷啟動 KV、開啟 MTP |
-| **Qwen3.6-35B-A3B** | **+52.5%** | 持平或更優 | Split-K Router 解碼 |
-| **bge-m3（長文本）** | **+35% ~ +50%** | — (純 Prefill) | hipBLASLt 自動調優與快取執行器 |
-| **Qwen3-Embedding-0.6B** | **+41% ~ +50%** | — (純 Prefill) | 單 Prefill 優化 |
-| **Reranker（批次評分）** | — | **超額 +15%** | 多序列 Padding 批次化 |
-| **GPT-OSS 120B** | **+62%** | -17% | 超大參數量，Prefill 顯著領先 |
+| 模型（權重） | Prefill tok/s：MBufo / llama.cpp | 差距 | Decode tok/s：MBufo / llama.cpp | 差距 |
+| --- | --- | --- | --- | --- |
+| **Gemma 4 26B-A4B**（Q4_0） | 2689 / 1728 | **+56%** | 55.3 / 53.2 | +4% |
+| **Qwen3.6-35B-A3B**（UD-Q4_K_XL） | 2130 / 1230 | **+73%** | 54.4 / 50.7 | +7% |
+| **GPT-OSS 120B**（Q4_K_M） | 1226 / 1089 | **+13%** | 52.3 / 52.4 | 0% |
+| **Muse Glimmer 30B**（UD-Q4_K_XL） | 516 / 398 | **+30%** | 12.6 / 13.2 | -5% |
+| **DeepSeek V4 Flash**（IQ2_XXS 混合） | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
+| **Qwen3.8 Flash-Next**（ROCmFP4-FAST） | 1141 / 無 | 無 | 33.3 / 無 | 無 |
+
+Embedding 與重排序（經由 HTTP 服務端的單次請求）：
+
+| 模型（權重） | MBufo / llama.cpp | 差距 |
+| --- | --- | --- |
+| **Qwen3-Embedding-0.6B**（Q8_0），约 2K token | 6546 / 5087 tok/s | **+29%** |
+| **Qwen3-Embedding-0.6B**（Q8_0），约 0.9K token | 10321 / 7475 tok/s | **+38%** |
+| **bge-m3**（Q4_K_M），约 1.7K token | 3546 / 5272 tok/s | -33% |
+| **bge-m3**（FP16），约 1.7K token | 3507 / 4940 tok/s | -29% |
+| **bge-reranker-v2-m3**（Q4_K_M），64 篇文件 | 38.8 / 38.0 docs/s | +2% |
+| **Qwen3-Reranker-0.6B**（Q8_0），64 篇文件 | 30.3 / 28.1 docs/s | +8% |
+
+說明：
+- llama.cpp 不支援 Flash-Next 架構，因此沒有對照數字。
+- DeepSeek V4 的對照為該 llama.cpp 建置自帶的 `deepseek4` 支援，使用預設批次大小 512；本次未使用 ds4 參考專案。
+- llama.cpp 批次大小：Gemma 4 與 Glimmer 為 2048，Qwen3.6 為 1024（2048 曾使測試機當機，其最佳成績可能更高），GPT-OSS 經 `llama-server` 為 8192。
+- MBufo 的 bge-m3 單次輸入最多 2048 token，llama.cpp 可達 8192。
 
 ---
 
