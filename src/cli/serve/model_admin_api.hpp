@@ -33,6 +33,9 @@ struct AdminLoadRequest {
   std::string draft_model_path;
   std::size_t max_draft_tokens{0};
   bool enable_disk_cache{false};
+  // Compute target: "gpu" (default) or "npu" (XDNA2 IRON lanes where the
+  // model has runtime support; silently ignored elsewhere).
+  std::string device{"gpu"};
 };
 
 /// Loads a model file into a fresh backend and returns it ready for the

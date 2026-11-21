@@ -105,7 +105,8 @@ public:
             TextRunnerRamCacheOptions ram_cache_config = {},
             const std::string& kv_cache_quant = "f16",
             bool enable_yarn = false,
-            bool kv_cache_quant_supplied = false);
+            bool kv_cache_quant_supplied = false,
+            const std::string& device_target = "gpu");
 
 #if defined(ENGINE_ENABLE_HIP)
   /// Installs a previously loaded model without duplicating mapped weights.

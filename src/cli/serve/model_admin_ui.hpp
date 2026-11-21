@@ -814,7 +814,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             <span>Model Catalog</span>
             <span id="catalog-count" class="badge">0 GGUFs</span>
           </div>
-          <span style="font-size:11px;font-family:var(--mono);color:var(--muted);">$MBUFO_MODELS_DIR</span>
+          <span id="catalog-roots" style="font-size:11px;font-family:var(--mono);color:var(--muted);"></span>
         </div>
         <div class="catalog-controls">
           <input type="text" id="cat-search" placeholder="Search model name, quant, capability (e.g. bge, rerank, vision, 27B)..." oninput="renderCatalog()" />
@@ -941,10 +941,19 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         </div>
         <div>
           <label class="field-label">KV Cache Quantization</label>
-          <select id="lm-kv" style="width:100%;">
-            <option value="q8" selected>q8 (Recommended)</option>
+          <select id="lm-kv" style="width:100%;" title="q4/k8v4/k4v8 use packed 4-bit key/value grids and apply server-wide (process-global)">
+            <option value="q4" selected>q4 K4V4 (Recommended)</option>
+            <option value="q8">q8</option>
+            <option value="k8v4">k8v4 (K8V4)</option>
+            <option value="k4v8">k4v8 (K4V8)</option>
             <option value="fp16">fp16</option>
-            <option value="fp8">fp8</option>
+          </select>
+        </div>
+        <div>
+          <label class="field-label">Compute Device</label>
+          <select id="lm-device" style="width:100%;" title="GPU always works. NPU runs the model on XDNA2 IRON kernels where supported (dual-capable models).">
+            <option value="gpu" selected>&#x1F3AE; GPU</option>
+            <option value="npu">&#x26A1; NPU (where supported)</option>
           </select>
         </div>
         <div>
@@ -1036,15 +1045,6 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         };
         devContainer.appendChild(el);
       });
-    }
-
-    async function copyText(t) {
-      try {
-        await navigator.clipboard.writeText(t);
-        showToast('Launch command copied: ' + t);
-      } catch (e) {
-        showToast('Copy the launch command manually: ' + t);
-      }
     }
 
     async function probeSidecar(base) {
@@ -1167,6 +1167,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         renderDevicePills();
         renderFamilyPills();
         renderCatalog();
+        const rootsEl = document.getElementById('catalog-roots');
+        if (rootsEl) {
+          const roots = stateCatalog.scan_roots || [];
+          rootsEl.textContent = roots.length ? roots.join(' · ') : '(default scan roots)';
+          rootsEl.title = 'Directories scanned for the catalog (server $MBUFO_MODELS_DIR plus loaded-model ancestors)';
+        }
         return true;
       } catch (e) {
         return false;
@@ -1321,11 +1327,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
         const badges = [];
         badges.push(renderBackendBadge(m));
+        if (m.sidecar) badges.push(`<span class="badge badge-green">RUNNING</span>`);
         if (m.is_default) badges.push(`<span class="badge badge-primary">★ PRIMARY DEFAULT</span>`);
-        else if (m.lru_rank > 0) badges.push(`<span class="badge">LRU #${m.lru_rank}</span>`);
-        if (m.ready) badges.push(`<span class="badge badge-green">READY</span>`);
+        else if (m.lru_rank > 0 && !m.sidecar) badges.push(`<span class="badge">LRU #${m.lru_rank}</span>`);
+        if (m.ready && !m.sidecar) badges.push(`<span class="badge badge-green">READY</span>`);
         badges.push(renderCapabilityBadges(m.capabilities || []));
-        badges.push(`<span class="badge">CTX: ${(m.context_length / 1024).toFixed(0)}K</span>`);
+        if (!m.sidecar) badges.push(`<span class="badge">CTX: ${(m.context_length / 1024).toFixed(0)}K</span>`);
         badges.push(`<span class="badge">~${fmtGiB(m.file_size_mib || m.estimated_resident_mib)}</span>`);
 
         const slotsHtml = (m.sessions || []).map(s => {
@@ -1344,17 +1351,23 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               </div>
               <div class="model-path">${m.model_path}</div>
             </div>
-            <div class="model-actions">
-              <button class="btn-sm" onclick="selectInPlayground('${m.id}')">💬 Test</button>
-              ${!m.is_default ? `<button class="btn-sm" onclick="setPrimaryModel('${m.id}')">★ Set Primary</button>` : ''}
-              <button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', ${m.busy})">⏏ Eject</button>
-            </div>
+          <div class="model-actions">
+            ${m.sidecar
+              ? `<button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 Probe</button>
+                 <button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', false)">⏏ Eject</button>`
+              : `${!m.is_default ? `<button class="btn-sm" onclick="setPrimaryModel('${m.id}')">★ Set Primary</button>` : ''}
+                  <button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', ${m.busy})">⏏ Eject</button>`}
           </div>
-          <div class="slots-bar">
-            <span style="font-size:11px;color:var(--muted);margin-right:4px;">Sessions (${m.active_sessions}/${m.total_sessions} busy):</span>
-            ${slotsHtml}
-            <span style="margin-left:auto;font-size:11px;color:var(--muted);">Idle: ${fmtDuration(m.idle_ms || 0)}</span>
-          </div>
+        </div>
+        ${m.sidecar
+          ? `<div class="slots-bar">
+               <span style="font-size:11px;color:var(--muted);">Sidecar process${m.pid > 0 ? ' · pid ' + m.pid : ''}${m.external ? ' (externally started, adopted)' : ''} · POST ${m.endpoint || ''}</span>
+             </div>`
+          : `<div class="slots-bar">
+          <span style="font-size:11px;color:var(--muted);margin-right:4px;">Sessions (${m.active_sessions}/${m.total_sessions} busy):</span>
+          ${slotsHtml}
+          <span style="margin-left:auto;font-size:11px;color:var(--muted);">Idle: ${fmtDuration(m.idle_ms || 0)}</span>
+        </div>`}
         `;
         container.appendChild(card);
       });
@@ -1450,13 +1463,22 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         ];
         if (m.shards > 1) badges.push(`<span class="badge">${m.shards} shards</span>`);
         if (isLoaded) badges.push(`<span class="badge badge-green">LOADED</span>`);
-        if (m.sidecar) badges.push(`<span class="badge">sidecar :${m.default_port}</span>`);
+        if (m.npu_capable) badges.push('<span class="badge badge-amber">NPU-ready</span>');
+        if (m.sidecar) {
+          badges.push(`<span class="badge">sidecar :${m.default_port}</span>`);
+          if (m.running) badges.push(`<span class="badge badge-green">RUNNING</span>`);
+        }
 
-        const actionsHtml = m.sidecar
-          ? `<button class="btn-sm" onclick='copyText(${JSON.stringify(m.launch_cmd || '')})'>📋 Launch cmd</button>
-             <button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 Probe</button>`
+        const isActionable = m.actionable !== false;
+    const actionsHtml = !isActionable ? ""
+      : m.sidecar
+          ? (m.running
+            ? `<button class="btn-sm btn-danger" onclick="ejectModel('${m.id_suggestion}', false)">⏏ Eject</button>
+               <button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 Probe</button>`
+            : `<button class="btn-sm btn-primary" onclick='quickLoadModel(${JSON.stringify(m)})'>⚡ Load</button>
+               <button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 Probe</button>`)
           : (isLoaded
-            ? `<button class="btn-sm" onclick="selectInPlayground('${m.id_suggestion}')">Use</button>`
+            ? ''
             : `<button class="btn-sm" onclick='openLoadModal(${JSON.stringify(m)})'>⚙ Configure</button>
                <button class="btn-sm btn-primary" onclick='quickLoadModel(${JSON.stringify(m)})'>⚡ Load</button>`);
 
@@ -1466,8 +1488,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               <span>${m.id_suggestion}</span>
               ${badges.join('')}
             </div>
-            <div class="cat-rel" title="${m.path}">${m.relative_path}</div>
-            ${m.sidecar ? `<div class="cat-rel" style="color:var(--muted);">POST ${m.endpoint} · manual start, never auto-start at boot</div>` : ''}
+        <div class="cat-rel" title="${m.path}">${m.relative_path}</div>
+        ${(!m.actionable && m.note) ? `<div class="cat-rel" style="color:var(--muted);font-style:italic;">${m.note}</div>` : ''}
+        ${m.sidecar ? `<div class="cat-rel" style="color:var(--muted);">POST ${m.endpoint} · managed by server — Load to start, Eject to stop (never auto-started at boot)</div>` : ''}
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0;">
             ${actionsHtml}
@@ -1485,7 +1508,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       const isEnc = (m.task === 'embedding' || m.task === 'reranker');
       document.getElementById('lm-ctx').value = isEnc ? '8192' : '32768';
       document.getElementById('lm-sessions').value = '1';
-      document.getElementById('lm-kv').value = isEnc ? 'fp16' : 'q8';
+      document.getElementById('lm-kv').value = isEnc ? 'fp16' : 'q4';
+    const devSel = document.getElementById('lm-device');
+    devSel.value = 'gpu';
+    devSel.disabled = !m.npu_capable;
+    devSel.title = m.npu_capable
+      ? 'Run on NPU (XDNA2 IRON kernels) or GPU'
+      : 'Only GPU execution is wired for this model';
       document.getElementById('lm-spec').value = 'off';
       document.getElementById('lm-default').checked = false;
       document.getElementById('lm-evict').checked = true;
@@ -1537,7 +1566,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         path: m.path,
         context_length: isEnc ? 0 : 32768,
         sessions: 1,
-        kv_quant: isEnc ? 'fp16' : 'q8',
+        kv_quant: isEnc ? 'fp16' : 'q4',
+        device: 'gpu',
         speculative: 'off',
         mmproj_path: (!isEnc && m.suggested_mmproj) ? m.suggested_mmproj : '',
         allow_evict: true,
@@ -1556,6 +1586,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         context_length: parseInt(document.getElementById('lm-ctx').value, 10),
         sessions: parseInt(document.getElementById('lm-sessions').value, 10),
         kv_quant: document.getElementById('lm-kv').value,
+        device: document.getElementById('lm-device').value,
         speculative: document.getElementById('lm-spec').value,
         draft_model_path: document.getElementById('lm-draft').value,
         mmproj_path: document.getElementById('lm-mmproj').value,

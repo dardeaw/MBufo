@@ -1,5 +1,7 @@
 #include "src/cli/serve/model_admin_api.hpp"
 
+#include "src/cli/serve/npu_sidecar_proxy.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -379,6 +381,51 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["sessions"] = std::move(sessions);
     data.push_back(std::move(row));
   }
+  // Running sidecars appear as loaded models so the UI renders the same
+  // cards (with Eject) as GPU models.
+  for (const auto& st : GlobalSidecarManager().ListRunning()) {
+    const SidecarLaunchSpec* spec = nullptr;
+    for (const auto& s : KnownSidecars()) {
+      if (s.base_url == st.base_url) {
+        spec = &s;
+        break;
+      }
+    }
+    if (spec == nullptr) continue;
+    json::Value row = json::Value::object();
+    row["id"] = spec->id;
+    row["path"] = spec->base_url;
+    row["model_path"] = spec->base_url;
+    json::Value names = json::Value::array();
+    names.push_back(spec->id);
+    row["names"] = std::move(names);
+    row["context_length"] = 0;
+    row["ready"] = true;
+    row["is_default"] = false;
+    row["task"] = spec->task;
+    row["has_vision"] = false;
+    row["has_audio"] = spec->task == "asr" || spec->task == "tts";
+    row["has_tools"] = false;
+    json::Value caps = json::Value::array();
+    caps.push_back(spec->capability);
+    row["capabilities"] = std::move(caps);
+    row["total_sessions"] = 0;
+    row["active_sessions"] = 0;
+    row["busy"] = false;
+    row["file_size_mib"] = 0;
+    row["estimated_resident_mib"] =
+        static_cast<std::uint64_t>(spec->estimated_resident_mib);
+    row["backend"] = spec->backend;
+    row["sidecar"] = true;
+    row["default_port"] = spec->port;
+    row["endpoint"] = spec->endpoint;
+    row["pid"] = static_cast<std::int64_t>(st.pid);
+    row["external"] = st.external;
+    row["lru_rank"] = -1;
+    json::Value sessions = json::Value::array();
+    row["sessions"] = std::move(sessions);
+    data.push_back(std::move(row));
+  }
   resp["models"] = data;
   resp["data"] = std::move(data);
   resp["memory"] = QueryMemorySnapshot(probe_).ToJson();
@@ -595,6 +642,14 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     // In-process GGUF entries are HIP/GPU resident (see npu_lane.hpp).
     item["backend"] = "gpu";
     item["sidecar"] = false;
+    item["actionable"] = true;
+    {
+      const std::string id_lower = ToLowerAscii(derived_id);
+      item["npu_capable"] =
+          id_lower.find("bge-m3") != std::string::npos ||
+          id_lower.find("embeddinggemma") != std::string::npos ||
+          id_lower.find("bge-reranker") != std::string::npos;
+    }
     item["size_mib"] = f.size_bytes >> 20;
     item["file_size_mib"] = f.size_bytes >> 20;
     item["estimated_resident_mib"] = est_bytes >> 20;
@@ -610,42 +665,120 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     models.push_back(std::move(item));
   }
 
-  // NPU/GPU sidecar entries for the router admin UI device switch.
-  // These are not GGUF files so the directory scan above never finds them;
-  // they are launched on demand (not at boot) and proxied as upstreams.
-  // Ports/endpoints mirror src/cli/serve/npu_sidecar_routes.hpp.
+  // Non-GGUF model/artifact directories the GGUF scan above skips.
+  // Surfaced read-only (actionable=false) so the catalog reflects what's
+  // actually on disk: safetensors weights (served via sidecars or the NPU
+  // runtime, never hot-loaded as GGUF) and prebuilt NPU kernel bundles.
   {
-    auto push_sidecar = [&](std::string id, std::string name,
-                            std::string capability, std::string task,
-                            std::string backend, std::size_t size_mib,
-                            std::string url, int port, std::string endpoint,
-                            std::string launch) {
+    struct ExtraDir {
+      const char* id;
+      const char* subdir;
+      const char* family;
+      const char* backend;
+      const char* note;
+    };
+    const ExtraDir kExtraDirs[] = {
+        {"qwen3-asr-1.7b-weights", "qwen3-asr-1.7b", "weights", "gpu",
+         "safetensors weights (ASR runs via whisper sidecar)"},
+        {"embeddinggemma-2-weights", "embeddinggemma-2", "weights", "npu",
+         "safetensors weights (NPU runtime source; GGUF in catalog runs GPU)"},
+        {"flux2-klein-4b-weights", "flux2-klein-4b", "weights", "gpu",
+         "safetensors weights (no HTTP serving yet)"},
+        {"z-image-turbo-weights", "z-image-turbo", "weights", "gpu",
+         "safetensors weights (no HTTP serving yet)"},
+        {"npu-kernels-bundle", "npu-kernels", "npu-artifacts", "npu",
+         "prebuilt NPU2 xclbin/insts bundles (verified artifacts)"},
+        {"npu-quant-bundle", "npu-quant", "npu-artifacts", "npu",
+         "Q8/Q4 prepacked weights + verify outputs"},
+    };
+    for (const auto& ed : kExtraDirs) {
+      std::filesystem::path dir;
+      for (const auto& r : roots) {
+        std::error_code dec;
+        auto cand = r / ed.subdir;
+        if (std::filesystem::is_directory(cand, dec)) {
+          dir = cand;
+          break;
+        }
+      }
+      if (dir.empty()) continue;
+      std::uintmax_t bytes = 0;
+      {
+        std::error_code wec;
+        std::filesystem::recursive_directory_iterator it(dir, wec);
+        std::filesystem::recursive_directory_iterator end;
+        for (; !wec && it != end; it.increment(wec)) {
+          if (it->is_regular_file()) bytes += it->file_size();
+        }
+      }
       json::Value item = json::Value::object();
-      item["id"] = id;
-      item["id_suggestion"] = id;
-      item["name"] = name;
-      item["relative_path"] = url;
-      item["family"] = "sidecar";
-      item["task"] = task;
+      item["id"] = ed.id;
+      item["id_suggestion"] = ed.id;
+      item["name"] = std::string(ed.subdir) + "/";
+      item["relative_path"] = dir.string();
+      item["family"] = ed.family;
+      item["task"] = "";
       item["has_vision"] = false;
-      item["has_audio"] = capability == "AUDIO";
+      item["has_audio"] = false;
+      item["has_tools"] = false;
+      item["capabilities"] = json::Value::array();
+      item["backend"] = ed.backend;
+      item["sidecar"] = false;
+      item["actionable"] = false;
+      item["note"] = ed.note;
+      const std::uint64_t mib = static_cast<std::uint64_t>(bytes >> 20);
+      item["size_mib"] = mib;
+      item["file_size_mib"] = mib;
+      item["estimated_resident_mib"] = std::uint64_t{0};
+      item["shards"] = 0;
+      item["loaded"] = false;
+      item["loaded_id"] = "";
+      item["is_default"] = false;
+      item["running"] = false;
+      item["npu_capable"] = false;
+      item["path"] = dir.string();
+      item["suggested_mmproj"] = "";
+      item["suggested_draft"] = "";
+      item["suggested_mtp"] = "";
+      item["suggested_dflash"] = "";
+      item["suggested_dspark"] = "";
+      models.push_back(std::move(item));
+    }
+  }
+
+  // NPU/GPU sidecar entries for the router admin UI device switch.
+  // Single-sourced from KnownSidecars() (the same table SidecarManager
+  // spawns from); launched on demand via /admin/load, never at boot.
+  {
+    auto push_sidecar = [&](const SidecarLaunchSpec& spec) {
+      json::Value item = json::Value::object();
+      item["id"] = spec.id;
+      item["id_suggestion"] = spec.id;
+      item["name"] = spec.display_name;
+      item["relative_path"] = spec.base_url;
+      item["family"] = "sidecar";
+      item["task"] = spec.task;
+      item["has_vision"] = false;
+      item["has_audio"] = spec.capability == "AUDIO";
       item["has_tools"] = false;
       json::Value caps = json::Value::array();
-      caps.push_back(capability);
+      caps.push_back(spec.capability);
       item["capabilities"] = std::move(caps);
-      item["backend"] = backend;
+      item["backend"] = spec.backend;
       item["sidecar"] = true;
-      item["default_port"] = port;
-      item["endpoint"] = endpoint;
-      item["launch_cmd"] = launch;
-      item["size_mib"] = size_mib;
-      item["file_size_mib"] = size_mib;
-      item["estimated_resident_mib"] = size_mib;
+      item["actionable"] = true;
+      item["default_port"] = spec.port;
+      item["endpoint"] = spec.endpoint;
+      item["launch_cmd"] = SidecarLaunchDisplay(spec);
+      item["size_mib"] = spec.estimated_resident_mib;
+      item["file_size_mib"] = spec.estimated_resident_mib;
+      item["estimated_resident_mib"] = spec.estimated_resident_mib;
       item["shards"] = 1;
       item["loaded"] = false;
       item["loaded_id"] = "";
       item["is_default"] = false;
-      item["path"] = url;
+      item["running"] = GlobalSidecarManager().IsRunning(spec.id);
+      item["path"] = spec.base_url;
       item["suggested_mmproj"] = "";
       item["suggested_draft"] = "";
       item["suggested_mtp"] = "";
@@ -653,37 +786,7 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["suggested_dspark"] = "";
       models.push_back(std::move(item));
     };
-    push_sidecar(
-        "d3-lite-npu", "D3-Lite-NPU2 (flm sidecar)", "DECIDE", "decide", "npu",
-        900, "http://127.0.0.1:8766", 8766, "/v1/systemone",
-        "flm serve llama3.2:1b --decision d3:lite --port 8766");
-    push_sidecar(
-        "d3-nano-npu", "D3-Nano-NPU2 (flm sidecar)", "DECIDE", "decide", "npu",
-        1800, "http://127.0.0.1:8766", 8766, "/v1/systemone",
-        "flm serve llama3.2:1b --decision d3:nano --port 8766");
-    push_sidecar(
-        "d3-mini-npu", "D3-Mini-NPU2 (flm sidecar)", "DECIDE", "decide", "npu",
-        3200, "http://127.0.0.1:8766", 8766, "/v1/systemone",
-        "flm serve llama3.2:1b --decision d3:mini --port 8766");
-    push_sidecar(
-        "d3-turbo-npu", "D3-Turbo-NPU2 (flm sidecar)", "DECIDE", "decide",
-        "npu", 6400, "http://127.0.0.1:8766", 8766, "/v1/systemone",
-        "flm serve llama3.2:1b --decision d3:turbo --port 8766");
-    push_sidecar(
-        "d3-ultra-npu", "D3-Ultra-NPU2 (flm sidecar)", "DECIDE", "decide",
-        "npu", 12000, "http://127.0.0.1:8766", 8766, "/v1/systemone",
-        "flm serve llama3.2:1b --decision d3:ultra --port 8766");
-    push_sidecar(
-        "whisper-turbo-npu", "Whisper-V3-Turbo-NPU2 (flm sidecar)", "AUDIO",
-        "asr", "npu", 700, "http://127.0.0.1:8764", 8764,
-        "/v1/audio/transcriptions",
-        "flm serve whisper-v3:turbo --asr 1 --port 8764");
-    push_sidecar(
-        "qwen3-tts-1.7b", "Qwen3-TTS-12Hz-1.7B-Base (gufo sidecar)", "AUDIO",
-        "tts", "gpu", 4700, "http://127.0.0.1:8765", 8765,
-        "/v1/audio/speech",
-        "gufo serve tts --model /mnt/nvme-data/mbufo-models/qwen3-tts-1.7b-base"
-        " --port 8765");
+    for (const auto& spec : KnownSidecars()) push_sidecar(spec);
   }
 
   json::Value sidecars = json::Value::object();
@@ -693,6 +796,11 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
   json::Value resp = json::Value::object();
   resp["object"] = "catalog";
   resp["models"] = std::move(models);
+  {
+    json::Value roots_json = json::Value::array();
+    for (const auto& r : roots) roots_json.push_back(r.string());
+    resp["scan_roots"] = std::move(roots_json);
+  }
   resp["mmproj_files"] = std::move(mmproj_files);
   resp["draft_files"] = std::move(draft_files);
   resp["sidecars"] = std::move(sidecars);
@@ -728,9 +836,14 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
   request.session_count =
       body.member_size("session_count", body.member_size("sessions", 1));
   request.kv_cache_quant =
-      body.member_str("kv_cache_quant", body.member_str("kv_quant", "q8"));
+      body.member_str("kv_cache_quant", body.member_str("kv_quant", "q4"));
   request.kv_cache_quant_supplied =
       body.find("kv_cache_quant") != nullptr || body.find("kv_quant") != nullptr;
+  request.device = body.member_str("device", "gpu");
+  if (request.device != "gpu" && request.device != "npu") {
+    return AdminErr(400, "Bad Request",
+                    "device must be 'gpu' or 'npu'", "invalid_device");
+  }
   request.vision_model_path =
       body.member_str("vision_model_path", body.member_str("mmproj_path", ""));
   request.enable_yarn = body.find("enable_yarn") != nullptr &&
@@ -748,10 +861,64 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
   const bool allow_evict =
       body.find("allow_evict") == nullptr ||
       body.find("allow_evict")->as_bool(true);
+
+  // Sidecars are not GGUFs: spawn (or adopt) the sidecar process instead of
+  // loading a model. Same Load button as GPU models; the UI shows RUNNING.
+  // Checked before the GGUF path requirement since sidecars carry no file.
+  {
+    const std::string want_id =
+        body.member_str("id", body.member_str("model", ""));
+    if (const auto* sc0 = !want_id.empty() ? FindSidecarSpec(want_id) : nullptr;
+        sc0 != nullptr) {
+      request.id = want_id;
+      std::lock_guard serialize(load_mutex_);
+      {
+        std::lock_guard lock(loading_state_mutex_);
+        loading_id_ = request.id;
+        loading_path_ = sc0->base_url;
+        loading_started_ms_ = NowSteadyMs();
+      }
+      const std::uint64_t t_load_start = NowSteadyMs();
+      std::string sc_err;
+      const bool was_running = GlobalSidecarManager().IsRunning(request.id);
+      const bool ok = GlobalSidecarManager().Start(request.id, &sc_err);
+      {
+        std::lock_guard lock(loading_state_mutex_);
+        loading_id_.clear();
+        loading_path_.clear();
+        loading_started_ms_ = 0;
+      }
+      if (!ok) {
+        return AdminErr(502, "Bad Gateway",
+                        sc_err.empty() ? "sidecar failed to start" : sc_err,
+                        "sidecar_start_failed");
+      }
+      const auto st = GlobalSidecarManager().GetStatus(request.id);
+      json::Value resp = json::Value::object();
+      resp["id"] = request.id;
+      resp["path"] = sc0->base_url;
+      resp["model_path"] = sc0->base_url;
+      resp["status"] = was_running ? "already_running" : "running";
+      resp["backend"] = sc0->backend;
+      resp["sidecar"] = true;
+      resp["endpoint"] = sc0->endpoint;
+      resp["default_port"] = sc0->port;
+      resp["estimated_resident_mib"] =
+          static_cast<std::uint64_t>(sc0->estimated_resident_mib);
+      resp["pid"] = static_cast<std::int64_t>(st.pid);
+      resp["external"] = st.external;
+      resp["load_ms"] = NowSteadyMs() >= t_load_start
+                            ? NowSteadyMs() - t_load_start
+                            : std::uint64_t{0};
+      return AdminOk(std::move(resp));
+    }
+  }
+
   if (request.path.empty())
     return AdminErr(400, "Bad Request", "'path' is required", "missing_path");
   if (request.session_count == 0) request.session_count = 1;
   if (request.id.empty()) request.id = DeriveId(request.path);
+
   if (registry_->HasName(request.id))
     return AdminErr(409, "Conflict",
                     "model '" + request.id + "' is already loaded",
@@ -849,6 +1016,28 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
   const std::string id = body.member_str("id");
   if (id.empty())
     return AdminErr(400, "Bad Request", "'id' is required", "missing_id");
+  // Sidecars stop their OS process; mirrors the GPU eject flow above.
+  if (FindSidecarSpec(id) != nullptr) {
+    std::lock_guard serialize(load_mutex_);
+    const auto st = GlobalSidecarManager().GetStatus(id);
+    if (!st.running) {
+      return AdminErr(404, "Not Found",
+                      "sidecar '" + id + "' is not running", "not_loaded");
+    }
+    std::string sc_err;
+    if (!GlobalSidecarManager().Stop(id, &sc_err)) {
+      return AdminErr(502, "Bad Gateway",
+                      sc_err.empty() ? "failed to stop sidecar" : sc_err,
+                      "sidecar_stop_failed");
+    }
+    json::Value resp = json::Value::object();
+    resp["id"] = id;
+    resp["status"] = "ejected";
+    resp["note"] = st.external
+                       ? "stopped an adopted external sidecar process"
+                       : "sidecar process stopped; port released";
+    return AdminOk(std::move(resp));
+  }
   if (!registry_->HasId(id))
     return AdminErr(404, "Not Found", "model '" + id + "' is not loaded",
                     "not_loaded");

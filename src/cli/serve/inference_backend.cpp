@@ -69,9 +69,36 @@
 #include "src/models/embeddinggemma2/engine.hpp"
 #include "src/models/bge_reranker/engine.hpp"
 #include "src/models/qwen_reranker/engine.hpp"
+#include "src/core/compute/npu/npu_scheduler.hpp"
+#include "src/core/compute/npu/npu_lane.hpp"
 #endif
 
+// Process-wide NPU scheduler shared by every dual-capable encoder model.
+// Lazy singleton: created on first NPU-targeted load, never at boot.
 namespace mbufo::server {
+namespace {
+#ifdef MBUFO_ENABLE_NPU
+mbufo::core::npu::NpuScheduler& GlobalNpuScheduler() {
+  static mbufo::core::npu::NpuScheduler scheduler;
+  return scheduler;
+}
+mbufo::npu::NpuLaneConfig NpuLaneConfigForDevice(const std::string& device) {
+  mbufo::npu::NpuLaneConfig cfg;
+  if (device == "npu") {
+    cfg.embedding = true;
+    cfg.reranker = true;
+    cfg.decide = true;
+    cfg.asr = true;
+    cfg.tts = true;
+  }
+  return cfg;
+}
+#else
+mbufo::npu::NpuLaneConfig NpuLaneConfigForDevice(const std::string&) {
+  return mbufo::npu::NpuLaneConfig{};
+}
+#endif
+}  // namespace
 
 // A selected token ends the turn only when the request admits EOS and the token
 // is one of the model's stop tokens. The engine stops there itself and the stop
@@ -5627,6 +5654,7 @@ struct InferenceBackend::Impl {
   std::unique_ptr<models::bge_reranker::EngineSession> bge_rerank_session;
   std::unique_ptr<models::qwen_reranker::EngineModel> qwen_rerank_model;
   std::unique_ptr<models::qwen_reranker::EngineSession> qwen_rerank_session;
+  std::string device_target{"gpu"};
 #endif
 };
 
@@ -5662,9 +5690,11 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             TextRunnerRamCacheOptions ram_cache_config,
                             const std::string& kv_cache_quant,
                             bool enable_yarn,
-                            bool kv_cache_quant_supplied) {
+                            bool kv_cache_quant_supplied,
+                            const std::string& device_target) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
+  if (!device_target.empty()) impl_->device_target = device_target;
   std::string load_error;
   auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
   if (reader_owner == nullptr) {
@@ -5916,6 +5946,13 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error, "Failed to create EmbeddingGemma 2 model: " + eg_error);
       return false;
     }
+    // NPU path: attach the process-wide scheduler + lane config. When the
+    // caller asked for device=npu, TryNpuEmbed picks it up per request;
+    // otherwise the seam stays cold and the engine runs HIP as before.
+#ifdef MBUFO_ENABLE_NPU
+    eg_model->SetNpuScheduler(&GlobalNpuScheduler());
+#endif
+    eg_model->SetNpuLaneConfig(NpuLaneConfigForDevice(device_target));
     if (max_context == 0 || max_context > models::embeddinggemma2::kMaxTokens) {
       max_context = models::embeddinggemma2::kMaxTokens;
     }
@@ -5960,6 +5997,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         SetError(error, "Failed to create BERT embedding model: " + bge_error);
         return false;
       }
+      // NPU scheduler/lane attach to the EngineSession (see Embed() below);
+      // SetNpuLaneConfig lives on EngineSession, not EngineModel.
       const std::uint32_t native_context =
           bge_model->Config().max_position_embeddings;
       if (max_context == 0 || max_context > native_context) {
@@ -5995,6 +6034,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                "Failed to create BERT reranker model: " + rerank_error);
       return false;
     }
+    // NPU scheduler attaches when the rerank session is created (see below);
+    // SetNpuLaneConfig lives on EngineSession, not EngineModel.
     const std::uint32_t native_context =
         rerank_model->Config().max_position_embeddings;
     if (max_context == 0) {
@@ -7319,6 +7360,13 @@ std::optional<RerankResult> InferenceBackend::Rerank(
         impl_->bge_rerank_session =
             std::make_unique<models::bge_reranker::EngineSession>(
                 impl_->bge_rerank_model.get());
+#ifdef MBUFO_ENABLE_NPU
+        if (impl_->device_target == "npu") {
+          impl_->bge_rerank_session->SetNpuScheduler(&GlobalNpuScheduler());
+          impl_->bge_rerank_session->SetNpuLaneConfig(
+              NpuLaneConfigForDevice("npu"));
+        }
+#endif
       }
       double total_ms = 0.0;
       std::size_t prompt_tokens = 0;
@@ -7410,6 +7458,13 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
         impl_->bge_embed_session =
             std::make_unique<models::bge_m3::EngineSession>(
                 impl_->bge_embed_model.get());
+#ifdef MBUFO_ENABLE_NPU
+        if (impl_->device_target == "npu") {
+          impl_->bge_embed_session->SetNpuScheduler(&GlobalNpuScheduler());
+          impl_->bge_embed_session->SetNpuLaneConfig(
+              NpuLaneConfigForDevice("npu"));
+        }
+#endif
       }
       auto encoded = impl_->bge_embed_model->Tokenizer().Encode(
           text, models::bge_m3::kBgeM3HipMaxTokens);

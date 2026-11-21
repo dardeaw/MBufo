@@ -1621,17 +1621,24 @@ int RunServe(std::span<const char* const> args) {
               const server::AdminLoadRequest& spec,
               std::string* error)
                -> std::shared_ptr<server::TextGenerationBackend> {
-        // q4/k8v4/k4v8 grids are process-global (MBUFO_KV_Q4/V4), so a
-        // per-model spec can only ask for f16/q8; the global modes come
-        // from --kv-quant on the server command line.
-        if (spec.kv_cache_quant != "f16" && spec.kv_cache_quant != "q8") {
-          if (error != nullptr) {
-            *error = "kv_cache_quant '" + spec.kv_cache_quant +
-                     "' is process-global: pass --kv-quant q4|k8v4|k4v8 on the "
-                     "server command line instead of per-model";
-          }
-          return nullptr;
+        // q4/k8v4/k4v8 grids are process-global (MBUFO_KV_Q4/V4): map them
+        // here exactly like --kv-quant does, so /admin/load accepts the same
+        // values. Effective for models whose kernels first run after this
+        // load; already-running models keep their grids until restart.
+        std::string spec_kv = spec.kv_cache_quant;
+        if (spec_kv == "q4" || spec_kv == "k8v4" || spec_kv == "k4v8") {
+          // Process-global grids like --kv-quant: set before first kernels run.
+          // Mid-run changes are inert for already-initialized kernels (same as
+          // the CLI flag after startup); the load itself still proceeds.
+          const bool key4 = spec_kv != "k8v4";
+          const bool val4 = spec_kv != "k4v8";
+          ::setenv("MBUFO_KV_Q4", key4 ? "1" : "0", 1);
+          ::setenv("MBUFO_KV_V4", val4 ? "1" : "0", 1);
+          spec_kv = "q8";
         }
+        // NOTE: unlike --kv-quant q8 on the command line, a per-model "q8" here
+        // deliberately does NOT clear a server-wide Q4 grid: clearing mid-run
+        // cannot take effect for already-running kernels anyway.
         server::TextSpeculativeConfig req_spec{};
         // An omitted/zero max_draft_tokens means "the serve default" (--draft-tokens), not "propose nothing": a zero
         // limit made a dflash2 /admin/load run every round with an empty draft and no speedup.
@@ -1686,8 +1693,9 @@ int RunServe(std::span<const char* const> args) {
                 req_spec, req_disk, spec.vision_model_path,
                 server::TextRunnerRamCacheOptions{
                     .capacity_bytes = cache_ram_bytes},
-                spec.kv_cache_quant, spec.enable_yarn,
-                spec.kv_cache_quant_supplied)) {
+                spec_kv, spec.enable_yarn,
+                spec.kv_cache_quant_supplied && spec_kv == "q8",
+                spec.device)) {
           return nullptr;
         }
         // Advertise the registry id + aliases so serves_model() accepts them.
