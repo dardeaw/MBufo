@@ -1,5 +1,7 @@
 #include "src/cli/serve/text_generation_scheduler.hpp"
 
+#include "src/core/admission_queue.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -81,6 +83,7 @@ struct SessionTable {
 
 struct ScheduledRequest {
   std::uint64_t id{0};
+  std::uint64_t admission_ticket{0};
   std::string client_id{"anonymous"};
   std::vector<TextRunnerToken> prompt;
   std::shared_ptr<const TextPromptContext> prompt_context;
@@ -162,10 +165,7 @@ struct ScheduledRequest {
   }
 };
 
-struct PendingClient {
-  std::string client_id;
-  std::deque<std::shared_ptr<ScheduledRequest>> requests;
-};
+// Client round-robin admission lives in core::AdmissionQueue.
 
 void LogPublicationWait(const std::shared_ptr<ScheduledRequest>& request,
                         std::string_view stage, std::string_view release = {}) {
@@ -513,7 +513,12 @@ struct TextGenerationScheduler::Impl {
         prefill_policy(model_prefill_policy),
         scheduler_policy(model_scheduler_policy),
         output_budget(std::make_shared<OutputBudget>(
-            model_scheduler_policy.max_buffered_output_bytes_total)) {
+            model_scheduler_policy.max_buffered_output_bytes_total)),
+        admission_queue(core::AdmissionPolicy{
+            .max_pending = model_scheduler_policy.max_pending_requests,
+            .max_pending_per_client =
+                model_scheduler_policy.max_pending_requests_per_client,
+            .request_timeout = model_scheduler_policy.request_timeout}) {
     if (runner_pool == nullptr) {
       throw std::invalid_argument(
           "text generation scheduler runner pool must not be null");
@@ -553,6 +558,9 @@ struct TextGenerationScheduler::Impl {
             .Descriptor()
             .capabilities.batched_multi_token_decode_max_width;
     device_lost_requests.reserve(runner_pool->capacity());
+    admission_queue.SetQueuedDeltaCallback([](std::int64_t delta) {
+      detail::RequestsDeferred().fetch_add(delta, std::memory_order_relaxed);
+    });
     PrepareStructuredOutput(runner_pool->runner());
     worker = std::jthread(
         [this](const std::stop_token& stop_token) { Run(stop_token); });
@@ -568,12 +576,8 @@ struct TextGenerationScheduler::Impl {
     if (stall_monitor.joinable()) {
       stall_monitor.join();
     }
-    {
-      const std::lock_guard<std::mutex> lock(queue_mutex);
-      stopping = true;
-    }
+    admission_queue.Stop();
     worker.request_stop();
-    queue_condition.notify_all();
     if (worker.joinable()) {
       worker.join();
     }
@@ -660,64 +664,33 @@ struct TextGenerationScheduler::Impl {
     }
   }
 
-  /// Keeps the process-wide deferred gauge in step. Requires queue_mutex.
-  void SetQueuedCountLocked(std::size_t count) {
-    detail::RequestsDeferred().fetch_add(
-        static_cast<std::int64_t>(count) -
-            static_cast<std::int64_t>(queued_count),
-        std::memory_order_relaxed);
-    queued_count = count;
-  }
-
   [[nodiscard]] std::shared_ptr<ScheduledRequest> PopQueued() {
-    const std::lock_guard<std::mutex> lock(queue_mutex);
-    if (queued_clients.empty()) {
-      return {};
-    }
-    auto client = std::move(queued_clients.front());
-    queued_clients.pop_front();
-    auto request = std::move(client.requests.front());
-    client.requests.pop_front();
-    // Admission reserves a session before potentially slow cache preparation.
-    // Publish the transfer before removing it from the deferred count. Admit
-    // holds fewer than capacity requests here, so a session is always free.
-    {
-      const std::lock_guard<std::mutex> sessions_lock(sessions->mutex);
-      const auto free = std::find(sessions->requests.begin(),
-                                  sessions->requests.end(), nullptr);
-      if (free != sessions->requests.end()) {
-        request->session =
-            static_cast<std::size_t>(free - sessions->requests.begin());
-        *free = request;
-      }
-    }
-    request->counted_processing = true;
-    detail::RequestsProcessing().fetch_add(1, std::memory_order_relaxed);
-    SetQueuedCountLocked(queued_count - 1);
-    if (!client.requests.empty()) {
-      queued_clients.push_back(std::move(client));
-    }
-    return request;
+    auto popped = admission_queue.AdmitNextPayload(
+        [this](const std::shared_ptr<ScheduledRequest>& request) {
+          // Admission reserves a session before potentially slow cache
+          // preparation and increments processing before deferred decrements.
+          {
+            const std::lock_guard<std::mutex> sessions_lock(sessions->mutex);
+            const auto free = std::find(sessions->requests.begin(),
+                                        sessions->requests.end(), nullptr);
+            if (free != sessions->requests.end()) {
+              request->session =
+                  static_cast<std::size_t>(free - sessions->requests.begin());
+              *free = request;
+            }
+          }
+          request->counted_processing = true;
+          detail::RequestsProcessing().fetch_add(1, std::memory_order_relaxed);
+        },
+        /*skip_cancelled_or_expired=*/false);
+    return popped.has_value() ? std::move(popped->second)
+                              : std::shared_ptr<ScheduledRequest>{};
   }
 
   [[nodiscard]] bool RemoveQueued(
       const std::shared_ptr<ScheduledRequest>& request) {
-    const std::lock_guard<std::mutex> lock(queue_mutex);
-    for (auto client = queued_clients.begin(); client != queued_clients.end();
-         ++client) {
-      const auto queued =
-          std::find(client->requests.begin(), client->requests.end(), request);
-      if (queued == client->requests.end()) {
-        continue;
-      }
-      client->requests.erase(queued);
-      SetQueuedCountLocked(queued_count - 1);
-      if (client->requests.empty()) {
-        queued_clients.erase(client);
-      }
-      return true;
-    }
-    return false;
+    return request != nullptr && request->admission_ticket != 0 &&
+           admission_queue.RemoveQueued(request->admission_ticket).has_value();
   }
 
   [[nodiscard]] std::vector<TextGenerationBackend::SessionState>
@@ -751,14 +724,21 @@ struct TextGenerationScheduler::Impl {
 
   [[nodiscard]] std::vector<std::shared_ptr<ScheduledRequest>> QueuedSnapshot()
       const {
-    const std::lock_guard<std::mutex> lock(queue_mutex);
+    auto raw = admission_queue.QueuedSnapshot();
     std::vector<std::shared_ptr<ScheduledRequest>> snapshot;
-    snapshot.reserve(queued_count);
-    for (const auto& client : queued_clients) {
-      snapshot.insert(snapshot.end(), client.requests.begin(),
-                      client.requests.end());
+    snapshot.reserve(raw.size());
+    for (auto& [ticket, request] : raw) {
+      (void)ticket;
+      snapshot.push_back(std::move(request));
     }
     return snapshot;
+  }
+
+  void FinishAdmissionTicket(
+      const std::shared_ptr<ScheduledRequest>& request) noexcept {
+    if (request != nullptr && request->admission_ticket != 0) {
+      admission_queue.Finish(request->admission_ticket);
+    }
   }
 
   void FinalizeResult(const std::shared_ptr<ScheduledRequest>& request,
@@ -796,8 +776,10 @@ struct TextGenerationScheduler::Impl {
       FinalizeResult(request, TextGenerationBackend::FinishReason::kCancelled);
       LogDecodeProgress(request, true);
       RecordRequestMetrics(request->result);
+      FinishAdmissionTicket(request);
       PublishTerminal(request, {}, true);
     } catch (...) {
+      FinishAdmissionTicket(request);
       PublishTerminal(request, std::current_exception(), true);
     }
   }
@@ -822,12 +804,14 @@ struct TextGenerationScheduler::Impl {
     }
     request->result.completion_tokens = request->result.tokens.size();
     LogDecodeProgress(request, true);
+    FinishAdmissionTicket(request);
     PublishTerminal(request, std::move(failure), true);
   }
 
   void MarkDeviceLost(std::string_view reason) noexcept {
     if (device_lost.exchange(true, std::memory_order_acq_rel))
       return;
+    admission_queue.SetDeviceLost();
     detail::DeviceLostTotal().fetch_add(1, std::memory_order_relaxed);
     try {
       Logger::Error("scheduler", "event=device_lost remedy=restart reason=" +
@@ -978,6 +962,7 @@ struct TextGenerationScheduler::Impl {
     // Recorded here rather than by the HTTP adapter, so a client that leaves
     // before reading the result still counts.
     RecordRequestMetrics(request->result);
+    FinishAdmissionTicket(request);
     PublishTerminal(request);
   }
 
@@ -1926,18 +1911,8 @@ struct TextGenerationScheduler::Impl {
       std::deque<std::shared_ptr<ScheduledRequest>>& prefilling,
       std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
       std::deque<std::shared_ptr<ScheduledRequest>>& waiting) noexcept {
-    std::vector<std::shared_ptr<ScheduledRequest>> remaining_queued;
-    {
-      const std::lock_guard<std::mutex> lock(queue_mutex);
-      remaining_queued.reserve(queued_count);
-      for (auto& client : queued_clients) {
-        std::move(client.requests.begin(), client.requests.end(),
-                  std::back_inserter(remaining_queued));
-      }
-      queued_clients.clear();
-      SetQueuedCountLocked(0);
-    }
-    for (const auto& request : remaining_queued) {
+    for (auto& [ticket, request] : admission_queue.CancelAll()) {
+      (void)ticket;
       CompleteCancelled(request);
     }
     for (const auto& request : prefilling) {
@@ -2364,7 +2339,7 @@ struct TextGenerationScheduler::Impl {
       if (device_lost.load(std::memory_order_acquire))
         break;
       loop_working.store(true, std::memory_order_relaxed);
-      if (queued_count == 0)
+      if (admission_queue.queued() == 0)
         starved_decode_deferrals = 0;
       ProcessQueuedCancellations();
 
@@ -2391,24 +2366,25 @@ struct TextGenerationScheduler::Impl {
       if (device_lost.load(std::memory_order_acquire))
         break;
       if (prefilling.empty() && decoding.empty()) {
-        std::unique_lock<std::mutex> lock(queue_mutex);
         const auto wake = [&] {
-          return stop_token.stop_requested() || stopping ||
-                 (queued_count != 0 &&
+          return stop_token.stop_requested() || admission_queue.stopping() ||
+                 admission_queue.device_lost() ||
+                 (admission_queue.queued() != 0 &&
                   capturing.size() + waiting.size() < runner_pool->capacity());
         };
         if (capturing.empty() && waiting.empty()) {
           // Only the idle wait has a timer. Arrival interrupts it immediately;
           // no clock checks or device polling are added to active work units.
           while (!wake()) {
-            loop_working.store(false, std::memory_order_relaxed);
-            const bool woken = queue_condition.wait_for(
-                lock, scheduler_policy.device_probe_interval, wake);
-            progress.fetch_add(1, std::memory_order_relaxed);
-            loop_working.store(true, std::memory_order_relaxed);
-            if (woken)
+            const bool woken = admission_queue.WaitIdleFor(
+                scheduler_policy.device_probe_interval, wake,
+                [&] { loop_working.store(false, std::memory_order_relaxed); },
+                [&] {
+                  progress.fetch_add(1, std::memory_order_relaxed);
+                  loop_working.store(true, std::memory_order_relaxed);
+                });
+            if (woken || wake())
               break;
-            lock.unlock();
             try {
               if (runner_pool->runner().PollDevice() ==
                   TextModelRunner::DeviceProbeStatus::kLost)
@@ -2416,12 +2392,12 @@ struct TextGenerationScheduler::Impl {
             } catch (...) {
               // An inconclusive probe must not kill a usable model.
             }
-            lock.lock();
             if (device_lost.load(std::memory_order_acquire))
               break;
           }
-        } else
-          queue_condition.wait_for(lock, std::chrono::milliseconds(1), wake);
+        } else {
+          admission_queue.WaitIdleFor(std::chrono::milliseconds(1), wake);
+        }
         continue;
       }
 
@@ -2467,7 +2443,7 @@ struct TextGenerationScheduler::Impl {
           decoding.begin(), decoding.end(), [](const auto& request) {
             return request->result.tokens.size() + 64 >= request->token_limit;
           });
-      if (queued_count != 0 && !decoding.empty() && !due_decoder &&
+      if (admission_queue.queued() != 0 && !decoding.empty() && !due_decoder &&
           near_done_decoder && starved_decode_deferrals < 32) {
         ++starved_decode_deferrals;
         MarkAllDecodersDue(decoding);
@@ -2564,11 +2540,7 @@ struct TextGenerationScheduler::Impl {
   bool multi_token_decode{false};
   bool batched_multi_token_decode{false};
   std::size_t batched_multi_token_decode_max_width{0};
-  mutable std::mutex queue_mutex;
-  std::condition_variable queue_condition;
-  std::deque<PendingClient> queued_clients;
-  std::size_t queued_count{0};
-  bool stopping{false};
+  core::AdmissionQueue<std::shared_ptr<ScheduledRequest>> admission_queue;
   std::atomic<bool> device_lost{false};
   const std::exception_ptr device_lost_failure =
       std::make_exception_ptr(TextGenerationError(
@@ -2870,55 +2842,39 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   // Snapshot for the admission log: once the block below unlocks, the
   // scheduler thread owns the request and moves `prompt` out of it, so any
   // later read of the vector would race even though the shared_ptr survives.
-  std::size_t admitted_prompt_tokens = 0;
-  {
-    const std::lock_guard<std::mutex> lock(impl_->queue_mutex);
-    if (impl_->stopping) {
+  const std::size_t admitted_prompt_tokens = request->prompt.size();
+  const auto submit_res = impl_->admission_queue.SubmitPayload(
+      request->client_id, request, request->deadline,
+      [&](std::uint64_t ticket, std::size_t q_depth, std::size_t cq_depth) {
+        request->admission_ticket = ticket;
+        request->result.queue_depth_at_submit = q_depth;
+        request->result.client_queue_depth_at_submit = cq_depth;
+      });
+  if (submit_res.ticket == 0) {
+    if (submit_res.reject == core::AdmissionRejectReason::kStopping) {
       throw TextGenerationError(TextGenerationErrorCode::kSchedulerStopping,
                                 "text generation scheduler is stopping");
     }
-    if (impl_->device_lost.load(std::memory_order_acquire)) {
+    if (submit_res.reject == core::AdmissionRejectReason::kDeviceLost ||
+        impl_->device_lost.load(std::memory_order_acquire)) {
       throw TextGenerationError(TextGenerationErrorCode::kDeviceLost,
                                 kDeviceLostMessage);
     }
-    if (impl_->queued_count >= impl_->scheduler_policy.max_pending_requests) {
-      refused = true;
+    refused = true;
+    decision_queued = submit_res.queued_depth;
+    decision_client_queued = submit_res.client_queued_depth;
+    if (submit_res.reject == core::AdmissionRejectReason::kClientQueueFull) {
+      refusal_code = TextGenerationErrorCode::kClientQueueFull;
+      refusal_message = "text generation client pending queue is full";
+      refusal_reason = "client_quota";
+    } else {
       refusal_code = TextGenerationErrorCode::kQueueFull;
       refusal_message = "text generation pending queue is full";
       refusal_reason = "queue_full";
-      decision_queued = impl_->queued_count;
-    } else {
-      auto client = std::find_if(
-          impl_->queued_clients.begin(), impl_->queued_clients.end(),
-          [&](const PendingClient& pending) {
-            return pending.client_id == request->client_id;
-          });
-      if (client != impl_->queued_clients.end() &&
-          client->requests.size() >=
-              impl_->scheduler_policy.max_pending_requests_per_client) {
-        refused = true;
-        refusal_code = TextGenerationErrorCode::kClientQueueFull;
-        refusal_message = "text generation client pending queue is full";
-        refusal_reason = "client_quota";
-        decision_queued = impl_->queued_count;
-        decision_client_queued = client->requests.size();
-      } else {
-        if (client == impl_->queued_clients.end()) {
-          impl_->queued_clients.push_back({
-              .client_id = request->client_id,
-              .requests = {},
-          });
-          client = std::prev(impl_->queued_clients.end());
-        }
-        decision_queued = impl_->queued_count + 1;
-        decision_client_queued = client->requests.size() + 1;
-        request->result.queue_depth_at_submit = decision_queued;
-        request->result.client_queue_depth_at_submit = decision_client_queued;
-        admitted_prompt_tokens = request->prompt.size();
-        client->requests.push_back(request);
-        impl_->SetQueuedCountLocked(impl_->queued_count + 1);
-      }
     }
+  } else {
+    decision_queued = submit_res.queued_depth;
+    decision_client_queued = submit_res.client_queued_depth;
   }
   if (refused) {
     if (Logger::Enabled(LogLevel::kDebug)) {
@@ -2939,7 +2895,6 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
     }
     throw TextGenerationError(refusal_code, refusal_message);
   }
-  impl_->queue_condition.notify_one();
   // Emitted after the notification, not between the enqueue and it: these
   // lines allocate, and a failure there would throw out of Submit for a
   // request the scheduler is already running. The counters are the locals

@@ -2,9 +2,38 @@
 // in hip/session.hip.
 #include "src/models/embeddinggemma2/engine.hpp"
 
+#include "src/core/compute/npu/npu_scheduler.hpp"
+
 #include <utility>
 
 namespace mbufo::models::embeddinggemma2 {
+
+bool EngineModel::TryNpuEmbed(std::span<const std::uint32_t> ids,
+                              std::optional<EmbedResult>* out,
+                              std::string* error_msg) {
+  const bool npu_ready =
+      npu_scheduler_ != nullptr && !npu_scheduler_->device_lost();
+  if (npu::DecideNpuEmbed(npu_config_, ids.size(), false, npu_ready) !=
+      npu::EmbedNpuRoute::kIron || npu_scheduler_ == nullptr) {
+    return false;
+  }
+  const auto sched_res = mbufo::core::npu::RunLaneSync(
+      *npu_scheduler_,
+      mbufo::core::npu::NpuWorkDesc{
+          .lane = mbufo::core::npu::NpuWorkLane::kEmbedding,
+          .seq_len = ids.size(),
+          .client = "embeddinggemma2"},
+      []() {
+        return mbufo::core::npu::NpuWorkResult{
+            .ok = false,
+            .error = "embeddinggemma2 NPU runtime bridge not bound yet"};
+      });
+  if (error_msg != nullptr) {
+    *error_msg = "embeddinggemma2 NPU Embed: " + sched_res.error;
+  }
+  *out = std::nullopt;
+  return true;
+}
 
 #ifndef ENGINE_ENABLE_HIP
 struct EngineModel::HipState {};
@@ -12,9 +41,9 @@ EngineModel::EngineModel() = default;
 EngineModel::~EngineModel() = default;
 std::optional<EmbedResult> EngineModel::Embed(
     std::span<const std::uint32_t> ids, std::string* error_msg) {
-  if (npu::DecideNpuEmbed(npu_config_, ids.size()) ==
-      npu::EmbedNpuRoute::kIron) {
-    // Future NPU IRON prefill dispatch seam (zero-change while kNone).
+  std::optional<EmbedResult> npu_out;
+  if (TryNpuEmbed(ids, &npu_out, error_msg)) {
+    return npu_out;
   }
   if (error_msg != nullptr)
     *error_msg = "EmbeddingGemma 2 requires the HIP backend";

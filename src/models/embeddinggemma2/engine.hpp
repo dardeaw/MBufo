@@ -19,6 +19,10 @@
 #include "src/models/embeddinggemma2/npu_embed.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
+namespace mbufo::core::npu {
+class NpuScheduler;
+}
+
 namespace mbufo::models::embeddinggemma2 {
 
 /// Longest sequence one forward accepts. The model's native window is far
@@ -82,11 +86,25 @@ class EngineModel {
       const noexcept {
     return npu_config_;
   }
+  void SetNpuScheduler(mbufo::core::npu::NpuScheduler* scheduler) noexcept {
+    npu_scheduler_ = scheduler;
+  }
+  [[nodiscard]] mbufo::core::npu::NpuScheduler* npu_scheduler()
+      const noexcept {
+    return npu_scheduler_;
+  }
 
  private:
+  /// Runs the NPU admission + execution gate when Decided == kIron.
+  /// Returns true if the NPU lane handled (or explicitly refused) the call.
+  [[nodiscard]] bool TryNpuEmbed(std::span<const std::uint32_t> ids,
+                                 std::optional<EmbedResult>* out,
+                                 std::string* error_msg);
+
   EngineModel();
   std::unique_ptr<core::GgufReader> reader_;
   mbufo::npu::NpuLaneConfig npu_config_{};
+  mbufo::core::npu::NpuScheduler* npu_scheduler_{nullptr};
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
   Config config_;
   struct HipState;

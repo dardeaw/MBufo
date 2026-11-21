@@ -31,6 +31,10 @@
 #include "src/models/bge_m3/tokenizer.hpp"
 #include "src/models/bge_m3/weights.hpp"
 
+namespace mbufo::core::npu {
+class NpuScheduler;
+}
+
 namespace mbufo::models::bge_m3 {
 
 #ifdef ENGINE_ENABLE_HIP
@@ -88,11 +92,19 @@ class EngineSession {
       const noexcept {
     return npu_config_;
   }
+  void SetNpuScheduler(mbufo::core::npu::NpuScheduler* scheduler) noexcept {
+    npu_scheduler_ = scheduler;
+  }
+  [[nodiscard]] mbufo::core::npu::NpuScheduler* npu_scheduler()
+      const noexcept {
+    return npu_scheduler_;
+  }
 
  private:
   const EngineModel* model_;
   BgeM3Scratch scratch_;
   mbufo::npu::NpuLaneConfig npu_config_{};
+  mbufo::core::npu::NpuScheduler* npu_scheduler_{nullptr};
 };
 
 /// Immutable, shareable bge-m3 model: GGUF storage plus the F32 compute

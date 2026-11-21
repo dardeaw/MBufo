@@ -22,12 +22,17 @@
 //   answer(noul)   = {"type":"noul","noul": p_true}
 // 錯誤一律 422 {"detail": reason}；questions 缺失/空亦 422。
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+#include "src/core/compute/npu/npu_lane.hpp"
+#include "src/core/compute/npu/npu_scheduler.hpp"
 
 namespace mbufo::models::d3_decide {
 
@@ -96,5 +101,60 @@ struct DecideResult {
   std::map<std::string, DecideAnswer> answers;
   std::string error;
 };
+
+enum class DecideNpuRoute : std::uint8_t { kNone = 0, kIron };
+
+[[nodiscard]] inline DecideNpuRoute DecideNpuDecisionRoute(
+    const mbufo::npu::NpuLaneConfig& config, std::size_t question_count,
+    bool weights_resident = false, bool device_ready = false) noexcept {
+  if (config.decide && weights_resident && device_ready && question_count > 0) {
+    return DecideNpuRoute::kIron;
+  }
+  return DecideNpuRoute::kNone;
+}
+
+[[nodiscard]] inline mbufo::core::npu::NpuWorkResult RunDecideSync(
+    mbufo::core::npu::NpuScheduler& scheduler, const DecideRequest& req,
+    bool weights_resident = false,
+    mbufo::core::npu::NpuWork custom_work = {}) {
+  if (req.questions.empty()) {
+    return mbufo::core::npu::NpuWorkResult{
+        .ok = false, .error = "d3-decide empty questions"};
+  }
+  const bool npu_ready = !scheduler.device_lost();
+  if (DecideNpuDecisionRoute(scheduler.config(), req.questions.size(),
+                             weights_resident, npu_ready) !=
+      DecideNpuRoute::kIron) {
+    return mbufo::core::npu::NpuWorkResult{
+        .ok = false, .error = "npu-disabled-or-unready"};
+  }
+  if (!custom_work) {
+    custom_work = []() {
+      return mbufo::core::npu::NpuWorkResult{
+          .ok = false,
+          .error = "d3-decide NPU IRON runtime bridge not bound yet"};
+    };
+  }
+  return mbufo::core::npu::RunLaneSync(
+      scheduler,
+      mbufo::core::npu::NpuWorkDesc{
+          .lane = mbufo::core::npu::NpuWorkLane::kDecide,
+          .seq_len = req.questions.size(),
+          .client = "d3-decide",
+          .coalesce_key = "d3-decide"},
+      std::move(custom_work));
+}
+
+[[nodiscard]] inline mbufo::core::npu::NpuWorkResult RunDecideSync(
+    mbufo::core::npu::NpuScheduler* scheduler, const DecideRequest& req,
+    bool weights_resident = false,
+    mbufo::core::npu::NpuWork custom_work = {}) {
+  if (scheduler == nullptr) {
+    return mbufo::core::npu::NpuWorkResult{
+        .ok = false, .error = "npu-disabled-or-unready"};
+  }
+  return RunDecideSync(*scheduler, req, weights_resident,
+                       std::move(custom_work));
+}
 
 }  // namespace mbufo::models::d3_decide

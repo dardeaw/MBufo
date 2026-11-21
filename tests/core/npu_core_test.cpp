@@ -6,16 +6,21 @@
 #include "src/core/compute/npu/npu_safetensors_bridge.hpp"
 #include "src/core/compute/npu/npu_scheduler.hpp"
 #include "src/models/bge_m3/npu_embed.hpp"
+#include "src/models/bge_reranker/npu_score.hpp"
+#include "src/models/d3_decide/d3_config.hpp"
 #include "src/models/embeddinggemma2/npu_embed.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -295,6 +300,270 @@ void TestDeviceLockAndHrxSeam() {
 #endif
 }
 
+void TestSharedAdmissionQueue() {
+  using mbufo::core::AdmissionPolicy;
+  using mbufo::core::AdmissionQueue;
+  using mbufo::core::AdmissionRejectReason;
+
+  AdmissionQueue<std::string> q(AdmissionPolicy{
+      .max_pending = 4,
+      .max_pending_per_client = 2,
+      .request_timeout = std::chrono::milliseconds{0},
+  });
+  std::atomic<std::int64_t> gauge{0};
+  q.SetQueuedDeltaCallback([&](std::int64_t delta) { gauge.fetch_add(delta); });
+
+  const auto r1 = q.SubmitPayload("c1", "c1-a");
+  const auto r2 = q.SubmitPayload("c1", "c1-b");
+  const auto r3 = q.SubmitPayload("c1", "c1-c");
+  assert(r1.ticket > 0 && r2.ticket > 0);
+  assert(r3.ticket == 0 && r3.reject == AdmissionRejectReason::kClientQueueFull);
+
+  const auto r4 = q.SubmitPayload("c2", "c2-a");
+  const auto r5 = q.SubmitPayload("c3", "c3-a");
+  const auto r6 = q.SubmitPayload("c4", "c4-a");
+  assert(r4.ticket > 0 && r5.ticket > 0);
+  assert(r6.ticket == 0 && r6.reject == AdmissionRejectReason::kQueueFull);
+  assert(q.queued() == 4 && gauge.load() == 4);
+
+  // Round-robin fairness across client buckets: c1-a, c2-a, c3-a, c1-b.
+  std::vector<std::string> order;
+  while (auto pop = q.AdmitNextPayload()) {
+    assert(q.active() == 1);
+    q.MarkRunning(pop->first);
+    order.push_back(pop->second);
+    q.Finish(pop->first);
+    assert(q.active() == 0);
+  }
+  assert((order == std::vector<std::string>{"c1-a", "c2-a", "c3-a", "c1-b"}));
+  assert(q.queued() == 0 && q.pending() == 0 && gauge.load() == 0);
+
+  // Single-ticket Cancel + Wait, and CancelAll drain.
+  const auto tc1 = q.SubmitPayload("c1", "x1");
+  const auto tc2 = q.SubmitPayload("c2", "x2");
+  assert(q.Cancel(tc1.ticket, false));
+  const auto w1 = q.Wait(tc1.ticket);
+  assert(!w1.admitted && w1.reason == AdmissionRejectReason::kCancelled);
+  q.Finish(tc1.ticket);
+  auto drained = q.CancelAll();
+  assert(drained.size() == 1 && drained[0].first == tc2.ticket);
+  assert(q.queued() == 0 && gauge.load() == 0);
+
+  // Per-request timeout.
+  const auto t_exp = q.SubmitWithTimeout("c1", "expire",
+                                         std::chrono::milliseconds{15});
+  assert(t_exp.ticket > 0);
+  const auto w_exp = q.Wait(t_exp.ticket);
+  assert(!w_exp.admitted && w_exp.reason == AdmissionRejectReason::kTimeout);
+  q.Finish(t_exp.ticket);
+  assert(q.queued() == 0 && gauge.load() == 0);
+
+  // Sticky device-lost circuit breaker.
+  q.SetDeviceLost();
+  assert(q.device_lost());
+  const auto r_lost = q.SubmitPayload("c1", "blocked");
+  assert(r_lost.ticket == 0 && r_lost.reject == AdmissionRejectReason::kDeviceLost);
+}
+
+void TestNpuSchedulerPumpAndCoalesce() {
+  using mbufo::core::AdmissionRejectReason;
+
+  // Disabled shortcut never spawns or accepts work.
+  {
+    NpuScheduler disabled_sched(mbufo::npu::NpuLaneConfig{});
+    const auto res = disabled_sched.Submit(
+        NpuWorkDesc{.lane = NpuWorkLane::kEmbedding, .seq_len = 8},
+        []() { return NpuWorkResult{.ok = true}; });
+    assert(!res.ok && res.ticket_id == 0 && res.error == "npu-disabled");
+    assert(disabled_sched.pending() == 0);
+  }
+
+  // Pump + external NpuDeviceLock contention + cancel/timeout + coalescing.
+  {
+    NpuDeviceLock dev_lock;
+    mbufo::npu::NpuLaneConfig cfg;
+    cfg.embedding = true;
+    cfg.reranker = true;
+    cfg.decide = true;
+    mbufo::core::NpuAdmissionPolicy policy{
+        .max_pending = 5,
+        .max_pending_per_client = 3,
+        .request_timeout = std::chrono::milliseconds{0},
+    };
+    NpuSchedulerOptions opts{
+        .max_coalesce_batch = 4,
+        .lock_acquire_timeout = std::chrono::milliseconds{5},
+        .idle_poll_interval = std::chrono::milliseconds{5},
+    };
+    std::atomic<int> coalesce_calls{0};
+    NpuScheduler sched(
+        cfg, policy, &dev_lock, opts,
+        [&](std::vector<NpuBatchEntry>& entries) {
+          // Pump must own NpuDeviceLock while running the coalesced batch
+          // (checked from a helper thread to avoid recursive timed_mutex UB).
+          std::thread probe([&] {
+            NpuDeviceLock::Hold h(&dev_lock, std::chrono::milliseconds{0});
+            assert(!h.holds());
+          });
+          probe.join();
+          coalesce_calls.fetch_add(1);
+          for (std::size_t i = 0; i < entries.size(); ++i) {
+            entries[i].result.ok = true;
+            entries[i].result.error =
+                "coalesced:" + std::to_string(entries.size()) + ":" +
+                entries[i].desc.client;
+          }
+        });
+
+    // External holder blocks admission until released.
+    NpuDeviceLock::Hold ext_hold(&dev_lock, std::chrono::milliseconds{50});
+    assert(ext_hold.holds());
+
+    auto e1 = sched.SubmitAsync(
+        NpuWorkDesc{.lane = NpuWorkLane::kEmbedding,
+                    .seq_len = 64,
+                    .client = "emb_client",
+                    .coalesce_key = "emb-64"},
+        []() { return NpuWorkResult{.ok = true}; });
+    auto e2 = sched.SubmitAsync(
+        NpuWorkDesc{.lane = NpuWorkLane::kEmbedding,
+                    .seq_len = 64,
+                    .client = "emb_client",
+                    .coalesce_key = "emb-64"},
+        []() { return NpuWorkResult{.ok = true}; });
+    auto e3 = sched.SubmitAsync(
+        NpuWorkDesc{.lane = NpuWorkLane::kEmbedding,
+                    .seq_len = 64,
+                    .client = "emb_client",
+                    .coalesce_key = "emb-64"},
+        []() { return NpuWorkResult{.ok = true}; });
+    // Per-client cap check while blocked on device lock.
+    auto e_over = sched.Submit(
+        NpuWorkDesc{.lane = NpuWorkLane::kEmbedding,
+                    .seq_len = 64,
+                    .client = "emb_client",
+                    .coalesce_key = "emb-64"},
+        []() { return NpuWorkResult{.ok = true}; });
+    assert(!e_over.ok &&
+           e_over.reject_reason == AdmissionRejectReason::kClientQueueFull);
+
+    // Enqueue 1 cancel + 1 short timeout -> hits max_pending=5.
+    auto h_cancel = sched.SubmitAsync(
+        NpuWorkDesc{.lane = NpuWorkLane::kEmbedding,
+                    .seq_len = 64,
+                    .client = "cancel_client",
+                    .coalesce_key = "emb-64"},
+        []() { return NpuWorkResult{.ok = true}; });
+    auto h_timeout = sched.SubmitAsync(
+        NpuWorkDesc{.lane = NpuWorkLane::kEmbedding,
+                    .seq_len = 64,
+                    .client = "timeout_client",
+                    .coalesce_key = "emb-64",
+                    .timeout = std::chrono::milliseconds{15}},
+        []() { return NpuWorkResult{.ok = true}; });
+    assert(e1.valid() && e2.valid() && e3.valid() && h_cancel.valid() &&
+           h_timeout.valid());
+
+    // Queue full (5 items pending).
+    auto q_full = sched.Submit(
+        NpuWorkDesc{.lane = NpuWorkLane::kReranker,
+                    .seq_len = 16,
+                    .client = "full_client"},
+        []() { return NpuWorkResult{.ok = true}; });
+    assert(!q_full.ok && q_full.reject_reason == AdmissionRejectReason::kQueueFull);
+
+    // Pump should not admit while external lock is held.
+    assert(sched.active() == 0);
+    assert(h_cancel.Cancel());
+    std::this_thread::sleep_for(std::chrono::milliseconds{35});
+    const auto r_cancel = h_cancel.Wait();
+    const auto r_timeout = h_timeout.Wait();
+    assert(!r_cancel.ok && r_cancel.reject_reason == AdmissionRejectReason::kCancelled);
+    assert(!r_timeout.ok && r_timeout.reject_reason == AdmissionRejectReason::kTimeout);
+
+    // Different lane must NOT coalesce with kEmbedding items.
+    auto rr = sched.SubmitAsync(
+        NpuWorkDesc{.lane = NpuWorkLane::kReranker,
+                    .seq_len = 16,
+                    .client = "rerank_client",
+                    .coalesce_key = "rerank-16"},
+        []() { return NpuWorkResult{.ok = true, .error = "single-rerank"}; });
+    assert(rr.valid());
+
+    // Release external device lock: pump admits 3-item coalesced batch + 1 rerank.
+    ext_hold.Reset();
+    const auto re1 = e1.Wait();
+    const auto re2 = e2.Wait();
+    const auto re3 = e3.Wait();
+    const auto r_rr = rr.Wait();
+    assert(re1.ok && re2.ok && re3.ok);
+    assert(re1.coalesced_batch_size == 3 && re2.coalesced_batch_size == 3 &&
+           re3.coalesced_batch_size == 3);
+    assert(coalesce_calls.load() == 1);
+    assert(r_rr.ok && r_rr.coalesced_batch_size == 1 &&
+           r_rr.error == "single-rerank");
+    assert(sched.pending() == 0);
+  }
+
+  // Device-lost propagation breaks queued + new requests immediately.
+  {
+    NpuDeviceLock dev_lock;
+    NpuDeviceLock::Hold ext_hold(&dev_lock, std::chrono::milliseconds{50});
+    mbufo::npu::NpuLaneConfig dec_cfg;
+    dec_cfg.decide = true;
+    NpuScheduler sched(dec_cfg, {}, &dev_lock);
+    auto h = sched.SubmitAsync(
+        NpuWorkDesc{.lane = NpuWorkLane::kDecide, .seq_len = 1},
+        []() { return NpuWorkResult{.ok = true}; });
+    assert(h.valid());
+    sched.SetDeviceLost();
+    assert(sched.device_lost());
+    const auto res_wait = h.Wait();
+    assert(!res_wait.ok && res_wait.reject_reason == AdmissionRejectReason::kDeviceLost);
+    const auto res_after = sched.Submit(
+        NpuWorkDesc{.lane = NpuWorkLane::kDecide, .seq_len = 1},
+        []() { return NpuWorkResult{.ok = true}; });
+    assert(!res_after.ok &&
+           res_after.reject_reason == AdmissionRejectReason::kDeviceLost);
+  }
+
+  // Reranker + Decide seam checks.
+  {
+    mbufo::npu::NpuLaneConfig off_cfg;
+    assert(mbufo::models::bge_reranker::npu::DecideNpuScore(off_cfg, 16, true,
+                                                             true) ==
+           mbufo::models::bge_reranker::npu::ScoreNpuRoute::kNone);
+    mbufo::npu::NpuLaneConfig rr_cfg;
+    rr_cfg.reranker = true;
+    assert(mbufo::models::bge_reranker::npu::DecideNpuScore(rr_cfg, 14, true,
+                                                             true) ==
+           mbufo::models::bge_reranker::npu::ScoreNpuRoute::kNone);
+    assert(mbufo::models::bge_reranker::npu::DecideNpuScore(rr_cfg, 16, false,
+                                                             true) ==
+           mbufo::models::bge_reranker::npu::ScoreNpuRoute::kNone);
+    assert(mbufo::models::bge_reranker::npu::DecideNpuScore(rr_cfg, 16, true,
+                                                             true) ==
+           mbufo::models::bge_reranker::npu::ScoreNpuRoute::kIron);
+
+    mbufo::models::d3_decide::DecideRequest d3_req;
+    mbufo::models::d3_decide::DecideQuestion d3_q;
+    d3_q.type = "noul";
+    d3_q.criteria = {{"false", "no"}, {"true", "yes"}};
+    d3_req.questions["q1"] = std::move(d3_q);
+    mbufo::npu::NpuLaneConfig d3_cfg;
+    d3_cfg.decide = true;
+    NpuScheduler sched(d3_cfg);
+    const auto off_d3 =
+        mbufo::models::d3_decide::RunDecideSync(sched, d3_req, false);
+    assert(!off_d3.ok && off_d3.error == "npu-disabled-or-unready");
+    const auto on_d3 = mbufo::models::d3_decide::RunDecideSync(
+        sched, d3_req, true, []() {
+          return NpuWorkResult{.ok = true, .error = "d3-ran"};
+        });
+    assert(on_d3.ok && on_d3.error == "d3-ran");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -303,6 +572,8 @@ int main() {
   TestPoolingAndRouteSeams();
   TestBfpAndSafetensorsBridge();
   TestDeviceLockAndHrxSeam();
+  TestSharedAdmissionQueue();
+  TestNpuSchedulerPumpAndCoalesce();
   std::cout << "ALL_NPU_CORE_TESTS_PASS\n";
   return 0;
 }

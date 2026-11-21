@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 
+#include "src/core/compute/npu/npu_scheduler.hpp"
 #include "src/core/pooling_norm.hpp"
 
 namespace mbufo::models::bge_m3 {
@@ -60,10 +61,20 @@ std::optional<EngineSession::SyncResult> EngineSession::Sync(
     return refuse("bge-m3 Sync: " + std::to_string(ids.size()) +
                   " tokens exceeds the window");
   }
-  if (npu::DecideNpuEmbed(npu_config_, ids.size()) ==
-      npu::EmbedNpuRoute::kIron) {
-    // Future in-process NPU execution + NpuPoolAndNormalizeBf16(..., kCls).
-    // Currently DecideNpuEmbed requires weights_resident=true and returns kNone.
+  const bool npu_ready = npu_scheduler_ != nullptr && !npu_scheduler_->device_lost();
+  if (npu::DecideNpuEmbed(npu_config_, ids.size(), false, npu_ready) ==
+      npu::EmbedNpuRoute::kIron && npu_scheduler_ != nullptr) {
+    const auto sched_res = mbufo::core::npu::RunLaneSync(
+        *npu_scheduler_,
+        mbufo::core::npu::NpuWorkDesc{
+            .lane = mbufo::core::npu::NpuWorkLane::kEmbedding,
+            .seq_len = ids.size(),
+            .client = "bge-m3"},
+        []() {
+          return mbufo::core::npu::NpuWorkResult{
+              .ok = false, .error = "bge-m3 NPU IRON xclbin not loaded yet"};
+        });
+    return refuse("bge-m3 NPU Sync: " + sched_res.error);
   }
 #ifdef ENGINE_ENABLE_HIP
   if (use_hip) {

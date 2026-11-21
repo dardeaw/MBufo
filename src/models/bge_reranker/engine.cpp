@@ -8,6 +8,7 @@
 #include <mutex>
 #include <utility>
 
+#include "src/core/compute/npu/npu_scheduler.hpp"
 #include "src/core/rerank_score.hpp"
 
 namespace mbufo::models::bge_reranker {
@@ -122,6 +123,24 @@ std::optional<EngineSession::ScoreResult> EngineSession::Score(
   if (ids.size() > kBgeRerankerMaxTokens) {
     return refuse("bge-reranker Score: " + std::to_string(ids.size()) +
                   " tokens exceeds the leg window");
+  }
+  const bool npu_ready =
+      npu_scheduler_ != nullptr && !npu_scheduler_->device_lost();
+  if (npu::DecideNpuScore(npu_config_, ids.size(), false, npu_ready) ==
+          npu::ScoreNpuRoute::kIron &&
+      npu_scheduler_ != nullptr) {
+    const auto sched_res = mbufo::core::npu::RunLaneSync(
+        *npu_scheduler_,
+        mbufo::core::npu::NpuWorkDesc{
+            .lane = mbufo::core::npu::NpuWorkLane::kReranker,
+            .seq_len = ids.size(),
+            .client = "bge-reranker"},
+        []() {
+          return mbufo::core::npu::NpuWorkResult{
+              .ok = false,
+              .error = "bge-reranker NPU IRON xclbin not loaded yet"};
+        });
+    return refuse("bge-reranker NPU Score: " + sched_res.error);
   }
   const auto& encoder = model_->Encoder();
   const std::size_t hidden = model_->Head().hidden_size;

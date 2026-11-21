@@ -26,10 +26,16 @@
 #include <string>
 #include <vector>
 
+#include "src/core/compute/npu/npu_lane.hpp"
 #include "src/models/bge_m3/engine.hpp"
 #include "src/models/bge_m3/forward.hpp"
 #include "src/models/bge_reranker/config.hpp"
+#include "src/models/bge_reranker/npu_score.hpp"
 #include "src/models/bge_reranker/weights.hpp"
+
+namespace mbufo::core::npu {
+class NpuScheduler;
+}  // namespace mbufo::core::npu
 
 namespace mbufo::models::bge_reranker {
 
@@ -79,9 +85,26 @@ public:
       bool use_hip, double* total_prefill_ms, std::size_t* prompt_tokens,
       std::string* error_msg = nullptr);
 
+  void SetNpuLaneConfig(mbufo::npu::NpuLaneConfig config) noexcept {
+    npu_config_ = std::move(config);
+  }
+  [[nodiscard]] const mbufo::npu::NpuLaneConfig& npu_lane_config()
+      const noexcept {
+    return npu_config_;
+  }
+  void SetNpuScheduler(mbufo::core::npu::NpuScheduler* scheduler) noexcept {
+    npu_scheduler_ = scheduler;
+  }
+  [[nodiscard]] mbufo::core::npu::NpuScheduler* npu_scheduler()
+      const noexcept {
+    return npu_scheduler_;
+  }
+
 private:
   const EngineModel* model_;
   bge_m3::BgeM3Scratch scratch_;
+  mbufo::npu::NpuLaneConfig npu_config_{};
+  mbufo::core::npu::NpuScheduler* npu_scheduler_{nullptr};
 };
 
 /// Immutable, shareable bge-reranker model: the bge_m3 encoder plus the F32
