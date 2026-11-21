@@ -885,7 +885,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               <div style="color:var(--muted);font-size:12px;">Select any loaded model (or Default Route) and send a message to verify simultaneous multi-model serving on :8741.</div>
             </div>
             <div class="pg-input-bar">
-              <input type="text" id="pg-input" placeholder="Ask something (e.g. '你是誰？用一句話回答')..." onkeydown="if(event.key==='Enter') sendPlayground()" />
+              <input type="text" id="pg-input" placeholder="Ask something (e.g. 'Who are you? Answer in one sentence')..." onkeydown="if(event.key==='Enter') sendPlayground()" />
               <button class="btn-primary" id="pg-send-btn" onclick="sendPlayground()">Send ↵</button>
             </div>
           </div>
@@ -1041,9 +1041,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     async function copyText(t) {
       try {
         await navigator.clipboard.writeText(t);
-        showToast('啟動指令已複製：' + t);
+        showToast('Launch command copied: ' + t);
       } catch (e) {
-        showToast('請手動複製啟動指令：' + t);
+        showToast('Copy the launch command manually: ' + t);
       }
     }
 
@@ -1051,9 +1051,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       const url = (base || '').replace(/\/$/, '');
       try {
         const res = await fetch(url + '/v1/models', { cache: 'no-store' });
-        showToast(`Sidecar ${url} 回應 HTTP ${res.status}（有回應即視為在線）`, res.ok ? false : true);
+        showToast(`Sidecar ${url} responded HTTP ${res.status}(any response counts as online)`, res.ok ? false : true);
       } catch (e) {
-        showToast(`Sidecar ${url} 無回應（offline），請用啟動指令拉起`, true);
+        showToast(`Sidecar ${url} not responding (offline); start it with the launch command`, true);
       }
     }
 
@@ -1453,8 +1453,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (m.sidecar) badges.push(`<span class="badge">sidecar :${m.default_port}</span>`);
 
         const actionsHtml = m.sidecar
-          ? `<button class="btn-sm" onclick='copyText(${JSON.stringify(m.launch_cmd || '')})'>📋 啟動指令</button>
-             <button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 探針</button>`
+          ? `<button class="btn-sm" onclick='copyText(${JSON.stringify(m.launch_cmd || '')})'>📋 Launch cmd</button>
+             <button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 Probe</button>`
           : (isLoaded
             ? `<button class="btn-sm" onclick="selectInPlayground('${m.id_suggestion}')">Use</button>`
             : `<button class="btn-sm" onclick='openLoadModal(${JSON.stringify(m)})'>⚙ Configure</button>
@@ -1467,7 +1467,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               ${badges.join('')}
             </div>
             <div class="cat-rel" title="${m.path}">${m.relative_path}</div>
-            ${m.sidecar ? `<div class="cat-rel" style="color:var(--muted);">POST ${m.endpoint} · 手動拉起，不開機自啟</div>` : ''}
+            ${m.sidecar ? `<div class="cat-rel" style="color:var(--muted);">POST ${m.endpoint} · manual start, never auto-start at boot</div>` : ''}
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0;">
             ${actionsHtml}

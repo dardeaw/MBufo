@@ -9,6 +9,7 @@
 #include <cmath>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -1162,7 +1163,7 @@ int RunServe(std::span<const char* const> args) {
     // q8 KV is the recommended default: it halves KV bytes with quality
     // held (measured on gfx1151 unified memory). f16 remains for hosts
     // that need exact KV arithmetic.
-    std::string kv_cache_quant = "q8";
+    std::string kv_cache_quant = "q4";
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
@@ -1273,8 +1274,11 @@ int RunServe(std::span<const char* const> args) {
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
     llm_parser.AddOption("", "--kv-quant", "MODE",
-                         "KV cache precision: f16 or q8 (default: q8)", "Model",
-                         &kv_cache_quant);
+                         "KV cache precision: f16 | q8 | q4 (K4V4) | k8v4 | "
+                         "k4v8 (default: q4). q4/k8v4/k4v8 ride the blocked-Q8 "
+                         "codec with packed 4-bit key/value grids "
+                         "(process-global via MBUFO_KV_Q4/V4)",
+                         "Model", &kv_cache_quant);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
@@ -1447,10 +1451,27 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;
     }
-    if (kv_cache_quant != "f16" && kv_cache_quant != "q8") {
-      std::cerr
-          << "Error: --kv-quant must be f16 or q8 (fp8 removed, use q8)\n";
+    if (kv_cache_quant != "f16" && kv_cache_quant != "q8" &&
+        kv_cache_quant != "q4" && kv_cache_quant != "k8v4" &&
+        kv_cache_quant != "k4v8") {
+      std::cerr << "Error: --kv-quant must be f16, q8, q4, k8v4 or k4v8\n";
       return 2;
+    }
+    // q4/k8v4/k4v8 ride the blocked-Q8 codec; the packed 4-bit key/value
+    // grids are process-global switches read lazily by the kernels
+    // (MBUFO_KV_Q4/V4), so the CLI owns them here, before any engine loads.
+    if (kv_cache_quant == "q4" || kv_cache_quant == "k8v4" ||
+        kv_cache_quant == "k4v8") {
+      const bool key4 = kv_cache_quant != "k8v4";
+      const bool val4 = kv_cache_quant != "k4v8";
+      ::setenv("MBUFO_KV_Q4", key4 ? "1" : "0", 1);
+      ::setenv("MBUFO_KV_V4", val4 ? "1" : "0", 1);
+      kv_cache_quant = "q8";
+    } else if (llm_parser.WasSupplied("--kv-quant") &&
+               kv_cache_quant == "q8") {
+      // An explicit q8 wins over any inherited 4-bit grid env vars.
+      ::setenv("MBUFO_KV_Q4", "0", 1);
+      ::setenv("MBUFO_KV_V4", "0", 1);
     }
     if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&
         (dflash_model_path.empty() || min_draft_tokens != 1)) {
@@ -1599,7 +1620,18 @@ int RunServe(std::span<const char* const> args) {
            build_artifact = std::string(MBUFO_RELEASE_VERSION " (" MBUFO_REVISION ")")](
               const server::AdminLoadRequest& spec,
               std::string* error)
-              -> std::shared_ptr<server::TextGenerationBackend> {
+               -> std::shared_ptr<server::TextGenerationBackend> {
+        // q4/k8v4/k4v8 grids are process-global (MBUFO_KV_Q4/V4), so a
+        // per-model spec can only ask for f16/q8; the global modes come
+        // from --kv-quant on the server command line.
+        if (spec.kv_cache_quant != "f16" && spec.kv_cache_quant != "q8") {
+          if (error != nullptr) {
+            *error = "kv_cache_quant '" + spec.kv_cache_quant +
+                     "' is process-global: pass --kv-quant q4|k8v4|k4v8 on the "
+                     "server command line instead of per-model";
+          }
+          return nullptr;
+        }
         server::TextSpeculativeConfig req_spec{};
         // An omitted/zero max_draft_tokens means "the serve default" (--draft-tokens), not "propose nothing": a zero
         // limit made a dflash2 /admin/load run every round with an empty draft and no speedup.
