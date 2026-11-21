@@ -557,6 +557,9 @@ struct TextGenerationScheduler::Impl {
         runner_pool->runner()
             .Descriptor()
             .capabilities.batched_multi_token_decode_max_width;
+    mixed_prefill_decode_supported = runner_pool->runner()
+                                         .Descriptor()
+                                         .capabilities.mixed_prefill_decode;
     device_lost_requests.reserve(runner_pool->capacity());
     admission_queue.SetQueuedDeltaCallback([](std::int64_t delta) {
       detail::RequestsDeferred().fetch_add(delta, std::memory_order_relaxed);
@@ -2165,6 +2168,8 @@ struct TextGenerationScheduler::Impl {
       std::deque<std::shared_ptr<ScheduledRequest>>& prefilling,
       std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
       std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
+    if (!mixed_prefill_decode_supported)
+      return false;
     static const bool mixed_batches = [] {
       const char* e = std::getenv("MBUFO_MIXED_BATCH");
       return e == nullptr || e[0] != '0';
@@ -2226,7 +2231,7 @@ struct TextGenerationScheduler::Impl {
       step = prefill_req->runner_request.PrefillWithCoworkers(
           budget, decode_reqs, failures);
     } catch (...) {
-      const auto failure = std::current_exception();
+      const auto failure = ClassifyFailure(std::current_exception());
       for (const auto& item : prepared) {
         if (!CompleteIfStopped(item.request))
           CompleteFailure(item.request, failure);
@@ -2451,7 +2456,8 @@ struct TextGenerationScheduler::Impl {
       }
       if (!prefilling.empty() && !decoding.empty() &&
           (!due_decoder || assemble_initial_batch)) {
-        if (TryStepMixedBatch(prefilling, decoding, capturing)) {
+        if (!assemble_initial_batch &&
+            TryStepMixedBatch(prefilling, decoding, capturing)) {
           continue;
         }
         auto chosen = PickPrefill(prefilling);
@@ -2539,6 +2545,7 @@ struct TextGenerationScheduler::Impl {
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
   bool batched_multi_token_decode{false};
+  bool mixed_prefill_decode_supported{false};
   std::size_t batched_multi_token_decode_max_width{0};
   core::AdmissionQueue<std::shared_ptr<ScheduledRequest>> admission_queue;
   std::atomic<bool> device_lost{false};

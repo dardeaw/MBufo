@@ -1286,12 +1286,12 @@ void TestShortArrivalBehindWaitingPrefill() {
              short_request.Wait().tokens == ExpectedTokens(3, 1),
          "three independent requests preserve their outputs");
   const auto events = control->Events();
+  const auto short_prefill = EventIndex(events, EventKind::kPrefill, 3);
   const auto second_start = EventIndex(events, EventKind::kPrefill, 2);
-  Expect(events[second_start].count == 2,
-         "a long peer gets bounded work ahead of a waiting short request");
-  Expect(second_start < EventIndex(events, EventKind::kPrefill, 3) &&
-             EventIndex(events, EventKind::kAdvance, 3) <
-                 EventIndex(events, EventKind::kPrefill, 1, 1),
+  Expect(short_prefill < second_start,
+         "SRTF prefill serves a waiting short prompt ahead of a longer peer");
+  Expect(EventIndex(events, EventKind::kAdvance, 3) <
+             EventIndex(events, EventKind::kPrefill, 1, 1),
          "the short newcomer gets its first token without repeating the round");
 }
 

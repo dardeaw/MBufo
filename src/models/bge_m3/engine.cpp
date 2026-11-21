@@ -6,9 +6,72 @@
 #include <mutex>
 
 #include "src/core/compute/npu/npu_scheduler.hpp"
+#ifdef MBUFO_ENABLE_NPU
+#include "src/core/compute/npu/npu_bge_runtime.hpp"
+#endif
 #include "src/core/pooling_norm.hpp"
 
+#include <cstdlib>
+
 namespace mbufo::models::bge_m3 {
+
+#ifdef MBUFO_ENABLE_NPU
+struct EngineModel::NpuState {
+  mbufo::core::npu::NpuBgeRuntime runtime;
+};
+#else
+struct EngineModel::NpuState {};
+#endif
+
+bool EngineModel::LoadNpuWeights(const std::string& kernel_dir,
+                                 std::string* error_msg) {
+#ifdef MBUFO_ENABLE_NPU
+  std::string dir = kernel_dir;
+  if (dir.empty()) {
+    if (const char* env = std::getenv("MBUFO_NPU_BGE_KERNELS");
+        env != nullptr && env[0] != '\0') {
+      dir = env;
+    } else {
+      dir = "/mnt/nvme-data/mbufo-models/npu-kernels/bge_m64";
+    }
+  }
+  auto state = std::make_shared<NpuState>();
+  if (!state->runtime.Init(f32_, dir, error_msg)) {
+    npu_.reset();
+    npu_weights_resident_ = false;
+    return false;
+  }
+  npu_ = std::move(state);
+  npu_weights_resident_ = true;
+  return true;
+#else
+  (void)kernel_dir;
+  if (error_msg != nullptr) {
+    *error_msg = "bge-m3 NPU runtime disabled (MBUFO_ENABLE_NPU=OFF)";
+  }
+  return false;
+#endif
+}
+
+bool EngineModel::RunNpuCls(std::span<const std::uint32_t> ids,
+                            std::vector<float>* cls_out, double* prefill_ms,
+                            std::string* error_msg) const {
+#ifdef MBUFO_ENABLE_NPU
+  if (!npu_weights_resident_ || npu_ == nullptr) {
+    if (error_msg != nullptr) *error_msg = "bge-m3 NPU weights not loaded";
+    return false;
+  }
+  return npu_->runtime.ForwardCls(ids, f32_, cls_out, prefill_ms, error_msg);
+#else
+  (void)ids;
+  (void)cls_out;
+  (void)prefill_ms;
+  if (error_msg != nullptr) {
+    *error_msg = "bge-m3 NPU runtime disabled (MBUFO_ENABLE_NPU=OFF)";
+  }
+  return false;
+#endif
+}
 
 #ifndef ENGINE_ENABLE_HIP
 // Out-of-line so the destructor is defined exactly once per build mode;
@@ -62,19 +125,36 @@ std::optional<EngineSession::SyncResult> EngineSession::Sync(
                   " tokens exceeds the window");
   }
   const bool npu_ready = npu_scheduler_ != nullptr && !npu_scheduler_->device_lost();
-  if (npu::DecideNpuEmbed(npu_config_, ids.size(), false, npu_ready) ==
-      npu::EmbedNpuRoute::kIron && npu_scheduler_ != nullptr) {
+  if (npu::DecideNpuEmbed(npu_config_, ids.size(), model_->npu_weights_resident(),
+                          npu_ready) == npu::EmbedNpuRoute::kIron &&
+      npu_scheduler_ != nullptr) {
+    std::vector<float> cls;
+    double prefill_ms = 0.0;
+    std::string run_err;
     const auto sched_res = mbufo::core::npu::RunLaneSync(
         *npu_scheduler_,
         mbufo::core::npu::NpuWorkDesc{
             .lane = mbufo::core::npu::NpuWorkLane::kEmbedding,
             .seq_len = ids.size(),
-            .client = "bge-m3"},
-        []() {
-          return mbufo::core::npu::NpuWorkResult{
-              .ok = false, .error = "bge-m3 NPU IRON xclbin not loaded yet"};
+            .client = "bge-m3",
+            .coalesce_key = "bge-m3"},
+        [&]() {
+          mbufo::core::npu::NpuWorkResult wr;
+          wr.ok = model_->RunNpuCls(ids, &cls, &prefill_ms, &run_err);
+          wr.error = wr.ok ? "ok" : run_err;
+          return wr;
         });
-    return refuse("bge-m3 NPU Sync: " + sched_res.error);
+    if (!sched_res.ok) {
+      return refuse("bge-m3 NPU Sync: " + sched_res.error);
+    }
+    SyncResult result;
+    result.values = std::move(cls);
+    result.pre_norm = core::embedding::L2Normalize(result.values);
+    if (!(result.pre_norm > 0.0)) {
+      return refuse("bge-m3 NPU Sync: zero-norm embedding refused");
+    }
+    result.prefill_ms = prefill_ms;
+    return result;
   }
 #ifdef ENGINE_ENABLE_HIP
   if (use_hip) {

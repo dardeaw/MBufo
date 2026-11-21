@@ -18,7 +18,7 @@ enum class EmbedNpuRoute : std::uint8_t { kNone = 0, kIron };
     const mbufo::npu::NpuLaneConfig& config, std::size_t seq_len,
     bool weights_resident = false, bool device_ready = false) noexcept {
   if (config.embedding && weights_resident && device_ready && seq_len > 0 &&
-      (seq_len % 4u == 0u)) {
+      seq_len <= 2048u) {
     return EmbedNpuRoute::kIron;
   }
   return EmbedNpuRoute::kNone;

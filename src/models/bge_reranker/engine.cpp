@@ -126,21 +126,33 @@ std::optional<EngineSession::ScoreResult> EngineSession::Score(
   }
   const bool npu_ready =
       npu_scheduler_ != nullptr && !npu_scheduler_->device_lost();
-  if (npu::DecideNpuScore(npu_config_, ids.size(), false, npu_ready) ==
+  if (npu::DecideNpuScore(npu_config_, ids.size(),
+                          model_->npu_weights_resident(), npu_ready) ==
           npu::ScoreNpuRoute::kIron &&
       npu_scheduler_ != nullptr) {
+    std::vector<float> cls;
+    double prefill_ms = 0.0;
+    std::string run_err;
     const auto sched_res = mbufo::core::npu::RunLaneSync(
         *npu_scheduler_,
         mbufo::core::npu::NpuWorkDesc{
             .lane = mbufo::core::npu::NpuWorkLane::kReranker,
             .seq_len = ids.size(),
-            .client = "bge-reranker"},
-        []() {
-          return mbufo::core::npu::NpuWorkResult{
-              .ok = false,
-              .error = "bge-reranker NPU IRON xclbin not loaded yet"};
+            .client = "bge-reranker",
+            .coalesce_key = "bge-reranker"},
+        [&]() {
+          mbufo::core::npu::NpuWorkResult wr;
+          wr.ok = model_->Encoder().RunNpuCls(ids, &cls, &prefill_ms, &run_err);
+          wr.error = wr.ok ? "ok" : run_err;
+          return wr;
         });
-    return refuse("bge-reranker NPU Score: " + sched_res.error);
+    if (!sched_res.ok) {
+      return refuse("bge-reranker NPU Score: " + sched_res.error);
+    }
+    if (cls.size() != model_->Head().hidden_size) {
+      return refuse("bge-reranker NPU Score: CLS hidden size mismatch");
+    }
+    return ScoreClsRow(cls, model_->Head(), prefill_ms);
   }
   const auto& encoder = model_->Encoder();
   const std::size_t hidden = model_->Head().hidden_size;

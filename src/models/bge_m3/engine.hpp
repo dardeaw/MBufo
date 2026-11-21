@@ -136,12 +136,24 @@ class EngineModel {
     return weights_;
   }
 
+  [[nodiscard]] bool LoadNpuWeights(const std::string& kernel_dir = "",
+                                    std::string* error_msg = nullptr);
+  [[nodiscard]] bool npu_weights_resident() const noexcept {
+    return npu_weights_resident_;
+  }
+  [[nodiscard]] bool RunNpuCls(std::span<const std::uint32_t> ids,
+                               std::vector<float>* cls_out, double* prefill_ms,
+                               std::string* error_msg) const;
+
  private:
   EngineModel();
   std::unique_ptr<core::GgufReader> reader_;
   BgeM3Weights weights_;
   BgeM3F32Weights f32_;
   std::unique_ptr<SpmUnigramTokenizer> tokenizer_;
+  bool npu_weights_resident_{false};
+  struct NpuState;
+  std::shared_ptr<NpuState> npu_;
 #ifdef ENGINE_ENABLE_HIP
   struct HipState;
   std::unique_ptr<HipState> hip_;

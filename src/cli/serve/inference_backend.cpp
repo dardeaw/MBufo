@@ -2500,6 +2500,7 @@ public:
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
+                .mixed_prefill_decode = true,
             },
         .persistence = persistence_,
     };

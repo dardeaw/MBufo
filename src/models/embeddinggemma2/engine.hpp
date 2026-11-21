@@ -79,6 +79,14 @@ class EngineModel {
   [[nodiscard]] std::optional<EmbedResult> Embed(
       std::span<const std::uint32_t> ids, std::string* error_msg = nullptr);
 
+  /// Loads exported NPU2 IRON kernels and uploads 24-layer weights into resident
+  /// HRX buffers (returns false when MBUFO_ENABLE_NPU=OFF).
+  [[nodiscard]] bool LoadNpuWeights(const std::string& kernel_dir = "",
+                                    std::string* error_msg = nullptr);
+  [[nodiscard]] bool npu_weights_resident() const noexcept {
+    return npu_weights_resident_;
+  }
+
   void SetNpuLaneConfig(mbufo::npu::NpuLaneConfig config) noexcept {
     npu_config_ = std::move(config);
   }
@@ -105,6 +113,9 @@ class EngineModel {
   std::unique_ptr<core::GgufReader> reader_;
   mbufo::npu::NpuLaneConfig npu_config_{};
   mbufo::core::npu::NpuScheduler* npu_scheduler_{nullptr};
+  bool npu_weights_resident_{false};
+  struct NpuState;
+  std::shared_ptr<NpuState> npu_;
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
   Config config_;
   struct HipState;

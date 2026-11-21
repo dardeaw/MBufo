@@ -1748,6 +1748,10 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
       coworkers[i]->impl_->state_reusable = true;
     }
   }
+  if (!merged) {
+    throw std::runtime_error(
+        "merged prefill chunk failed after coworker advances");
+  }
   const std::size_t maximum_consumed = std::min(remaining, max_input_tokens);
   if (step.consumed_tokens == 0 || step.consumed_tokens > maximum_consumed) {
     throw std::runtime_error(

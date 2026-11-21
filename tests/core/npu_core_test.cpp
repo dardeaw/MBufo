@@ -535,13 +535,16 @@ void TestNpuSchedulerPumpAndCoalesce() {
            mbufo::models::bge_reranker::npu::ScoreNpuRoute::kNone);
     mbufo::npu::NpuLaneConfig rr_cfg;
     rr_cfg.reranker = true;
-    assert(mbufo::models::bge_reranker::npu::DecideNpuScore(rr_cfg, 14, true,
+    assert(mbufo::models::bge_reranker::npu::DecideNpuScore(rr_cfg, 0, true,
+                                                             true) ==
+           mbufo::models::bge_reranker::npu::ScoreNpuRoute::kNone);
+    assert(mbufo::models::bge_reranker::npu::DecideNpuScore(rr_cfg, 2049, true,
                                                              true) ==
            mbufo::models::bge_reranker::npu::ScoreNpuRoute::kNone);
     assert(mbufo::models::bge_reranker::npu::DecideNpuScore(rr_cfg, 16, false,
                                                              true) ==
            mbufo::models::bge_reranker::npu::ScoreNpuRoute::kNone);
-    assert(mbufo::models::bge_reranker::npu::DecideNpuScore(rr_cfg, 16, true,
+    assert(mbufo::models::bge_reranker::npu::DecideNpuScore(rr_cfg, 14, true,
                                                              true) ==
            mbufo::models::bge_reranker::npu::ScoreNpuRoute::kIron);
 

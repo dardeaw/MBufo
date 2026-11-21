@@ -129,6 +129,8 @@ struct TextRunnerCapabilities {
   /// Interrupted prefill rolls back to its entry frontier without consuming
   /// input, so cancellation need not wait for the whole pass.
   bool prefill_rollback{false};
+  /// Backend implements AdvanceBatchWithPrefillChunk (mixed decode + prefill).
+  bool mixed_prefill_decode{false};
 };
 
 /// Model-owned compatibility identity for restart-safe snapshots.
@@ -463,9 +465,10 @@ public:
   [[nodiscard]] virtual std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const;
   virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
-  /// Merged plain-advance + prefill-chunk step. The default refuses (returns
-  /// false, advances untouched) so callers fall back to the legacy pair;
-  /// backends that fuse the batch override it. Plain advances only.
+  /// Merged plain-advance + prefill-chunk step. Throws MixedBatchRefused with
+  /// nothing mutated when the backend cannot merge (the default); returns
+  /// true on full merge, or returns false when advances completed/recorded
+  /// failures while the chunk did not run. Plain advances only.
   [[nodiscard]] virtual bool AdvanceBatchWithPrefillChunk(
       std::span<const TextRunnerAdvance> advances,
       std::span<std::exception_ptr> advance_failures,
@@ -479,7 +482,7 @@ public:
     (void)offset;
     (void)max_input_tokens;
     (void)chunk_step;
-    return false;
+    throw MixedBatchRefused("backend has no merged advance+prefill");
   }
   /// Merged multi-token decode step + prefill chunk: every decode runs one
   /// MTP step and the chunk rides the same verify pass. Throws

@@ -3,36 +3,100 @@
 #include "src/models/embeddinggemma2/engine.hpp"
 
 #include "src/core/compute/npu/npu_scheduler.hpp"
+#ifdef MBUFO_ENABLE_NPU
+#include "src/core/compute/npu/npu_embgemma2_runtime.hpp"
+#endif
 
+#include <cstdlib>
 #include <utility>
 
 namespace mbufo::models::embeddinggemma2 {
+
+#ifdef MBUFO_ENABLE_NPU
+struct EngineModel::NpuState {
+  mbufo::core::npu::NpuEmbGemma2Runtime runtime;
+};
+#else
+struct EngineModel::NpuState {};
+#endif
+
+bool EngineModel::LoadNpuWeights(const std::string& kernel_dir,
+                                 std::string* error_msg) {
+#ifdef MBUFO_ENABLE_NPU
+  std::string dir = kernel_dir;
+  if (dir.empty()) {
+    if (const char* env = std::getenv("MBUFO_NPU_EMBGEMMA2_KERNELS");
+        env != nullptr && env[0] != '\0') {
+      dir = env;
+    } else {
+      dir = "/mnt/nvme-data/mbufo-models/npu-kernels/embgemma2_s128";
+    }
+  }
+  auto state = std::make_shared<NpuState>();
+  if (!state->runtime.Init(*reader_, config_, dir, error_msg)) {
+    npu_.reset();
+    npu_weights_resident_ = false;
+    return false;
+  }
+  npu_ = std::move(state);
+  npu_weights_resident_ = true;
+  return true;
+#else
+  (void)kernel_dir;
+  if (error_msg != nullptr) {
+    *error_msg = "embeddinggemma2 NPU runtime disabled (MBUFO_ENABLE_NPU=OFF)";
+  }
+  return false;
+#endif
+}
 
 bool EngineModel::TryNpuEmbed(std::span<const std::uint32_t> ids,
                               std::optional<EmbedResult>* out,
                               std::string* error_msg) {
   const bool npu_ready =
       npu_scheduler_ != nullptr && !npu_scheduler_->device_lost();
-  if (npu::DecideNpuEmbed(npu_config_, ids.size(), false, npu_ready) !=
-      npu::EmbedNpuRoute::kIron || npu_scheduler_ == nullptr) {
+  if (npu::DecideNpuEmbed(npu_config_, ids.size(), npu_weights_resident_,
+                          npu_ready) != npu::EmbedNpuRoute::kIron ||
+      npu_scheduler_ == nullptr || !npu_weights_resident_ || npu_ == nullptr) {
     return false;
   }
+#ifdef MBUFO_ENABLE_NPU
+  if (ids.size() > mbufo::core::npu::NpuEmbGemma2Runtime::kFixedSeqLen) {
+    return false;
+  }
+  std::vector<float> values;
+  double prefill_ms = 0.0;
+  std::string run_err;
   const auto sched_res = mbufo::core::npu::RunLaneSync(
       *npu_scheduler_,
       mbufo::core::npu::NpuWorkDesc{
           .lane = mbufo::core::npu::NpuWorkLane::kEmbedding,
           .seq_len = ids.size(),
-          .client = "embeddinggemma2"},
-      []() {
-        return mbufo::core::npu::NpuWorkResult{
-            .ok = false,
-            .error = "embeddinggemma2 NPU runtime bridge not bound yet"};
+          .client = "embeddinggemma2",
+          .coalesce_key = "embgemma2-s128"},
+      [&]() {
+        mbufo::core::npu::NpuWorkResult wr;
+        wr.ok = npu_->runtime.Forward(ids, &values, &prefill_ms, &run_err);
+        wr.error = wr.ok ? "ok" : run_err;
+        return wr;
       });
-  if (error_msg != nullptr) {
-    *error_msg = "embeddinggemma2 NPU Embed: " + sched_res.error;
+  if (!sched_res.ok) {
+    if (error_msg != nullptr) {
+      *error_msg = "embeddinggemma2 NPU Embed: " + sched_res.error;
+    }
+    *out = std::nullopt;
+    return true;
   }
-  *out = std::nullopt;
+  EmbedResult res;
+  res.values = std::move(values);
+  res.prefill_ms = prefill_ms;
+  *out = std::move(res);
   return true;
+#else
+  (void)out;
+  (void)error_msg;
+  return false;
+#endif
 }
 
 #ifndef ENGINE_ENABLE_HIP

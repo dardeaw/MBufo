@@ -131,6 +131,13 @@ public:
   [[nodiscard]] const BgeRerankerHeadF32& Head() const noexcept {
     return head_;
   }
+  [[nodiscard]] bool LoadNpuWeights(const std::string& kernel_dir = "",
+                                    std::string* error_msg = nullptr) {
+    return encoder_->LoadNpuWeights(kernel_dir, error_msg);
+  }
+  [[nodiscard]] bool npu_weights_resident() const noexcept {
+    return encoder_->npu_weights_resident();
+  }
 
 private:
   EngineModel();

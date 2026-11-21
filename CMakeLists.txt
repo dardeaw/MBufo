@@ -380,6 +380,9 @@ if (MBUFO_ENABLE_NPU)
   target_link_libraries(mbufo_npu PUBLIC ${MBUFO_HRX_LIB} Threads::Threads)
   target_link_options(mbufo_npu PUBLIC "-Wl,-rpath,${MBUFO_NPU_LIB_DIR}")
   target_link_libraries(mbufo_core PUBLIC mbufo_npu)
+  target_sources(mbufo_core PRIVATE
+    src/core/compute/npu/npu_embgemma2_runtime.cpp
+    src/core/compute/npu/npu_bge_runtime.cpp)
 endif()
 
 add_library(mbufo_llm_cli STATIC
@@ -605,7 +608,16 @@ if (BUILD_TESTING)
     add_executable(npu_hrx_probe_test tests/core/npu_hrx_probe_test.cpp)
     target_link_libraries(npu_hrx_probe_test PRIVATE mbufo_core mbufo_npu)
     add_test(NAME npu_hrx_probe_test COMMAND npu_hrx_probe_test)
-    set_tests_properties(npu_hrx_probe_test PROPERTIES LABELS "npu;hardware")
+    set_tests_properties(npu_hrx_probe_test PROPERTIES
+      LABELS "npu;hardware"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_e2e_model_test tests/core/npu_e2e_model_test.cpp)
+    target_link_libraries(npu_e2e_model_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_e2e_model_test COMMAND npu_e2e_model_test)
+    set_tests_properties(npu_e2e_model_test PROPERTIES
+      LABELS "npu;hardware;embedding;rerank"
+      RESOURCE_LOCK npu)
   endif()
 
   add_executable(rerank_score_test tests/core/rerank_score_test.cpp)
@@ -782,12 +794,8 @@ if (BUILD_TESTING)
   target_link_libraries(text_generation_scheduler_test PRIVATE mbufo_logging mbufo_core mbufo_cache)
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
-  # Disabled on the fork: the P3 mixed prefill+decode step (f505e1e8)
-  # changes the batching/draft routing these upstream 0.20.0 tests
-  # assert on. Re-enable once the P3 scheduler is reconciled.
   set_tests_properties(text_generation_scheduler_test PROPERTIES
-    LABELS "cpu;server;scheduler;queue;state;lifecycle;cancellation"
-    DISABLED TRUE)
+    LABELS "cpu;server;scheduler;queue;state;lifecycle;cancellation")
 
   add_executable(prompt_cli_test
     tests/cli/prompt_test.cpp
