@@ -237,7 +237,7 @@ Every engine reads GGUF directly; the formats below are what each one accepts (a
 
 | Engine | Dense / attention weights | Routed experts |
 | --- | --- | --- |
-| **Qwen 27B / Qwen3.5-3.6 MoE** | Q8_0, Q4_K, Q5_K, Q6_K, Q3_K, IQ4_NL, IQ4_XS, IQ3_S, ROCmFP4, F16 / BF16 / F32 | Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q4_K, Q5_K, Q6_K, IQ2_XXS, MXFP4, ROCmFP4 |
+| **Qwen 27B / Qwen3.5-3.6 MoE** | Q8_0, Q4_K, Q5_K, Q6_K, Q3_K, IQ4_NL, IQ4_XS, IQ3_S, ROCmFP4, ROCmFP4_FAST, F16 / BF16 / F32 | Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q4_K, Q5_K, Q6_K, IQ2_XXS, MXFP4, ROCmFP4, ROCmFP4_FAST |
 | **Qwen3.8 Flash-Next** | Native: Q8_0, Q6_K, ROCmFP4 / FAST, MXFP4, F16 / BF16 / F32. Converted to Q8_0 at load: Q4_K, Q5_K, Q4_0, Q4_1, Q5_0, Q2_K, Q3_K, IQ4_XS, IQ4_NL | Q4_K, Q5_K, Q6_K, Q5_1, Q8_0, Q4_0, Q3_K, Q2_K, ROCmFP4_FAST, MXFP4 |
 | **Gemma 4 (26B-A4B, E4B, E2B, 12B)** | Q4_0, Q8_0, Q4_K, Q5_K, Q6_K, F16 / BF16 / F32 | same (Q4_0 takes the fast MoE path) |
 | **GPT-OSS 20B / 120B** | Q8_0, Q5_0, Q4_K and F16 / BF16 / F32 attention | MXFP4 (native), Q4_0, Q8_0, Q5_1 (K-quants cannot encode its 2880-wide experts) |

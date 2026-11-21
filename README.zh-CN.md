@@ -234,7 +234,7 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 
 | 引擎 | 稠密／注意力权重 | 路由专家 |
 | --- | --- | --- |
-| **Qwen 27B / Qwen3.5-3.6 MoE** | Q8_0、Q4_K、Q5_K、Q6_K、Q3_K、IQ4_NL、IQ4_XS、IQ3_S、ROCmFP4、F16 / BF16 / F32 | Q4_0、Q4_1、Q5_0、Q5_1、Q8_0、Q2_K、Q4_K、Q5_K、Q6_K、IQ2_XXS、MXFP4、ROCmFP4 |
+| **Qwen 27B / Qwen3.5-3.6 MoE** | Q8_0、Q4_K、Q5_K、Q6_K、Q3_K、IQ4_NL、IQ4_XS、IQ3_S、ROCmFP4、ROCmFP4_FAST、F16 / BF16 / F32 | Q4_0、Q4_1、Q5_0、Q5_1、Q8_0、Q2_K、Q4_K、Q5_K、Q6_K、IQ2_XXS、MXFP4、ROCmFP4、ROCmFP4_FAST |
 | **Qwen3.8 Flash-Next** | 原生：Q8_0、Q6_K、ROCmFP4 / FAST、MXFP4、F16 / BF16 / F32；加载时转为 Q8_0：Q4_K、Q5_K、Q4_0、Q4_1、Q5_0、Q2_K、Q3_K、IQ4_XS、IQ4_NL | Q4_K、Q5_K、Q6_K、Q5_1、Q8_0、Q4_0、Q3_K、Q2_K、ROCmFP4_FAST、MXFP4 |
 | **Gemma 4（26B-A4B、E4B、E2B、12B）** | Q4_0、Q8_0、Q4_K、Q5_K、Q6_K、F16 / BF16 / F32 | 同左（Q4_0 走快速 MoE 路径） |
 | **GPT-OSS 20B / 120B** | Q8_0、Q5_0、Q4_K 及 F16 / BF16 / F32 注意力 | MXFP4（原生）、Q4_0、Q8_0、Q5_1（K 系列无法编码其 2880 宽的专家） |
