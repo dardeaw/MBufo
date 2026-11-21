@@ -206,30 +206,30 @@ A single HTTP port hosts and routes across all 22 supported families:
 
 Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT_FORMATS.md).
 
-| Model | Parameters | HTTP Serving | Evaluation | Speculative Draft | Architecture Highlights |
-| --- | --- | --- | --- | --- | --- |
-| **Qwen3.8 Flash-Next** (Primary) | 30B-A3B MoE | Supported | Pilot | MTP | ROCmFP4-FAST / UD-Q4_K_XL, Blocked-Q8 KV |
-| **Qwen3.8 27B** | 27B Dense | Supported | Pilot | DFlash2 (inc. Q8) | Dense + MoE paths; UD-Q4_K_XL recommended |
-| **Gemma 4 26B-A4B** | 26B-A4B | Supported | Verified | MTP (F16 mirror) | Native tool use, SWA shared Q8 layers |
-| **Gemma 4 E4B / E2B** | 4B / 2B effective (per-layer embeddings) | Supported | Verified | — | Q4_0 QAT; PLE (Q6_K gather), shared-KV layers, 8 heads x d256/d512, WMMA large-head prefill |
-| **Gemma-4-12B** | 12B Dense | Bench | — | — | K-quant preconversion & WMMA Q8 prefill |
-| **Qwen3.5-35B-A3B** | 35B-A3B MoE | Engine | — | — | qwen35moe pipeline support |
-| **Qwen3.6-35B-A3B** | 35B-A3B MoE | Engine | — | — | Q6_K→Q8_0 loading, Split-K decode MoE |
-| **Ornith-1.5-35B-A3B** | 35B-A3B MoE | Supported | Verified | — | `qwen35moe` hybrid SSM/attention, ROCmFP4 / Q4_K_M + BF16 vision (`width=2048`) |
-| **Tiel-Coder / Cyber-Tiel-Coder-35B-A3B** | 35B-A3B MoE | Supported | Verified | — | Ornith-1.5 (`qwen35moe`) agentic coding & abliterated cyber/CTF fine-tunes; Q3_K/Q4_K/Q5_K/Q6_K/Q8_0 (`-GGUF-MTP`) |
-| **GPT-OSS 20B / 120B** | 20B / 117B MoE | Supported | Pilot | — | Native MXFP4 GEMM; zero-copy streaming for 120B |
-| **Muse Glimmer 30B** | 30B | Supported | Prompt | DFlash (~89%) | ATEM tool calling, W8A8 / Q8_0 execution |
-| **Llama-3.1-8B** | 8B Dense | Supported | Adapter | — | Standard dense GQA support |
-| **DeepSeek V4 Flash** | MoE (IQ2/Q2/Q8 mixed GGUF) | Supported | Quality limits documented | DSpark | MLA decode, ds4-parity kernels, ~81 GiB resident |
-| **Qwen3-Embedding-0.6B** | 0.6B | Supported (`/v1/embeddings`) | — | — | Single-prefill pooled executor |
-| **bge-m3** | 0.6B XLM-R | Supported (`/v1/embeddings`) | Encoder | — | CLS pooling, Q4_K_M loader, hipBLASLt autotune |
-| **EmbeddingGemma 2** | ~0.3B Gemma-4 encoder (text path) | Supported (`/v1/embeddings`) | Matches PyTorch (cosine 1.000000) | — | Bidirectional attention: 20 sliding-window (+-512) and 4 full layers (head_dim 256 / 512), per-layer inputs, mean pooling, 768-d output |
-| **bge-reranker-v2-m3** | Cross-Encoder | Supported (`/v1/reranking`) | ScoreBatch | — | BERT dispatch, padded batching |
-| **Qwen3-Reranker** | Cross-Encoder | Supported (`/v1/reranking`) | Scoring | — | Qwen dispatch, shared scoring heads |
-| **Qwen3-ASR 1.7B** | 1.7B | Supported (audio transcription) | — | — | BF16 safetensors, deterministic greedy decoding |
-| **Qwen3-TTS 12Hz 1.7B** | 1.7B | Supported (speech synthesis) | — | — | BF16 safetensors, F32 waveform decoder |
-| **Qwen-Image-2.1** | Diffusion transformer | Supported (image generation / editing) | — | — | BF16 safetensors, Qwen3-VL prompt encoder, RGBA VAE |
-| **MiniMax H3** | 50-block BF16 transformer | Supported (video, text-only FL2VA) | — | — | HIP transformer, VisualVAE / AudioVAE, MP4 composition |
+| Model | Parameters | Speculative Draft | Architecture Highlights |
+| --- | --- | --- | --- |
+| **Qwen3.8 Flash-Next** (Primary) | 30B-A3B MoE | MTP | ROCmFP4-FAST / UD-Q4_K_XL, Blocked-Q8 KV |
+| **Qwen3.8 27B** | 27B Dense | DFlash2 (inc. Q8) | Dense + MoE paths; UD-Q4_K_XL recommended |
+| **Gemma 4 26B-A4B** | 26B-A4B | MTP (F16 mirror) | Native tool use, SWA shared Q8 layers |
+| **Gemma 4 E4B / E2B** | 4B / 2B effective (per-layer embeddings) | — | Q4_0 QAT; PLE (Q6_K gather), shared-KV layers, 8 heads x d256/d512, WMMA large-head prefill |
+| **Gemma-4-12B** | 12B Dense | — | K-quant preconversion & WMMA Q8 prefill |
+| **Qwen3.5-35B-A3B** | 35B-A3B MoE | — | qwen35moe pipeline support |
+| **Qwen3.6-35B-A3B** | 35B-A3B MoE | — | Q6_K→Q8_0 loading, Split-K decode MoE |
+| **Ornith-1.5-35B-A3B** | 35B-A3B MoE | — | `qwen35moe` hybrid SSM/attention, ROCmFP4 / Q4_K_M + BF16 vision (`width=2048`) |
+| **Tiel-Coder / Cyber-Tiel-Coder-35B-A3B** | 35B-A3B MoE | — | Ornith-1.5 (`qwen35moe`) agentic coding & abliterated cyber/CTF fine-tunes; Q3_K/Q4_K/Q5_K/Q6_K/Q8_0 (`-GGUF-MTP`) |
+| **GPT-OSS 20B / 120B** | 20B / 117B MoE | — | Native MXFP4 GEMM; zero-copy streaming for 120B |
+| **Muse Glimmer 30B** | 30B | DFlash (~89%) | ATEM tool calling, W8A8 / Q8_0 execution |
+| **Llama-3.1-8B** | 8B Dense | — | Standard dense GQA support |
+| **DeepSeek V4 Flash** | MoE (IQ2/Q2/Q8 mixed GGUF) | DSpark | MLA decode, ds4-parity kernels, ~81 GiB resident |
+| **Qwen3-Embedding-0.6B** | 0.6B | — | Single-prefill pooled executor |
+| **bge-m3** | 0.6B XLM-R | — | CLS pooling, Q4_K_M loader, hipBLASLt autotune |
+| **EmbeddingGemma 2** | ~0.3B Gemma-4 encoder (text path) | — | Bidirectional attention: 20 sliding-window (+-512) and 4 full layers (head_dim 256 / 512), per-layer inputs, mean pooling, 768-d output |
+| **bge-reranker-v2-m3** | Cross-Encoder | — | BERT dispatch, padded batching |
+| **Qwen3-Reranker** | Cross-Encoder | — | Qwen dispatch, shared scoring heads |
+| **Qwen3-ASR 1.7B** | 1.7B | — | BF16 safetensors, deterministic greedy decoding |
+| **Qwen3-TTS 12Hz 1.7B** | 1.7B | — | BF16 safetensors, F32 waveform decoder |
+| **Qwen-Image-2.1** | Diffusion transformer | — | BF16 safetensors, Qwen3-VL prompt encoder, RGBA VAE |
+| **MiniMax H3** | 50-block BF16 transformer | — | HIP transformer, VisualVAE / AudioVAE, MP4 composition |
 
 ### Supported Quantization Formats
 
