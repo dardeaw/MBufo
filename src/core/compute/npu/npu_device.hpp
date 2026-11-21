@@ -159,9 +159,12 @@ class NpuDeviceLock final {
   NpuXclbinTable xclbins_;
 };
 
-/// Hardware bind seam. Implemented in npu_device_hrx.cpp (future CMake
-/// option); until then every NPU lane reports kHrxUnbound and sidecars carry
-/// the load. Declared here so call sites compile unchanged after wiring.
+/// Hardware bind seam: with MBUFO_ENABLE_NPU this is defined in
+/// npu_device_hrx.cpp (real init/get/sync over hrx); without it, the inline
+/// stub below reports kHrxUnbound and sidecars carry the load.
+#ifdef MBUFO_ENABLE_NPU
+[[nodiscard]] bool HrxBind(std::string* error);
+#else
 [[nodiscard]] inline bool HrxBind(std::string* error) {
   if (error != nullptr) {
     *error =
@@ -170,5 +173,6 @@ class NpuDeviceLock final {
   }
   return false;
 }
+#endif
 
 }  // namespace mbufo::core::npu
