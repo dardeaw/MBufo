@@ -13,6 +13,7 @@
 #include "src/core/compute/attention/attention_dispatcher.hpp"
 #include "src/core/compute/attention/fused_fa_gqa128.hpp"
 #include "src/core/compute/attention/flash_wmma_large.hpp"
+#include "src/core/compute/attention/flash_wmma_gqa.hpp"
 #include "src/models/qwen/hip/moe.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
 #include "src/core/compute/attention/mixed_batch_attn.hpp"
@@ -116,6 +117,32 @@ bool TryLaunchFusedFaGqa128(
       q, k, v, gate, k_cache, v_cache, k_cache_f16, v_cache_f16, out_context,
       layer_idx, start_pos, batch_size, max_context, num_heads, num_kv_heads,
       head_dim, stream, skip_kv_write);
+}
+
+// head_dim 128 dense prefill (Qwen3-Embedding / Qwen3-Reranker, small Qwen3 decoders): the core WMMA flash kernel over the F16 plane
+// the fused QK-norm/RoPE kernel already filled. It replaces the fused-FA kernel, which ran at ~3 TFLOPs on these shapes and took 42%
+// of an embedding request. MBUFO_QWEN_NO_WMMA128=1 keeps the previous route.
+bool TryLaunchFlashWmma128(const float* q, void* kv_f16, std::size_t total_k, float* out, const float* q_gate,
+                           std::uint32_t attn_layer_idx, std::uint32_t start_pos, std::size_t batch_size,
+                           std::uint32_t max_context, std::uint32_t heads, std::uint32_t kv_heads,
+                           std::uint32_t head_dim, bool kv_written, hipStream_t stream) {
+  if (head_dim != 128 || !kv_written || kv_f16 == nullptr || std::getenv("MBUFO_QWEN_NO_WMMA128") != nullptr ||
+      !mbufo::core::compute::flash_wmma_gqa::IsFlashWmmaSupported(heads, kv_heads, head_dim)) {
+    return false;
+  }
+  const std::size_t layer_off =
+      static_cast<std::size_t>(attn_layer_idx) * max_context * static_cast<std::size_t>(kv_heads) * head_dim;
+  const auto* k = static_cast<const __half*>(kv_f16) + layer_off;
+  const auto* v = reinterpret_cast<const __half*>(static_cast<const std::uint16_t*>(kv_f16) + total_k) + layer_off;
+  if (!mbufo::core::compute::flash_wmma_gqa::FlashWmmaPrefill(
+          q, k, v, nullptr, out, static_cast<std::uint32_t>(batch_size), start_pos, heads, kv_heads, head_dim, 0,
+          1.0F / std::sqrt(static_cast<float>(head_dim)), stream)) {
+    return false;
+  }
+  if (q_gate != nullptr) {
+    LaunchSigmoidGateMultiply(out, q_gate, batch_size * heads * head_dim, stream);
+  }
+  return true;
 }
 }  // namespace
 
@@ -441,7 +468,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // below only applies RoPE in place and never touches the cache, so it
       // still needs the pack.
       const bool kv_already_written = fused_qknorm_rope_kv;
-      const bool fused_fa_attention = TryLaunchFusedFaGqa128(
+      const bool wmma128_attention = TryLaunchFlashWmma128(
+          arena_.d_q, arena_.d_attention_kv_f16, total_k, arena_.d_ssm_out, q_gate, attn_layer_idx, start_pos,
+          batch_size, arena_.GetMaxContext(), config.num_attention_heads, config.num_key_value_heads,
+          config.head_dim, kv_already_written, arena_.stream);
+      const bool fused_fa_attention = wmma128_attention || TryLaunchFusedFaGqa128(
           arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
           arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
           arena_.d_attention_kv_f16,
@@ -1153,7 +1184,11 @@ void QwenGpuExecutor::PrefillAttentionPost(const PrefillChunkCtx& ctx,
     // multiply on a null gate pointer.
     const float* q_gate =
         config.IsDenseQwenAttention() ? nullptr : arena_.d_ssm_gate;
-    const bool fused_fa_attention = TryLaunchFusedFaGqa128(
+    const bool wmma128_attention = TryLaunchFlashWmma128(
+        arena_.d_q, arena_.d_attention_kv_f16, total_k, arena_.d_ssm_out, q_gate, attn_layer_idx, ctx.start_pos,
+        batch_size, arena_.GetMaxContext(), config.num_attention_heads, config.num_key_value_heads,
+        config.head_dim, kv_already_written, arena_.stream);
+    const bool fused_fa_attention = wmma128_attention || TryLaunchFusedFaGqa128(
         arena_.d_q, arena_.d_k, arena_.d_v, q_gate,
         arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
         arena_.d_attention_kv_f16,
