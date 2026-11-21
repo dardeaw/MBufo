@@ -24,7 +24,6 @@
 [§3 GGUF 全家族支援與多模型路由](#3-gguf-全家族支援與多模型路由) ·
 [快速開始](#快速開始) ·
 [效能基準](#效能基準-gfx1151-strix-halo) ·
-[上游追蹤](#上游追蹤) ·
 [從原始碼建置](#從原始碼建置) ·
 [文件索引](#文件索引) ·
 [相容性與限制](#相容性與限制)
@@ -204,30 +203,30 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 
 透過內建多模型路由器，單一 HTTP 端口即可統一調度下列全部 22 個家族：
 
-| 模型 | 參數量 | HTTP 服務 | 驗證測試 | 投機草稿支援 | 特性與架構亮點 |
-| --- | --- | --- | --- | --- | --- |
-| **Qwen3.8 Flash-Next**（主力） | 30B-A3B MoE | 支援 | Pilot | MTP | ROCmFP4-FAST / UD-Q4_K_XL、Blocked-Q8 KV |
-| **Qwen3.8 27B** | 27B Dense | 支援 | Pilot | DFlash2 (含 Q8) | 支援 Dense 與 MoE 路徑，推薦 UD-Q4_K_XL |
-| **Gemma 4 26B-A4B** | 26B-A4B | 支援 | 完整測試 | MTP (F16 鏡像) | 具備原生 Tool 支援，SWA 共用 Q8 |
-| **Gemma 4 E4B / E2B** | 4B / 2B 有效參數（逐層嵌入） | 支援 | 已驗證 | — | Q4_0 QAT；PLE（Q6_K gather）、共用 KV 層、WMMA 大 head prefill |
-| **Gemma-4-12B** | 12B Dense | Bench | — | — | 支援 K-quant 預轉換與 WMMA Q8 Prefill |
-| **Qwen3.5-35B-A3B** | 35B-A3B MoE | Engine | — | — | 支援 qwen35moe 架構路徑 |
-| **Qwen3.6-35B-A3B** | 35B-A3B MoE | Engine | — | — | Q6_K→Q8_0 載入、Split-K MoE 解碼 |
-| **Ornith-1.5-35B-A3B** | 35B-A3B MoE | 支援 | 已驗證 | — | `qwen35moe` 混合 SSM/Attention、ROCmFP4 / Q4_K_M + BF16 視覺 (`width=2048`) |
-| **Tiel-Coder / Cyber-Tiel-Coder-35B-A3B** | 35B-A3B MoE | 支援 | 已驗證 | — | 基於 Ornith-1.5 (`qwen35moe`) 之程式開發與去審查資安微調版；支援 Q3_K/Q4_K/Q5_K/Q6_K/Q8_0 (`-GGUF-MTP`) |
-| **GPT-OSS 20B / 120B** | 20B / 117B MoE | 支援 | Pilot | — | 原生 MXFP4 矩陣核心、120B 支援零拷貝串流上傳 |
-| **Muse Glimmer 30B** | 30B | 支援 | Prompt | DFlash (~89%) | ATEM 工具呼叫、W8A8 / Q8_0 支援 |
-| **Llama-3.1-8B** | 8B Dense | 支援 | Adapter | — | 標準 Dense GQA 支援 |
-| **DeepSeek V4 Flash** | MoE（IQ2/Q2/Q8 混合 GGUF） | 支援 | 品質限制已記載 | DSpark | MLA decode、ds4 一致 kernel、約 81 GiB 常駐 |
-| **Qwen3-Embedding-0.6B** | 0.6B | 支援 (`/v1/embeddings`) | — | — | 快取池化 Single-Prefill 執行器 |
-| **bge-m3** | 0.6B XLM-R | 支援 (`/v1/embeddings`) | Encoder | — | CLS 池化、Q4_K_M 載入器、hipBLASLt 調優 |
-| **EmbeddingGemma 2** | 約 0.3B Gemma-4 編碼器（文字路徑） | 支援 (`/v1/embeddings`) | 與 PyTorch 一致（餘弦 1.000000） | — | 雙向注意力：20 層滑動視窗（±512）與 4 層全域層（head_dim 256 / 512）、逐層輸入、平均池化、768 維輸出 |
-| **bge-reranker-v2-m3** | Cross-Encoder | 支援 (`/v1/reranking`) | ScoreBatch | — | BERT 分派、多序列 Padding 批次加速 |
-| **Qwen3-Reranker** | Cross-Encoder | 支援 (`/v1/reranking`) | Scoring | — | Qwen 分派、共用 Rerank 評分頭 |
-| **Qwen3-ASR 1.7B** | 1.7B | 支援（語音轉文字） | — | — | BF16 safetensors、決定性 greedy 解碼 |
-| **Qwen3-TTS 12Hz 1.7B** | 1.7B | 支援（語音合成） | — | — | BF16 safetensors、F32 波形解碼器 |
-| **Qwen-Image-2.1** | Diffusion transformer | 支援（圖像生成／編輯） | — | — | BF16 safetensors、Qwen3-VL 提示編碼器、RGBA VAE |
-| **MiniMax H3** | 50 區塊 BF16 transformer | 支援（影片，純文字 FL2VA） | — | — | HIP transformer、VisualVAE / AudioVAE、MP4 合成 |
+| 模型 | 參數量 | 投機草稿支援 | 特性與架構亮點 |
+| --- | --- | --- | --- |
+| **Qwen3.8 Flash-Next**（主力） | 30B-A3B MoE | MTP | ROCmFP4-FAST / UD-Q4_K_XL、Blocked-Q8 KV |
+| **Qwen3.8 27B** | 27B Dense | DFlash2 (含 Q8) | 支援 Dense 與 MoE 路徑，推薦 UD-Q4_K_XL |
+| **Gemma 4 26B-A4B** | 26B-A4B | MTP (F16 鏡像) | 具備原生 Tool 支援，SWA 共用 Q8 |
+| **Gemma 4 E4B / E2B** | 4B / 2B 有效參數（逐層嵌入） | — | Q4_0 QAT；PLE（Q6_K gather）、共用 KV 層、WMMA 大 head prefill |
+| **Gemma-4-12B** | 12B Dense | — | 支援 K-quant 預轉換與 WMMA Q8 Prefill |
+| **Qwen3.5-35B-A3B** | 35B-A3B MoE | — | 支援 qwen35moe 架構路徑 |
+| **Qwen3.6-35B-A3B** | 35B-A3B MoE | — | Q6_K→Q8_0 載入、Split-K MoE 解碼 |
+| **Ornith-1.5-35B-A3B** | 35B-A3B MoE | — | `qwen35moe` 混合 SSM/Attention、ROCmFP4 / Q4_K_M + BF16 視覺 (`width=2048`) |
+| **Tiel-Coder / Cyber-Tiel-Coder-35B-A3B** | 35B-A3B MoE | — | 基於 Ornith-1.5 (`qwen35moe`) 之程式開發與去審查資安微調版；支援 Q3_K/Q4_K/Q5_K/Q6_K/Q8_0 (`-GGUF-MTP`) |
+| **GPT-OSS 20B / 120B** | 20B / 117B MoE | — | 原生 MXFP4 矩陣核心、120B 支援零拷貝串流上傳 |
+| **Muse Glimmer 30B** | 30B | DFlash (~89%) | ATEM 工具呼叫、W8A8 / Q8_0 支援 |
+| **Llama-3.1-8B** | 8B Dense | — | 標準 Dense GQA 支援 |
+| **DeepSeek V4 Flash** | MoE（IQ2/Q2/Q8 混合 GGUF） | DSpark | MLA decode、ds4 一致 kernel、約 81 GiB 常駐 |
+| **Qwen3-Embedding-0.6B** | 0.6B | — | 快取池化 Single-Prefill 執行器 |
+| **bge-m3** | 0.6B XLM-R | — | CLS 池化、Q4_K_M 載入器、hipBLASLt 調優 |
+| **EmbeddingGemma 2** | 約 0.3B Gemma-4 編碼器（文字路徑） | — | 雙向注意力：20 層滑動視窗（±512）與 4 層全域層（head_dim 256 / 512）、逐層輸入、平均池化、768 維輸出 |
+| **bge-reranker-v2-m3** | Cross-Encoder | — | BERT 分派、多序列 Padding 批次加速 |
+| **Qwen3-Reranker** | Cross-Encoder | — | Qwen 分派、共用 Rerank 評分頭 |
+| **Qwen3-ASR 1.7B** | 1.7B | — | BF16 safetensors、決定性 greedy 解碼 |
+| **Qwen3-TTS 12Hz 1.7B** | 1.7B | — | BF16 safetensors、F32 波形解碼器 |
+| **Qwen-Image-2.1** | Diffusion transformer | — | BF16 safetensors、Qwen3-VL 提示編碼器、RGBA VAE |
+| **MiniMax H3** | 50 區塊 BF16 transformer | — | HIP transformer、VisualVAE / AudioVAE、MP4 合成 |
 
 ### 支援的量化格式
 
@@ -235,7 +234,7 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 
 | 引擎 | 稠密／注意力權重 | 路由專家 |
 | --- | --- | --- |
-| **Qwen 27B / Qwen3.5-3.6 MoE** | Q8_0、Q4_K、Q5_K、Q6_K、Q3_K、IQ4_NL、IQ4_XS、IQ3_S、ROCmFP4、F16 / BF16 / F32 | Q4_0、Q4_1、Q5_0、Q5_1、Q8_0、Q2_K、Q4_K、Q5_K、Q6_K、IQ2_XXS、MXFP4、ROCmFP4 |
+| **Qwen 27B / Qwen3.5-3.6 MoE** | Q8_0、Q4_K、Q5_K、Q6_K、Q3_K、IQ4_NL、IQ4_XS、IQ3_S、ROCmFP4、ROCmFP4_FAST、F16 / BF16 / F32 | Q4_0、Q4_1、Q5_0、Q5_1、Q8_0、Q2_K、Q4_K、Q5_K、Q6_K、IQ2_XXS、MXFP4、ROCmFP4、ROCmFP4_FAST |
 | **Qwen3.8 Flash-Next** | 原生：Q8_0、Q6_K、ROCmFP4 / FAST、MXFP4、F16 / BF16 / F32；載入時轉為 Q8_0：Q4_K、Q5_K、Q4_0、Q4_1、Q5_0、Q2_K、Q3_K、IQ4_XS、IQ4_NL | Q4_K、Q5_K、Q6_K、Q5_1、Q8_0、Q4_0、Q3_K、Q2_K、ROCmFP4_FAST、MXFP4 |
 | **Gemma 4（26B-A4B、E4B、E2B、12B）** | Q4_0、Q8_0、Q4_K、Q5_K、Q6_K、F16 / BF16 / F32 | 同左（Q4_0 走快速 MoE 路徑） |
 | **GPT-OSS 20B / 120B** | Q8_0、Q5_0、Q4_K 及 F16 / BF16 / F32 注意力 | MXFP4（原生）、Q4_0、Q8_0、Q5_1（K 系列無法編碼其 2880 寬的專家） |
@@ -384,19 +383,6 @@ _本版本未重新測量：此表來自早期版本。_
 
 - **Qwen 3.8 27B**：推薦採用 **UD-Q4_K_XL** 作為參考版本；在上述測量中，兩種建置的解碼速度在上述測量中相差約 15% 以內。
 - **Qwen 3.8 Flash-Next**：推薦採用 **ROCmFP4**，解碼吞吐極高（散文 54 tok/s、費氏數列 59 tok/s），且僅需 ~94 GB 記憶體（對比 Q4_K_XL 節省約 17 GB）。
-
----
-
-## 上游追蹤
-
-MBufo 持續追隨並以標準 Git Merge 方式整合上游 `main` 分支，保持歷史清晰與乾淨。
-
-| 項目 | 內容說明 |
-| --- | --- |
-| 上游倉庫 | [gufo-org/gufo](https://github.com/gufo-org/gufo) |
-| 上游基準版本 | `v0.26.0`（持續追隨穩定提交） |
-| 合併策略 | 透過 `--no-ff` 合併上游最新提交，MBufo 特有提交保持獨立清晰，永不竄改上游歷史 |
-| 標籤命名規範 | MBufo 發布標籤均採用 `mbufo-vX.Y.Z` 前綴，與上游原生標籤完全隔離 |
 
 ---
 
