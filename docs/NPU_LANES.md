@@ -41,3 +41,16 @@
 - `EngineSession::Sync` 前查 `DecideNpuEmbed`；`core/compute` dispatcher 加 `kNpu`。
 - router 加三條 upstream（8766/8764/8765），WebUI 加後端選項。
 - decide 接線後，qwen3.8-flash-next 的 `task=decide` 標籤要改名，避免再混淆。
+
+## EmbeddingGemma2 NPU 组装（11/21 起）
+
+- 模型：google/embeddinggemma-2（Apache-2.0），权重已验（sha256 OK，
+  /mnt/nvme-data/mbufo-models/embeddinggemma-2/model.safetensors 1.49GB）。
+- text tower：hidden 512 / FFN 2048 / 24 层 / 4 heads（head_dim 256）/
+  2 KV heads / sliding_window 512（5/11/17/23 层为 full attention）/
+  vocab 262144 / RMS norm / gelu_pytorch_tanh / 输出 768 维。
+- NPU 影响：sliding window 天生有界（NPU 友好）；full attention 层需整
+  QK^T；RMSNorm 是新 kernel（SDK 只有 layer_norm，待确认）；
+  gelu-tanh 已有 CPU 参考（RefGeluTanh）；embedding 表 268MB 留 host。
+- device lock 已收编（HrxSession 实机 HRX_PROBE_PASS），执行端就绪；
+  下一步 E0.6 multi-tile 整 block 组装。
