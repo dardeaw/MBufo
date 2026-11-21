@@ -346,6 +346,10 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
         info.path.empty() ? 0 : EstimateResidentBytes(info.path);
     row["file_size_mib"] = file_bytes >> 20;
     row["estimated_resident_mib"] = est_bytes >> 20;
+    // Device backend for the router admin UI (NPU/GPU switch + badges).
+    // In-process registry models all run on HIP/GPU today; the NPU Iron
+    // route (src/core/compute/npu) will flip this per model when it lands.
+    row["backend"] = "gpu";
 
     int lru_rank = -1;
     for (std::size_t i = 0; i < lru_order.size(); ++i) {
@@ -589,6 +593,9 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     item["family"] = f.family;
     item["path"] = full_path;
     item["relative_path"] = rel_path;
+    // In-process GGUF entries are HIP/GPU resident (see npu_lane.hpp).
+    item["backend"] = "gpu";
+    item["sidecar"] = false;
     item["size_mib"] = f.size_bytes >> 20;
     item["file_size_mib"] = f.size_bytes >> 20;
     item["estimated_resident_mib"] = est_bytes >> 20;
@@ -602,6 +609,66 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     item["suggested_dflash"] = sug_dflash;
     item["suggested_dspark"] = sug_dspark;
     models.push_back(std::move(item));
+  }
+
+  // NPU/GPU sidecar entries for the router admin UI device switch.
+  // These are not GGUF files so the directory scan above never finds them;
+  // they are launched on demand (not at boot) and proxied as upstreams.
+  // Ports/endpoints mirror src/cli/serve/npu_sidecar_routes.hpp.
+  {
+    auto push_sidecar = [&](std::string id, std::string name,
+                            std::string capability, std::string task,
+                            std::string backend, std::size_t size_mib,
+                            std::string url, int port, std::string endpoint,
+                            std::string launch) {
+      json::Value item = json::Value::object();
+      item["id"] = id;
+      item["id_suggestion"] = id;
+      item["name"] = name;
+      item["relative_path"] = url;
+      item["family"] = "sidecar";
+      item["task"] = task;
+      item["has_vision"] = false;
+      item["has_audio"] = capability == "AUDIO";
+      item["has_tools"] = false;
+      json::Value caps = json::Value::array();
+      caps.push_back(capability);
+      item["capabilities"] = std::move(caps);
+      item["backend"] = backend;
+      item["sidecar"] = true;
+      item["default_port"] = port;
+      item["endpoint"] = endpoint;
+      item["launch_cmd"] = launch;
+      item["size_mib"] = size_mib;
+      item["file_size_mib"] = size_mib;
+      item["estimated_resident_mib"] = size_mib;
+      item["shards"] = 1;
+      item["loaded"] = false;
+      item["loaded_id"] = "";
+      item["is_default"] = false;
+      item["path"] = url;
+      item["suggested_mmproj"] = "";
+      item["suggested_draft"] = "";
+      item["suggested_mtp"] = "";
+      item["suggested_dflash"] = "";
+      item["suggested_dspark"] = "";
+      models.push_back(std::move(item));
+    };
+    push_sidecar(
+        "d3-lite-npu", "D3-Lite-NPU2 (flm sidecar)", "DECIDE", "decide", "npu",
+        900, "http://127.0.0.1:8766", 8766, "/v1/systemone",
+        "flm serve llama3.2:1b --decision d3:lite --port 8766");
+    push_sidecar(
+        "whisper-turbo-npu", "Whisper-V3-Turbo-NPU2 (flm sidecar)", "AUDIO",
+        "asr", "npu", 700, "http://127.0.0.1:8764", 8764,
+        "/v1/audio/transcriptions",
+        "flm serve whisper-v3:turbo --asr 1 --port 8764");
+    push_sidecar(
+        "qwen3-tts-1.7b", "Qwen3-TTS-12Hz-1.7B-Base (gufo sidecar)", "AUDIO",
+        "tts", "gpu", 4700, "http://127.0.0.1:8765", 8765,
+        "/v1/audio/speech",
+        "gufo serve tts --model /mnt/nvme-data/mbufo-models/qwen3-tts-1.7b-base"
+        " --port 8765");
   }
 
   json::Value sidecars = json::Value::object();
