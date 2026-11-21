@@ -381,6 +381,8 @@ if (MBUFO_ENABLE_NPU)
   target_link_options(mbufo_npu PUBLIC "-Wl,-rpath,${MBUFO_NPU_LIB_DIR}")
   target_link_libraries(mbufo_core PUBLIC mbufo_npu)
   target_sources(mbufo_core PRIVATE
+    src/core/compute/npu/npu_quant_gemm.cpp
+    src/core/compute/npu/npu_quant_models.cpp
     src/core/compute/npu/npu_embgemma2_runtime.cpp
     src/core/compute/npu/npu_bge_runtime.cpp)
 endif()
@@ -617,6 +619,13 @@ if (BUILD_TESTING)
     add_test(NAME npu_e2e_model_test COMMAND npu_e2e_model_test)
     set_tests_properties(npu_e2e_model_test PROPERTIES
       LABELS "npu;hardware;embedding;rerank"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_quant_models_test tests/core/npu_quant_models_test.cpp)
+    target_link_libraries(npu_quant_models_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_quant_models_test COMMAND npu_quant_models_test)
+    set_tests_properties(npu_quant_models_test PROPERTIES
+      LABELS "npu;hardware;quant"
       RESOURCE_LOCK npu)
   endif()
 

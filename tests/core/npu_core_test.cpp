@@ -57,7 +57,7 @@ void TestAvailableOpsAndValidators() {
   assert(find_op("linalg.mha_softmax") != nullptr &&
          find_op("linalg.mha_softmax")->status == NpuOpStatus::kSdkOnly);
   assert(find_op("quant.q4nx_dequant") != nullptr &&
-         find_op("quant.q4nx_dequant")->status == NpuOpStatus::kSdkOnly);
+         find_op("quant.q4nx_dequant")->status == NpuOpStatus::kVerified);
 
   assert(ValidateGemm(32, 256, 64, NpuDType::kBf16).empty());
   assert(ValidateGemm(32, 256, 64, NpuDType::kBfp16Ebs8).empty());

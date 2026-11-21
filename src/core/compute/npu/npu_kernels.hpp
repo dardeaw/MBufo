@@ -83,8 +83,9 @@ struct NpuOpInfo {
        "E0.7: rope_two_halves d=256/512 bf16, max_abs=0.0000 on NPU2"},
       {NpuOp::kMhaSoftmax, "linalg.mha_softmax", NpuOpStatus::kSdkOnly, nullptr,
        "SDK causal online partial_softmax 64x64 (roles In,Out,InOut,Param*6)"},
-      {NpuOp::kQ4nxDequant, "quant.q4nx_dequant", NpuOpStatus::kSdkOnly,
-       nullptr, "AIE2P-only q4nx -> bfp16ebs8 dequant (32K & 64K m_tile)"},
+      {NpuOp::kQ4nxDequant, "quant.q4nx_dequant", NpuOpStatus::kVerified,
+       "e10_quant_gemm.py",
+       "E1.0: AIE2P q4nx -> bfp16ebs8 L1 dequant + mm_bfp 16-core verified on NPU2"},
       {NpuOp::kFusedMmGelu, "fused_mm", NpuOpStatus::kSdkOnly, nullptr,
        "epilogue=gelu, bfp16ebs8 prepacked-B (flm embedding format)"},
   };

@@ -33,7 +33,20 @@ bool EngineModel::LoadNpuWeights(const std::string& kernel_dir,
     }
   }
   auto state = std::make_shared<NpuState>();
-  if (!state->runtime.Init(*reader_, config_, dir, error_msg)) {
+  const char* qenv = std::getenv("MBUFO_NPU_QUANT");
+  bool ok = false;
+  if (qenv != nullptr && (std::string(qenv) == "q8" || std::string(qenv) == "Q8")) {
+    ok = state->runtime.InitQuant(*reader_, config_,
+                                  mbufo::core::npu::NpuQuantMode::kQ8Bfp16,
+                                  "", error_msg);
+  } else if (qenv != nullptr && (std::string(qenv) == "q4" || std::string(qenv) == "Q4")) {
+    ok = state->runtime.InitQuant(*reader_, config_,
+                                  mbufo::core::npu::NpuQuantMode::kQ4Q4nx,
+                                  "", error_msg);
+  } else {
+    ok = state->runtime.Init(*reader_, config_, dir, error_msg);
+  }
+  if (!ok) {
     npu_.reset();
     npu_weights_resident_ = false;
     return false;
