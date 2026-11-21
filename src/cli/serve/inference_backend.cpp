@@ -65,6 +65,7 @@
 #include "src/models/deepseek_v4_flash/engine_adapter.hpp"
 #include "src/core/engine/moe_contract.hpp"
 #include "src/models/bge_m3/engine.hpp"
+#include "src/models/embeddinggemma2/engine.hpp"
 #include "src/models/bge_reranker/engine.hpp"
 #include "src/models/qwen_reranker/engine.hpp"
 #endif
@@ -5420,6 +5421,7 @@ struct InferenceBackend::Impl {
   std::uint32_t embed_context{0};
   std::unique_ptr<models::bge_m3::EngineModel> bge_embed_model;
   std::unique_ptr<models::bge_m3::EngineSession> bge_embed_session;
+  std::unique_ptr<models::embeddinggemma2::EngineModel> eg2_embed_model;
   // Rerank state: one cached session per loaded reranker kind (sessions are
   // not thread-safe; rerank_mutex serializes use, mirroring embed_mutex).
   mutable std::mutex rerank_mutex;
@@ -5696,6 +5698,44 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     return load(std::move(model), error, max_context, session_count,
                 prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config), ram_cache_config);
+  }
+  if (architecture == "embedding_gemma2") {
+    if (!vision_model_path.empty()) {
+      SetError(error, "EmbeddingGemma 2 does not support --mmproj");
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config) ||
+        speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error,
+               "EmbeddingGemma 2 is an embedding encoder: no disk cache or "
+               "speculative decoding");
+      return false;
+    }
+    std::string eg_error;
+    auto eg_model =
+        models::embeddinggemma2::EngineModel::Create(model_path, &eg_error);
+    if (eg_model == nullptr) {
+      SetError(error, "Failed to create EmbeddingGemma 2 model: " + eg_error);
+      return false;
+    }
+    if (max_context == 0 || max_context > models::embeddinggemma2::kMaxTokens) {
+      max_context = models::embeddinggemma2::kMaxTokens;
+    }
+    {
+      auto new_state = std::make_shared<Impl::State>();
+      new_state->model_id = "embeddinggemma-2";
+      new_state->max_context = max_context;
+      new_state->model_path = model_path;
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    {
+      const std::lock_guard<std::mutex> lock(impl_->embed_mutex);
+      impl_->eg2_embed_model = std::move(eg_model);
+      impl_->bge_embed_model.reset();
+      impl_->bge_embed_session.reset();
+    }
+    return true;
   }
   if (architecture == "bert") {
     if (!vision_model_path.empty()) {
@@ -7068,6 +7108,20 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
   if (current == nullptr) return refuse("no model is loaded");
   {
     const std::lock_guard<std::mutex> lock(impl_->embed_mutex);
+    if (impl_->eg2_embed_model != nullptr) {
+      auto& eg = *impl_->eg2_embed_model;
+      const auto ids = eg.Encode(text);
+      if (ids.size() <= 2) return refuse("embedding input tokenizes to zero tokens");
+      if (ids.size() > models::embeddinggemma2::kMaxTokens)
+        return refuse("EmbeddingGemma 2 input exceeds the context window");
+      auto r = eg.Embed(ids, error);
+      if (!r.has_value()) return std::nullopt;
+      EmbeddingResult result;
+      result.values = std::move(r->values);
+      result.prompt_tokens = ids.size();
+      result.prefill_ms = r->prefill_ms;
+      return result;
+    }
     if (impl_->bge_embed_model != nullptr) {
       if (impl_->bge_embed_session == nullptr) {
         impl_->bge_embed_session =

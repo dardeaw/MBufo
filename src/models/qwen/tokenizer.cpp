@@ -332,7 +332,7 @@ std::size_t Qwen35PieceEnd(std::string_view text, std::size_t offset) {
 // GPT-2 byte-escape round-trip), spaces become the U+2581 word symbol, and
 // merges run over whole newline-delimited chunks without word splitting.
 bool IsGemma4Vocabulary(std::string_view architecture) {
-  return architecture == "gemma4";
+  return architecture == "gemma4" || architecture == "embedding_gemma2";
 }
 
 // llama-bpe (tiktoken) ordered split, mirroring the reference regex:
