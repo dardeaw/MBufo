@@ -162,22 +162,27 @@ Same weights, greedy decoding, release builds, re-measured on one Strix Halo nod
 | **DeepSeek V4 Flash** (IQ2_XXS mix) | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
 | **Qwen3.8 Flash-Next** (ROCmFP4-FAST) | 1141 / n/a | n/a | 33.3 / n/a | n/a |
 
-Embedding and reranking (one request through the HTTP server):
+Embedding and reranking (one request through the HTTP server, lengths in tokens):
 
 | Model (weights) | MBufo / llama.cpp | Delta |
 | --- | --- | --- |
-| **Qwen3-Embedding-0.6B** (Q8_0), about 2K tokens | 6546 / 5087 tok/s | **+29%** |
-| **Qwen3-Embedding-0.6B** (Q8_0), about 0.9K tokens | 10321 / 7475 tok/s | **+38%** |
-| **bge-m3** (Q4_K_M), about 1.7K tokens | 3546 / 5272 tok/s | -33% |
-| **bge-m3** (FP16), about 1.7K tokens | 3507 / 4940 tok/s | -29% |
-| **bge-reranker-v2-m3** (Q4_K_M), 64 documents | 38.8 / 38.0 docs/s | +2% |
-| **Qwen3-Reranker-0.6B** (Q8_0), 64 documents | 30.3 / 28.1 docs/s | +8% |
+| **bge-m3** (Q4_K_M), 0.9K | 16651 / 5663 tok/s | **+194%** |
+| **bge-m3** (Q4_K_M), 1.7K | 14101 / 5032 tok/s | **+180%** |
+| **bge-m3** (Q4_K_M), 5K | 7426 / 3324 tok/s | **+123%** |
+| **bge-m3** (FP16), 1.7K | 13895 / 4962 tok/s | **+180%** |
+| **Qwen3-Embedding-0.6B** (Q8_0), 0.9K | 15481 / 7454 tok/s | **+108%** |
+| **Qwen3-Embedding-0.6B** (Q8_0), 1.7K | 13981 / 5301 tok/s | **+164%** |
+| **Qwen3-Embedding-0.6B** (Q8_0), 3.4K | 11356 / 4700 tok/s | **+142%** |
+| **bge-reranker-v2-m3** (Q4_K_M), 64 documents | 76.9 / 38.0 docs/s | **+102%** |
+| **bge-reranker-v2-m3** (FP16), 64 documents | 73.1 / 34.3 docs/s | **+113%** |
+| **Qwen3-Reranker-0.6B** (Q8_0), 64 documents | 35.2 / 28.1 docs/s | **+25%** |
 
 Notes:
 - llama.cpp does not support the Flash-Next architecture, so it has no reference number here.
 - The DeepSeek V4 reference is the `deepseek4` support of this llama.cpp build, run at its default batch size of 512; the ds4 reference project was not available for this run.
 - llama.cpp batch sizes: Gemma 4 and Glimmer at 2048, Qwen3.6 at 1024 (a 2048 run froze the test machine, so its best case may be higher), GPT-OSS through `llama-server` at 8192.
-- bge-m3 in MBufo accepts at most 2048 tokens per input; llama.cpp accepts up to 8192.
+- bge-m3 accepts inputs up to its native 8192 tokens. Input lengths are bucketed to a small set of shapes (about 12% steps) with exact key masking, so requests of different lengths share tuned GEMM plans; tuned picks are cached on disk (`MBUFO_TUNE_CACHE`, default `~/.cache/mbufo/bge_tune_v1.txt`), and the first request of a new shape still pays its one-time tuning.
+- Qwen3-Reranker: MBufo applies the prompt template the model requires (about 27% more tokens per document). The `/rerank` of this llama.cpp build does not, and on a test set of 8 relevant and 40 unrelated documents it put none of the relevant ones in its top 8, while MBufo ranked all 8 first.
 
 ---
 

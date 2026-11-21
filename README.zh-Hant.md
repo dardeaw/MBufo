@@ -161,22 +161,27 @@ MBufo 主張精度與效能之間的平衡需經嚴格量測。推薦基準配�
 | **DeepSeek V4 Flash**（IQ2_XXS 混合） | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
 | **Qwen3.8 Flash-Next**（ROCmFP4-FAST） | 1141 / 無 | 無 | 33.3 / 無 | 無 |
 
-Embedding 與重排序（經由 HTTP 服務端的單次請求）：
+Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 token）：
 
 | 模型（權重） | MBufo / llama.cpp | 差距 |
 | --- | --- | --- |
-| **Qwen3-Embedding-0.6B**（Q8_0），约 2K token | 6546 / 5087 tok/s | **+29%** |
-| **Qwen3-Embedding-0.6B**（Q8_0），约 0.9K token | 10321 / 7475 tok/s | **+38%** |
-| **bge-m3**（Q4_K_M），约 1.7K token | 3546 / 5272 tok/s | -33% |
-| **bge-m3**（FP16），约 1.7K token | 3507 / 4940 tok/s | -29% |
-| **bge-reranker-v2-m3**（Q4_K_M），64 篇文件 | 38.8 / 38.0 docs/s | +2% |
-| **Qwen3-Reranker-0.6B**（Q8_0），64 篇文件 | 30.3 / 28.1 docs/s | +8% |
+| **bge-m3**（Q4_K_M），0.9K | 16651 / 5663 tok/s | **+194%** |
+| **bge-m3**（Q4_K_M），1.7K | 14101 / 5032 tok/s | **+180%** |
+| **bge-m3**（Q4_K_M），5K | 7426 / 3324 tok/s | **+123%** |
+| **bge-m3**（FP16），1.7K | 13895 / 4962 tok/s | **+180%** |
+| **Qwen3-Embedding-0.6B**（Q8_0），0.9K | 15481 / 7454 tok/s | **+108%** |
+| **Qwen3-Embedding-0.6B**（Q8_0），1.7K | 13981 / 5301 tok/s | **+164%** |
+| **Qwen3-Embedding-0.6B**（Q8_0），3.4K | 11356 / 4700 tok/s | **+142%** |
+| **bge-reranker-v2-m3**（Q4_K_M），64 篇文件 | 76.9 / 38.0 docs/s | **+102%** |
+| **bge-reranker-v2-m3**（FP16），64 篇文件 | 73.1 / 34.3 docs/s | **+113%** |
+| **Qwen3-Reranker-0.6B**（Q8_0），64 篇文件 | 35.2 / 28.1 docs/s | **+25%** |
 
 說明：
 - llama.cpp 不支援 Flash-Next 架構，因此沒有對照數字。
 - DeepSeek V4 的對照為該 llama.cpp 建置自帶的 `deepseek4` 支援，使用預設批次大小 512；本次未使用 ds4 參考專案。
 - llama.cpp 批次大小：Gemma 4 與 Glimmer 為 2048，Qwen3.6 為 1024（2048 曾使測試機當機，其最佳成績可能更高），GPT-OSS 經 `llama-server` 為 8192。
-- MBufo 的 bge-m3 單次輸入最多 2048 token，llama.cpp 可達 8192。
+- bge-m3 單次輸入可達模型原生的 8192 token。輸入長度會按約 12% 的間隔分桶並做精確的鍵遮罩，不同長度的請求因此共用已調優的 GEMM 方案；調優結果快取在磁碟（`MBUFO_TUNE_CACHE`，默认 `~/.cache/mbufo/bge_tune_v1.txt`），新形狀的第一次請求仍需付出一次性調優時間。
+- Qwen3-Reranker：MBufo 套用該模型要求的提示模板（每篇文件約多 27% token）。該 llama.cpp 建置的 `/rerank` 未套用，在 8 篇相關與 40 篇無關文件的測試中，它的前 8 名裡沒有任何一篇相關文件，MBufo 則把 8 篇相關文件全排在最前。
 
 ---
 

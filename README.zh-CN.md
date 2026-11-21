@@ -161,22 +161,27 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 | **DeepSeek V4 Flash**（IQ2_XXS 混合） | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
 | **Qwen3.8 Flash-Next**（ROCmFP4-FAST） | 1141 / 无 | 无 | 33.3 / 无 | 无 |
 
-Embedding 与重排序（经由 HTTP 服务端的单次请求）：
+Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 token）：
 
 | 模型（权重） | MBufo / llama.cpp | 差距 |
 | --- | --- | --- |
-| **Qwen3-Embedding-0.6B**（Q8_0），约 2K token | 6546 / 5087 tok/s | **+29%** |
-| **Qwen3-Embedding-0.6B**（Q8_0），约 0.9K token | 10321 / 7475 tok/s | **+38%** |
-| **bge-m3**（Q4_K_M），约 1.7K token | 3546 / 5272 tok/s | -33% |
-| **bge-m3**（FP16），约 1.7K token | 3507 / 4940 tok/s | -29% |
-| **bge-reranker-v2-m3**（Q4_K_M），64 篇文档 | 38.8 / 38.0 docs/s | +2% |
-| **Qwen3-Reranker-0.6B**（Q8_0），64 篇文档 | 30.3 / 28.1 docs/s | +8% |
+| **bge-m3**（Q4_K_M），0.9K | 16651 / 5663 tok/s | **+194%** |
+| **bge-m3**（Q4_K_M），1.7K | 14101 / 5032 tok/s | **+180%** |
+| **bge-m3**（Q4_K_M），5K | 7426 / 3324 tok/s | **+123%** |
+| **bge-m3**（FP16），1.7K | 13895 / 4962 tok/s | **+180%** |
+| **Qwen3-Embedding-0.6B**（Q8_0），0.9K | 15481 / 7454 tok/s | **+108%** |
+| **Qwen3-Embedding-0.6B**（Q8_0），1.7K | 13981 / 5301 tok/s | **+164%** |
+| **Qwen3-Embedding-0.6B**（Q8_0），3.4K | 11356 / 4700 tok/s | **+142%** |
+| **bge-reranker-v2-m3**（Q4_K_M），64 篇文档 | 76.9 / 38.0 docs/s | **+102%** |
+| **bge-reranker-v2-m3**（FP16），64 篇文档 | 73.1 / 34.3 docs/s | **+113%** |
+| **Qwen3-Reranker-0.6B**（Q8_0），64 篇文档 | 35.2 / 28.1 docs/s | **+25%** |
 
 说明：
 - llama.cpp 不支持 Flash-Next 架构，因此没有对照数字。
 - DeepSeek V4 的对照为该 llama.cpp 构建自带的 `deepseek4` 支持，使用默认批大小 512；本次未使用 ds4 参考项目。
 - llama.cpp 批大小：Gemma 4 与 Glimmer 为 2048，Qwen3.6 为 1024（2048 曾使测试机死机，其最佳成绩可能更高），GPT-OSS 经 `llama-server` 为 8192。
-- MBufo 的 bge-m3 单次输入最多 2048 token，llama.cpp 可达 8192。
+- bge-m3 单次输入可达模型原生的 8192 token。输入长度会按约 12% 的间隔分桶并做精确的键遮罩，不同长度的请求因此共用已调优的 GEMM 方案；调优结果缓存在磁盘（`MBUFO_TUNE_CACHE`，默认 `~/.cache/mbufo/bge_tune_v1.txt`），新形状的第一次请求仍需付出一次性调优时间。
+- Qwen3-Reranker：MBufo 套用该模型要求的提示模板（每篇文档约多 27% token）。该 llama.cpp 构建的 `/rerank` 未套用，在 8 篇相关与 40 篇无关文档的测试中，它的前 8 名里没有任何一篇相关文档，MBufo 则把 8 篇相关文档全排在最前。
 
 ---
 
