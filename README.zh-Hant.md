@@ -67,6 +67,29 @@ MBufo 將 Prefill Chunk 與 Decode 步驟合併至同一個 `ForwardBatch` 與�
 
 在服務層將 Decode 步驟以預處理批次推進（`StepDecodeBatch` / `ExecutePreparedDecodeBatch`），底層注意力算子全面接入共用 Split-K 解碼讀取器（`blocked_splitk`）。在共用 Q8 下，Gemma 4 SWA 層解碼效能提升，27B 注意力層直接讀取開銷極低，且 F16 輸出維持全精度位元精確。
 
+### 單流速度：Flash-Next 與 27B
+
+單節點 Strix Halo、一次一個請求、冷啟動 KV、F16 KV、開啟投機解碼（tok/s，本版本經 HTTP 服務測量）。完整表格見「效能基準」一節。
+
+| 模型 | Prefill 2K | Prefill 32K | Prefill 128K | Decode（散文） | Decode（重複文本） |
+|---|---|---|---|---|---|
+| Flash-Next ROCmFP4 | 1733 | 1679 | 1585 | 54.4 | 78.0 |
+| Flash-Next Q4_K_XL | 1719 | 1672 | 1587 | 52.1 | 81.7 |
+| 27B Q4_K_XL | 533 | 525 | 382 | 24.6 | 55.7 |
+| 27B FP4-FAST | 534 | 512 | 392 | 22.5 | 52.5 |
+
+### 負載下三引擎對比（開啟用 MTP）
+
+在相同測試框架與充分預熱環境下（併發 1 / 2 / 3 / 4 之總 TPS 與每 Session TPS）：
+
+| 引擎 | 總 TPS | 每 Session TPS | Fairness A / B |
+| --- | --- | --- | --- |
+| A (Halogen) | 85 / 82 / 75 / 88 | 85 / 41 / 25 / 22 | 322 / 1140 |
+| B (gufo) | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
+| **C (MBufo)** | **66 / 83 / 110 / 129** | **66 / 42 / 38 / 33** | **19 / 187** |
+
+MBufo 在多路負載下展現出最優異的線性擴展能力（總吞吐平穩攀升至 129 TPS，單路速率平緩），且具備最佳的公平性指標。
+
 ### 公平調度防飢餓架構
 
 為杜絕超長 Prefill 擠壓短請求首字延遲，MBufo 實作三層排程防護機制：
@@ -82,18 +105,6 @@ MBufo 將 Prefill Chunk 與 Decode 步驟合併至同一個 `ForwardBatch` 與�
 | 短請求 TTFT（首字延遲） | **3.4 秒 → 0.1 秒** |
 | ITL（Token 間延遲） | 穩定不增加 |
 | 貪婪輸出正確性 | 位元一致（SHA 比對通過） |
-
-### 負載下三引擎對比（開啟用 MTP）
-
-在相同測試框架與充分預熱環境下（併發 1 / 2 / 3 / 4 之總 TPS 與每 Session TPS）：
-
-| 引擎 | 總 TPS | 每 Session TPS | Fairness A / B |
-| --- | --- | --- | --- |
-| A (Halogen) | 85 / 82 / 75 / 88 | 85 / 41 / 25 / 22 | 322 / 1140 |
-| B (gufo) | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
-| **C (MBufo)** | **66 / 83 / 110 / 129** | **66 / 42 / 38 / 33** | **19 / 187** |
-
-MBufo 在多路負載下展現出最優異的線性擴展能力（總吞吐平穩攀升至 129 TPS，單路速率平緩），且具備最佳的公平性指標。
 
 ### 高效投機解碼（Speculative Decoding）
 
@@ -152,7 +163,7 @@ MBufo 主張精度與效能之間的平衡需經嚴格量測。推薦基準配�
 
 ### 效能對比 llama.cpp（gfx1151 實測）
 
-相同權重、貪婪解碼、Release 建置，在同一台 Strix Halo 節點上對 llama.cpp `5d9e5ac30` 重新實測。MBufo 經由 HTTP 服務端測量，數字含分詞與請求開銷；llama.cpp 使用 `llama-bench` / `llama-server`，並取其最佳批次大小。Prefill 為約 2K token 的冷提示；Decode 為約 2K token 上下文下的生成速度；均未開啟投機解碼。MBufo 使用預設的分塊 Q8 KV 快取，llama.cpp 使用 F16（Flash-Next 改用 F16 KV 快取時 prefill 為 1662 tok/s，而非 1158；下文「效能基準」使用 F16）。正值代表 MBufo 更快。
+相同權重、貪婪解碼、Release 建置，在同一台 Strix Halo 節點上對 llama.cpp `5d9e5ac30` 重新實測。MBufo 經由 HTTP 服務端測量，數字含分詞與請求開銷；llama.cpp 使用 `llama-bench` / `llama-server`，並取其最佳批次大小。Prefill 為約 2K token 的冷提示；Decode 為約 2K token 上下文下的生成速度；均未開啟投機解碼。MBufo 使用預設的分塊 Q8 KV 快取，llama.cpp 使用 F16（下文「效能基準」使用 F16）。正值代表 MBufo 更快。
 
 | 模型（權重） | Prefill tok/s：MBufo / llama.cpp | 差距 | Decode tok/s：MBufo / llama.cpp | 差距 |
 | --- | --- | --- | --- | --- |
@@ -161,7 +172,6 @@ MBufo 主張精度與效能之間的平衡需經嚴格量測。推薦基準配�
 | **GPT-OSS 120B**（Q4_K_M） | 1226 / 1089 | **+13%** | 52.3 / 52.4 | 0% |
 | **Muse Glimmer 30B**（UD-Q4_K_XL） | 516 / 398 | **+30%** | 12.6 / 13.2 | -5% |
 | **DeepSeek V4 Flash**（IQ2_XXS 混合） | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
-| **Qwen3.8 Flash-Next**（ROCmFP4-FAST） | 1158 / 無 | 無 | 33.3 / 無 | 無 |
 
 Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 token）：
 
@@ -179,7 +189,6 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 | **Qwen3-Reranker-0.6B**（Q8_0），64 篇文件 | 41.1 / 28.1 docs/s | **+46%** |
 
 說明：
-- llama.cpp 不支援 Flash-Next 架構，因此沒有對照數字。
 - DeepSeek V4 的對照為該 llama.cpp 建置自帶的 `deepseek4` 支援，使用預設批次大小 512；本次未使用 ds4 參考專案。
 - llama.cpp 批次大小：Gemma 4 與 Glimmer 為 2048，Qwen3.6 為 1024（2048 曾使測試機當機，其最佳成績可能更高），GPT-OSS 經 `llama-server` 為 8192。
 - bge-m3 單次輸入可達模型原生的 8192 token。輸入長度會按約 12% 的間隔分桶並做精確的鍵遮罩，不同長度的請求因此共用已調優的 GEMM 方案；調優結果快取在磁碟（`MBUFO_TUNE_CACHE`，默认 `~/.cache/mbufo/bge_tune_v1.txt`），新形狀的第一次請求仍需付出一次性調優時間。

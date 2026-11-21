@@ -68,6 +68,29 @@ MBufo merges the prefill chunk and decode rows into a single `ForwardBatch` and 
 
 The serving layer advances decoders via prepared batches (`StepDecodeBatch` / `ExecutePreparedDecodeBatch`), and attention work routes through a unified Split-K decode reader (`blocked_splitk`). In shared Q8, Gemma 4 SWA layers and 27B attention layers decode with minimal overhead, while F16 paths remain fully bit-exact.
 
+### Single-Stream Speed: Flash-Next and 27B
+
+One request at a time on one Strix Halo node, cold KV, F16 KV, speculative decoding on (tok/s, measured through the HTTP server for this release). Full tables are in [Benchmarks](#benchmarks-gfx1151-strix-halo).
+
+| Model | Prefill 2K | Prefill 32K | Prefill 128K | Decode (prose) | Decode (repetitive) |
+|---|---|---|---|---|---|
+| Flash-Next ROCmFP4 | 1733 | 1679 | 1585 | 54.4 | 78.0 |
+| Flash-Next Q4_K_XL | 1719 | 1672 | 1587 | 52.1 | 81.7 |
+| 27B Q4_K_XL | 533 | 525 | 382 | 24.6 | 55.7 |
+| 27B FP4-FAST | 534 | 512 | 392 | 22.5 | 52.5 |
+
+### Engine Comparison Under Load (MTP Enabled)
+
+Benchmarked on identical hardware after warmup across concurrency levels 1 / 2 / 3 / 4 (Total TPS / Per-Session TPS):
+
+| Engine | Total TPS | Per-Session TPS | Fairness A / B |
+| --- | --- | --- | --- |
+| A (Halogen) | 85 / 82 / 75 / 88 | 85 / 41 / 25 / 22 | 322 / 1140 |
+| B (gufo) | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
+| **C (MBufo)** | **66 / 83 / 110 / 129** | **66 / 42 / 38 / 33** | **19 / 187** |
+
+MBufo demonstrates superior linear scaling under multi-stream load (scaling smoothly up to 129 TPS with minimal per-session dropoff) while maintaining the best fairness scores.
+
 ### Anti-Starvation Fairness Scheduler
 
 To prevent long prefills from degrading the responsiveness of short requests, MBufo employs three cooperative scheduling mechanisms:
@@ -83,18 +106,6 @@ To prevent long prefills from degrading the responsiveness of short requests, MB
 | Short-request TTFT | **3.4 s → 0.1 s** |
 | ITL | Stable / Unchanged |
 | Greedy output correctness | Bit-identical (verified by SHA checksums) |
-
-### Engine Comparison Under Load (MTP Enabled)
-
-Benchmarked on identical hardware after warmup across concurrency levels 1 / 2 / 3 / 4 (Total TPS / Per-Session TPS):
-
-| Engine | Total TPS | Per-Session TPS | Fairness A / B |
-| --- | --- | --- | --- |
-| A (Halogen) | 85 / 82 / 75 / 88 | 85 / 41 / 25 / 22 | 322 / 1140 |
-| B (gufo) | 57 / 64 / 108 / 127 | 57 / 32 / 37 / 33 | 15 / 399 |
-| **C (MBufo)** | **66 / 83 / 110 / 129** | **66 / 42 / 38 / 33** | **19 / 187** |
-
-MBufo demonstrates superior linear scaling under multi-stream load (scaling smoothly up to 129 TPS with minimal per-session dropoff) while maintaining the best fairness scores.
 
 ### High-Efficiency Speculative Decoding
 
@@ -153,7 +164,7 @@ MBufo abstracts Blocked-Q8 KV into modular codecs, allowing Key and Value axes t
 
 ### Performance vs llama.cpp (gfx1151)
 
-Same weights, greedy decoding, release builds, re-measured on one Strix Halo node against llama.cpp `5d9e5ac30`. MBufo is measured through its HTTP server, so its numbers include tokenization and request overhead; llama.cpp through `llama-bench` / `llama-server` at its best batch size. Prefill is a cold prompt of about 2K tokens; decode is generation at about 2K tokens of context. Speculative decoding is off. MBufo runs at its default blocked-Q8 KV cache, llama.cpp at F16 (with an F16 KV cache Flash-Next prefill is 1662 tok/s instead of 1158; the Benchmarks section below uses F16). Positive values mean MBufo is faster.
+Same weights, greedy decoding, release builds, re-measured on one Strix Halo node against llama.cpp `5d9e5ac30`. MBufo is measured through its HTTP server, so its numbers include tokenization and request overhead; llama.cpp through `llama-bench` / `llama-server` at its best batch size. Prefill is a cold prompt of about 2K tokens; decode is generation at about 2K tokens of context. Speculative decoding is off. MBufo runs at its default blocked-Q8 KV cache, llama.cpp at F16 (the Benchmarks section below uses F16). Positive values mean MBufo is faster.
 
 | Model (weights) | Prefill tok/s: MBufo / llama.cpp | Delta | Decode tok/s: MBufo / llama.cpp | Delta |
 | --- | --- | --- | --- | --- |
@@ -162,7 +173,6 @@ Same weights, greedy decoding, release builds, re-measured on one Strix Halo nod
 | **GPT-OSS 120B** (Q4_K_M) | 1226 / 1089 | **+13%** | 52.3 / 52.4 | 0% |
 | **Muse Glimmer 30B** (UD-Q4_K_XL) | 516 / 398 | **+30%** | 12.6 / 13.2 | -5% |
 | **DeepSeek V4 Flash** (IQ2_XXS mix) | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
-| **Qwen3.8 Flash-Next** (ROCmFP4-FAST) | 1158 / n/a | n/a | 33.3 / n/a | n/a |
 
 Embedding and reranking (one request through the HTTP server, lengths in tokens):
 
@@ -180,7 +190,6 @@ Embedding and reranking (one request through the HTTP server, lengths in tokens)
 | **Qwen3-Reranker-0.6B** (Q8_0), 64 documents | 41.1 / 28.1 docs/s | **+46%** |
 
 Notes:
-- llama.cpp does not support the Flash-Next architecture, so it has no reference number here.
 - The DeepSeek V4 reference is the `deepseek4` support of this llama.cpp build, run at its default batch size of 512; the ds4 reference project was not available for this run.
 - llama.cpp batch sizes: Gemma 4 and Glimmer at 2048, Qwen3.6 at 1024 (a 2048 run froze the test machine, so its best case may be higher), GPT-OSS through `llama-server` at 8192.
 - bge-m3 accepts inputs up to its native 8192 tokens. Input lengths are bucketed to a small set of shapes (about 12% steps) with exact key masking, so requests of different lengths share tuned GEMM plans; tuned picks are cached on disk (`MBUFO_TUNE_CACHE`, default `~/.cache/mbufo/bge_tune_v1.txt`), and the first request of a new shape still pays its one-time tuning.
