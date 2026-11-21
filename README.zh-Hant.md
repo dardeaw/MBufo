@@ -213,8 +213,6 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 | **Gemma-4-12B** | 12B Dense | Bench | — | — | 支援 K-quant 預轉換與 WMMA Q8 Prefill |
 | **Qwen3.5-35B-A3B** | 35B-A3B MoE | Engine | — | — | 支援 qwen35moe 架構路徑 |
 | **Qwen3.6-35B-A3B** | 35B-A3B MoE | Engine | — | — | Q6_K→Q8_0 載入、Split-K MoE 解碼 |
-| **Ornith-1.5-35B-A3B** | 35B-A3B MoE | 支援 | 已驗證 | — | `qwen35moe` 混合 SSM/Attention、ROCmFP4 / Q4_K_M + BF16 視覺 (`width=2048`) |
-| **Tiel-Coder / Cyber-Tiel-Coder-35B-A3B** | 35B-A3B MoE | 支援 | 已驗證 | — | 基於 Ornith-1.5 (`qwen35moe`) 之程式開發與去審查資安微調版；支援 Q3_K/Q4_K/Q5_K/Q6_K/Q8_0 (`-GGUF-MTP`) |
 | **GPT-OSS 20B / 120B** | 20B / 117B MoE | 支援 | Pilot | — | 原生 MXFP4 矩陣核心、120B 支援零拷貝串流上傳 |
 | **Muse Glimmer 30B** | 30B | 支援 | Prompt | DFlash (~89%) | ATEM 工具呼叫、W8A8 / Q8_0 支援 |
 | **Llama-3.1-8B** | 8B Dense | 支援 | Adapter | — | 標準 Dense GQA 支援 |
