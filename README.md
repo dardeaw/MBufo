@@ -12,7 +12,7 @@ Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily 
 
 - **High concurrency**: a single Strix Halo node stays saturated with 16+ concurrent streams, each with up to 256K tokens of context (§1).
 - **Fair scheduling**: prefill and decode share one mixed batch under anti-starvation scheduling, so no request is starved under load (§1).
-- **Multiple models, one port**: 22 model families served side by side, loaded and unloaded at runtime from the built-in `/admin` console (§3).
+- **Multiple models, one port**: 22 GPU + 9 NPU models served side by side, loaded and unloaded at runtime from the built-in `/admin` console (§3).
 - **Multiple quantization formats**: K-quants, IQ4, MXFP4, ROCmFP4 and more; see [Supported Quantization Formats](#supported-quantization-formats) for each engine (§3).
 - **FlashAttention and Split-K attention**: WMMA flash-attention prefill and Split-K decode attention keep long-context decode bandwidth-bound, from short prompts to 256K (§2).
 - **Efficient KV cache**: blocked INT8 and compact 4-bit layouts that cut the memory each session holds (§2).
@@ -202,7 +202,7 @@ Notes:
 
 ### Supported Model Families
 
-A single HTTP port hosts and routes across all 22 supported families:
+A single HTTP port hosts and routes across all supported families — 22 GPU families first, then 9 NPU entries below the separator line:
 
 Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT_FORMATS.md).
 
@@ -230,6 +230,24 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 | **Qwen3-TTS 12Hz 1.7B** | 1.7B | — | BF16 safetensors, F32 waveform decoder |
 | **Qwen-Image-2.1** | Diffusion transformer | — | BF16 safetensors, Qwen3-VL prompt encoder, RGBA VAE |
 | **MiniMax H3** | 50-block BF16 transformer | — | HIP transformer, VisualVAE / AudioVAE, MP4 composition |
+
+---
+
+### ⚡ NPU Models (XDNA2 Strix Halo NPU)
+
+Below the line are the 9 NPU entries. The flm sidecars are served today through the router proxy (`/admin` "📋 啟動指令" + "🔍 探針", on demand, never at boot). The native IRON / quant-engine rows are verified end-to-end on silicon; HTTP serving integration is pending where marked 🧪.
+
+| Model | Device | Params | Format / Backend | HTTP Route | Status |
+| --- | --- | --- | --- | --- | --- |
+| **D3-Lite / Nano / Mini / Turbo / Ultra** | ⚡ NPU sidecar (flm) | 0.8B / 2B / 4B / — / — | Q4NX (flm NPU2) | `POST /v1/systemone` | ✅ Served (router proxy + admin cards; ⚡ DECIDE only, qwen3.8 stays CHAT) |
+| **Whisper-V3-Turbo** | ⚡ NPU sidecar (flm) | 0.8B | Q4NX NPU2 (5 xclbins) | `POST /v1/audio/transcriptions` | ✅ Served (proxy; 1.4 s audio → 2.3 s verified) |
+| **EmbeddingGemma 2** | ⚡ NPU native (IRON) | ~0.3B | Q8 bfp16ebs8 / Q4 q4nx | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (24-layer E2E cos > 0.993; engine seam wired, default kNone) |
+| **bge-m3** | ⚡ NPU native (IRON) | 0.6B XLM-R | Q8 / Q4 | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (64×1024 GEMM cos 0.999988; encoder cos 0.999924) |
+| **bge-reranker-v2-m3** | ⚡ NPU native (IRON) | Cross-Encoder | Q8 / Q4 | `/v1/reranking` (NPU lane) | 🧪 Runtime verified (score diff ~1e-5) |
+| **Qwen3-ASR 1.7B** | ⚡ NPU native (quant engine) | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions` (served via GPU sidecar) | 🧪 NPU runtime verified (cos > 0.967, top-1 match) |
+| **Qwen3-TTS 12Hz 1.7B** | ⚡ NPU native (quant engine) | 1.7B | Q8 / Q4 | `/v1/audio/speech` (served via GPU sidecar) | 🧪 NPU runtime verified (wav produced, cos > 0.98) |
+| **FLUX.2-klein-4B** | ⚡ NPU native (quant engine) | 4B DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
+| **Z-Image-Turbo** | ⚡ NPU native (quant engine) | DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
 
 ### Supported Quantization Formats
 

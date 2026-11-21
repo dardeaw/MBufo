@@ -11,7 +11,7 @@
 
 - **高并发**：单台 Strix Halo 节点在 16 路以上并发下保持满载，每路最长可达 256K 上下文（§1）。
 - **公平调度**：预填充与解码统一混合批处理，配合防饥饿调度，高负载下不会有请求被饿死（§1）。
-- **多模型单端口**：22 个模型家族并行服务，可通过内置 `/admin` 控制台在运行期加载与卸载（§3）。
+- **多模型单端口**：22 个 GPU + 9 个 NPU 模型并行服务，可通过内置 `/admin` 控制台在运行期加载与卸载（§3）。
 - **多种量化格式**：K 系列、IQ4、MXFP4、ROCmFP4 等，各引擎的支持清单见[支持的量化格式](#支持的量化格式)（§3）。
 - **FlashAttention 与 Split-K 注意力**：WMMA FlashAttention 预填充与 Split-K 解码注意力，让长上下文解码从短提示到 256K 都保持在内存带宽上限附近（§2）。
 - **高效 KV 缓存**：分块 INT8 与 4-bit 紧凑布局，显著降低每个会话占用的内存（§2）。
@@ -201,7 +201,7 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 
 ### 支持的模型家族
 
-通过内置多模型路由器，单一 HTTP 端口即可统筹调度下列全部 22 个家族：
+通过内置多模型路由器，单一 HTTP 端口即可统筹调度：上方 22 个 GPU 家族，下方分隔线起 9 个 NPU 项目：
 
 | 模型 | 参数量 | 投机草稿支持 | 特性与架构亮点 |
 | --- | --- | --- | --- |
@@ -227,6 +227,24 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 | **Qwen3-TTS 12Hz 1.7B** | 1.7B | — | BF16 safetensors、F32 波形解碼器 |
 | **Qwen-Image-2.1** | Diffusion transformer | — | BF16 safetensors、Qwen3-VL 提示編碼器、RGBA VAE |
 | **MiniMax H3** | 50 區塊 BF16 transformer | — | HIP transformer、VisualVAE / AudioVAE、MP4 合成 |
+
+---
+
+### ⚡ NPU 模型（XDNA2 Strix Halo NPU）
+
+分隔线下方为 9 个 NPU 项目。flm sidecar 已通过 router 代理提供服务（`/admin`「📋 启动指令」＋「🔍 探针」，按需拉起，绝不开机自启）。原生 IRON／量化引擎行已在实机上端到端验证；标 🧪 者 HTTP 转接尚待完成。
+
+| 模型 | 设备 | 参数量 | 格式／后端 | HTTP 路由 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| **D3-Lite / Nano / Mini / Turbo / Ultra** | ⚡ NPU sidecar（flm） | 0.8B / 2B / 4B / — / — | Q4NX（flm NPU2） | `POST /v1/systemone` | ✅ 已上线（router 代理＋admin 卡片；⚡ DECIDE 专用，qwen3.8 维持 CHAT） |
+| **Whisper-V3-Turbo** | ⚡ NPU sidecar（flm） | 0.8B | Q4NX NPU2（5 个 xclbin） | `POST /v1/audio/transcriptions` | ✅ 已上线（代理；1.4 秒音频 → 2.3 秒已验证） |
+| **EmbeddingGemma 2** | ⚡ NPU 原生（IRON） | 约 0.3B | Q8 bfp16ebs8 / Q4 q4nx | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（24 层端到端 cos > 0.993；引擎已接缝，默认 kNone） |
+| **bge-m3** | ⚡ NPU 原生（IRON） | 0.6B XLM-R | Q8 / Q4 | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（64×1024 GEMM cos 0.999988；编码器 cos 0.999924） |
+| **bge-reranker-v2-m3** | ⚡ NPU 原生（IRON） | Cross-Encoder | Q8 / Q4 | `/v1/reranking`（NPU lane） | 🧪 运行时已验证（评分差约 1e-5） |
+| **Qwen3-ASR 1.7B** | ⚡ NPU 原生（量化引擎） | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（cos > 0.967，top-1 吻合） |
+| **Qwen3-TTS 12Hz 1.7B** | ⚡ NPU 原生（量化引擎） | 1.7B | Q8 / Q4 | `/v1/audio/speech`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（已产出 wav，cos > 0.98） |
+| **FLUX.2-klein-4B** | ⚡ NPU 原生（量化引擎） | 4B DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
+| **Z-Image-Turbo** | ⚡ NPU 原生（量化引擎） | DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
 
 ### 支持的量化格式
 

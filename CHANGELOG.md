@@ -3,6 +3,22 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.36.0 (2026-11-21)
+
+### Added (NPU/XDNA2 backend: scheduler, device, kernels, proxy, admin)
+- Shared admission queue (`src/core/admission_queue.hpp`, header-only): bounded queue, per-client caps, round-robin fairness, timeout/deadline, cancel-all, device-lost fuse. `TextGenerationScheduler` now runs admission through it (prefill/decode/MTP phase machine unchanged); the P3 batched/draft tests are re-enabled and the `text_generation_scheduler_test` DISABLED marker is removed.
+- `NpuScheduler` pump (`src/core/compute/npu/npu_scheduler.hpp`): single owner thread holds `NpuDeviceLock`, admits 1..N compatible same-lane/same-key requests (`max_coalesce_batch`), runs them under one lock acquisition, then `Finish()` + publish. `RunLaneSync` + `TicketHandle` (Wait/Cancel) API.
+- NPU lanes wired end to end (default kNone, HIP behavior unchanged): bge-m3 `EngineSession::Sync` (`SetNpuScheduler`/`SetNpuLaneConfig`), bge-reranker `Score()`, embeddinggemma2 CPU + HIP `Embed()`, D3 decide (`RunDecideSync`). Router sidecar proxy (`src/cli/serve/npu_sidecar_proxy.{hpp,cpp}`): `/v1/systemone` → `:8766`, `/v1/audio/transcriptions` → `:8764`, `/v1/audio/speech` + `/v1/audio/voices` → `:8765`, with `MBUFO_SIDECAR_PROXY` / `MBUFO_*_UPSTREAM` overrides and 502 on disconnect. Admin catalog gains 5 NPU sidecar entries (D3-Lite/Nano/Mini/Turbo/Ultra); `/v1/audio/*` and `/v1/systemone` work with no model loaded.
+- HrxBind is real behind `MBUFO_ENABLE_NPU` (`npu_device_hrx.{hpp,cpp}` + CMake `mbufo_npu` lib): open → register xclbin → sync, verified on silicon (`HRX_PROBE_PASS dev=amdxdna`).
+- NPU op registry up to 11 ops with guards (`mha_softmax`, `softmax`, `rope`, `q4nx_dequant` incl. m_tile=64 + 64 KiB L1 check; `RefRmsNormRows` / `RefSoftmaxRows` / `RefRopeTwoHalves`CPU goldens); `npu_kernels_attn.hpp` (GQA/SWA/B-slot/BRnd DMA checks, `RefBidirectionalGqaAttention`, `ValidatePrefillFv`); `aie_linalg_aie2p_conv_even.patch` so non-emulated bf16 MMUL uses round-to-nearest-even (fixes a -0.158 systematic floor-bias).
+- IRON assets on NPU2 silicon: `e06_ffn.py` (EmbGemma2 24-layer FFN chain 3.02 ms, cos 0.9999754), `e07_attn.py` (4 standalone sub-kernels + 24-layer mixed chain S=128 17.387 ms / S=512 119.578 ms), `e08_transformer_e2e.py` (+P4 real-weights 768-d cos 0.9998656), `e09_bge_gemm.py` (64x1024x1024 bf16, cos 0.9999882), `e10_quant_gemm.py` (Q8 bfp16ebs8 EBS8-block + Q4 q4nx on-core dequant, 4 prebuilt xclbins under `/mnt/nvme-data/mbufo-models/npu-kernels/quant_gemm/`); `npu_safetensors_bridge` (1.49 GB model.safetensors → 146.82 MiB packed shards, HF parity bit-exact).
+- Unified model list: README §3 in all three languages now shows the 22 GPU families first, a separator line, then 9 NPU entries (device / format / route / ✅ served vs 🧪 runtime-verified status).
+
+### Added (NPU Q8/Q4 shared engine across 5 models, all NPU2-silicon verified)
+- New `e10` AIE2P 16-core quantized GEMM core (`q8_256x256` / `q8_1024x1024` / `q4_256x256` / `q4_1024x1024` prebuilt xclbins): Q8 bfp16ebs8 W8A16 (56.25% size) and Q4 q4nx W4A16 per-group-32 with on-core L1 dequant fusion (31.25% size), `NpuQuantGemmEngine` with reusable DMA stage BO pool.
+- `npu_quant_models_test` (`ALL_5_MODELS_NPU_Q8_Q4_TESTS_PASS`): EmbGemma2 24L (Q8 88.05 ms cos 0.999601 / Q4 93.12 ms cos 0.993148), Qwen3-TTS (Q8 65.77 ms / Q4 64.16 ms, wav artifacts), Qwen3-ASR (Q8 42.32 ms top-1 match), FLUX.2-klein-4B (Q8 280.09 ms / Q4 304.52 ms, PNG artifacts), Z-Image-Turbo (Q8 2028.57 ms / Q4 2127.15 ms, PNG artifacts); `MBUFO_NPU_QUANT=q8|q4` selects the path in `NpuEmbGemma2Runtime`.
+- Weights/models staged under `/mnt/nvme-data/mbufo-models/` (embeddinggemma-2-gguf, qwen3-tts-1.7b-base→`qwen3-tts-1.7b`, qwen3-asr-1.7b, flux2-klein-4b, z-image-turbo) plus NPU artifacts under `npu-kernels/` and `npu-quant/`.
+
 ## v0.35.0 (2026-11-21)
 
 ### Added (EmbeddingGemma 2 text encoder)
