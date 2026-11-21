@@ -358,6 +358,16 @@ std::string ResolveFlmBinary() {
       cur.push_back(dirs[i]);
     }
   }
+  if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+    for (const char* rel : {"/venv-npu/bin/flm", "/.local/bin/flm"}) {
+      const std::string cand = std::string(home) + rel;
+      if (::access(cand.c_str(), X_OK) == 0) return cand;
+    }
+  }
+  for (const char* fixed : {"/home/dardeaw/venv-npu/bin/flm",
+                            "/usr/local/bin/flm", "/opt/bin/flm"}) {
+    if (::access(fixed, X_OK) == 0) return fixed;
+  }
   return "flm";  // last resort: let execvp report the error into the log
 }
 

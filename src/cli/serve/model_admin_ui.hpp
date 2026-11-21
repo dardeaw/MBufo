@@ -755,6 +755,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <span id="conn-pill" class="status-pill"><span class="status-dot"></span> Online (:8741)</span>
+      <button class="btn-primary" onclick="openDownloadModal()">⬇ Download Models</button>
       <button onclick="refreshAll(true)">↻ Refresh</button>
     </div>
   </header>
@@ -828,76 +829,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             <div class="filter-dim-label">DEVICE</div>
             <div class="cap-tabs" id="dev-pills"></div>
           </div>
-          <div class="filter-row">
-            <div class="filter-dim-label">FAMILY</div>
-            <div class="family-pills" id="family-pills"></div>
-          </div>
+
         </div>
         <div class="catalog-list" id="catalog-list"></div>
       </div>
     </div>
 
-    <!-- Quick Chat & Router Verification Playground -->
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">
-          <span>Router & Multi-Model Playground</span>
-          <span class="badge badge-purple">Live Stream Test</span>
-        </div>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <button class="btn-sm" onclick="clearChat()">Clear Output</button>
-        </div>
-      </div>
-      <div class="playground-grid">
-        <div class="pg-sidebar">
-          <div>
-            <label class="field-label">Target Model ("model" field)</label>
-            <select id="pg-model" style="width:100%;"></select>
-          </div>
-          <div>
-            <label class="field-label">API Endpoint Format</label>
-            <select id="pg-endpoint" style="width:100%;">
-              <option value="/v1/chat/completions">Chat LLM: OpenAI (/v1/chat/completions)</option>
-              <option value="/v1/messages">Chat LLM: Anthropic (/v1/messages)</option>
-              <option value="/v1/systemone">Decide D3 (/v1/systemone)</option>
-              <option value="/v1/embeddings">Embedding (/v1/embeddings)</option>
-              <option value="/v1/reranking">Reranker (/v1/reranking)</option>
-            </select>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-            <div>
-              <label class="field-label">Max Tokens</label>
-              <input type="number" id="pg-max-tokens" value="256" style="width:100%;" />
-            </div>
-            <div>
-              <label class="field-label">Temperature</label>
-              <input type="number" id="pg-temp" value="0.6" step="0.1" style="width:100%;" />
-            </div>
-          </div>
-          <div>
-            <label class="field-label">cURL / API Routing Snippet</label>
-            <pre id="pg-curl" style="background:#090c10;border:1px solid var(--border);padding:8px;border-radius:6px;font-family:var(--mono);font-size:10px;color:#93c5fd;overflow-x:auto;white-space:pre-wrap;"></pre>
-          </div>
-        </div>
-        <div>
-          <div class="pg-chat">
-            <div class="pg-messages" id="pg-messages">
-              <div style="color:var(--muted);font-size:12px;">Select any loaded model (or Default Route) and send a message to verify simultaneous multi-model serving on :8741.</div>
-            </div>
-            <div class="pg-input-bar">
-              <input type="text" id="pg-input" placeholder="Ask something (e.g. 'Who are you? Answer in one sentence')..." onkeydown="if(event.key==='Enter') sendPlayground()" />
-              <button class="btn-primary" id="pg-send-btn" onclick="sendPlayground()">Send ↵</button>
-            </div>
-          </div>
-          <div class="pg-metrics" id="pg-metrics">
-            <span>Routed Model: <strong id="m-model">-</strong></span>
-            <span>TTFT: <strong id="m-ttft">-</strong></span>
-            <span>Decode Speed: <strong id="m-tps">-</strong></span>
-            <span>Tokens: <strong id="m-tokens">-</strong></span>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- Configure & Load Modal -->
@@ -951,9 +888,17 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         </div>
         <div>
           <label class="field-label">Compute Device</label>
-          <select id="lm-device" style="width:100%;" title="GPU always works. NPU runs the model on XDNA2 IRON kernels where supported (dual-capable models).">
-            <option value="gpu" selected>&#x1F3AE; GPU</option>
-            <option value="npu">&#x26A1; NPU (where supported)</option>
+          <select id="lm-device" style="width:100%;" onchange="onModalDeviceChange()" title="Dual-capable models default to NPU; switch between NPU and GPU here.">
+            <option value="npu">&#x26A1; NPU (XDNA2)</option>
+            <option value="gpu" selected>&#x1F3AE; GPU (HIP)</option>
+          </select>
+        </div>
+        <div id="lm-npu-quant-wrap" style="display:none;">
+          <label class="field-label">NPU Quantization</label>
+          <select id="lm-npu-quant" style="width:100%;">
+            <option value="q8" selected>Q8 (bfp16ebs8 - High Accuracy)</option>
+            <option value="q4">Q4 (q4nx - Low Memory)</option>
+            <option value="bf16">BF16 (Native)</option>
           </select>
         </div>
         <div>
@@ -993,16 +938,117 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     </div>
   </div>
 
+    <!-- Download Models Modal (from GitHub model_mapping.json) -->
+  <div class="modal-backdrop" id="download-modal">
+    <div class="modal" style="width:min(820px,96vw);max-height:86vh;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <h3 style="font-size:16px;">Download Supported Models (GitHub model_mapping.json)</h3>
+          <div id="dl-source-note" style="font-size:11px;color:var(--muted);margin-top:2px;">Source: https://raw.githubusercontent.com/dardeaw/MBufo/main/model_mapping.json</div>
+        </div>
+        <button class="btn-sm" onclick="closeDownloadModal()">✕</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input type="text" id="dl-search" placeholder="Search model name, task, arch, quant..." style="flex:1;min-width:200px;" oninput="renderDownloadList()" />
+        <select id="dl-task" onchange="renderDownloadList()">
+          <option value="ALL">All Tasks</option>
+          <option value="chat">Chat LLM</option>
+          <option value="embedding">Embedding</option>
+          <option value="reranking">Reranking</option>
+          <option value="asr">ASR (Speech-to-Text)</option>
+          <option value="tts">TTS (Text-to-Speech)</option>
+          <option value="image_generation">Image Generation</option>
+          <option value="video_generation">Video Generation</option>
+          <option value="decide">Decide (D3)</option>
+        </select>
+      </div>
+      <div id="dl-list" style="overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:4px;max-height:58vh;"></div>
+      <div style="display:flex;justify-content:flex-end;">
+        <button onclick="closeDownloadModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script>
     const MODEL_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#06b6d4', '#ec4899', '#eab308'];
+    const GH_MAPPING_URL = 'https://raw.githubusercontent.com/dardeaw/MBufo/main/model_mapping.json';
     let stateModels = { models: [], memory: {}, loading: { active: false } };
     let stateCatalog = { models: [], mmproj_files: [], draft_files: [] };
-    let selectedFamily = 'ALL';
+    let stateMapping = { models: [] };
+    let mappingSource = 'none';
     let selectedCap = 'ALL';
     let selectedDevice = 'ALL';
     let previewModel = null;
+    window._catalogFiltered = [];
+
+    function globToRegex(pat) {
+      const esc = pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+      return new RegExp('^' + esc + '$', 'i');
+    }
+
+    function findMappingForCatalog(m) {
+      const list = (stateMapping && stateMapping.models) || [];
+      const id = (m.id_suggestion || m.id || '').toLowerCase();
+      const rel = (m.relative_path || m.path || '').toLowerCase();
+      for (const entry of list) {
+        if (entry.id && (id === entry.id.toLowerCase() || id.startsWith(entry.id.toLowerCase()))) return entry;
+        const pats = (entry.match && entry.match.filename_patterns) || [];
+        for (const pat of pats) {
+          const rx = globToRegex(pat);
+          if (rx.test(m.name || '') || rx.test(rel) || rx.test(id)) return entry;
+        }
+      }
+      return null;
+    }
+
+    function mappingSupportsGpu(entry) {
+      return !!(entry && (entry.supported_backends || []).some(b => b.startsWith('gpu')));
+    }
+
+    function mappingSupportsNpu(entry) {
+      return !!(entry && (entry.supported_backends || []).some(b => b.startsWith('npu')));
+    }
+
+    function isDualCapable(m) {
+      const entry = m._mapping || findMappingForCatalog(m);
+      if (entry) return mappingSupportsGpu(entry) && mappingSupportsNpu(entry);
+      return !!m.npu_capable && !m.sidecar;
+    }
+
+    function defaultDeviceFor(m) {
+      const entry = m._mapping || findMappingForCatalog(m);
+      if (m.sidecar || (m.backend || '').toLowerCase() === 'npu') return 'npu';
+      if (entry) {
+        const hasGpu = mappingSupportsGpu(entry);
+        const hasNpu = mappingSupportsNpu(entry);
+        if (hasGpu && hasNpu) return 'npu';  // dual-capable defaults to NPU
+        if (hasNpu && !hasGpu) return 'npu';
+      }
+      if (m.npu_capable) return 'npu';
+      return 'gpu';
+    }
+
+    async function fetchModelMapping() {
+      try {
+        const res = await fetch(GH_MAPPING_URL, { cache: 'no-store' });
+        if (res.ok) {
+          stateMapping = await res.json();
+          mappingSource = 'GitHub (dardeaw/MBufo)';
+          return true;
+        }
+      } catch (_) {}
+      try {
+        const res = await fetch('/admin/model-mapping', { cache: 'no-store' });
+        if (res.ok) {
+          stateMapping = await res.json();
+          mappingSource = 'Local Fallback (/admin/model-mapping)';
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    }
 
     const GPU_COLOR = '#3b82f6';
     const NPU_COLOR = '#f59e0b';
@@ -1039,7 +1085,6 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         el.onclick = () => {
           selectedDevice = dd.key;
           renderDevicePills();
-          renderFamilyPills();
           renderCatalog();
           renderLoadedModels();
         };
@@ -1137,7 +1182,6 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         renderLoadingBanner();
         renderMemoryBar();
         renderLoadedModels();
-        updatePlaygroundModelSelect();
         return true;
       } catch (e) {
         isServerOnline = false;
@@ -1165,7 +1209,6 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (!res.ok) return false;
         stateCatalog = await res.json();
         renderDevicePills();
-        renderFamilyPills();
         renderCatalog();
         const rootsEl = document.getElementById('catalog-roots');
         if (rootsEl) {
@@ -1180,9 +1223,10 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     }
 
     async function refreshAll(manual = false) {
+      await fetchModelMapping();
       const [okStatus] = await Promise.all([fetchStatus(), fetchCatalog()]);
       if (manual) {
-        if (okStatus) showToast('Dashboard state refreshed');
+        if (okStatus) showToast(`Refreshed (mapping: ${mappingSource})`);
         else showToast('Cannot reach :8741 — mbufo.service is currently stopped', true);
       }
     }
@@ -1353,8 +1397,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             </div>
           <div class="model-actions">
             ${m.sidecar
-              ? `<button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 Probe</button>
-                 <button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', false)">⏏ Eject</button>`
+              ? `<button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', false)">⏏ Eject</button>`
               : `${!m.is_default ? `<button class="btn-sm" onclick="setPrimaryModel('${m.id}')">★ Set Primary</button>` : ''}
                   <button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', ${m.busy})">⏏ Eject</button>`}
           </div>
@@ -1383,7 +1426,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         { key: 'EMBEDDING', label: '🧬 Embedding',     match: m => (m.capabilities || []).includes('EMBEDDING') },
         { key: 'RERANKER',  label: '🎯 Reranker',      match: m => (m.capabilities || []).includes('RERANKER') },
         { key: 'VISION',    label: '👁 Vision',        match: m => (m.capabilities || []).includes('VISION') },
-        { key: 'AUDIO',     label: '🎧 Audio',  match: m => (m.capabilities || []).includes('AUDIO') },
+        { key: 'AUDIO',     label: '🎧 Audio',         match: m => (m.capabilities || []).includes('AUDIO') },
         { key: 'TOOLS',     label: '🛠 Tools',         match: m => (m.capabilities || []).includes('TOOLS') }
       ];
       if (capContainer) {
@@ -1397,29 +1440,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           el.innerHTML = `<span>${cd.label}</span><span class="cap-cnt">${cnt}</span>`;
           el.onclick = () => {
             selectedCap = cd.key;
-            selectedFamily = 'ALL';
             renderFamilyPills();
             renderCatalog();
           };
           capContainer.appendChild(el);
         });
       }
-
-      const capFilteredModels = models.filter(m =>
-        selectedCap === 'ALL' ? true : (m.capabilities || []).includes(selectedCap)
-      );
-      const pills = document.getElementById('family-pills');
-      const counts = { ALL: capFilteredModels.length };
-      capFilteredModels.forEach(m => { counts[m.family] = (counts[m.family] || 0) + 1; });
-
-      pills.innerHTML = '';
-      Object.keys(counts).forEach(fam => {
-        const el = document.createElement('span');
-        el.className = 'family-pill' + (selectedFamily === fam ? ' active' : '');
-        el.textContent = fam === 'ALL' ? `All Families (${counts[fam]})` : `${fam} · ${counts[fam]}`;
-        el.onclick = () => { selectedFamily = fam; renderFamilyPills(); renderCatalog(); };
-        pills.appendChild(el);
-      });
     }
 
     function renderCatalog() {
@@ -1428,27 +1454,35 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       const loadedPaths = new Set((stateModels.models || []).map(m => m.model_path));
       const loadedIds = new Set((stateModels.models || []).map(m => m.id));
 
-      const filtered = (stateCatalog.models || []).filter(m => {
-        if (selectedFamily !== 'ALL' && m.family !== selectedFamily) return false;
+      const enriched = (stateCatalog.models || []).map(m => {
+        const entry = findMappingForCatalog(m);
+        return Object.assign({}, m, { _mapping: entry });
+      });
+
+      const filtered = enriched.filter(m => {
         if (selectedCap !== 'ALL' && !(m.capabilities || []).includes(selectedCap)) return false;
-        if (selectedDevice !== 'ALL' && backendOf(m) !== selectedDevice) return false;
+        if (selectedDevice !== 'ALL') {
+          const dual = isDualCapable(m);
+          if (!dual && backendOf(m) !== selectedDevice) return false;
+        }
         if (!q) return true;
         const capsStr = (m.capabilities || []).join(' ').toLowerCase();
-        return m.id_suggestion.toLowerCase().includes(q) ||
-               m.relative_path.toLowerCase().includes(q) ||
-               m.family.toLowerCase().includes(q) ||
+        return (m.id_suggestion || '').toLowerCase().includes(q) ||
+               (m.relative_path || '').toLowerCase().includes(q) ||
                capsStr.includes(q);
       });
 
+      window._catalogFiltered = filtered;
       document.getElementById('catalog-count').textContent = filtered.length + ' models';
       list.innerHTML = '';
 
-      filtered.forEach(m => {
+      filtered.forEach((m, idx) => {
         const isLoaded = loadedPaths.has(m.path) || loadedIds.has(m.id_suggestion);
+        const dual = isDualCapable(m);
         const item = document.createElement('div');
         item.className = 'cat-item';
         item.onmouseenter = () => {
-          previewModel = { name: m.id_suggestion, estMib: m.size_mib + 512 };
+          previewModel = { name: m.id_suggestion, estMib: (m.size_mib || 0) + 512 };
           renderMemoryBar();
         };
         item.onmouseleave = () => {
@@ -1456,31 +1490,34 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           renderMemoryBar();
         };
 
-        const badges = [
-          renderBackendBadge(m),
-          renderCapabilityBadges(m.capabilities || []),
-          `<span class="badge">${fmtGiB(m.size_mib)}</span>`
-        ];
+        const badges = [];
+        if (dual) {
+          badges.push(`<span class="badge badge-amber" title="Default: NPU (switchable to GPU in Configure)">⚡ NPU (Default)</span>`);
+          badges.push(`<span class="badge badge-primary" title="Also supports GPU HIP">🎮 GPU</span>`);
+        } else {
+          badges.push(renderBackendBadge(m));
+        }
+        badges.push(renderCapabilityBadges(m.capabilities || []));
+        badges.push(`<span class="badge">${fmtGiB(m.size_mib)}</span>`);
         if (m.shards > 1) badges.push(`<span class="badge">${m.shards} shards</span>`);
         if (isLoaded) badges.push(`<span class="badge badge-green">LOADED</span>`);
-        if (m.npu_capable) badges.push('<span class="badge badge-amber">NPU-ready</span>');
         if (m.sidecar) {
           badges.push(`<span class="badge">sidecar :${m.default_port}</span>`);
           if (m.running) badges.push(`<span class="badge badge-green">RUNNING</span>`);
         }
 
         const isActionable = m.actionable !== false;
-    const actionsHtml = !isActionable ? ""
-      : m.sidecar
-          ? (m.running
-            ? `<button class="btn-sm btn-danger" onclick="ejectModel('${m.id_suggestion}', false)">⏏ Eject</button>
-               <button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 Probe</button>`
-            : `<button class="btn-sm btn-primary" onclick='quickLoadModel(${JSON.stringify(m)})'>⚡ Load</button>
-               <button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 Probe</button>`)
-          : (isLoaded
-            ? ''
-            : `<button class="btn-sm" onclick='openLoadModal(${JSON.stringify(m)})'>⚙ Configure</button>
-               <button class="btn-sm btn-primary" onclick='quickLoadModel(${JSON.stringify(m)})'>⚡ Load</button>`);
+        const actionsHtml = !isActionable ? ''
+          : m.sidecar
+            ? (m.running
+              ? `<button class="btn-sm" onclick="openLoadModal(${idx})">⚙ Configure</button>
+                 <button class="btn-sm btn-danger" onclick="ejectModel('${m.id_suggestion}', false)">⏏ Eject</button>`
+              : `<button class="btn-sm" onclick="openLoadModal(${idx})">⚙ Configure</button>
+                 <button class="btn-sm btn-primary" onclick="quickLoadModel(${idx})">⚡ Load</button>`)
+            : (isLoaded
+              ? ''
+              : `<button class="btn-sm" onclick="openLoadModal(${idx})">⚙ Configure</button>
+                 <button class="btn-sm btn-primary" onclick="quickLoadModel(${idx})">⚡ Load</button>`);
 
         item.innerHTML = `
           <div class="cat-info">
@@ -1488,9 +1525,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               <span>${m.id_suggestion}</span>
               ${badges.join('')}
             </div>
-        <div class="cat-rel" title="${m.path}">${m.relative_path}</div>
-        ${(!m.actionable && m.note) ? `<div class="cat-rel" style="color:var(--muted);font-style:italic;">${m.note}</div>` : ''}
-        ${m.sidecar ? `<div class="cat-rel" style="color:var(--muted);">POST ${m.endpoint} · managed by server — Load to start, Eject to stop (never auto-started at boot)</div>` : ''}
+            <div class="cat-rel" title="${m.path}">${m.relative_path}</div>
+            ${(!m.actionable && m.note) ? `<div class="cat-rel" style="color:var(--muted);font-style:italic;">${m.note}</div>` : ''}
+            ${m.sidecar ? `<div class="cat-rel" style="color:var(--muted);">POST ${m.endpoint} · NPU2 sidecar</div>` : ''}
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0;">
             ${actionsHtml}
@@ -1500,21 +1537,34 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       });
     }
 
-    function openLoadModal(m) {
+    function onModalDeviceChange() {
+      const dev = document.getElementById('lm-device').value;
+      document.getElementById('lm-npu-quant-wrap').style.display = (dev === 'npu') ? 'block' : 'none';
+    }
+
+    function openLoadModal(idx) {
+      const m = (window._catalogFiltered && window._catalogFiltered[idx]) || null;
+      if (!m) return;
       window._modalModel = m;
       document.getElementById('lm-id').value = m.id_suggestion;
       document.getElementById('lm-aliases').value = '';
-      document.getElementById('lm-path').value = m.path;
+      document.getElementById('lm-path').value = m.path || '';
       const isEnc = (m.task === 'embedding' || m.task === 'reranker');
       document.getElementById('lm-ctx').value = isEnc ? '8192' : '32768';
       document.getElementById('lm-sessions').value = '1';
       document.getElementById('lm-kv').value = isEnc ? 'fp16' : 'q4';
-    const devSel = document.getElementById('lm-device');
-    devSel.value = 'gpu';
-    devSel.disabled = !m.npu_capable;
-    devSel.title = m.npu_capable
-      ? 'Run on NPU (XDNA2 IRON kernels) or GPU'
-      : 'Only GPU execution is wired for this model';
+
+      const dual = isDualCapable(m);
+      const npuOk = !!(m.npu_capable || m.sidecar || (m._mapping && mappingSupportsNpu(m._mapping)) || backendOf(m) === 'NPU');
+      const gpuOk = !m.sidecar && (!m._mapping || mappingSupportsGpu(m._mapping) || backendOf(m) === 'GPU');
+      const devSel = document.getElementById('lm-device');
+      devSel.value = defaultDeviceFor(m);
+      devSel.disabled = !(dual || (npuOk && gpuOk));
+      devSel.title = (dual || (npuOk && gpuOk))
+        ? 'Dual-capable: defaults to NPU, switchable between NPU and GPU'
+        : (npuOk ? 'NPU model' : 'GPU model');
+      onModalDeviceChange();
+
       document.getElementById('lm-spec').value = 'off';
       document.getElementById('lm-default').checked = false;
       document.getElementById('lm-evict').checked = true;
@@ -1559,15 +1609,19 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         `Weights: <strong>${fmtGiB(m.size_mib)}</strong> + Est. KV/Buffers (${sess}×${(ctx/1024).toFixed(0)}K): <strong>~${fmtGiB(kvMib + 512)}</strong> → Total: <strong>~${fmtGiB(totalEst)}</strong> (Current Available: ${fmtGiB(avail)})`;
     }
 
-    async function quickLoadModel(m) {
+    async function quickLoadModel(idx) {
+      const m = (window._catalogFiltered && window._catalogFiltered[idx]) || null;
+      if (!m) return;
       const isEnc = (m.task === 'embedding' || m.task === 'reranker');
+      const dev = defaultDeviceFor(m);
       const payload = {
         id: m.id_suggestion,
         path: m.path,
         context_length: isEnc ? 0 : 32768,
         sessions: 1,
         kv_quant: isEnc ? 'fp16' : 'q4',
-        device: 'gpu',
+        device: dev,
+        npu_quant: dev === 'npu' ? 'q8' : '',
         speculative: 'off',
         mmproj_path: (!isEnc && m.suggested_mmproj) ? m.suggested_mmproj : '',
         allow_evict: true,
@@ -1579,6 +1633,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     async function submitLoadModal() {
       const aliasesRaw = document.getElementById('lm-aliases').value.trim();
       const aliases = aliasesRaw ? aliasesRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+      const dev = document.getElementById('lm-device').value;
       const payload = {
         id: document.getElementById('lm-id').value.trim(),
         aliases: aliases,
@@ -1586,7 +1641,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         context_length: parseInt(document.getElementById('lm-ctx').value, 10),
         sessions: parseInt(document.getElementById('lm-sessions').value, 10),
         kv_quant: document.getElementById('lm-kv').value,
-        device: document.getElementById('lm-device').value,
+        device: dev,
+        npu_quant: dev === 'npu' ? document.getElementById('lm-npu-quant').value : '',
         speculative: document.getElementById('lm-spec').value,
         draft_model_path: document.getElementById('lm-draft').value,
         mmproj_path: document.getElementById('lm-mmproj').value,
@@ -1596,6 +1652,70 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       };
       closeLoadModal();
       await doLoadRequest(payload);
+    }
+
+    async function openDownloadModal() {
+      document.getElementById('download-modal').classList.add('open');
+      if (!stateMapping.models || !stateMapping.models.length) {
+        await fetchModelMapping();
+      }
+      document.getElementById('dl-source-note').textContent =
+        `Source: ${GH_MAPPING_URL} (${mappingSource}, ${(stateMapping.models || []).length} models)`;
+      renderDownloadList();
+    }
+
+    function closeDownloadModal() {
+      document.getElementById('download-modal').classList.remove('open');
+    }
+
+    function renderDownloadList() {
+      const box = document.getElementById('dl-list');
+      const q = (document.getElementById('dl-search').value || '').toLowerCase().trim();
+      const task = document.getElementById('dl-task').value;
+      const list = (stateMapping.models || []).filter(m => {
+        if (task !== 'ALL' && m.task !== task) return false;
+        if (!q) return true;
+        const quants = JSON.stringify(m.quant_formats || {}).toLowerCase();
+        return (m.id || '').toLowerCase().includes(q) ||
+               (m.name || '').toLowerCase().includes(q) ||
+               (m.engine || '').toLowerCase().includes(q) ||
+               (m.task || '').toLowerCase().includes(q) ||
+               quants.includes(q);
+      });
+      if (!list.length) {
+        box.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted);">No matching models in model_mapping.json</div>`;
+        return;
+      }
+      box.innerHTML = list.map(m => {
+        const backs = (m.supported_backends || []).map(b => {
+          const isNpu = b.startsWith('npu');
+          return `<span class="badge ${isNpu ? 'badge-amber' : 'badge-primary'}">${b}</span>`;
+        }).join('');
+        const recQ = (m.quant_formats && m.quant_formats.recommended) ? m.quant_formats.recommended : (m.format || '');
+        const hf = m.huggingface || {};
+        const url = hf.url || ('https://huggingface.co/models?search=' + encodeURIComponent(m.name || m.id));
+        const linkLabel = hf.is_search_url ? '🔍 Search on HuggingFace ↗' : '⬇ HuggingFace Repo ↗';
+        return `
+          <div style="background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:12px;">
+            <div style="min-width:0;">
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-weight:600;font-size:13px;">
+                <span>${m.name || m.id}</span>
+                <span class="badge">${m.task || ''}</span>
+                <span class="badge">${m.engine || ''}</span>
+                ${recQ ? `<span class="badge badge-green">${recQ}</span>` : ''}
+                ${backs}
+              </div>
+              <div style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px;">
+                id: ${m.id} · format: ${m.format || ''} · default: ${m.recommended_backend || ''}
+              </div>
+            </div>
+            <a href="${url}" target="_blank" rel="noopener noreferrer"
+               style="flex-shrink:0;text-decoration:none;background:rgba(59,130,246,0.16);border:1px solid rgba(59,130,246,0.45);color:#93c5fd;padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;">
+              ${linkLabel}
+            </a>
+          </div>
+        `;
+      }).join('');
     }
 
     async function doLoadRequest(payload) {

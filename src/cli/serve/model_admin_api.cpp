@@ -286,6 +286,25 @@ HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
     return HandleList(req);
   if (req.path == "/admin/catalog" && req.method == "GET")
     return HandleCatalog(req);
+  if (req.path == "/admin/model-mapping" && req.method == "GET") {
+    for (const char* cand : {"model_mapping.json",
+                             "/home/dardeaw/git/gufo-final2/model_mapping.json"}) {
+      std::ifstream ifs(cand, std::ios::binary);
+      if (ifs) {
+        std::string body((std::istreambuf_iterator<char>(ifs)),
+                         std::istreambuf_iterator<char>());
+        HttpResponse resp;
+        resp.status = 200;
+        resp.reason = "OK";
+        resp.headers.emplace_back("Content-Type", "application/json; charset=utf-8");
+        resp.headers.emplace_back("Cache-Control", "no-store");
+        resp.body = std::move(body);
+        return resp;
+      }
+    }
+    return AdminErr(404, "Not Found", "model_mapping.json not found locally",
+                    "not_found");
+  }
   if (req.path == "/admin/load" && req.method == "POST")
     return HandleLoad(req);
   if (req.path == "/admin/eject" && req.method == "POST")
@@ -461,22 +480,47 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     roots.emplace_back("models");
   }
 
-  // Also include the ancestor directory of any currently loaded model if not
-  // already under roots.
+  // Also include the ancestor models root of any currently loaded model
+  // (walking up to 3 levels to find a directory containing multiple model folders
+  // or named *models*) plus /mnt/nvme-data/mbufo-models if present.
+  auto add_root_unique = [&](const std::filesystem::path& cand) {
+    std::error_code ec;
+    if (!std::filesystem::exists(cand, ec) || !std::filesystem::is_directory(cand, ec))
+      return;
+    const std::string cs = cand.string();
+    for (const auto& r : roots) {
+      if (r.string() == cs) return;
+    }
+    roots.push_back(cand);
+  };
+  if (std::getenv("MBUFO_MODELS_DIR") == nullptr) {
+    add_root_unique("/mnt/nvme-data/mbufo-models");
+  }
   const auto loaded_list = registry_->List();
   for (const auto& info : loaded_list) {
     if (info.path.empty()) continue;
     std::filesystem::path p(info.path);
-    if (p.has_parent_path() && p.parent_path().has_parent_path()) {
-      auto candidate = p.parent_path().parent_path();
+    std::filesystem::path cur = p.parent_path();
+    std::filesystem::path best;
+    for (int up = 0; up < 3 && cur.has_parent_path(); ++up) {
+      cur = cur.parent_path();
+      const std::string fname = ToLowerAscii(cur.filename().string());
+      if (fname.find("models") != std::string::npos) {
+        best = cur;
+        break;
+      }
+      if (best.empty()) best = cur;
+    }
+    if (!best.empty()) {
       bool covered = false;
       for (const auto& r : roots) {
-        if (info.path.rfind(r.string(), 0) == 0) {
+        if (info.path.rfind(r.string(), 0) == 0 &&
+            r.string() != "models") {
           covered = true;
           break;
         }
       }
-      if (!covered) roots.push_back(std::move(candidate));
+      if (!covered) add_root_unique(best);
     }
   }
 
