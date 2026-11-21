@@ -42,6 +42,8 @@
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/model_admin_api.hpp"
+#include "src/cli/serve/npu_sidecar_proxy.hpp"
+#include "src/cli/serve/npu_sidecar_routes.hpp"
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
@@ -2397,21 +2399,44 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     }
     return HandleVideoApiRequest(req, *video_jobs_);
   }
-  if (IsAudioTtsApiPath(req.path)) {
-    if (tts_ == nullptr || !tts_->ready()) {
-      return Err(503, "Service Unavailable",
-                 "Qwen3-TTS audio service is not configured", "server_error",
-                 "tts_service_unavailable");
+  if (req.path == npu::SystemOnePath()) {
+    if (options_.sidecar_proxy.enabled &&
+        !options_.sidecar_proxy.decide_base_url.empty()) {
+      return ForwardSidecarRequest(req, options_.sidecar_proxy.decide_base_url,
+                                   options_.sidecar_proxy.connect_timeout_ms,
+                                   options_.sidecar_proxy.request_timeout_ms);
     }
-    return HandleAudioTtsApiRequest(req, *tts_);
+    return Err(503, "Service Unavailable",
+               "D3 decide sidecar is not configured", "server_error",
+               "decide_service_unavailable");
+  }
+  if (IsAudioTtsApiPath(req.path)) {
+    if (tts_ != nullptr && tts_->ready()) {
+      return HandleAudioTtsApiRequest(req, *tts_);
+    }
+    if (options_.sidecar_proxy.enabled &&
+        !options_.sidecar_proxy.tts_base_url.empty()) {
+      return ForwardSidecarRequest(req, options_.sidecar_proxy.tts_base_url,
+                                   options_.sidecar_proxy.connect_timeout_ms,
+                                   options_.sidecar_proxy.request_timeout_ms);
+    }
+    return Err(503, "Service Unavailable",
+               "Qwen3-TTS audio service is not configured", "server_error",
+               "tts_service_unavailable");
   }
   if (IsAudioAsrApiPath(req.path)) {
-    if (asr_ == nullptr || !asr_->ready()) {
-      return Err(503, "Service Unavailable",
-                 "Qwen3-ASR service is not configured", "server_error",
-                 "asr_service_unavailable");
+    if (asr_ != nullptr && asr_->ready()) {
+      return HandleAudioAsrApiRequest(req, *asr_);
     }
-    return HandleAudioAsrApiRequest(req, *asr_);
+    if (options_.sidecar_proxy.enabled &&
+        !options_.sidecar_proxy.asr_base_url.empty()) {
+      return ForwardSidecarRequest(req, options_.sidecar_proxy.asr_base_url,
+                                   options_.sidecar_proxy.connect_timeout_ms,
+                                   options_.sidecar_proxy.request_timeout_ms);
+    }
+    return Err(503, "Service Unavailable",
+               "Qwen3-ASR service is not configured", "server_error",
+               "asr_service_unavailable");
   }
   for (const auto& entry : routes_) {
     if (entry.first.first == req.method && entry.first.second == req.path) {

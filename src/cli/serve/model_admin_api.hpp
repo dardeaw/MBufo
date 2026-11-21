@@ -79,6 +79,21 @@ private:
   std::uint64_t loading_started_ms_{0};
 };
 
+struct ModelCapabilityProfile {
+  std::string task{"chat"};
+  bool has_vision{false};
+  bool has_audio{false};
+  bool has_tools{false};
+  std::vector<std::string> badges;
+};
+
+/// Classifies a model or sidecar into task (`chat`, `decide`, `embedding`,
+/// `reranker`, `audio`, `tts`) and UI badges. LLM chat models (e.g. Qwen3.8)
+/// map to `chat` + `TOOLS`; D3 sidecars map to `decide` (`DECIDE`).
+[[nodiscard]] ModelCapabilityProfile ClassifyModelCapabilities(
+    std::string_view id_or_name, std::string_view family, std::string_view path,
+    bool has_mmproj, std::string_view spec_kind);
+
 }  // namespace mbufo::server
 
 #endif  // MBUFO_SERVER_MODEL_ADMIN_API_HPP_

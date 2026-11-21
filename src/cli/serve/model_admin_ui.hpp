@@ -159,6 +159,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       flex-shrink: 0;
       border: 1px solid transparent;
     }
+    .cap-chat   { background: rgba(59,130,246,0.18); color: #93c5fd; border-color: rgba(59,130,246,0.45); }
     .cap-decide { background: rgba(99,102,241,0.18); color: #a5b4fc; border-color: rgba(99,102,241,0.45); }
     .cap-embed  { background: rgba(16,185,129,0.18); color: #34d399; border-color: rgba(16,185,129,0.45); }
     .cap-rerank { background: rgba(245,158,11,0.18); color: #fbbf24; border-color: rgba(245,158,11,0.45); }
@@ -483,6 +484,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       color: #94a3b8;
     }
     .cap-tab.active[data-cap="ALL"]       { background: rgba(59,130,246,0.22); border-color: #3b82f6; color: #93c5fd; box-shadow: 0 0 12px rgba(59,130,246,0.2); }
+    .cap-tab.active[data-cap="CHAT"]      { background: rgba(59,130,246,0.25); border-color: #3b82f6; color: #bfdbfe; box-shadow: 0 0 12px rgba(59,130,246,0.22); }
     .cap-tab.active[data-cap="DECIDE"]    { background: rgba(99,102,241,0.25); border-color: #6366f1; color: #c7d2fe; box-shadow: 0 0 12px rgba(99,102,241,0.22); }
     .cap-tab.active[data-cap="EMBEDDING"] { background: rgba(16,185,129,0.22); border-color: #10b981; color: #6ee7b7; box-shadow: 0 0 12px rgba(16,185,129,0.2); }
     .cap-tab.active[data-cap="RERANKER"]  { background: rgba(245,158,11,0.22); border-color: #f59e0b; color: #fde68a; box-shadow: 0 0 12px rgba(245,158,11,0.2); }
@@ -855,8 +857,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           <div>
             <label class="field-label">API Endpoint Format</label>
             <select id="pg-endpoint" style="width:100%;">
-              <option value="/v1/chat/completions">Decide / Chat: OpenAI (/v1/chat/completions)</option>
-              <option value="/v1/messages">Decide / Chat: Anthropic (/v1/messages)</option>
+              <option value="/v1/chat/completions">Chat LLM: OpenAI (/v1/chat/completions)</option>
+              <option value="/v1/messages">Chat LLM: Anthropic (/v1/messages)</option>
+              <option value="/v1/systemone">Decide D3 (/v1/systemone)</option>
               <option value="/v1/embeddings">Embedding (/v1/embeddings)</option>
               <option value="/v1/reranking">Reranker (/v1/reranking)</option>
             </select>
@@ -1057,7 +1060,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     function renderCapabilityBadges(caps) {
       const list = Array.isArray(caps) ? caps : [];
       return list.map(c => {
-        if (c === 'DECIDE')    return `<span class="cap-pill cap-decide" title="Decide / Reasoning / Chat LLM">🧠 DECIDE</span>`;
+        if (c === 'CHAT')      return `<span class="cap-pill cap-chat" title="Chat / Reasoning LLM (/v1/chat/completions)">💬 CHAT</span>`;
+        if (c === 'DECIDE')    return `<span class="cap-pill cap-decide" title="D3 Fast Decision Engine (/v1/systemone)">⚡ DECIDE</span>`;
         if (c === 'EMBEDDING') return `<span class="cap-pill cap-embed" title="Vector Embeddings (/v1/embeddings)">🧬 EMBEDDING</span>`;
         if (c === 'RERANKER')  return `<span class="cap-pill cap-rerank" title="Cross-Encoder / Relevance Reranker (/v1/reranking)">🎯 RERANKER</span>`;
         if (c === 'VISION')    return `<span class="cap-pill cap-vision" title="Multimodal Vision (Image Input)">👁 VISION</span>`;
@@ -1361,7 +1365,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       const models = stateCatalog.models || [];
       const capDefs = [
         { key: 'ALL',       label: 'All Capabilities', match: () => true },
-        { key: 'DECIDE',    label: '🧠 Decide / Chat', match: m => (m.capabilities || []).includes('DECIDE') },
+        { key: 'CHAT',      label: '💬 Chat LLM',     match: m => (m.capabilities || []).includes('CHAT') },
+        { key: 'DECIDE',    label: '⚡ Decide (D3)',  match: m => (m.capabilities || []).includes('DECIDE') },
         { key: 'EMBEDDING', label: '🧬 Embedding',     match: m => (m.capabilities || []).includes('EMBEDDING') },
         { key: 'RERANKER',  label: '🎯 Reranker',      match: m => (m.capabilities || []).includes('RERANKER') },
         { key: 'VISION',    label: '👁 Vision',        match: m => (m.capabilities || []).includes('VISION') },
@@ -1661,6 +1666,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         const epSel = document.getElementById('pg-endpoint');
         if (m.task === 'embedding') epSel.value = '/v1/embeddings';
         else if (m.task === 'reranker') epSel.value = '/v1/reranking';
+        else if (m.task === 'decide') epSel.value = '/v1/systemone';
         else if (epSel.value === '/v1/embeddings' || epSel.value === '/v1/reranking')
           epSel.value = '/v1/chat/completions';
       }

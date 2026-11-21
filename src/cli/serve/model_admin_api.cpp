@@ -202,20 +202,14 @@ GgufRole ClassifyGguf(const std::filesystem::path& p) {
   return GgufRole::kMainModel;
 }
 
-struct CapabilityProfile {
-  std::string task{"decide"};
-  bool has_vision{false};
-  bool has_audio{false};
-  bool has_tools{false};
-  std::vector<std::string> badges;
-};
+}  // namespace
 
-CapabilityProfile AnalyzeCapabilities(std::string_view id_or_name,
-                                      std::string_view family,
-                                      std::string_view path,
-                                      bool has_mmproj,
-                                      std::string_view spec_kind) {
-  CapabilityProfile prof;
+ModelCapabilityProfile ClassifyModelCapabilities(std::string_view id_or_name,
+                                                 std::string_view family,
+                                                 std::string_view path,
+                                                 bool has_mmproj,
+                                                 std::string_view spec_kind) {
+  ModelCapabilityProfile prof;
   const std::string hay = ToLowerAscii(std::string(id_or_name) + " " +
                                        std::string(family) + " " +
                                        std::string(path));
@@ -235,9 +229,16 @@ CapabilityProfile AnalyzeCapabilities(std::string_view id_or_name,
     prof.task = "tts";
     prof.has_audio = true;
     prof.badges.push_back("SPEECH");
-  } else {
+  } else if (hay.find("d3-") != std::string::npos ||
+             hay.find("d3:") != std::string::npos ||
+             hay.find("d3_decide") != std::string::npos ||
+             hay.find("decision") != std::string::npos ||
+             hay.find("systemone") != std::string::npos) {
     prof.task = "decide";
     prof.badges.push_back("DECIDE");
+  } else {
+    prof.task = "chat";
+    prof.badges.push_back("CHAT");
   }
 
   const bool is_gemma4 = hay.find("gemma-4") != std::string::npos ||
@@ -259,7 +260,7 @@ CapabilityProfile AnalyzeCapabilities(std::string_view id_or_name,
     prof.has_audio = true;
     if (prof.task != "audio") prof.badges.push_back("AUDIO");
   }
-  if (prof.task == "decide") {
+  if (prof.task == "chat") {
     prof.has_tools = true;
     prof.badges.push_back("TOOLS");
   }
@@ -272,8 +273,6 @@ CapabilityProfile AnalyzeCapabilities(std::string_view id_or_name,
   }
   return prof;
 }
-
-}  // namespace
 
 HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
   if (req.method == "GET" &&
@@ -327,7 +326,7 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["speculative"] = info.speculative;
     {
       const std::string spec_s = info.speculative ? "mtp" : "";
-      const auto prof = AnalyzeCapabilities(info.id, "", info.path,
+      const auto prof = ClassifyModelCapabilities(info.id, "", info.path,
                                             info.supports_images, spec_s);
       row["task"] = prof.task;
       row["has_vision"] = prof.has_vision;
@@ -580,7 +579,7 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
                                  : !sug_dflash.empty() ? "dflash2"
                                  : !sug_dspark.empty() ? "dspark"
                                                        : "";
-      const auto prof = AnalyzeCapabilities(derived_id, f.family, full_path,
+      const auto prof = ClassifyModelCapabilities(derived_id, f.family, full_path,
                                             !sug_mm.empty(), spec_k);
       item["task"] = prof.task;
       item["has_vision"] = prof.has_vision;

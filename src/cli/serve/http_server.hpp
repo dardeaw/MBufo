@@ -16,6 +16,7 @@
 
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/model_registry.hpp"
+#include "src/cli/serve/npu_sidecar_proxy.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 
 namespace mbufo::server {
@@ -100,6 +101,7 @@ struct HttpServerOptions {
   /// a lost device. Health, readiness and generation answer 503 `device_lost`
   /// from then on; the hook decides how the process exits.
   std::function<void()> on_device_lost{};
+  SidecarProxyConfig sidecar_proxy{};
 };
 
 /// True for a numeric IPv4 or IPv6 literal `HttpServer` can bind. Host names

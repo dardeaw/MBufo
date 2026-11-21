@@ -1719,6 +1719,8 @@ int RunServe(std::span<const char* const> args) {
                 device_lost.store(true);
                 ShutdownAfterDeviceLoss();
               },
+          .sidecar_proxy =
+              server::SidecarProxyConfig::FromEnvironment(subcommand == "llm"),
       },
       images, registry, admin);
   std::string err;
