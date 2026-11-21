@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -252,6 +253,72 @@ std::optional<std::vector<float>> EngineSession::ScoreBatch(
   std::vector<float> scores;
   scores.reserve(batch.size());
   double total_ms = 0.0;
+  // Every pair shares the system/instruction/query framing; only the document
+  // and the closing frame differ. On a dense causal model the shared prefix is
+  // prefilled once and each document continues from that KV (start_pos =
+  // prefix length), so the framing and the query are not recomputed per pair.
+  // Hybrid (recurrent-state) models would be corrupted by the continuation,
+  // so they keep the per-pair path.
+  std::size_t prefix = 0;
+  const std::string architecture = model_->Qwen().GetConfig().architecture;
+  if (batch.size() > 1 && (architecture == "qwen3" || architecture == "qwen2") &&
+      std::getenv("MBUFO_QWEN_RERANK_NO_PREFIX") == nullptr) {
+    prefix = batch.front().size();
+    for (const auto& ids : batch) {
+      std::size_t common = 0;
+      const std::size_t limit = std::min(prefix, ids.size());
+      while (common < limit && ids[common] == batch.front()[common]) ++common;
+      prefix = common;
+    }
+    // The last token of every pair must stay in its own call: it carries the
+    // yes/no readout.
+    std::size_t shortest = batch.front().size();
+    for (const auto& ids : batch) shortest = std::min(shortest, ids.size());
+    prefix = std::min(prefix, shortest - 1);
+  }
+  if (prefix >= 8) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!EnsureExecutor(error_msg)) {
+      return std::nullopt;
+    }
+    executor_->Reset();
+    const std::size_t vocab = model_->Qwen().GetTokenizer().GetVocabSize();
+    const auto yes = static_cast<std::size_t>(model_->YesId());
+    const auto no = static_cast<std::size_t>(model_->NoId());
+    if (vocab == 0 || yes >= vocab || no >= vocab) {
+      return refuse("qwen-reranker ScoreBatch: scoring id outside vocabulary");
+    }
+    const auto start = std::chrono::steady_clock::now();
+    try {
+      (void)executor_->ForwardPromptBatch(
+          std::span<const tokenization::TokenId>(batch.front()).first(prefix),
+          0, false);
+      for (const auto& ids : batch) {
+        (void)executor_->ForwardPromptBatch(
+            std::span<const tokenization::TokenId>(ids).subspan(prefix),
+            static_cast<std::uint32_t>(prefix), true);
+        const std::span<const float> logits = executor_->CopyLastLogits();
+        if (logits.size() < vocab) {
+          return refuse("qwen-reranker ScoreBatch: logit capture size mismatch");
+        }
+        const float score = core::rerank::YesNoScore(logits[yes], logits[no]);
+        if (!(score >= 0.0F) || !(score <= 1.0F)) {
+          return refuse(
+              "qwen-reranker ScoreBatch: non-finite yes/no readout refused");
+        }
+        scores.push_back(score);
+      }
+    } catch (const std::exception& exception) {
+      return refuse(std::string("qwen-reranker prefill failed: ") +
+                    exception.what());
+    }
+    total_ms = std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - start)
+                   .count();
+    if (total_prefill_ms != nullptr) *total_prefill_ms = total_ms;
+    if (prompt_tokens != nullptr) *prompt_tokens = tokens;
+    return scores;
+  }
   for (const auto& ids : batch) {
     auto result = Score(ids, error_msg);
     if (!result.has_value()) {
