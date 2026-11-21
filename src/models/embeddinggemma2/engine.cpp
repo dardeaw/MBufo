@@ -7,10 +7,15 @@
 namespace mbufo::models::embeddinggemma2 {
 
 #ifndef ENGINE_ENABLE_HIP
+struct EngineModel::HipState {};
 EngineModel::EngineModel() = default;
 EngineModel::~EngineModel() = default;
-std::optional<EmbedResult> EngineModel::Embed(std::span<const std::uint32_t>,
-                                              std::string* error_msg) {
+std::optional<EmbedResult> EngineModel::Embed(
+    std::span<const std::uint32_t> ids, std::string* error_msg) {
+  if (npu::DecideNpuEmbed(npu_config_, ids.size()) ==
+      npu::EmbedNpuRoute::kIron) {
+    // Future NPU IRON prefill dispatch seam (zero-change while kNone).
+  }
   if (error_msg != nullptr)
     *error_msg = "EmbeddingGemma 2 requires the HIP backend";
   return std::nullopt;

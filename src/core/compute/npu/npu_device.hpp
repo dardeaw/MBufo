@@ -1,5 +1,5 @@
 #pragma once
-// NPU device lock + xclbin table (v0: lock/pump/xclbin-table real, hrx bind TODO).
+// NPU device lock + xclbin table + HRX hardware bind seam.
 //
 // Why this file exists: XDNA2 runs one graph at a time. All five lanes share
 // one device, so exactly one owner thread may submit. This file owns:
@@ -7,12 +7,12 @@
 //   2. the xclbin registry (register once by name, reuse across lanes);
 //   3. the pump bridge: AdmitNext -> hold lock -> run payload -> Finish.
 //
-// Hardware seam: hrx init/get/synchronize/release (spike3 proved the call
-// sequence; `code=14` when used before init) lives in a future
-// npu_device_hrx.cpp guarded by its own CMake option. This header only
-// declares HrxBind() and reports kHrxUnbound until that file lands, so the
-// queue/lock/table logic is fully testable without NPU hardware.
+// Hardware seam: with MBUFO_ENABLE_NPU, HrxBind() and HrxDeviceName() call into
+// npu_device_hrx.cpp (Open -> Sync over libhrx / amdxdna).
+// Without MBUFO_ENABLE_NPU, inline stubs report kHrxUnbound so unit tests and
+// HIP builds stay dependency-free.
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -153,6 +153,11 @@ class NpuDeviceLock final {
     return ticket;
   }
 
+  /// Acquire the device lock and probe HRX hardware binding.
+  [[nodiscard]] inline bool ProbeHardware(
+      std::string* error, std::string* device_name = nullptr,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
+
  private:
   std::timed_mutex mutex_;
   std::atomic<bool> device_lost_{false};
@@ -160,19 +165,42 @@ class NpuDeviceLock final {
 };
 
 /// Hardware bind seam: with MBUFO_ENABLE_NPU this is defined in
-/// npu_device_hrx.cpp (real init/get/sync over hrx); without it, the inline
-/// stub below reports kHrxUnbound and sidecars carry the load.
+/// npu_device_hrx.cpp (real Open -> Sync over libhrx / amdxdna); without it,
+/// the inline stub reports kHrxUnbound.
 #ifdef MBUFO_ENABLE_NPU
 [[nodiscard]] bool HrxBind(std::string* error);
+[[nodiscard]] std::string HrxDeviceName(std::string* error);
 #else
 [[nodiscard]] inline bool HrxBind(std::string* error) {
   if (error != nullptr) {
     *error =
-        "kHrxUnbound: npu_device_hrx.cpp not wired yet (see spike3 for the "
-        "proven hrx init/register sequence)";
+        "kHrxUnbound: built without MBUFO_ENABLE_NPU (configure with FastFlow "
+        "SDK to enable real amdxdna Open/Register/Sync)";
   }
   return false;
 }
+
+[[nodiscard]] inline std::string HrxDeviceName(std::string* error) {
+  (void)HrxBind(error);
+  return {};
+}
 #endif
+
+[[nodiscard]] inline bool NpuDeviceLock::ProbeHardware(
+    std::string* error, std::string* device_name,
+    std::chrono::milliseconds timeout) {
+  Hold hold(this, timeout);
+  if (!hold.holds()) {
+    if (error != nullptr) {
+      *error = device_lost() ? "npu device lost" : "npu device lock busy";
+    }
+    return false;
+  }
+  if (!HrxBind(error)) return false;
+  if (device_name != nullptr) {
+    *device_name = HrxDeviceName(error);
+  }
+  return true;
+}
 
 }  // namespace mbufo::core::npu

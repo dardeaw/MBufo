@@ -60,6 +60,11 @@ std::optional<EngineSession::SyncResult> EngineSession::Sync(
     return refuse("bge-m3 Sync: " + std::to_string(ids.size()) +
                   " tokens exceeds the window");
   }
+  if (npu::DecideNpuEmbed(npu_config_, ids.size()) ==
+      npu::EmbedNpuRoute::kIron) {
+    // Future in-process NPU execution + NpuPoolAndNormalizeBf16(..., kCls).
+    // Currently DecideNpuEmbed requires weights_resident=true and returns kNone.
+  }
 #ifdef ENGINE_ENABLE_HIP
   if (use_hip) {
     // Device prefill lives in hip/session.hip (HipSync); failure falls

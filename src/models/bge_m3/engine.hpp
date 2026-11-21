@@ -23,7 +23,9 @@
 #include <string>
 #include <vector>
 
+#include "src/core/compute/npu/npu_lane.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/models/bge_m3/npu_embed.hpp"
 #include "src/models/bge_m3/config.hpp"
 #include "src/models/bge_m3/forward.hpp"
 #include "src/models/bge_m3/tokenizer.hpp"
@@ -79,9 +81,18 @@ class EngineSession {
       std::span<const std::uint32_t> ids, bool use_hip,
       std::string* error_msg = nullptr);
 
+  void SetNpuLaneConfig(mbufo::npu::NpuLaneConfig config) noexcept {
+    npu_config_ = std::move(config);
+  }
+  [[nodiscard]] const mbufo::npu::NpuLaneConfig& npu_lane_config()
+      const noexcept {
+    return npu_config_;
+  }
+
  private:
   const EngineModel* model_;
   BgeM3Scratch scratch_;
+  mbufo::npu::NpuLaneConfig npu_config_{};
 };
 
 /// Immutable, shareable bge-m3 model: GGUF storage plus the F32 compute

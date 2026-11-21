@@ -1,0 +1,33 @@
+--- a/aie/iron/kernels/linalg.py
++++ b/aie/iron/kernels/linalg.py
+@@ -539,8 +539,9 @@
+         round_conv_even: AIE2 only, bf16 inputs only.  When ``True``
+             compile with ``-DROUND_CONV_EVEN`` so the kernel itself selects
+             round-to-nearest-even for each call and restores the caller's
+-            mode, in place of the contract's ``conv_even`` setup.  AIE2P's
+-            kernel always does this, so it is ignored there.
++            mode, in place of the contract's ``conv_even`` setup.  On AIE2P,
++            only ``emulate_bf16_mmul_with_bfp16=True`` swaps rounding inside
++            ``mm_aie2p.h``; non-emulated bf16 outputs use ``setup=conv_even``.
+ 
+     Returns:
+         ExternalFunction configured for the matmul kernel.
+@@ -645,12 +646,14 @@
+                     else None
+                 )
+             ),
+-            # mm_aie2p.h sets conv_even itself and restores it; mm_aie2.h
+-            # does so only under round_conv_even, and otherwise stores bf16
+-            # in whatever mode the core is in.
++            # mm_aie2p.h sets conv_even itself only under
++            # AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16 (bf16_emulated);
++            # non-emulated bf16 output stores on aie2p inherit the core's
++            # default floor rounding unless setup=conv_even runs. mm_aie2.h
++            # sets conv_even itself only under round_conv_even.
+             setup=(
+                 conv_even
+-                if arch != "aie2p" and output_dtype is bfloat16 and not self_rounding
++                if output_dtype is bfloat16 and not self_rounding and not bf16_emulated
+                 else None
+             ),
+             roles=(In, In, InOut),

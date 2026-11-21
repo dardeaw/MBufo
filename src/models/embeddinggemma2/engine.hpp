@@ -14,7 +14,9 @@
 #include <string>
 #include <vector>
 
+#include "src/core/compute/npu/npu_lane.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/models/embeddinggemma2/npu_embed.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
 namespace mbufo::models::embeddinggemma2 {
@@ -73,9 +75,18 @@ class EngineModel {
   [[nodiscard]] std::optional<EmbedResult> Embed(
       std::span<const std::uint32_t> ids, std::string* error_msg = nullptr);
 
+  void SetNpuLaneConfig(mbufo::npu::NpuLaneConfig config) noexcept {
+    npu_config_ = std::move(config);
+  }
+  [[nodiscard]] const mbufo::npu::NpuLaneConfig& npu_lane_config()
+      const noexcept {
+    return npu_config_;
+  }
+
  private:
   EngineModel();
   std::unique_ptr<core::GgufReader> reader_;
+  mbufo::npu::NpuLaneConfig npu_config_{};
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
   Config config_;
   struct HipState;

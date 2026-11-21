@@ -1,4 +1,4 @@
-// HrxSession implementation + the real HrxBind used when MBUFO_ENABLE_NPU.
+// HrxSession implementation + real HrxBind/HrxDeviceName used when MBUFO_ENABLE_NPU.
 // Build: only in libmbufo_npu (CMake option MBUFO_ENABLE_NPU, default OFF).
 
 #include "src/core/compute/npu/npu_device_hrx.hpp"
@@ -76,10 +76,24 @@ std::string HrxSession::device_info() const {
   }
 }
 
-// Probe used by NpuDeviceLock owners: open + sync + destroy.
+// Probe used by NpuDeviceLock owners: open + sync + verify device identity.
 bool HrxBind(std::string* error) {
   auto s = HrxSession::Open(0, error);
-  return s != nullptr;
+  if (!s) return false;
+  const std::string info = s->device_info();
+  if (info.empty()) {
+    if (error != nullptr) {
+      *error = "HrxBind: HRX device opened/synced but device_info() is empty";
+    }
+    return false;
+  }
+  return true;
+}
+
+std::string HrxDeviceName(std::string* error) {
+  auto s = HrxSession::Open(0, error);
+  if (!s) return {};
+  return s->device_info();
 }
 
 }  // namespace mbufo::core::npu

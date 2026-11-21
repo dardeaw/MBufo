@@ -365,19 +365,20 @@ if (MBUFO_ENABLE_NPU)
       "MBUFO_NPU_HRX_INCLUDE_DIR and MBUFO_NPU_LIB_DIR")
   endif()
   add_library(mbufo_npu STATIC src/core/compute/npu/npu_device_hrx.cpp)
-  target_include_directories(mbufo_npu PRIVATE
+  target_include_directories(mbufo_npu PUBLIC
     ${MBUFO_NPU_INCLUDE_DIR} ${MBUFO_NPU_HRX_INCLUDE_DIR}
-    ${CMAKE_SOURCE_DIR})
+    ${MBUFO_NPU_HRX_INCLUDE_DIR}/hrx ${CMAKE_SOURCE_DIR})
   # MBUFO_ENABLE_NPU selects our seam; FLM_USE_HRX selects the HRX (amdxdna)
   # branch inside the FastFlow headers (without it they demand XRT headers,
   # which are not installed).
   target_compile_definitions(mbufo_npu PUBLIC MBUFO_ENABLE_NPU=1 FLM_USE_HRX=1)
-  find_library(MBUFO_HRX_LIB NAMES hrx PATHS ${MBUFO_NPU_LIB_DIR}
+  find_library(MBUFO_HRX_LIB NAMES libhrx.so.0 hrx PATHS ${MBUFO_NPU_LIB_DIR}
     NO_DEFAULT_PATH)
   if (NOT MBUFO_HRX_LIB)
     message(FATAL_ERROR "libhrx not found under ${MBUFO_NPU_LIB_DIR}")
   endif()
   target_link_libraries(mbufo_npu PUBLIC ${MBUFO_HRX_LIB} Threads::Threads)
+  target_link_options(mbufo_npu PUBLIC "-Wl,-rpath,${MBUFO_NPU_LIB_DIR}")
   target_link_libraries(mbufo_core PUBLIC mbufo_npu)
 endif()
 
@@ -402,6 +403,7 @@ endif()
 
 add_library(mbufo_http STATIC
   src/cli/serve/image_api.cpp
+  src/cli/serve/npu_sidecar_proxy.cpp
   src/cli/serve/audio_asr_api.cpp
   src/cli/serve/asr_service.cpp
   src/cli/serve/audio_tts_api.cpp
@@ -417,7 +419,7 @@ add_library(mbufo_http STATIC
   # the engine library, so no translation unit is linked twice.
   src/models/deepseek_v4_flash/tool_calls.cpp
 )
-target_link_libraries(mbufo_http PUBLIC mbufo_logging mbufo_core mbufo_qwen3_tts mbufo_qwen3_asr mbufo_qwen_image_21)
+target_link_libraries(mbufo_http PUBLIC mbufo_logging mbufo_core mbufo_qwen3_tts mbufo_qwen3_asr mbufo_qwen_image_21 CURL::libcurl)
 
 add_executable(mbufo
   src/cli/main.cpp
@@ -594,6 +596,18 @@ if (BUILD_TESTING)
   add_test(NAME pooling_norm_test COMMAND pooling_norm_test)
   set_tests_properties(pooling_norm_test PROPERTIES LABELS "cpu;core;embedding")
 
+  add_executable(npu_core_test tests/core/npu_core_test.cpp)
+  target_link_libraries(npu_core_test PRIVATE mbufo_core)
+  add_test(NAME npu_core_test COMMAND npu_core_test)
+  set_tests_properties(npu_core_test PROPERTIES LABELS "cpu;core;npu")
+
+  if (MBUFO_ENABLE_NPU)
+    add_executable(npu_hrx_probe_test tests/core/npu_hrx_probe_test.cpp)
+    target_link_libraries(npu_hrx_probe_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_hrx_probe_test COMMAND npu_hrx_probe_test)
+    set_tests_properties(npu_hrx_probe_test PROPERTIES LABELS "npu;hardware")
+  endif()
+
   add_executable(rerank_score_test tests/core/rerank_score_test.cpp)
   target_link_libraries(rerank_score_test PRIVATE mbufo_core)
   add_test(NAME rerank_score_test COMMAND rerank_score_test)
@@ -645,6 +659,14 @@ if (BUILD_TESTING)
   target_link_libraries(http_server_test PRIVATE mbufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
+
+  add_executable(npu_sidecar_proxy_test
+    tests/cli/npu_sidecar_proxy_test.cpp
+    src/cli/serve/model_admin_api.cpp
+    src/cli/serve/model_registry.cpp)
+  target_link_libraries(npu_sidecar_proxy_test PRIVATE mbufo_http)
+  add_test(NAME npu_sidecar_proxy_test COMMAND npu_sidecar_proxy_test)
+  set_tests_properties(npu_sidecar_proxy_test PROPERTIES LABELS "cpu;server;http;npu" TIMEOUT 30)
   add_executable(audio_websocket_test tests/cli/audio_websocket_test.cpp)
   target_link_libraries(audio_websocket_test PRIVATE mbufo_http)
   add_test(NAME audio_websocket_test COMMAND audio_websocket_test)

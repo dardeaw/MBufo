@@ -592,6 +592,10 @@ std::optional<EmbedResult> EngineModel::Embed(std::span<const std::uint32_t> ids
   if (ids.size() > kMaxTokens)
     return refuse("embeddinggemma2: " + std::to_string(ids.size()) +
                   " tokens exceeds the " + std::to_string(kMaxTokens) + " window");
+  if (npu::DecideNpuEmbed(npu_config_, ids.size()) ==
+      npu::EmbedNpuRoute::kIron) {
+    // Future in-process NPU IRON execution + NpuEmbGemma2PostProcessBf16.
+  }
   if (hip_ == nullptr) {
     auto state = std::make_unique<HipState>();
     std::string error;
