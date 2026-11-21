@@ -25,7 +25,6 @@ Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily 
 [§3 GGUF Coverage & Multi-Model Router](#3-gguf-coverage--multi-model-router) ·
 [Quickstart](#quickstart) ·
 [Benchmarks](#benchmarks-gfx1151-strix-halo) ·
-[Upstream Tracking](#upstream-tracking) ·
 [Build from Source](#build-from-source) ·
 [Documentation Index](#documentation-index) ·
 [Compatibility & Limits](#compatibility--limits)
@@ -387,19 +386,6 @@ _Not re-run for this release: this table comes from an earlier build._
 
 - **Qwen 3.8 27B**: **UD-Q4_K_XL** is the reference build; the two builds decode within about 15% of each other in the measurements above.
 - **Qwen 3.8 Flash-Next**: **ROCmFP4** decodes as fast as Q4_K_XL (prose 54.4, fibonacci 59.2 tok/s) and fits in ~94 GB (saving ~17 GB over Q4_K_XL).
-
----
-
-## Upstream Tracking
-
-MBufo tracks upstream `main` via standard Git merges, preserving upstream history without rebase:
-
-| Property | Details |
-| --- | --- |
-| Upstream Repository | [gufo-org/gufo](https://github.com/gufo-org/gufo) |
-| Upstream Base Release | `v0.26.0` (tracking stable updates) |
-| Merge Strategy | Clean `--no-ff` merges from upstream `main`; MBufo commits remain cleanly isolated |
-| Tagging Scheme | MBufo releases use the `mbufo-vX.Y.Z` prefix to avoid colliding with upstream tags |
 
 ---
 
