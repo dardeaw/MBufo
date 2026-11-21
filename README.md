@@ -216,6 +216,8 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 | **Gemma-4-12B** | 12B Dense | Bench | — | — | K-quant preconversion & WMMA Q8 prefill |
 | **Qwen3.5-35B-A3B** | 35B-A3B MoE | Engine | — | — | qwen35moe pipeline support |
 | **Qwen3.6-35B-A3B** | 35B-A3B MoE | Engine | — | — | Q6_K→Q8_0 loading, Split-K decode MoE |
+| **Ornith-1.5-35B-A3B** | 35B-A3B MoE | Supported | Verified | — | `qwen35moe` hybrid SSM/attention, ROCmFP4 / Q4_K_M + BF16 vision (`width=2048`) |
+| **Tiel-Coder / Cyber-Tiel-Coder-35B-A3B** | 35B-A3B MoE | Supported | Verified | — | Ornith-1.5 (`qwen35moe`) agentic coding & abliterated cyber/CTF fine-tunes; Q3_K/Q4_K/Q5_K/Q6_K/Q8_0 (`-GGUF-MTP`) |
 | **GPT-OSS 20B / 120B** | 20B / 117B MoE | Supported | Pilot | — | Native MXFP4 GEMM; zero-copy streaming for 120B |
 | **Muse Glimmer 30B** | 30B | Supported | Prompt | DFlash (~89%) | ATEM tool calling, W8A8 / Q8_0 execution |
 | **Llama-3.1-8B** | 8B Dense | Supported | Adapter | — | Standard dense GQA support |
