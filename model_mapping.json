@@ -1,0 +1,1307 @@
+{
+  "schema_version": 1,
+  "generated_from": "README.md + src/models/* + src/core/compute/npu/*",
+  "notes": {
+    "purpose": "Canonical model capability mapping for MBufo WebUI (/admin) and model catalog auto-detection.",
+    "match_priority": "Match by GGUF general.architecture / safetensors config.json architectures first, then filename_patterns.",
+    "backends": [
+      "gpu_hip",
+      "npu_bf16",
+      "npu_q8_bfp16",
+      "npu_q4_q4nx",
+      "npu_flm_sidecar",
+      "cpu"
+    ]
+  },
+  "models": [
+    {
+      "id": "qwen3.8-flash-next",
+      "name": "Qwen3.8 Flash-Next",
+      "task": "chat",
+      "params": "30B-A3B MoE",
+      "engine": "qwen38_flash_next",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "qwen3moe",
+          "qwen3_next"
+        ],
+        "filename_patterns": [
+          "*Qwen3.8-Flash-Next*",
+          "*Flash-Next*"
+        ]
+      },
+      "huggingface": {
+        "repo": "Qwen/Qwen3.8-Flash-Next",
+        "url": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next"
+      },
+      "quant_formats": {
+        "dense_attention": [
+          "Q8_0",
+          "Q6_K",
+          "ROCmFP4",
+          "ROCmFP4_FAST",
+          "MXFP4",
+          "F16",
+          "BF16",
+          "F32",
+          "Q4_K",
+          "Q5_K",
+          "Q4_0",
+          "Q4_1",
+          "Q5_0",
+          "Q2_K",
+          "Q3_K",
+          "IQ4_XS",
+          "IQ4_NL"
+        ],
+        "routed_experts": [
+          "ROCmFP4_FAST",
+          "MXFP4",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "Q5_1",
+          "Q8_0",
+          "Q4_0",
+          "Q3_K",
+          "Q2_K"
+        ],
+        "recommended": "ROCmFP4-FAST"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [
+        "mtp"
+      ],
+      "kv_cache": [
+        "q8",
+        "f16",
+        "k8v4",
+        "k4v4"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "qwen3.8-27b",
+      "name": "Qwen3.8 27B",
+      "task": "chat",
+      "params": "27B Dense",
+      "engine": "qwen",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "qwen3",
+          "qwen2"
+        ],
+        "filename_patterns": [
+          "*Qwen3.8-27B*"
+        ]
+      },
+      "huggingface": {
+        "repo": "Qwen/Qwen3.8-27B",
+        "url": "https://huggingface.co/Qwen/Qwen3.8-27B"
+      },
+      "quant_formats": {
+        "dense_attention": [
+          "UD-Q4_K_XL",
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "Q3_K",
+          "IQ4_NL",
+          "IQ4_XS",
+          "IQ3_S",
+          "ROCmFP4",
+          "ROCmFP4_FAST",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [],
+        "recommended": "UD-Q4_K_XL"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [
+        "dflash2"
+      ],
+      "kv_cache": [
+        "q8",
+        "f16",
+        "k8v4",
+        "k4v4"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "gemma-4-26b-a4b",
+      "name": "Gemma 4 26B-A4B",
+      "task": "chat",
+      "params": "26B-A4B MoE",
+      "engine": "gemma4",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "gemma4"
+        ],
+        "filename_patterns": [
+          "*gemma-4-26b*",
+          "*Gemma-4-26B*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q4_0",
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [
+          "Q4_0",
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "recommended": "Q4_0"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [
+        "mtp"
+      ],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "gemma-4-e4b",
+      "name": "Gemma 4 E4B",
+      "task": "chat",
+      "params": "4B effective",
+      "engine": "gemma4",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "gemma4"
+        ],
+        "filename_patterns": [
+          "*gemma-4-e4b*",
+          "*Gemma-4-E4B*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q4_0",
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [],
+        "recommended": "Q4_0"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "gemma-4-e2b",
+      "name": "Gemma 4 E2B",
+      "task": "chat",
+      "params": "2B effective",
+      "engine": "gemma4",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "gemma4"
+        ],
+        "filename_patterns": [
+          "*gemma-4-e2b*",
+          "*Gemma-4-E2B*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q4_0",
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [],
+        "recommended": "Q4_0"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "gemma-4-12b",
+      "name": "Gemma 4 12B",
+      "task": "chat",
+      "params": "12B Dense",
+      "engine": "gemma4",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "gemma4"
+        ],
+        "filename_patterns": [
+          "*gemma-4-12b*",
+          "*Gemma-4-12B*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q4_0",
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [],
+        "recommended": "Q4_K_M"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "qwen3.5-35b-a3b",
+      "name": "Qwen3.5-35B-A3B",
+      "task": "chat",
+      "params": "35B-A3B MoE",
+      "engine": "qwen",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "qwen35moe"
+        ],
+        "filename_patterns": [
+          "*Qwen3.5-35B*",
+          "*qwen3.5-35b*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "Q3_K",
+          "IQ4_NL",
+          "IQ4_XS",
+          "IQ3_S",
+          "ROCmFP4",
+          "ROCmFP4_FAST",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [
+          "Q4_0",
+          "Q4_1",
+          "Q5_0",
+          "Q5_1",
+          "Q8_0",
+          "Q2_K",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "IQ2_XXS",
+          "MXFP4",
+          "ROCmFP4",
+          "ROCmFP4_FAST"
+        ],
+        "recommended": "UD-Q4_K_XL"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "qwen3.6-35b-a3b",
+      "name": "Qwen3.6-35B-A3B",
+      "task": "chat",
+      "params": "35B-A3B MoE",
+      "engine": "qwen",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "qwen35moe"
+        ],
+        "filename_patterns": [
+          "*Qwen3.6-35B*",
+          "*qwen3.6-35b*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "UD-Q4_K_XL",
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "ROCmFP4",
+          "ROCmFP4_FAST",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [
+          "UD-Q4_K_XL",
+          "Q4_0",
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "MXFP4",
+          "ROCmFP4",
+          "ROCmFP4_FAST"
+        ],
+        "recommended": "UD-Q4_K_XL"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "ornith-1.5-35b-a3b",
+      "name": "Ornith-1.5-35B-A3B",
+      "task": "chat_vision",
+      "params": "35B-A3B MoE + BF16 Vision",
+      "engine": "qwen",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "qwen35moe"
+        ],
+        "filename_patterns": [
+          "*Ornith-1.5*",
+          "*ornith-1.5*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "ROCmFP4",
+          "Q4_K_M",
+          "Q8_0",
+          "BF16"
+        ],
+        "routed_experts": [
+          "ROCmFP4",
+          "Q4_K_M",
+          "Q8_0"
+        ],
+        "recommended": "ROCmFP4"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "tiel-coder-35b-a3b",
+      "name": "Tiel-Coder / Cyber-Tiel-Coder-35B-A3B",
+      "task": "chat",
+      "params": "35B-A3B MoE",
+      "engine": "qwen",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "qwen35moe"
+        ],
+        "filename_patterns": [
+          "*Tiel-Coder*",
+          "*Cyber-Tiel-Coder*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q3_K",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "Q8_0"
+        ],
+        "routed_experts": [
+          "Q3_K",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "Q8_0"
+        ],
+        "recommended": "Q4_K_M"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [
+        "mtp"
+      ],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "gpt-oss-20b",
+      "name": "GPT-OSS 20B",
+      "task": "chat",
+      "params": "20B MoE",
+      "engine": "gptoss",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "gptoss",
+          "gpt_oss"
+        ],
+        "filename_patterns": [
+          "*gpt-oss-20b*",
+          "*GPT-OSS-20B*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q8_0",
+          "Q5_0",
+          "Q4_K",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [
+          "MXFP4",
+          "Q4_0",
+          "Q8_0",
+          "Q5_1"
+        ],
+        "recommended": "MXFP4"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "gpt-oss-120b",
+      "name": "GPT-OSS 120B",
+      "task": "chat",
+      "params": "117B MoE",
+      "engine": "gptoss",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "gptoss",
+          "gpt_oss"
+        ],
+        "filename_patterns": [
+          "*gpt-oss-120b*",
+          "*GPT-OSS-120B*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q8_0",
+          "Q5_0",
+          "Q4_K",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [
+          "MXFP4",
+          "Q4_0",
+          "Q8_0",
+          "Q5_1"
+        ],
+        "recommended": "MXFP4"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "muse-glimmer-30b",
+      "name": "Muse Glimmer 30B",
+      "task": "chat",
+      "params": "30B",
+      "engine": "glimmer",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "glimmer"
+        ],
+        "filename_patterns": [
+          "*muse-glimmer-30b*",
+          "*Glimmer*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "W8A8",
+          "Q8_0",
+          "Q4_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [],
+        "recommended": "UD-Q4_K_XL"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [
+        "dflash"
+      ],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "llama-3.1-8b",
+      "name": "Llama-3.1-8B",
+      "task": "chat",
+      "params": "8B Dense",
+      "engine": "llama",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "llama"
+        ],
+        "filename_patterns": [
+          "*llama-3.1-8b*",
+          "*Llama-3.1-8B*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q4_0",
+          "Q8_0",
+          "Q4_K",
+          "Q5_K",
+          "Q6_K",
+          "F16",
+          "BF16",
+          "F32"
+        ],
+        "routed_experts": [],
+        "recommended": "Q8_0"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash",
+      "task": "chat",
+      "params": "MoE (~81 GiB resident)",
+      "engine": "deepseek_v4_flash",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "deepseek4",
+          "deepseek2"
+        ],
+        "filename_patterns": [
+          "*deepseek-v4-flash*",
+          "*DeepSeek-V4-Flash*"
+        ]
+      },
+      "huggingface": {
+        "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731"
+      },
+      "quant_formats": {
+        "dense_attention": [
+          "IQ2_XXS",
+          "Q2_K",
+          "Q8_0"
+        ],
+        "routed_experts": [
+          "IQ2_XXS",
+          "Q2_K",
+          "Q8_0"
+        ],
+        "recommended": "IQ2_XXS-mix"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [
+        "dspark"
+      ],
+      "kv_cache": [
+        "q8",
+        "f16"
+      ],
+      "http_routes": [
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "qwen3-embedding-0.6b",
+      "name": "Qwen3-Embedding-0.6B",
+      "task": "embedding",
+      "params": "0.6B",
+      "engine": "qwen",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "qwen3"
+        ],
+        "filename_patterns": [
+          "*qwen3-embedding*",
+          "*Qwen3-Embedding*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q8_0",
+          "Q4_K_M",
+          "F16"
+        ],
+        "routed_experts": [],
+        "recommended": "Q8_0"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "speculative": [],
+      "kv_cache": [],
+      "http_routes": [
+        "/v1/embeddings"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "bge-m3",
+      "name": "bge-m3",
+      "task": "embedding",
+      "params": "0.6B XLM-R",
+      "engine": "bge_m3",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "bert",
+          "xlm-roberta"
+        ],
+        "filename_patterns": [
+          "*bge-m3*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q4_K_M",
+          "F16",
+          "BF16",
+          "Q8_0"
+        ],
+        "routed_experts": [],
+        "recommended": "Q4_K_M"
+      },
+      "supported_backends": [
+        "gpu_hip",
+        "npu_q8_bfp16",
+        "npu_q4_q4nx"
+      ],
+      "recommended_backend": "gpu_hip",
+      "npu_spec": {
+        "runtime": "npu_bge_runtime",
+        "status": "runtime_verified"
+      },
+      "http_routes": [
+        "/v1/embeddings"
+      ],
+      "status": "production_gpu_plus_npu_verified"
+    },
+    {
+      "id": "embeddinggemma-2",
+      "name": "EmbeddingGemma 2",
+      "task": "embedding",
+      "params": "~0.3B (24L, H=512, F=2048, out=768)",
+      "engine": "embeddinggemma2",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "embedding_gemma2"
+        ],
+        "filename_patterns": [
+          "*embeddinggemma-2*",
+          "*embeddinggemma2*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "BF16",
+          "q8_bfp16",
+          "q4_q4nx"
+        ],
+        "routed_experts": [],
+        "recommended": "BF16"
+      },
+      "supported_backends": [
+        "gpu_hip",
+        "npu_bf16",
+        "npu_q8_bfp16",
+        "npu_q4_q4nx"
+      ],
+      "recommended_backend": "npu_q8_bfp16",
+      "npu_spec": {
+        "runtime": "npu_embgemma2_runtime",
+        "kernel_dir_bf16": "embgemma2_s128",
+        "kernel_dir_quant": "quant_gemm",
+        "fixed_seq_len": 128,
+        "quant_env": {
+          "q8": "MBUFO_NPU_QUANT=q8",
+          "q4": "MBUFO_NPU_QUANT=q4"
+        },
+        "status": "runtime_verified_24L_e2e"
+      },
+      "http_routes": [
+        "/v1/embeddings"
+      ],
+      "status": "production_gpu_plus_npu_verified"
+    },
+    {
+      "id": "bge-reranker-v2-m3",
+      "name": "bge-reranker-v2-m3",
+      "task": "reranking",
+      "params": "Cross-Encoder",
+      "engine": "bge_reranker",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "bert",
+          "xlm-roberta"
+        ],
+        "filename_patterns": [
+          "*bge-reranker*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q4_K_M",
+          "F16",
+          "BF16"
+        ],
+        "routed_experts": [],
+        "recommended": "Q4_K_M"
+      },
+      "supported_backends": [
+        "gpu_hip",
+        "npu_q8_bfp16",
+        "npu_q4_q4nx"
+      ],
+      "recommended_backend": "gpu_hip",
+      "npu_spec": {
+        "runtime": "npu_bge_runtime",
+        "status": "runtime_verified"
+      },
+      "http_routes": [
+        "/v1/reranking"
+      ],
+      "status": "production_gpu_plus_npu_verified"
+    },
+    {
+      "id": "qwen3-reranker-0.6b",
+      "name": "Qwen3-Reranker-0.6B",
+      "task": "reranking",
+      "params": "Cross-Encoder (0.6B)",
+      "engine": "qwen_reranker",
+      "format": "gguf",
+      "match": {
+        "gguf_arch": [
+          "qwen3"
+        ],
+        "filename_patterns": [
+          "*qwen3-reranker*",
+          "*Qwen3-Reranker*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q8_0",
+          "Q4_K_M",
+          "F16"
+        ],
+        "routed_experts": [],
+        "recommended": "Q8_0"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "http_routes": [
+        "/v1/reranking"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "qwen3-asr-1.7b",
+      "name": "Qwen3-ASR 1.7B",
+      "task": "asr",
+      "params": "1.7B",
+      "engine": "qwen3_asr",
+      "format": "safetensors",
+      "match": {
+        "config_arch": [
+          "Qwen3ASRForConditionalGeneration"
+        ],
+        "filename_patterns": [
+          "*qwen3-asr-1.7b*",
+          "*Qwen3-ASR-1.7B*"
+        ]
+      },
+      "huggingface": {
+        "repo": "Qwen/Qwen3-ASR-1.7B",
+        "url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B"
+      },
+      "quant_formats": {
+        "dense_attention": [
+          "BF16",
+          "q8_bfp16",
+          "q4_q4nx"
+        ],
+        "routed_experts": [],
+        "recommended": "BF16"
+      },
+      "supported_backends": [
+        "gpu_hip",
+        "npu_q8_bfp16",
+        "npu_q4_q4nx"
+      ],
+      "recommended_backend": "gpu_hip",
+      "npu_spec": {
+        "runtime": "npu_quant_models",
+        "kernel_dir_quant": "quant_gemm",
+        "status": "runtime_verified"
+      },
+      "http_routes": [
+        "/v1/audio/transcriptions"
+      ],
+      "status": "production_gpu_plus_npu_verified"
+    },
+    {
+      "id": "qwen3-tts-12hz-1.7b",
+      "name": "Qwen3-TTS 12Hz 1.7B",
+      "task": "tts",
+      "params": "1.7B",
+      "engine": "qwen3_tts",
+      "format": "safetensors",
+      "match": {
+        "config_arch": [
+          "Qwen3TTSForConditionalGeneration"
+        ],
+        "filename_patterns": [
+          "*qwen3-tts-1.7b*",
+          "*Qwen3-TTS-12Hz-1.7B*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "BF16",
+          "q8_bfp16",
+          "q4_q4nx"
+        ],
+        "routed_experts": [],
+        "recommended": "BF16"
+      },
+      "supported_backends": [
+        "gpu_hip",
+        "npu_q8_bfp16",
+        "npu_q4_q4nx"
+      ],
+      "recommended_backend": "gpu_hip",
+      "npu_spec": {
+        "runtime": "npu_quant_models",
+        "kernel_dir_quant": "quant_gemm",
+        "status": "runtime_verified"
+      },
+      "http_routes": [
+        "/v1/audio/speech"
+      ],
+      "status": "production_gpu_plus_npu_verified"
+    },
+    {
+      "id": "qwen-image-2.1",
+      "name": "Qwen-Image-2.1",
+      "task": "image_generation",
+      "params": "Diffusion Transformer",
+      "engine": "qwen_image_21",
+      "format": "safetensors",
+      "match": {
+        "config_arch": [
+          "QwenImageTransformer2DModel"
+        ],
+        "filename_patterns": [
+          "*qwen-image*",
+          "*Qwen-Image*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "BF16"
+        ],
+        "routed_experts": [],
+        "recommended": "BF16"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "http_routes": [
+        "/v1/images/generations",
+        "/v1/images/edits"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "minimax-h3",
+      "name": "MiniMax H3 FL2VA",
+      "task": "video_generation",
+      "params": "50-block BF16 Transformer",
+      "engine": "minimax_h3",
+      "format": "safetensors",
+      "match": {
+        "config_arch": [],
+        "filename_patterns": [
+          "*minimax-h3*",
+          "*MiniMax-H3*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "BF16"
+        ],
+        "routed_experts": [],
+        "recommended": "BF16"
+      },
+      "supported_backends": [
+        "gpu_hip"
+      ],
+      "recommended_backend": "gpu_hip",
+      "http_routes": [
+        "/v1/videos/generations"
+      ],
+      "status": "production"
+    },
+    {
+      "id": "d3-decide",
+      "name": "D3-Lite / Nano / Mini / Turbo / Ultra",
+      "task": "decide",
+      "params": "0.8B / 2B / 4B",
+      "engine": "d3_decide",
+      "format": "flm_q4nx",
+      "match": {
+        "filename_patterns": [
+          "*d3-*",
+          "*D3-*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q4NX"
+        ],
+        "routed_experts": [],
+        "recommended": "Q4NX"
+      },
+      "supported_backends": [
+        "npu_flm_sidecar"
+      ],
+      "recommended_backend": "npu_flm_sidecar",
+      "http_routes": [
+        "/v1/systemone"
+      ],
+      "status": "served_via_router_proxy"
+    },
+    {
+      "id": "whisper-v3-turbo",
+      "name": "Whisper-V3-Turbo",
+      "task": "asr",
+      "params": "0.8B",
+      "engine": "flm_whisper_sidecar",
+      "format": "flm_q4nx",
+      "match": {
+        "filename_patterns": [
+          "*whisper-v3-turbo*"
+        ]
+      },
+      "huggingface": null,
+      "quant_formats": {
+        "dense_attention": [
+          "Q4NX"
+        ],
+        "routed_experts": [],
+        "recommended": "Q4NX"
+      },
+      "supported_backends": [
+        "npu_flm_sidecar"
+      ],
+      "recommended_backend": "npu_flm_sidecar",
+      "http_routes": [
+        "/v1/audio/transcriptions"
+      ],
+      "status": "served_via_router_proxy"
+    },
+    {
+      "id": "flux2-klein-4b",
+      "name": "FLUX.2-klein-4B",
+      "task": "image_generation",
+      "params": "4B DiT + Qwen3-4B TE",
+      "engine": "npu_quant_models",
+      "format": "safetensors",
+      "match": {
+        "filename_patterns": [
+          "*flux2-klein-4b*",
+          "*FLUX.2-klein-4B*"
+        ]
+      },
+      "huggingface": {
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B"
+      },
+      "quant_formats": {
+        "dense_attention": [
+          "BF16",
+          "q8_bfp16",
+          "q4_q4nx"
+        ],
+        "routed_experts": [],
+        "recommended": "q4_q4nx"
+      },
+      "supported_backends": [
+        "npu_q8_bfp16",
+        "npu_q4_q4nx"
+      ],
+      "recommended_backend": "npu_q4_q4nx",
+      "npu_spec": {
+        "runtime": "npu_quant_models",
+        "kernel_dir_quant": "quant_gemm",
+        "steps": 4,
+        "status": "runtime_verified"
+      },
+      "http_routes": [],
+      "status": "npu_runtime_verified_no_http"
+    },
+    {
+      "id": "z-image-turbo",
+      "name": "Z-Image-Turbo",
+      "task": "image_generation",
+      "params": "Single-Stream DiT 30L + Qwen3-4B TE",
+      "engine": "npu_quant_models",
+      "format": "safetensors",
+      "match": {
+        "filename_patterns": [
+          "*z-image-turbo*",
+          "*Z-Image-Turbo*"
+        ]
+      },
+      "huggingface": {
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo"
+      },
+      "quant_formats": {
+        "dense_attention": [
+          "BF16",
+          "q8_bfp16",
+          "q4_q4nx"
+        ],
+        "routed_experts": [],
+        "recommended": "q4_q4nx"
+      },
+      "supported_backends": [
+        "npu_q8_bfp16",
+        "npu_q4_q4nx"
+      ],
+      "recommended_backend": "npu_q4_q4nx",
+      "npu_spec": {
+        "runtime": "npu_quant_models",
+        "kernel_dir_quant": "quant_gemm",
+        "steps": 8,
+        "status": "runtime_verified"
+      },
+      "http_routes": [],
+      "status": "npu_runtime_verified_no_http"
+    }
+  ]
+}
