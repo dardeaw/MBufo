@@ -133,7 +133,7 @@ bool LaunchDecodeMoeKQuant(const void* gate_w, WeightType gate_type, const void*
       act_scratch == nullptr || down_e == nullptr) {
     return false;
   }
-  if (n_tokens < 1 || n_tokens > 8 || top_k == 0 || top_k > 8) return false;
+  if (n_tokens < 1 || n_tokens > 8 || top_k == 0 || top_k > 16) return false;
   const std::size_t slots = static_cast<std::size_t>(n_tokens) * top_k;
   if (slots > kSlotsCap) return false;
   if (hidden == 0 || hidden % 256 != 0 || expert_ff == 0 || expert_ff % 256 != 0) return false;

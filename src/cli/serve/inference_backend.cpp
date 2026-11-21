@@ -3454,7 +3454,7 @@ class GptOssTextRunner final : public HipTextModelRunner {
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     std::vector<TextRunnerToken> tokens;
-    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/false)) {
+    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/true)) {
       tokens.push_back(static_cast<TextRunnerToken>(id));
     }
     return tokens;
@@ -3817,7 +3817,7 @@ class LagunaTextRunner final : public HipTextModelRunner {
   [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override { return {"<think>", "</think>", {}}; }
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(std::string_view text) const override {
     std::vector<TextRunnerToken> tokens;
-    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/false)) {
+    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/true)) {
       tokens.push_back(static_cast<TextRunnerToken>(id));
     }
     return tokens;
@@ -4041,7 +4041,7 @@ class LlamaTextRunner final : public HipTextModelRunner {
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     std::vector<TextRunnerToken> tokens;
-    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/false)) {
+    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/true)) {
       tokens.push_back(static_cast<TextRunnerToken>(id));
     }
     return tokens;
@@ -4567,7 +4567,7 @@ class GlimmerTextRunner final : public HipTextModelRunner {
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     std::vector<TextRunnerToken> tokens;
-    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/false)) {
+    for (const std::int32_t id : model_->Tokenize(text, /*add_bos=*/true)) {
       tokens.push_back(static_cast<TextRunnerToken>(id));
     }
     return tokens;

@@ -67,6 +67,16 @@ class Model final : public std::enable_shared_from_this<Model> {
   std::shared_ptr<core::GgufReader> reader_;
   std::unique_ptr<ModelWeights> weights_;
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
+ public:
+  struct RegisteredRegion {
+    const void* host_data{nullptr};
+    void* device_data{nullptr};
+    void* host_copy{nullptr};
+    std::size_t size{0};
+  };
+ private:
+ private:
+  std::vector<RegisteredRegion> registered_regions_;
   std::vector<void*> device_allocations_;
 
   friend class Session;
@@ -130,8 +140,17 @@ class Session final {
   std::int32_t* d_cursors_{nullptr};
   std::int32_t* d_rows_token_{nullptr};
   std::int32_t* d_rows_slot_{nullptr};
+  std::int32_t* d_tiles_{nullptr};
+  std::uint32_t* d_n_tiles_{nullptr};
+  __half* d_wdq_scratch_{nullptr};
   float* d_logits_{nullptr};
   std::size_t routed_compact_rows_{0};
+  std::size_t tile_cap_{0};
+  std::size_t wdq_scratch_bytes_{0};
+  float* d_attn_partials_{nullptr};
+  std::size_t attn_partials_bytes_{0};
+  void* d_preq_scratch_{nullptr};
+  std::size_t preq_scratch_bytes_{0};
 
   std::vector<float> host_logits_;
   std::vector<std::int32_t> history_;

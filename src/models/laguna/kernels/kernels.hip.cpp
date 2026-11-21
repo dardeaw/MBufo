@@ -286,6 +286,7 @@ __global__ void F16AttentionKernel(const float* q, const __half* k_cache,
     }
     __syncthreads();
     const float score = s_dot[0];
+    __syncthreads();
     const float m_new = fmaxf(m, score);
     const float alpha = expf(m - m_new);
     const float w = expf(score - m_new);
@@ -464,6 +465,118 @@ std::int32_t Argmax(const float* logits, std::uint32_t vocab_size,
                        hipMemcpyDeviceToHost, stream);
   (void)hipStreamSynchronize(stream);
   return host_out;
+}
+
+
+__global__ void ConvertQ6KToQ80Kernel(const std::uint8_t* __restrict__ src,
+                                      std::uint8_t* __restrict__ dst) {
+  const std::size_t b = blockIdx.x;
+  const std::uint32_t i = threadIdx.x;  // 0..255
+  const std::uint8_t* blk = src + b * 210ULL;
+
+  const std::uint32_t half = i / 128U;
+  const std::uint32_t within_half = i % 128U;
+  const std::uint32_t segment = within_half / 32U;
+  const std::uint32_t lane32 = within_half % 32U;
+  const std::uint32_t ql_base = half * 64U;
+  const std::uint8_t qh = blk[128U + half * 32U + lane32];
+
+  std::uint8_t low = 0;
+  std::uint8_t high = 0;
+  if (segment == 0U) {
+    low = blk[ql_base + lane32] & 0x0FU;
+    high = qh & 0x03U;
+  } else if (segment == 1U) {
+    low = blk[ql_base + 32U + lane32] & 0x0FU;
+    high = (qh >> 2U) & 0x03U;
+  } else if (segment == 2U) {
+    low = blk[ql_base + lane32] >> 4U;
+    high = (qh >> 4U) & 0x03U;
+  } else {
+    low = blk[ql_base + 32U + lane32] >> 4U;
+    high = (qh >> 6U) & 0x03U;
+  }
+
+  const std::uint32_t scale_index = (half * 8U) + (lane32 / 16U) + (segment * 2U);
+  const std::int8_t sc = static_cast<std::int8_t>(blk[192U + scale_index]);
+  const std::int32_t quant = static_cast<std::int32_t>((high << 4U) | low) - 32;
+  const std::uint16_t d_bits =
+      static_cast<std::uint16_t>(blk[208U]) |
+      (static_cast<std::uint16_t>(blk[209U]) << 8U);
+  const float d_block = __half2float(__ushort_as_half(d_bits));
+  const float val = d_block * static_cast<float>(sc) * static_cast<float>(quant);
+
+  float amax = fabsf(val);
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    amax = fmaxf(amax, __shfl_xor(amax, offset, 32));
+  }
+  const float d_out = amax / 127.0F;
+  const float id_out = (d_out != 0.0F) ? (1.0F / d_out) : 0.0F;
+  long q = lrintf(val * id_out);
+  if (q < -127L) q = -127L;
+  if (q > 127L) q = 127L;
+
+  const std::size_t q80_blk_idx = b * 8ULL + (i / 32U);
+  const std::uint32_t q80_lane = i % 32U;
+  std::uint8_t* out_blk = dst + q80_blk_idx * 34ULL;
+  if (q80_lane == 0U) {
+    const std::uint16_t out_bits = __half_as_ushort(__float2half(d_out));
+    out_blk[0] = static_cast<std::uint8_t>(out_bits & 0xFFU);
+    out_blk[1] = static_cast<std::uint8_t>(out_bits >> 8U);
+  }
+  out_blk[2U + q80_lane] = static_cast<std::uint8_t>(static_cast<std::int8_t>(q));
+}
+
+void ConvertQ6KToQ80(const void* q6k_dev, void* q80_dev, std::size_t n_elems,
+                    hipStream_t stream) {
+  const std::size_t n_blocks = n_elems / 256ULL;
+  if (n_blocks == 0) return;
+  hipLaunchKernelGGL(ConvertQ6KToQ80Kernel, dim3(static_cast<unsigned>(n_blocks)),
+                     dim3(256), 0, stream,
+                     static_cast<const std::uint8_t*>(q6k_dev),
+                     static_cast<std::uint8_t*>(q80_dev));
+}
+
+__global__ void FillSlotTilesKernel(const std::int32_t* __restrict__ ids,
+                                    std::int32_t* __restrict__ tiles,
+                                    std::size_t slots) {
+  const std::size_t s = blockIdx.x * blockDim.x + threadIdx.x;
+  if (s < slots) {
+    tiles[2 * s] = ids[s];
+    tiles[2 * s + 1] = ids[s] | (1 << 16);
+  }
+}
+
+void FillSlotTiles(const std::int32_t* ids, std::int32_t* tiles,
+                   std::size_t slots, hipStream_t stream) {
+  if (slots == 0) return;
+  const unsigned blocks = static_cast<unsigned>((slots + 255) / 256);
+  hipLaunchKernelGGL(FillSlotTilesKernel, dim3(blocks), dim3(256), 0, stream,
+                     ids, tiles, slots);
+}
+
+__global__ void BuildRoutedTilesKernel(const std::uint32_t* __restrict__ counts,
+                                       std::uint32_t n_experts,
+                                       std::uint32_t tile_rows,
+                                       std::int32_t* __restrict__ tiles,
+                                       std::uint32_t* __restrict__ n_tiles) {
+  const std::uint32_t e = blockIdx.x * blockDim.x + threadIdx.x;
+  if (e >= n_experts) return;
+  const std::uint32_t c = counts[e];
+  const std::uint32_t chunks = (c + tile_rows - 1) / tile_rows;
+  for (std::uint32_t j = 0; j < chunks; ++j) {
+    const std::uint32_t idx = atomicAdd(n_tiles, 1u);
+    tiles[idx] = static_cast<std::int32_t>(e | (j << 16));
+  }
+}
+
+void BuildRoutedTiles(const std::uint32_t* counts, std::uint32_t n_experts,
+                      std::uint32_t tile_rows, std::int32_t* tiles,
+                      std::uint32_t* n_tiles, hipStream_t stream) {
+  if (n_experts == 0) return;
+  const unsigned blocks = static_cast<unsigned>((n_experts + 255) / 256);
+  hipLaunchKernelGGL(BuildRoutedTilesKernel, dim3(blocks), dim3(256), 0, stream,
+                     counts, n_experts, tile_rows, tiles, n_tiles);
 }
 
 }  // namespace mbufo::models::laguna::kernels

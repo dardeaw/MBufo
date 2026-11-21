@@ -172,6 +172,8 @@ Same weights, greedy decoding, release builds, re-measured on one Strix Halo nod
 | **GPT-OSS 120B** (Q4_K_M) | 1226 / 1089 | **+13%** | 52.3 / 52.4 | 0% |
 | **Muse Glimmer 30B** (UD-Q4_K_XL) | 516 / 398 | **+30%** | 12.6 / 13.2 | -5% |
 | **DeepSeek V4 Flash** (IQ2_XXS mix) | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
+| **Laguna-XS-2.1** (Q4_K_M) | 1586 / 930 | **+71%** | 60.4 / 61.8 | -2% |
+| **Laguna-S-2.1** (Q4_K_M) | 652 / 497 | **+31%** | 26.6 / 26.6 | 0% |
 
 Embedding and reranking (one request through the HTTP server, lengths in tokens):
 
@@ -202,7 +204,7 @@ Notes:
 
 ### Supported Model Families
 
-A single HTTP port hosts and routes across all supported families — 22 GPU families first, then 9 NPU entries below the separator line:
+A single HTTP port hosts and routes across all supported families — 23 GPU families first, then 9 NPU entries below the separator line:
 
 Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT_FORMATS.md).
 
@@ -221,6 +223,7 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 | **Muse Glimmer 30B** | 30B | DFlash (~89%) | ATEM tool calling, W8A8 / Q8_0 execution |
 | **Llama-3.1-8B** | 8B Dense | — | Standard dense GQA support |
 | **DeepSeek V4 Flash** | MoE (IQ2/Q2/Q8 mixed GGUF) | DSpark | MLA decode, ds4-parity kernels, ~81 GiB resident |
+| **Laguna 2.1 (XS / S)** | 33B-A3B / 118B-A8B MoE | — | Hybrid 1:3 Global (YaRN) / SWA-512 RoPE, softplus per-head gate, sigmoid+bias top-8/10 MoE + shared expert |
 | **Qwen3-Embedding-0.6B** | 0.6B | — | Single-prefill pooled executor |
 | **bge-m3** | 0.6B XLM-R | — | CLS pooling, Q4_K_M loader, hipBLASLt autotune |
 | **EmbeddingGemma 2** | ~0.3B Gemma-4 encoder (text path) | — | Bidirectional attention: 20 sliding-window (+-512) and 4 full layers (head_dim 256 / 512), per-layer inputs, mean pooling, 768-d output |

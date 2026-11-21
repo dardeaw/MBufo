@@ -12,6 +12,16 @@ namespace mbufo::models::laguna::kernels {
 void ConvertBf16ToF16(const std::uint16_t* in, __half* out, std::size_t count,
                       hipStream_t stream);
 
+void ConvertQ6KToQ80(const void* q6k_dev, void* q80_dev, std::size_t n_elems,
+                    hipStream_t stream);
+
+void FillSlotTiles(const std::int32_t* ids, std::int32_t* tiles,
+                   std::size_t slots, hipStream_t stream);
+
+void BuildRoutedTiles(const std::uint32_t* counts, std::uint32_t n_experts,
+                      std::uint32_t tile_rows, std::int32_t* tiles,
+                      std::uint32_t* n_tiles, hipStream_t stream);
+
 void RmsNorm(const float* x, const float* weight, float* out,
              std::uint32_t n_tokens, std::uint32_t hidden, float eps,
              hipStream_t stream);

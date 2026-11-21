@@ -171,6 +171,8 @@ MBufo 主張精度與效能之間的平衡需經嚴格量測。推薦基準配�
 | **GPT-OSS 120B**（Q4_K_M） | 1226 / 1089 | **+13%** | 52.3 / 52.4 | 0% |
 | **Muse Glimmer 30B**（UD-Q4_K_XL） | 516 / 398 | **+30%** | 12.6 / 13.2 | -5% |
 | **DeepSeek V4 Flash**（IQ2_XXS 混合） | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
+| **Laguna-XS-2.1**（Q4_K_M） | 1586 / 930 | **+71%** | 60.4 / 61.8 | -2% |
+| **Laguna-S-2.1**（Q4_K_M） | 652 / 497 | **+31%** | 26.6 / 26.6 | 0% |
 
 Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 token）：
 
@@ -218,6 +220,7 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 | **Muse Glimmer 30B** | 30B | DFlash (~89%) | ATEM 工具呼叫、W8A8 / Q8_0 支援 |
 | **Llama-3.1-8B** | 8B Dense | — | 標準 Dense GQA 支援 |
 | **DeepSeek V4 Flash** | MoE（IQ2/Q2/Q8 混合 GGUF） | DSpark | MLA decode、ds4 一致 kernel、約 81 GiB 常駐 |
+| **Laguna 2.1 (XS / S)** | 33B-A3B / 118B-A8B MoE | — | 1:3 全域（YaRN）/ SWA-512 雙 RoPE、per-head softplus gate、sigmoid+bias top-8/10 MoE + 共享專家 |
 | **Qwen3-Embedding-0.6B** | 0.6B | — | 快取池化 Single-Prefill 執行器 |
 | **bge-m3** | 0.6B XLM-R | — | CLS 池化、Q4_K_M 載入器、hipBLASLt 調優 |
 | **EmbeddingGemma 2** | 約 0.3B Gemma-4 編碼器（文字路徑） | — | 雙向注意力：20 層滑動視窗（±512）與 4 層全域層（head_dim 256 / 512）、逐層輸入、平均池化、768 維輸出 |
