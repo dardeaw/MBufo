@@ -100,6 +100,7 @@ private:
     kGemma4,
     kLlama,
     kLlama4,
+    kLaguna,
   };
 
   struct PairHash {

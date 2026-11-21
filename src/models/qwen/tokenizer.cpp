@@ -507,7 +507,9 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
         t == kObjectRefEnd || t == kVisionStart || t == kVisionEnd ||
         t == kImagePad || t == kVideoPad || t == kQuadStart || t == kQuadEnd ||
         (!gemma4_vocab && t.size() >= 4 && t.starts_with("<|") &&
-         t.ends_with("|>"))) {
+         t.ends_with("|>")) ||
+        t == "<assistant>" || t == "</assistant>" ||
+        (t.starts_with("〈|") && t.ends_with("|〉"))) {
       special_tokens[t] = static_cast<TokenId>(i);
     }
   }
@@ -547,6 +549,10 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
   if (reader.GetMetadataString("tokenizer.ggml.pre") ==
       std::optional<std::string_view>{"llama4"}) {
     tokenizer->pre_tokenizer_ = PreTokenizer::kLlama4;
+  }
+  if (reader.GetMetadataString("tokenizer.ggml.pre") ==
+      std::optional<std::string_view>{"laguna"}) {
+    tokenizer->pre_tokenizer_ = PreTokenizer::kLaguna;
   }
 
   if (auto eos = reader.GetMetadataUint32("tokenizer.ggml.eos_token_id")) {
@@ -862,7 +868,8 @@ std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
   }
   if (pre_tokenizer_ != PreTokenizer::kQwen35 &&
       pre_tokenizer_ != PreTokenizer::kLlama &&
-      pre_tokenizer_ != PreTokenizer::kLlama4) {
+      pre_tokenizer_ != PreTokenizer::kLlama4 &&
+      pre_tokenizer_ != PreTokenizer::kLaguna) {
     return BpeMergeChunk(text);
   }
 
