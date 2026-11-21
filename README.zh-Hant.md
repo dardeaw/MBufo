@@ -11,7 +11,7 @@
 
 - **高併發**：單台 Strix Halo 節點在 16 路以上併發下維持滿載，每路最長可達 256K 上下文（§1）。
 - **公平排程**：預填與解碼統一混合批次，搭配防飢餓排程，高負載下不會有請求被餓死（§1）。
-- **多模型單端口**：20 個模型家族並行服務，可透過內建 `/admin` 控制台在執行期載入與卸載（§3）。
+- **多模型單端口**：22 個模型家族並行服務，可透過內建 `/admin` 控制台在執行期載入與卸載（§3）。
 - **多種量化格式**：K 系列、IQ4、MXFP4、ROCmFP4 等，各引擎的支援清單見[支援的量化格式](#支援的量化格式)（§3）。
 - **FlashAttention 與 Split-K 注意力**：WMMA FlashAttention 預填與 Split-K 解碼注意力，讓長上下文解碼從短提示到 256K 都維持在記憶體頻寬上限附近（§2）。
 - **高效 KV 快取**：分塊 INT8 與 4-bit 緊湊佈局，顯著降低每個會話佔用的記憶體（§2）。
@@ -37,7 +37,7 @@
 | --- | --- | --- |
 | **極速響應** | **短請求 TTFT 0.7 秒** | 具備防飢餓公平調度機制，短請求即便遭遇 25 萬 token 超長 Prefill 併發，首字延遲仍穩定壓在 0.7 秒內，保證輸出位元精確無失真。 |
 | **極限省容** | **KV 快取記憶體減半** | Blocked-Q8 快取架構讓單一 262,144 (256K) token 請求的 KV 佔用從 6.44 GB 驟降至 3.42 GB（4-bit 模式更可低至 1.81 GB）。 |
-| **全能託管** | **20 個 GGUF 模型家族** | 單一 HTTP 端口統一服務，涵蓋 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 與 Reranker，支援動態熱載入與無重啟卸載。 |
+| **全能託管** | **22 個 GGUF 模型家族** | 單一 HTTP 端口統一服務，涵蓋 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 與 Reranker，支援動態熱載入與無重啟卸載。 |
 
 > §1 與 §2 中除 llama.cpp 對比以外的數據（混合批次、公平性、並發引擎對比、int8 WMMA）來自早期版本，記錄於 `docs/MIXED_BATCH.md` 與 `docs/KV-V4.md`。llama.cpp 對比與「基準測試」一節已在本版本重新測量。
 
@@ -193,7 +193,7 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 
 ### 支援的模型家族
 
-透過內建多模型路由器，單一 HTTP 端口即可統一調度下列全部 20 個家族：
+透過內建多模型路由器，單一 HTTP 端口即可統一調度下列全部 22 個家族：
 
 | 模型 | 參數量 | HTTP 服務 | 驗證測試 | 投機草稿支援 | 特性與架構亮點 |
 | --- | --- | --- | --- | --- | --- |
@@ -204,6 +204,8 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 | **Gemma-4-12B** | 12B Dense | Bench | — | — | 支援 K-quant 預轉換與 WMMA Q8 Prefill |
 | **Qwen3.5-35B-A3B** | 35B-A3B MoE | Engine | — | — | 支援 qwen35moe 架構路徑 |
 | **Qwen3.6-35B-A3B** | 35B-A3B MoE | Engine | — | — | Q6_K→Q8_0 載入、Split-K MoE 解碼 |
+| **Ornith-1.5-35B-A3B** | 35B-A3B MoE | 支援 | 已驗證 | — | `qwen35moe` 混合 SSM/Attention、ROCmFP4 / Q4_K_M + BF16 視覺 (`width=2048`) |
+| **Tiel-Coder / Cyber-Tiel-Coder-35B-A3B** | 35B-A3B MoE | 支援 | 已驗證 | — | 基於 Ornith-1.5 (`qwen35moe`) 之程式開發與去審查資安微調版；支援 Q3_K/Q4_K/Q5_K/Q6_K/Q8_0 (`-GGUF-MTP`) |
 | **GPT-OSS 20B / 120B** | 20B / 117B MoE | 支援 | Pilot | — | 原生 MXFP4 矩陣核心、120B 支援零拷貝串流上傳 |
 | **Muse Glimmer 30B** | 30B | 支援 | Prompt | DFlash (~89%) | ATEM 工具呼叫、W8A8 / Q8_0 支援 |
 | **Llama-3.1-8B** | 8B Dense | 支援 | Adapter | — | 標準 Dense GQA 支援 |

@@ -12,7 +12,7 @@ Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily 
 
 - **High concurrency**: a single Strix Halo node stays saturated with 16+ concurrent streams, each with up to 256K tokens of context (§1).
 - **Fair scheduling**: prefill and decode share one mixed batch under anti-starvation scheduling, so no request is starved under load (§1).
-- **Multiple models, one port**: 20 model families served side by side, loaded and unloaded at runtime from the built-in `/admin` console (§3).
+- **Multiple models, one port**: 22 model families served side by side, loaded and unloaded at runtime from the built-in `/admin` console (§3).
 - **Multiple quantization formats**: K-quants, IQ4, MXFP4, ROCmFP4 and more; see [Supported Quantization Formats](#supported-quantization-formats) for each engine (§3).
 - **FlashAttention and Split-K attention**: WMMA flash-attention prefill and Split-K decode attention keep long-context decode bandwidth-bound, from short prompts to 256K (§2).
 - **Efficient KV cache**: blocked INT8 and compact 4-bit layouts that cut the memory each session holds (§2).
@@ -38,7 +38,7 @@ Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily 
 | --- | --- | --- |
 | **Instant Response** | **Short-request TTFT 0.7 s** | An anti-starvation fairness scheduler guarantees that short queries arriving during massive 250K-token prefill batches begin generating in 0.7 seconds with bit-exact greedy outputs. |
 | **Memory Efficiency** | **KV memory cut by ~50%** | The Blocked-Q8 cache holds a 262,144-token session in just 3.42 GB (compared to 6.44 GB for F16), with 4-bit value/key options reaching down to 1.81 GB. |
-| **Unified Serving** | **20 GGUF model families** | A single HTTP port dynamically hosts and routes chat models, MoE, embeddings, and cross-encoders with zero-downtime hot swapping. |
+| **Unified Serving** | **22 GGUF model families** | A single HTTP port dynamically hosts and routes chat models, MoE, embeddings, and cross-encoders with zero-downtime hot swapping. |
 
 > Figures in §1 and §2 other than the llama.cpp comparison (mixed batch, fairness, the engine comparison under load, int8 WMMA) come from earlier releases and are documented in `docs/MIXED_BATCH.md` and `docs/KV-V4.md`. The llama.cpp comparison and the Benchmarks section were measured again for this release.
 
@@ -194,7 +194,7 @@ Notes:
 
 ### Supported Model Families
 
-A single HTTP port hosts and routes across all 20 supported families:
+A single HTTP port hosts and routes across all 22 supported families:
 
 Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT_FORMATS.md).
 
@@ -207,6 +207,8 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 | **Gemma-4-12B** | 12B Dense | Bench | — | — | K-quant preconversion & WMMA Q8 prefill |
 | **Qwen3.5-35B-A3B** | 35B-A3B MoE | Engine | — | — | qwen35moe pipeline support |
 | **Qwen3.6-35B-A3B** | 35B-A3B MoE | Engine | — | — | Q6_K→Q8_0 loading, Split-K decode MoE |
+| **Ornith-1.5-35B-A3B** | 35B-A3B MoE | Supported | Verified | — | `qwen35moe` hybrid SSM/attention, ROCmFP4 / Q4_K_M + BF16 vision (`width=2048`) |
+| **Tiel-Coder / Cyber-Tiel-Coder-35B-A3B** | 35B-A3B MoE | Supported | Verified | — | Ornith-1.5 (`qwen35moe`) agentic coding & abliterated cyber/CTF fine-tunes; Q3_K/Q4_K/Q5_K/Q6_K/Q8_0 (`-GGUF-MTP`) |
 | **GPT-OSS 20B / 120B** | 20B / 117B MoE | Supported | Pilot | — | Native MXFP4 GEMM; zero-copy streaming for 120B |
 | **Muse Glimmer 30B** | 30B | Supported | Prompt | DFlash (~89%) | ATEM tool calling, W8A8 / Q8_0 execution |
 | **Llama-3.1-8B** | 8B Dense | Supported | Adapter | — | Standard dense GQA support |

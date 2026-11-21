@@ -627,12 +627,17 @@ std::shared_ptr<models::qwen::vision::Encoder> LoadQwenVision(
     const PromptOptions& opt, const core::GgufReader& reader) {
   if (opt.image_paths.empty() && opt.vision_model_path.empty())
     return {};
-  if (reader.GetMetadataUint64("qwen35.embedding_length") != 5120) {
+  const auto qwen_embed_len =
+      reader.GetMetadataUint64("qwen35.embedding_length")
+          .value_or(reader.GetMetadataUint64("qwen35moe.embedding_length")
+                        .value_or(0));
+  if (qwen_embed_len != 5120 && qwen_embed_len != 2048) {
     throw std::invalid_argument(
-        "image input supports Qwen3.8-27B and Flash-Next");
+        "image input supports Qwen3.8-27B, Flash-Next, and Qwen3.5/Ornith 35B-A3B");
   }
   auto encoder = models::qwen::vision::Encoder::Open(
-      opt.model_path, opt.vision_model_path, 5120);
+      opt.model_path, opt.vision_model_path,
+      static_cast<std::uint32_t>(qwen_embed_len));
   if (!encoder)
     throw std::invalid_argument(
         "image input requires a matching --mmproj BF16 sidecar");

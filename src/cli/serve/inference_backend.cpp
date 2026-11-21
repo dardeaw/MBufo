@@ -5930,12 +5930,17 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
-    if (reader->GetMetadataUint64("qwen35.embedding_length") == 5120) {
-      vision = models::qwen::vision::Encoder::Open(model_path,
-                                                   vision_model_path, 5120);
+    const auto qwen_embed_len =
+        reader->GetMetadataUint64("qwen35.embedding_length")
+            .value_or(reader->GetMetadataUint64("qwen35moe.embedding_length")
+                          .value_or(0));
+    if (qwen_embed_len == 5120 || qwen_embed_len == 2048) {
+      vision = models::qwen::vision::Encoder::Open(
+          model_path, vision_model_path,
+          static_cast<std::uint32_t>(qwen_embed_len));
     } else if (!vision_model_path.empty()) {
       throw std::invalid_argument(
-          "image input supports Qwen3.8-27B and Flash-Next");
+          "image input supports Qwen3.8-27B, Flash-Next, and Qwen3.5/Ornith 35B-A3B");
     }
   } catch (const std::exception& e) {
     SetError(error, e.what());
