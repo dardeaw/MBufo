@@ -5,6 +5,9 @@ Format: `version.txt` is the version; pushes go to the fork only, never upstream
 
 ## v0.34.0 (2026-11-21)
 
+### Changed (README performance table re-measured)
+- The comparison with llama.cpp was re-run from scratch on one node (llama.cpp `5d9e5ac30`, identical weights, greedy): MBufo through its HTTP server, llama.cpp at its best batch size. Prefill leads are smaller than the old table claimed (Gemma 4 26B-A4B +56%, Qwen3.6-35B-A3B +73%, GPT-OSS 120B +13%, Muse Glimmer 30B +30%, DeepSeek V4 Flash +586%), decode is at parity or better except Muse Glimmer (-5%), and bge-m3 embeddings are slower than llama.cpp (-29..-33%). The old Flash-Next row could not be reproduced (llama.cpp does not support that architecture).
+
 ### Changed (README)
 - README intro rewritten (many model families, many quantization formats, efficient KV-cache compression; no longer presented as a fork), and a "Supported Quantization Formats" section in all three languages.
 

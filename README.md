@@ -151,16 +151,33 @@ MBufo abstracts Blocked-Q8 KV into modular codecs, allowing Key and Value axes t
 
 ### Performance vs llama.cpp (gfx1151)
 
-Identical weights, release build, greedy decoding; positive values denote MBufo speedup:
+Same weights, greedy decoding, release builds, re-measured on one Strix Halo node against llama.cpp `5d9e5ac30`. MBufo is measured through its HTTP server, so its numbers include tokenization and request overhead; llama.cpp through `llama-bench` / `llama-server` at its best batch size. Prefill is a cold prompt of about 2K tokens; decode is generation at about 2K tokens of context. Speculative decoding is off. Positive values mean MBufo is faster.
 
-| Workload | Prefill Delta | Decode Delta | Notes / Test Setup |
-| --- | --- | --- | --- |
-| **Flash-Next** | **+52%** | Parity or better | Cold KV, MTP enabled |
-| **Qwen3.6-35B-A3B** | **+52.5%** | Parity or better | Split-K Router GEMV decode |
-| **bge-m3 (long context)** | **+35% ~ +50%** | — (Prefill only) | hipBLASLt autotuning & cached executor |
-| **Qwen3-Embedding-0.6B** | **+41% ~ +50%** | — (Prefill only) | Optimized single-prefill Embed |
-| **Reranker (batched scoring)**| — | **+15% over target**| Padded multi-sequence ScoreBatch |
-| **GPT-OSS 120B** | **+62%** | -17% | Massive scale, prefill heavily accelerated |
+| Model (weights) | Prefill tok/s: MBufo / llama.cpp | Delta | Decode tok/s: MBufo / llama.cpp | Delta |
+| --- | --- | --- | --- | --- |
+| **Gemma 4 26B-A4B** (Q4_0) | 2689 / 1728 | **+56%** | 55.3 / 53.2 | +4% |
+| **Qwen3.6-35B-A3B** (UD-Q4_K_XL) | 2130 / 1230 | **+73%** | 54.4 / 50.7 | +7% |
+| **GPT-OSS 120B** (Q4_K_M) | 1226 / 1089 | **+13%** | 52.3 / 52.4 | 0% |
+| **Muse Glimmer 30B** (UD-Q4_K_XL) | 516 / 398 | **+30%** | 12.6 / 13.2 | -5% |
+| **DeepSeek V4 Flash** (IQ2_XXS mix) | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
+| **Qwen3.8 Flash-Next** (ROCmFP4-FAST) | 1141 / n/a | n/a | 33.3 / n/a | n/a |
+
+Embedding and reranking (one request through the HTTP server):
+
+| Model (weights) | MBufo / llama.cpp | Delta |
+| --- | --- | --- |
+| **Qwen3-Embedding-0.6B** (Q8_0), about 2K tokens | 6546 / 5087 tok/s | **+29%** |
+| **Qwen3-Embedding-0.6B** (Q8_0), about 0.9K tokens | 10321 / 7475 tok/s | **+38%** |
+| **bge-m3** (Q4_K_M), about 1.7K tokens | 3546 / 5272 tok/s | -33% |
+| **bge-m3** (FP16), about 1.7K tokens | 3507 / 4940 tok/s | -29% |
+| **bge-reranker-v2-m3** (Q4_K_M), 64 documents | 38.8 / 38.0 docs/s | +2% |
+| **Qwen3-Reranker-0.6B** (Q8_0), 64 documents | 30.3 / 28.1 docs/s | +8% |
+
+Notes:
+- llama.cpp does not support the Flash-Next architecture, so it has no reference number here.
+- The DeepSeek V4 reference is the `deepseek4` support of this llama.cpp build, run at its default batch size of 512; the ds4 reference project was not available for this run.
+- llama.cpp batch sizes: Gemma 4 and Glimmer at 2048, Qwen3.6 at 1024 (a 2048 run froze the test machine, so its best case may be higher), GPT-OSS through `llama-server` at 8192.
+- bge-m3 in MBufo accepts at most 2048 tokens per input; llama.cpp accepts up to 8192.
 
 ---
 
