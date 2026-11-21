@@ -12,7 +12,7 @@ Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily 
 
 - **High concurrency**: a single Strix Halo node stays saturated with 16+ concurrent streams, each with up to 256K tokens of context (§1).
 - **Fair scheduling**: prefill and decode share one mixed batch under anti-starvation scheduling, so no request is starved under load (§1).
-- **Multiple models, one port**: 19 model families served side by side, loaded and unloaded at runtime from the built-in `/admin` console (§3).
+- **Multiple models, one port**: 20 model families served side by side, loaded and unloaded at runtime from the built-in `/admin` console (§3).
 - **Multiple quantization formats**: K-quants, IQ4, MXFP4, ROCmFP4 and more; see [Supported Quantization Formats](#supported-quantization-formats) for each engine (§3).
 - **FlashAttention and Split-K attention**: WMMA flash-attention prefill and Split-K decode attention keep long-context decode bandwidth-bound, from short prompts to 256K (§2).
 - **Efficient KV cache**: blocked INT8 and compact 4-bit layouts that cut the memory each session holds (§2).
@@ -38,7 +38,9 @@ Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily 
 | --- | --- | --- |
 | **Instant Response** | **Short-request TTFT 0.7 s** | An anti-starvation fairness scheduler guarantees that short queries arriving during massive 250K-token prefill batches begin generating in 0.7 seconds with bit-exact greedy outputs. |
 | **Memory Efficiency** | **KV memory cut by ~50%** | The Blocked-Q8 cache holds a 262,144-token session in just 3.42 GB (compared to 6.44 GB for F16), with 4-bit value/key options reaching down to 1.81 GB. |
-| **Unified Serving** | **19 GGUF model families** | A single HTTP port dynamically hosts and routes chat models, MoE, embeddings, and cross-encoders with zero-downtime hot swapping. |
+| **Unified Serving** | **20 GGUF model families** | A single HTTP port dynamically hosts and routes chat models, MoE, embeddings, and cross-encoders with zero-downtime hot swapping. |
+
+> Figures in §1 and §2 other than the llama.cpp comparison (mixed batch, fairness, the engine comparison under load, int8 WMMA) come from earlier releases and are documented in `docs/MIXED_BATCH.md` and `docs/KV-V4.md`. The llama.cpp comparison and the Benchmarks section were measured again for this release.
 
 ---
 
@@ -151,7 +153,7 @@ MBufo abstracts Blocked-Q8 KV into modular codecs, allowing Key and Value axes t
 
 ### Performance vs llama.cpp (gfx1151)
 
-Same weights, greedy decoding, release builds, re-measured on one Strix Halo node against llama.cpp `5d9e5ac30`. MBufo is measured through its HTTP server, so its numbers include tokenization and request overhead; llama.cpp through `llama-bench` / `llama-server` at its best batch size. Prefill is a cold prompt of about 2K tokens; decode is generation at about 2K tokens of context. Speculative decoding is off. Positive values mean MBufo is faster.
+Same weights, greedy decoding, release builds, re-measured on one Strix Halo node against llama.cpp `5d9e5ac30`. MBufo is measured through its HTTP server, so its numbers include tokenization and request overhead; llama.cpp through `llama-bench` / `llama-server` at its best batch size. Prefill is a cold prompt of about 2K tokens; decode is generation at about 2K tokens of context. Speculative decoding is off. MBufo runs at its default blocked-Q8 KV cache, llama.cpp at F16 (with an F16 KV cache Flash-Next prefill is 1662 tok/s instead of 1158; the Benchmarks section below uses F16). Positive values mean MBufo is faster.
 
 | Model (weights) | Prefill tok/s: MBufo / llama.cpp | Delta | Decode tok/s: MBufo / llama.cpp | Delta |
 | --- | --- | --- | --- | --- |
@@ -160,7 +162,7 @@ Same weights, greedy decoding, release builds, re-measured on one Strix Halo nod
 | **GPT-OSS 120B** (Q4_K_M) | 1226 / 1089 | **+13%** | 52.3 / 52.4 | 0% |
 | **Muse Glimmer 30B** (UD-Q4_K_XL) | 516 / 398 | **+30%** | 12.6 / 13.2 | -5% |
 | **DeepSeek V4 Flash** (IQ2_XXS mix) | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
-| **Qwen3.8 Flash-Next** (ROCmFP4-FAST) | 1141 / n/a | n/a | 33.3 / n/a | n/a |
+| **Qwen3.8 Flash-Next** (ROCmFP4-FAST) | 1158 / n/a | n/a | 33.3 / n/a | n/a |
 
 Embedding and reranking (one request through the HTTP server, lengths in tokens):
 
@@ -175,14 +177,16 @@ Embedding and reranking (one request through the HTTP server, lengths in tokens)
 | **Qwen3-Embedding-0.6B** (Q8_0), 3.4K | 11356 / 4700 tok/s | **+142%** |
 | **bge-reranker-v2-m3** (Q4_K_M), 64 documents | 76.9 / 38.0 docs/s | **+102%** |
 | **bge-reranker-v2-m3** (FP16), 64 documents | 73.1 / 34.3 docs/s | **+113%** |
-| **Qwen3-Reranker-0.6B** (Q8_0), 64 documents | 35.2 / 28.1 docs/s | **+25%** |
+| **Qwen3-Reranker-0.6B** (Q8_0), 64 documents | 41.1 / 28.1 docs/s | **+46%** |
 
 Notes:
 - llama.cpp does not support the Flash-Next architecture, so it has no reference number here.
 - The DeepSeek V4 reference is the `deepseek4` support of this llama.cpp build, run at its default batch size of 512; the ds4 reference project was not available for this run.
 - llama.cpp batch sizes: Gemma 4 and Glimmer at 2048, Qwen3.6 at 1024 (a 2048 run froze the test machine, so its best case may be higher), GPT-OSS through `llama-server` at 8192.
 - bge-m3 accepts inputs up to its native 8192 tokens. Input lengths are bucketed to a small set of shapes (about 12% steps) with exact key masking, so requests of different lengths share tuned GEMM plans; tuned picks are cached on disk (`MBUFO_TUNE_CACHE`, default `~/.cache/mbufo/bge_tune_v1.txt`), and the first request of a new shape still pays its one-time tuning.
-- Qwen3-Reranker: MBufo applies the prompt template the model requires (about 27% more tokens per document). The `/rerank` of this llama.cpp build does not, and on a test set of 8 relevant and 40 unrelated documents it put none of the relevant ones in its top 8, while MBufo ranked all 8 first.
+- Qwen3-Reranker: MBufo applies the prompt template the model requires (about 27% more tokens per document) and prefills the shared system / instruction / query framing once per request instead of once per document (identical scores). The `/rerank` of this llama.cpp build does not, and on a test set of 8 relevant and 40 unrelated documents it put none of the relevant ones in its top 8, while MBufo ranked all 8 first.
+
+- EmbeddingGemma 2 (BF16, text path; `tools/convert/embeddinggemma2_to_gguf.py`) is not supported by llama.cpp, so there is no llama.cpp reference. MBufo's vectors match an independent PyTorch implementation (cosine 1.000000 on six texts of 4 to 908 tokens). Through the HTTP server a request takes about 10 ms for 15 to 23 tokens and 76 ms for 908 tokens (11.9K tok/s); the PyTorch implementation on this node's 32 CPU threads (FP32) needs 24.7 ms for 13 tokens and 364 ms for 908 tokens, because PyTorch with ROCm does not run on this machine.
 
 ---
 
@@ -190,7 +194,7 @@ Notes:
 
 ### Supported Model Families
 
-A single HTTP port hosts and routes across all 19 supported families:
+A single HTTP port hosts and routes across all 20 supported families:
 
 Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT_FORMATS.md).
 
@@ -209,6 +213,7 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 | **DeepSeek V4 Flash** | MoE (IQ2/Q2/Q8 mixed GGUF) | Supported | Quality limits documented | DSpark | MLA decode, ds4-parity kernels, ~81 GiB resident |
 | **Qwen3-Embedding-0.6B** | 0.6B | Supported (`/v1/embeddings`) | — | — | Single-prefill pooled executor |
 | **bge-m3** | 0.6B XLM-R | Supported (`/v1/embeddings`) | Encoder | — | CLS pooling, Q4_K_M loader, hipBLASLt autotune |
+| **EmbeddingGemma 2** | ~0.3B Gemma-4 encoder (text path) | Supported (`/v1/embeddings`) | Matches PyTorch (cosine 1.000000) | — | Bidirectional attention: 20 sliding-window (+-512) and 4 full layers (head_dim 256 / 512), per-layer inputs, mean pooling, 768-d output |
 | **bge-reranker-v2-m3** | Cross-Encoder | Supported (`/v1/reranking`) | ScoreBatch | — | BERT dispatch, padded batching |
 | **Qwen3-Reranker** | Cross-Encoder | Supported (`/v1/reranking`) | Scoring | — | Qwen dispatch, shared scoring heads |
 | **Qwen3-ASR 1.7B** | 1.7B | Supported (audio transcription) | — | — | BF16 safetensors, deterministic greedy decoding |
@@ -229,6 +234,7 @@ Every engine reads GGUF directly; the formats below are what each one accepts (a
 | **Muse Glimmer, Llama-3.1** | Q4_0, Q8_0, Q4_K, Q5_K, Q6_K, F16 / BF16 / F32 | - |
 | **DeepSeek V4 Flash** | the published mixed IQ2_XXS / Q2_K / Q8_0 recipe | same |
 | **bge-m3, rerankers, Qwen3-Embedding** | Q4_K_M and F16 loaders | - |
+| **EmbeddingGemma 2** | BF16 (GGUF from `tools/convert/embeddinggemma2_to_gguf.py`) | - |
 
 The embedding gather, row dequantization, row-dot kernels and host dequantizer share one registry (`core/quant/quant_traits.hpp`): F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, IQ2_XXS, MXFP4, ROCmFP4, ROCmFP3. KV cache: F16, or blocked INT8 (Q8) at roughly half the memory with exact-continuity split-K attention.
 
@@ -253,7 +259,7 @@ Running `serve llm --multi-model` turns MBufo into a **multi-model co-resident s
 | `/admin` | GET | Embedded Multi-Model Web UI Dashboard & Live Playground |
 | `/v1/chat/completions` | POST | OpenAI Chat completions (routes by `"model"` ID/alias or falls back to Primary) |
 | `/v1/messages` | POST | Anthropic Messages API (routes by `"model"` ID/alias or falls back to Primary) |
-| `/v1/embeddings` | POST | Embeddings (bge-m3, Qwen3-Embedding) |
+| `/v1/embeddings` | POST | Embeddings (bge-m3, Qwen3-Embedding, EmbeddingGemma 2) |
 | `/v1/reranking` | POST | Reranking (bge-reranker-v2-m3, Qwen3-Reranker) |
 | `/admin/models` | GET | List co-resident models, per-slot session telemetry, and UMA memory status |
 | `/admin/catalog` | GET | Scan local GGUF repository and auto-discover `mmproj` / draft sidecars |
@@ -333,30 +339,32 @@ MBufo is fully compatible with OpenAI SDKs, Open WebUI, and VS Code extensions. 
 
 ## Benchmarks (gfx1151 Strix Halo)
 
-Conditions: Cold KV (unique prompt per request), `think` disabled, F16 KV, `-j 1`, context 262,144. Speculative engines: 27B uses DFlash2, Flash-Next uses MTP.
+Conditions (re-measured for this release, through the HTTP server): cold KV (unique prompt per request), `think` disabled, F16 KV, one session (`-j 1`), context 262,144. Speculative engines: 27B uses DFlash2, Flash-Next uses MTP. Prefill is the server-reported prompt rate; decode is the median of three runs of a 128 to 256-token completion, so it moves with draft acceptance.
 
 ### Prefill (tok/s, higher is better)
 
 | Context Size | 27B Q4_K_XL | 27B FP4-FAST | Flash-Next ROCmFP4 | Flash-Next Q4_K_XL |
 |---:|---:|---:|---:|---:|
-| **2K** | 605 | 455 | **1739** | 1301 |
-| **8K** | 615 | 564 | **1701** | 1549 |
-| **32K** | 567 | 551 | 1598 | **1618** |
-| **64K** | 508 | 496 | **1695** | 1678 |
-| **128K** | 409 | 407 | **1504** | 1507 |
-| **250K** | — | — | **1438** | 1415 |
+| **2K** | 533 | 534 | **1733** | 1719 |
+| **8K** | 551 | 515 | **1708** | 1678 |
+| **32K** | 525 | 512 | **1679** | 1672 |
+| **64K** | 467 | 479 | **1643** | 1637 |
+| **128K** | 382 | 392 | 1585 | **1587** |
+| **250K** | — | — | 1512 | **1518** |
 
 ### Decode (tok/s, speculative enabled)
 
 | Scenario | 27B Q4_K_XL | 27B FP4-FAST | Flash-Next ROCmFP4 | Flash-Next Q4_K_XL |
 |---|---:|---:|---:|---:|
-| Prose generation (temp 0.4) | 23.5 | 19.7 | 43.3 | **43.6** |
-| Fibonacci generation (temp 0.4) | 67.9 | 56.2 | **86.3** | 84.7 |
-| JSON constraints (temp 0) | **55.1** | 46.5 | 51.5 | 51.7 |
-| Greedy code /128 (temp 0) | 61.9 | 55.3 | 70.5 | **73.2** |
-| Repetitive text /256 (temp 0) | 70.6 | 60.8 | 74.8 | **75.3** |
+| Prose generation (temp 0.4) | 24.6 | 22.5 | **54.4** | 52.1 |
+| Fibonacci generation (temp 0.4) | 41.5 | 41.9 | **59.2** | 56.0 |
+| JSON constraints (temp 0) | 43.8 | 44.3 | 63.6 | **64.2** |
+| Greedy code /128 (temp 0) | 44.2 | 37.9 | 50.6 | **52.7** |
+| Repetitive text /256 (temp 0) | 55.7 | 52.5 | 78.0 | **81.7** |
 
 ### Agentic Suite (agent_bench_v2 sandboxed tasks)
+
+_Not re-run for this release: this table comes from an earlier build._
 
 | Test Metric | 27B Q4_K_XL | 27B FP4-FAST | Flash-Next ROCmFP4 | Flash-Next Q4_K_XL |
 |---|---:|---:|---:|---:|
@@ -366,8 +374,8 @@ Conditions: Cold KV (unique prompt per request), `think` disabled, F16 KV, `-j 1
 
 ### Recommended Configurations
 
-- **Qwen 3.8 27B**: **UD-Q4_K_XL** provides the highest decode rate and draft acceptance.
-- **Qwen 3.8 Flash-Next**: **ROCmFP4** delivers peak decode speed (prose 45.0, fibonacci 87.0 tok/s) and fits in ~94 GB (saving ~17 GB over Q4_K_XL).
+- **Qwen 3.8 27B**: **UD-Q4_K_XL** is the reference build; the two builds decode within about 15% of each other in the measurements above.
+- **Qwen 3.8 Flash-Next**: **ROCmFP4** decodes as fast as Q4_K_XL (prose 54.4, fibonacci 59.2 tok/s) and fits in ~94 GB (saving ~17 GB over Q4_K_XL).
 
 ---
 

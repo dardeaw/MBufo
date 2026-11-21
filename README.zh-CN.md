@@ -11,7 +11,7 @@
 
 - **高并发**：单台 Strix Halo 节点在 16 路以上并发下保持满载，每路最长可达 256K 上下文（§1）。
 - **公平调度**：预填充与解码统一混合批处理，配合防饥饿调度，高负载下不会有请求被饿死（§1）。
-- **多模型单端口**：19 个模型家族并行服务，可通过内置 `/admin` 控制台在运行期加载与卸载（§3）。
+- **多模型单端口**：20 个模型家族并行服务，可通过内置 `/admin` 控制台在运行期加载与卸载（§3）。
 - **多种量化格式**：K 系列、IQ4、MXFP4、ROCmFP4 等，各引擎的支持清单见[支持的量化格式](#支持的量化格式)（§3）。
 - **FlashAttention 与 Split-K 注意力**：WMMA FlashAttention 预填充与 Split-K 解码注意力，让长上下文解码从短提示到 256K 都保持在内存带宽上限附近（§2）。
 - **高效 KV 缓存**：分块 INT8 与 4-bit 紧凑布局，显著降低每个会话占用的内存（§2）。
@@ -37,7 +37,9 @@
 | --- | --- | --- |
 | **极速响应** | **短请求 TTFT 0.7 秒** | 具备防饥饿公平调度机制，短请求即便遭遇 25 万 token 超长 Prefill 并发，首字延迟仍稳定压在 0.7 秒内，保证输出位元精确无失真。 |
 | **极致省容** | **KV 缓存显存减半** | Blocked-Q8 缓存架构让单一 262,144 (256K) token 请求的 KV 占用从 6.44 GB 骤降至 3.42 GB（4-bit 模式更可低至 1.81 GB）。 |
-| **全能托管** | **19 个 GGUF 模型家族** | 单一 HTTP 端口统筹服务，涵盖 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 与 Reranker，支持动态热加载与无重启卸载。 |
+| **全能托管** | **20 个 GGUF 模型家族** | 单一 HTTP 端口统筹服务，涵盖 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 与 Reranker，支持动态热加载与无重启卸载。 |
+
+> §1 与 §2 中除 llama.cpp 对比以外的数据（混合批次、公平性、并发引擎对比、int8 WMMA）来自早期版本，记录于 `docs/MIXED_BATCH.md` 与 `docs/KV-V4.md`。llama.cpp 对比与「基准测试」一节已在本版本重新测量。
 
 ---
 
@@ -150,7 +152,7 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 
 ### 性能对比 llama.cpp（gfx1151 实测）
 
-相同权重、贪婪解码、Release 构建，在同一台 Strix Halo 节点上对 llama.cpp `5d9e5ac30` 重新实测。MBufo 经由 HTTP 服务端测量，数字含分词与请求开销；llama.cpp 使用 `llama-bench` / `llama-server`，并取其最佳批大小。Prefill 为约 2K token 的冷提示；Decode 为约 2K token 上下文下的生成速度；均未开启投机解码。正值代表 MBufo 更快。
+相同权重、贪婪解码、Release 构建，在同一台 Strix Halo 节点上对 llama.cpp `5d9e5ac30` 重新实测。MBufo 经由 HTTP 服务端测量，数字含分词与请求开销；llama.cpp 使用 `llama-bench` / `llama-server`，并取其最佳批大小。Prefill 为约 2K token 的冷提示；Decode 为约 2K token 上下文下的生成速度；均未开启投机解码。MBufo 使用默认的分块 Q8 KV 缓存，llama.cpp 使用 F16（Flash-Next 改用 F16 KV 缓存时 prefill 为 1662 tok/s，而非 1158；下文「性能基准」使用 F16）。正值代表 MBufo 更快。
 
 | 模型（权重） | Prefill tok/s：MBufo / llama.cpp | 差距 | Decode tok/s：MBufo / llama.cpp | 差距 |
 | --- | --- | --- | --- | --- |
@@ -159,7 +161,7 @@ MBufo 主张精度与性能之间的平衡需经严格量测。推荐基准配�
 | **GPT-OSS 120B**（Q4_K_M） | 1226 / 1089 | **+13%** | 52.3 / 52.4 | 0% |
 | **Muse Glimmer 30B**（UD-Q4_K_XL） | 516 / 398 | **+30%** | 12.6 / 13.2 | -5% |
 | **DeepSeek V4 Flash**（IQ2_XXS 混合） | 432 / 63 | **+586%** | 15.8 / 14.2 | +12% |
-| **Qwen3.8 Flash-Next**（ROCmFP4-FAST） | 1141 / 无 | 无 | 33.3 / 无 | 无 |
+| **Qwen3.8 Flash-Next**（ROCmFP4-FAST） | 1158 / 无 | 无 | 33.3 / 无 | 无 |
 
 Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 token）：
 
@@ -174,14 +176,16 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 | **Qwen3-Embedding-0.6B**（Q8_0），3.4K | 11356 / 4700 tok/s | **+142%** |
 | **bge-reranker-v2-m3**（Q4_K_M），64 篇文档 | 76.9 / 38.0 docs/s | **+102%** |
 | **bge-reranker-v2-m3**（FP16），64 篇文档 | 73.1 / 34.3 docs/s | **+113%** |
-| **Qwen3-Reranker-0.6B**（Q8_0），64 篇文档 | 35.2 / 28.1 docs/s | **+25%** |
+| **Qwen3-Reranker-0.6B**（Q8_0），64 篇文档 | 41.1 / 28.1 docs/s | **+46%** |
 
 说明：
 - llama.cpp 不支持 Flash-Next 架构，因此没有对照数字。
 - DeepSeek V4 的对照为该 llama.cpp 构建自带的 `deepseek4` 支持，使用默认批大小 512；本次未使用 ds4 参考项目。
 - llama.cpp 批大小：Gemma 4 与 Glimmer 为 2048，Qwen3.6 为 1024（2048 曾使测试机死机，其最佳成绩可能更高），GPT-OSS 经 `llama-server` 为 8192。
 - bge-m3 单次输入可达模型原生的 8192 token。输入长度会按约 12% 的间隔分桶并做精确的键遮罩，不同长度的请求因此共用已调优的 GEMM 方案；调优结果缓存在磁盘（`MBUFO_TUNE_CACHE`，默认 `~/.cache/mbufo/bge_tune_v1.txt`），新形状的第一次请求仍需付出一次性调优时间。
-- Qwen3-Reranker：MBufo 套用该模型要求的提示模板（每篇文档约多 27% token）。该 llama.cpp 构建的 `/rerank` 未套用，在 8 篇相关与 40 篇无关文档的测试中，它的前 8 名里没有任何一篇相关文档，MBufo 则把 8 篇相关文档全排在最前。
+- Qwen3-Reranker：MBufo 套用该模型要求的提示模板（每篇文档约多 27% token），并且每次请求只预填一次共用的系统指令与查询前缀，而不是每篇文档各算一次（得分完全相同）。该 llama.cpp 构建的 `/rerank` 未套用，在 8 篇相关与 40 篇无关文档的测试中，它的前 8 名里没有任何一篇相关文档，MBufo 则把 8 篇相关文档全排在最前。
+
+- EmbeddingGemma 2（BF16，文本路径；`tools/convert/embeddinggemma2_to_gguf.py`）尚不受 llama.cpp 支持，因此没有 llama.cpp 对照。MBufo 的向量与独立的 PyTorch 实现一致（6 段 4 到 908 token 的文本，余弦相似度 1.000000）。经 HTTP 服务，15 到 23 token 的请求约 10 ms，908 token 为 76 ms（11.9K tok/s）；同一节点上以 32 个 CPU 线程（FP32）运行的 PyTorch 实现，13 token 需要 24.7 ms，908 token 需要 364 ms（这台机器上的 PyTorch ROCm 无法运行）。
 
 ---
 
@@ -189,7 +193,7 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 
 ### 支持的模型家族
 
-通过内置多模型路由器，单一 HTTP 端口即可统筹调度下列全部 19 个家族：
+通过内置多模型路由器，单一 HTTP 端口即可统筹调度下列全部 20 个家族：
 
 | 模型 | 参数量 | HTTP 服务 | 验证测试 | 投机草稿支持 | 特性与架构亮点 |
 | --- | --- | --- | --- | --- | --- |
@@ -206,6 +210,7 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 | **DeepSeek V4 Flash** | MoE（IQ2/Q2/Q8 混合 GGUF） | 支援 | 品質限制已記載 | DSpark | MLA decode、ds4 一致 kernel、約 81 GiB 常駐 |
 | **Qwen3-Embedding-0.6B** | 0.6B | 支持 (`/v1/embeddings`) | — | — | 缓存池化 Single-Prefill 执行器 |
 | **bge-m3** | 0.6B XLM-R | 支持 (`/v1/embeddings`) | Encoder | — | CLS 池化、Q4_K_M 加载器、hipBLASLt 调优 |
+| **EmbeddingGemma 2** | 约 0.3B Gemma-4 编码器（文本路径） | 支持 (`/v1/embeddings`) | 与 PyTorch 一致（余弦 1.000000） | — | 双向注意力：20 层滑动窗口（±512）与 4 层全局层（head_dim 256 / 512）、逐层输入、平均池化、768 维输出 |
 | **bge-reranker-v2-m3** | Cross-Encoder | 支持 (`/v1/reranking`) | ScoreBatch | — | BERT 分派、多序列 Padding 批次加速 |
 | **Qwen3-Reranker** | Cross-Encoder | 支持 (`/v1/reranking`) | Scoring | — | Qwen 分派、共用 Rerank 评分头 |
 | **Qwen3-ASR 1.7B** | 1.7B | 支援（語音轉文字） | — | — | BF16 safetensors、決定性 greedy 解碼 |
@@ -226,6 +231,7 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 | **Muse Glimmer、Llama-3.1** | Q4_0、Q8_0、Q4_K、Q5_K、Q6_K、F16 / BF16 / F32 | - |
 | **DeepSeek V4 Flash** | 已发布的 IQ2_XXS / Q2_K / Q8_0 混合配方 | 同左 |
 | **bge-m3、重排序、Qwen3-Embedding** | Q4_K_M 与 F16 加载器 | - |
+| **EmbeddingGemma 2** | BF16（由 `tools/convert/embeddinggemma2_to_gguf.py` 生成 GGUF） | - |
 
 嵌入查表、行反量化、行点积内核与主机端反量化器共用同一份格式注册表（`core/quant/quant_traits.hpp`）：F32、F16、BF16、Q4_0、Q4_1、Q5_0、Q5_1、Q8_0、Q2_K、Q3_K、Q4_K、Q5_K、Q6_K、IQ4_NL、IQ4_XS、IQ2_XXS、MXFP4、ROCmFP4、ROCmFP3。KV 缓存：F16，或分块 INT8（Q8），内存约减半，并保持精确连续性的 split-K 注意力。
 
@@ -250,7 +256,7 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 | `/admin` | GET | 内置多模型并驻管理 Web UI 仪表盘与实时测试 Playground |
 | `/v1/chat/completions` | POST | OpenAI 聊天对话接口（依 `"model"` ID/别名自动路由，未填则回退至默认模型） |
 | `/v1/messages` | POST | Anthropic Messages 接口（依 `"model"` ID/别名自动路由，支持 Claude Code 等工具） |
-| `/v1/embeddings` | POST | 向量嵌入接口（支持 bge-m3、Qwen3-Embedding） |
+| `/v1/embeddings` | POST | 向量嵌入接口（支持 bge-m3、Qwen3-Embedding、EmbeddingGemma 2） |
 | `/v1/reranking` | POST | 文本重排序接口（支持 bge-reranker-v2-m3、Qwen3-Reranker） |
 | `/admin/models` | GET | 查询当前并驻模型列表、各 Slot 状态与 UMA 内存遥测数据 |
 | `/admin/catalog` | GET | 扫描本地 GGUF 模型库并自动配对 `mmproj` 与 `MTP`/`DFlash2` 附属权重 |
@@ -330,30 +336,32 @@ curl http://localhost:8741/admin/eject -H "Content-Type: application/json" -d '{
 
 ## 性能基准（gfx1151 Strix Halo）
 
-测试条件：冷启动 KV（每请求独立 Prompt）、关闭思考模式、F16 KV、单流 `-j 1`、上下文 262,144。27B 采用 DFlash2 投机解码，Flash-Next 采用 MTP 投机解码。
+测试条件（本版本重新测量，经 HTTP 服务）：冷启动 KV（每请求独立 Prompt）、关闭思考模式、F16 KV、单会话 `-j 1`、上下文 262,144。27B 采用 DFlash2 投机解码，Flash-Next 采用 MTP 投机解码。Prefill 为服务端回报的提示处理速率；Decode 为 128 至 256 token 生成三次的中位数，会随草稿接受率波动。
 
 ### Prefill 吞吐量（tok/s，越高越好）
 
 | Token 规模 | 27B Q4_K_XL | 27B FP4-FAST | Flash-Next ROCmFP4 | Flash-Next Q4_K_XL |
 |---:|---:|---:|---:|---:|
-| **2K** | 605 | 455 | **1739** | 1301 |
-| **8K** | 615 | 564 | **1701** | 1549 |
-| **32K** | 567 | 551 | 1598 | **1618** |
-| **64K** | 508 | 496 | **1695** | 1678 |
-| **128K** | 409 | 407 | **1504** | 1507 |
-| **250K** | — | — | **1438** | 1415 |
+| **2K** | 533 | 534 | **1733** | 1719 |
+| **8K** | 551 | 515 | **1708** | 1678 |
+| **32K** | 525 | 512 | **1679** | 1672 |
+| **64K** | 467 | 479 | **1643** | 1637 |
+| **128K** | 382 | 392 | 1585 | **1587** |
+| **250K** | — | — | 1512 | **1518** |
 
 ### Decode 速度（tok/s，开启投机解码）
 
 | 测试场景 | 27B Q4_K_XL | 27B FP4-FAST | Flash-Next ROCmFP4 | Flash-Next Q4_K_XL |
 |---|---:|---:|---:|---:|
-| 散文生成 (temp 0.4) | 23.5 | 19.7 | 43.3 | **43.6** |
-| 斐波那契数列生成 (temp 0.4) | 67.9 | 56.2 | **86.3** | 84.7 |
-| JSON 结构生成 (temp 0) | **55.1** | 46.5 | 51.5 | 51.7 |
-| 代码贪婪生成 /128 (temp 0) | 61.9 | 55.3 | 70.5 | **73.2** |
-| 重复文本生成 /256 (temp 0) | 70.6 | 60.8 | 74.8 | **75.3** |
+| 散文生成 (temp 0.4) | 24.6 | 22.5 | **54.4** | 52.1 |
+| 斐波那契数列生成 (temp 0.4) | 41.5 | 41.9 | **59.2** | 56.0 |
+| JSON 结构生成 (temp 0) | 43.8 | 44.3 | 63.6 | **64.2** |
+| 代码贪婪生成 /128 (temp 0) | 44.2 | 37.9 | 50.6 | **52.7** |
+| 重复文本生成 /256 (temp 0) | 55.7 | 52.5 | 78.0 | **81.7** |
 
 ### Agentic 综合评测（agent_bench_v2 沙箱工具组）
+
+_本版本未重新测量：此表来自早期版本。_
 
 | 评测项目 | 27B Q4_K_XL | 27B FP4-FAST | Flash-Next ROCmFP4 | Flash-Next Q4_K_XL |
 |---|---:|---:|---:|---:|
@@ -363,8 +371,8 @@ curl http://localhost:8741/admin/eject -H "Content-Type: application/json" -d '{
 
 ### 各模型推荐配置
 
-- **Qwen 3.8 27B**：推荐采用 **UD-Q4_K_XL**，解码速度与草稿接受率皆达最佳状态。
-- **Qwen 3.8 Flash-Next**：推荐采用 **ROCmFP4**，解码吞吐极高（散文 45 tok/s、斐波那契 87 tok/s），且仅需 ~94 GB 显存（对比 Q4_K_XL 节省约 17 GB）。
+- **Qwen 3.8 27B**：推荐采用 **UD-Q4_K_XL** 作为参考版本；在上述测量中，两种构建的解码速度在上述测量中相差约 15% 以内。
+- **Qwen 3.8 Flash-Next**：推荐采用 **ROCmFP4**，解码吞吐极高（散文 54 tok/s、斐波那契 59 tok/s），且仅需 ~94 GB 显存（对比 Q4_K_XL 节省约 17 GB）。
 
 ---
 

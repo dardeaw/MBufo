@@ -3,11 +3,24 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
-## v0.34.0 (2026-11-21)
+## v0.35.0 (2026-11-21)
+
+### Added (EmbeddingGemma 2 text encoder)
+- New model kind `embedding_gemma2` served on `/v1/embeddings` (`src/models/embeddinggemma2/`, `tools/convert/embeddinggemma2_to_gguf.py`; the converter takes the checkpoint directory plus any Gemma 4 GGUF as the tokenizer donor). Bidirectional Gemma-4-style transformer: 20 sliding-window (+-512) and 4 full-attention layers (head_dim 256 / 512, 4 query heads, 2 / 1 KV heads), q/k/v norms, RoPE (10000 local / 1e6 full), per-layer input embeddings, layer scalars, mean pooling and the 768-d output projection. Weights are uploaded as F16 (range-checked); the residual stream is F32; attention runs through strided-batched hipBLAS with a masked softmax per 1024-row query chunk. Windows up to 8192 tokens.
+- Validation: cosine 1.000000 against an independent PyTorch implementation on six texts of 4 to 908 tokens (the token ids match too). A request takes about 10 ms for 15 to 23 tokens and 76 ms for 908 tokens; the PyTorch implementation on 32 CPU threads (FP32) takes 24.7 ms and 364 ms (PyTorch ROCm does not run on the test machine). llama.cpp has no EmbeddingGemma 2 support.
+- The Gemma 4 tokenizer path also serves `embedding_gemma2` GGUFs.
+
+### Changed (Qwen3-Reranker)
+- A request's pairs share the system / instruction / query framing; on dense models (`qwen3`, `qwen2`) it is prefilled once and every document continues from that KV (`start_pos`), instead of recomputing it per pair. Scores are identical; 64 documents of about 150 words go from 35.8 to 41.1 docs/s (+46% over llama.cpp). `MBUFO_QWEN_RERANK_NO_PREFIX=1` restores per-pair prefill; hybrid models keep it.
 
 ### Changed (encoders: bge-m3, bge-reranker, Qwen3-Embedding, Qwen3-Reranker)
 - bge-m3 / bge-reranker device path: input lengths are bucketed to a small set of GEMM shapes (about 12% steps, with exact key masking in a flash kernel that now takes a valid length and a batch dimension), tuned hipBLASLt picks persist across restarts (`MBUFO_TUNE_CACHE`), the GELU uses single-precision `erff` above the bitwise-guarded short range (the double-precision erf was 24% of a long prefill), and padded rerank batches use the flash kernel instead of materialized score tiles and are cut into length-sorted chunks. The device window is the model's native 8192 tokens (it was 2048). Output vectors / scores match the previous build (cosine >= 0.99997, reranker top-10 order unchanged). bge-m3 is now 2.2-2.9x llama.cpp, bge-reranker about 2.0-2.1x.
-- Qwen3-Embedding / Qwen3-Reranker (head_dim 128 dense prefill): the core WMMA flash kernel replaces the fused-FA kernel (about 3 TFLOPs on these shapes); embedding requests take 35-60% less time and are now 2.1-2.6x llama.cpp, the reranker +25%. `MBUFO_QWEN_NO_WMMA128=1` keeps the previous route.
+- Qwen3-Embedding / Qwen3-Reranker (head_dim 128 dense prefill): the core WMMA flash kernel replaces the fused-FA kernel (about 3 TFLOPs on these shapes); embedding requests take 35-60% less time and are now 2.1-2.6x llama.cpp, the reranker +46% (see below). `MBUFO_QWEN_NO_WMMA128=1` keeps the previous route.
+
+### Changed (README benchmarks re-measured)
+- The Benchmarks section (Flash-Next and 27B prefill up to 250K / 128K and decode scenarios, HTTP server, F16 KV) was measured again. The llama.cpp table now notes that MBufo ran at its default Q8 KV cache (Flash-Next 1158 tok/s prefill, 1662 with F16 KV). Figures that were not re-run (mixed batch, fairness, engine comparison under load, int8 WMMA, agentic suite) are marked as coming from earlier releases.
+
+## v0.34.0 (2026-11-21)
 
 ### Changed (README performance table re-measured)
 - The comparison with llama.cpp was re-run from scratch on one node (llama.cpp `5d9e5ac30`, identical weights, greedy): MBufo through its HTTP server, llama.cpp at its best batch size. Prefill leads are smaller than the old table claimed (Gemma 4 26B-A4B +56%, Qwen3.6-35B-A3B +73%, GPT-OSS 120B +13%, Muse Glimmer 30B +30%, DeepSeek V4 Flash +586%), decode is at parity or better except Muse Glimmer (-5%), and bge-m3 embeddings are slower than llama.cpp (-29..-33%). The old Flash-Next row could not be reproduced (llama.cpp does not support that architecture).
