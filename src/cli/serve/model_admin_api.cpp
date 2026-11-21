@@ -659,6 +659,22 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
         900, "http://127.0.0.1:8766", 8766, "/v1/systemone",
         "flm serve llama3.2:1b --decision d3:lite --port 8766");
     push_sidecar(
+        "d3-nano-npu", "D3-Nano-NPU2 (flm sidecar)", "DECIDE", "decide", "npu",
+        1800, "http://127.0.0.1:8766", 8766, "/v1/systemone",
+        "flm serve llama3.2:1b --decision d3:nano --port 8766");
+    push_sidecar(
+        "d3-mini-npu", "D3-Mini-NPU2 (flm sidecar)", "DECIDE", "decide", "npu",
+        3200, "http://127.0.0.1:8766", 8766, "/v1/systemone",
+        "flm serve llama3.2:1b --decision d3:mini --port 8766");
+    push_sidecar(
+        "d3-turbo-npu", "D3-Turbo-NPU2 (flm sidecar)", "DECIDE", "decide",
+        "npu", 6400, "http://127.0.0.1:8766", 8766, "/v1/systemone",
+        "flm serve llama3.2:1b --decision d3:turbo --port 8766");
+    push_sidecar(
+        "d3-ultra-npu", "D3-Ultra-NPU2 (flm sidecar)", "DECIDE", "decide",
+        "npu", 12000, "http://127.0.0.1:8766", 8766, "/v1/systemone",
+        "flm serve llama3.2:1b --decision d3:ultra --port 8766");
+    push_sidecar(
         "whisper-turbo-npu", "Whisper-V3-Turbo-NPU2 (flm sidecar)", "AUDIO",
         "asr", "npu", 700, "http://127.0.0.1:8764", 8764,
         "/v1/audio/transcriptions",
