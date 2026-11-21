@@ -489,6 +489,10 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     .cap-tab.active[data-cap="VISION"]    { background: rgba(168,85,247,0.25); border-color: #a855f7; color: #e9d5ff; box-shadow: 0 0 12px rgba(168,85,247,0.22); }
     .cap-tab.active[data-cap="AUDIO"]     { background: rgba(236,72,153,0.25); border-color: #ec4899; color: #fbcfe8; box-shadow: 0 0 12px rgba(236,72,153,0.22); }
     .cap-tab.active[data-cap="TOOLS"]     { background: rgba(14,165,233,0.22); border-color: #0ea5e9; color: #bae6fd; box-shadow: 0 0 12px rgba(14,165,233,0.2); }
+    /* Device (NPU/GPU) switch pills — same row language as capability pills. */
+    .cap-tab.active[data-dev="ALL"] { background: rgba(59,130,246,0.22); border-color: #3b82f6; color: #93c5fd; box-shadow: 0 0 12px rgba(59,130,246,0.2); }
+    .cap-tab.active[data-dev="GPU"] { background: rgba(59,130,246,0.25); border-color: #3b82f6; color: #bfdbfe; box-shadow: 0 0 12px rgba(59,130,246,0.25); }
+    .cap-tab.active[data-dev="NPU"] { background: rgba(245,158,11,0.25); border-color: #f59e0b; color: #fde68a; box-shadow: 0 0 12px rgba(245,158,11,0.25); }
     .cap-tab.active .cap-cnt {
       background: rgba(255, 255, 255, 0.16);
       color: #fff;
@@ -819,6 +823,10 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             <div class="cap-tabs" id="cap-pills"></div>
           </div>
           <div class="filter-row">
+            <div class="filter-dim-label">DEVICE</div>
+            <div class="cap-tabs" id="dev-pills"></div>
+          </div>
+          <div class="filter-row">
             <div class="filter-dim-label">FAMILY</div>
             <div class="family-pills" id="family-pills"></div>
           </div>
@@ -981,7 +989,70 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     let stateCatalog = { models: [], mmproj_files: [], draft_files: [] };
     let selectedFamily = 'ALL';
     let selectedCap = 'ALL';
+    let selectedDevice = 'ALL';
     let previewModel = null;
+
+    const GPU_COLOR = '#3b82f6';
+    const NPU_COLOR = '#f59e0b';
+
+    function backendOf(m) {
+      const b = (m && m.backend ? String(m.backend) : 'gpu').toLowerCase();
+      return b === 'npu' ? 'NPU' : 'GPU';
+    }
+
+    function renderBackendBadge(m) {
+      const be = backendOf(m);
+      if (be === 'NPU') return `<span class="badge badge-amber" title="Runs on NPU (XDNA2 / flm sidecar)">⚡ NPU</span>`;
+      return `<span class="badge badge-primary" title="Runs on GPU (HIP in-process)">🎮 GPU</span>`;
+    }
+
+    function renderDevicePills() {
+      const devContainer = document.getElementById('dev-pills');
+      if (!devContainer) return;
+      const models = stateCatalog.models || [];
+      const counts = { ALL: models.length, GPU: 0, NPU: 0 };
+      models.forEach(m => { counts[backendOf(m)] = (counts[backendOf(m)] || 0) + 1; });
+      const defs = [
+        { key: 'ALL', label: 'All Devices' },
+        { key: 'GPU', label: '🎮 GPU' },
+        { key: 'NPU', label: '⚡ NPU' }
+      ];
+      devContainer.innerHTML = '';
+      defs.forEach(dd => {
+        if (dd.key !== 'ALL' && !counts[dd.key]) return;
+        const el = document.createElement('span');
+        el.className = 'cap-tab' + (selectedDevice === dd.key ? ' active' : '');
+        el.setAttribute('data-dev', dd.key);
+        el.innerHTML = `<span>${dd.label}</span><span class="cap-cnt">${counts[dd.key]}</span>`;
+        el.onclick = () => {
+          selectedDevice = dd.key;
+          renderDevicePills();
+          renderFamilyPills();
+          renderCatalog();
+          renderLoadedModels();
+        };
+        devContainer.appendChild(el);
+      });
+    }
+
+    async function copyText(t) {
+      try {
+        await navigator.clipboard.writeText(t);
+        showToast('啟動指令已複製：' + t);
+      } catch (e) {
+        showToast('請手動複製啟動指令：' + t);
+      }
+    }
+
+    async function probeSidecar(base) {
+      const url = (base || '').replace(/\/$/, '');
+      try {
+        const res = await fetch(url + '/v1/models', { cache: 'no-store' });
+        showToast(`Sidecar ${url} 回應 HTTP ${res.status}（有回應即視為在線）`, res.ok ? false : true);
+      } catch (e) {
+        showToast(`Sidecar ${url} 無回應（offline），請用啟動指令拉起`, true);
+      }
+    }
 
     function renderCapabilityBadges(caps) {
       const list = Array.isArray(caps) ? caps : [];
@@ -1089,6 +1160,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         const res = await fetch('/admin/catalog', { cache: 'no-store' });
         if (!res.ok) return false;
         stateCatalog = await res.json();
+        renderDevicePills();
         renderFamilyPills();
         renderCatalog();
         return true;
@@ -1146,19 +1218,20 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       models.forEach((m, idx) => {
         const est = m.file_size_mib || m.estimated_resident_mib || 2048;
         const pct = Math.max(1.5, Math.min(100, (est / scaleDenom) * 100));
-        const color = MODEL_COLORS[idx % MODEL_COLORS.length];
+        const be = backendOf(m);
+        const color = be === 'NPU' ? NPU_COLOR : GPU_COLOR;
 
         const seg = document.createElement('div');
         seg.className = 'mem-seg';
         seg.style.width = pct + '%';
         seg.style.background = color;
-        seg.title = m.id + ': ~' + fmtGiB(est);
-        if (pct > 6) seg.textContent = m.id + ' (' + fmtGiB(est) + ')';
+        seg.title = be + ' · ' + m.id + ': ~' + fmtGiB(est);
+        if (pct > 6) seg.textContent = be + ' · ' + m.id + ' (' + fmtGiB(est) + ')';
         bar.appendChild(seg);
 
         const item = document.createElement('div');
         item.className = 'mem-legend-item';
-        item.innerHTML = `<span class="mem-swatch" style="background:${color}"></span><strong>${m.id}</strong> (~${fmtGiB(est)})`;
+        item.innerHTML = `<span class="mem-swatch" style="background:${color}"></span><strong>${be} · ${m.id}</strong> (~${fmtGiB(est)})`;
         legend.appendChild(item);
       });
 
@@ -1222,8 +1295,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
     function renderLoadedModels() {
       const container = document.getElementById('loaded-list');
-      const models = stateModels.models || [];
-      document.getElementById('loaded-count').textContent = models.length + ' loaded';
+      const allModels = stateModels.models || [];
+      const models = allModels.filter(m =>
+        selectedDevice === 'ALL' ? true : backendOf(m) === selectedDevice);
+      const nGpu = allModels.filter(m => backendOf(m) === 'GPU').length;
+      const nNpu = allModels.filter(m => backendOf(m) === 'NPU').length;
+      document.getElementById('loaded-count').textContent =
+        allModels.length + ' loaded (🎮 ' + nGpu + ' GPU · ⚡ ' + nNpu + ' NPU)';
 
       if (models.length === 0) {
         container.innerHTML = `<div style="padding:24px;text-align:center;color:var(--muted);">No models currently loaded. Choose one from the Catalog to load.</div>`;
@@ -1233,9 +1311,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       container.innerHTML = '';
       models.forEach((m, idx) => {
         const card = document.createElement('div');
+        const be = backendOf(m);
         card.className = 'model-card' + (m.is_default ? ' is-default' : '');
+        card.style.borderLeft = '3px solid ' + (be === 'NPU' ? NPU_COLOR : GPU_COLOR);
 
         const badges = [];
+        badges.push(renderBackendBadge(m));
         if (m.is_default) badges.push(`<span class="badge badge-primary">★ PRIMARY DEFAULT</span>`);
         else if (m.lru_rank > 0) badges.push(`<span class="badge">LRU #${m.lru_rank}</span>`);
         if (m.ready) badges.push(`<span class="badge badge-green">READY</span>`);
@@ -1253,7 +1334,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           <div class="model-top">
             <div>
               <div class="model-id">
-                <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${MODEL_COLORS[idx % MODEL_COLORS.length]}"></span>
+                <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${be === 'NPU' ? NPU_COLOR : GPU_COLOR}"></span>
                 <span>${m.id}</span>
                 ${badges.join('')}
               </div>
@@ -1332,6 +1413,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       const filtered = (stateCatalog.models || []).filter(m => {
         if (selectedFamily !== 'ALL' && m.family !== selectedFamily) return false;
         if (selectedCap !== 'ALL' && !(m.capabilities || []).includes(selectedCap)) return false;
+        if (selectedDevice !== 'ALL' && backendOf(m) !== selectedDevice) return false;
         if (!q) return true;
         const capsStr = (m.capabilities || []).join(' ').toLowerCase();
         return m.id_suggestion.toLowerCase().includes(q) ||
@@ -1340,7 +1422,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
                capsStr.includes(q);
       });
 
-      document.getElementById('catalog-count').textContent = filtered.length + ' GGUFs';
+      document.getElementById('catalog-count').textContent = filtered.length + ' models';
       list.innerHTML = '';
 
       filtered.forEach(m => {
@@ -1357,11 +1439,21 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         };
 
         const badges = [
+          renderBackendBadge(m),
           renderCapabilityBadges(m.capabilities || []),
           `<span class="badge">${fmtGiB(m.size_mib)}</span>`
         ];
         if (m.shards > 1) badges.push(`<span class="badge">${m.shards} shards</span>`);
         if (isLoaded) badges.push(`<span class="badge badge-green">LOADED</span>`);
+        if (m.sidecar) badges.push(`<span class="badge">sidecar :${m.default_port}</span>`);
+
+        const actionsHtml = m.sidecar
+          ? `<button class="btn-sm" onclick='copyText(${JSON.stringify(m.launch_cmd || '')})'>📋 啟動指令</button>
+             <button class="btn-sm" onclick="probeSidecar('${m.path}')">🔍 探針</button>`
+          : (isLoaded
+            ? `<button class="btn-sm" onclick="selectInPlayground('${m.id_suggestion}')">Use</button>`
+            : `<button class="btn-sm" onclick='openLoadModal(${JSON.stringify(m)})'>⚙ Configure</button>
+               <button class="btn-sm btn-primary" onclick='quickLoadModel(${JSON.stringify(m)})'>⚡ Load</button>`);
 
         item.innerHTML = `
           <div class="cat-info">
@@ -1370,13 +1462,10 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               ${badges.join('')}
             </div>
             <div class="cat-rel" title="${m.path}">${m.relative_path}</div>
+            ${m.sidecar ? `<div class="cat-rel" style="color:var(--muted);">POST ${m.endpoint} · 手動拉起，不開機自啟</div>` : ''}
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0;">
-            ${isLoaded
-              ? `<button class="btn-sm" onclick="selectInPlayground('${m.id_suggestion}')">Use</button>`
-              : `<button class="btn-sm" onclick='openLoadModal(${JSON.stringify(m)})'>⚙ Configure</button>
-                 <button class="btn-sm btn-primary" onclick='quickLoadModel(${JSON.stringify(m)})'>⚡ Load</button>`
-            }
+            ${actionsHtml}
           </div>
         `;
         list.appendChild(item);

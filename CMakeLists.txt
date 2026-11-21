@@ -345,6 +345,40 @@ if (ENGINE_ENABLE_HIP)
     roc::hipblaslt roc::rocblas)
 endif()
 
+# XDNA2 NPU backend (Strix Halo). Default OFF: it needs the FastFlow SDK
+# (hrx headers + libhrx), which is not part of a stock ROCm install.
+# Default builds are byte-for-byte unaffected when this stays OFF.
+option(MBUFO_ENABLE_NPU "Build the XDNA2 NPU backend (needs FastFlow SDK)" OFF)
+set(MBUFO_NPU_INCLUDE_DIR "" CACHE PATH
+  "FastFlow SDK include dir holding hrx_cpp/ and npu_utils/")
+set(MBUFO_NPU_HRX_INCLUDE_DIR "" CACHE PATH
+  "FastFlow runtime include dir holding hrx/hrx_runtime.h and hrx_amdxdna.h")
+set(MBUFO_NPU_LIB_DIR "" CACHE PATH "Directory containing libhrx.so.0")
+if (MBUFO_ENABLE_NPU)
+  if (MBUFO_NPU_INCLUDE_DIR STREQUAL ""
+      OR MBUFO_NPU_HRX_INCLUDE_DIR STREQUAL ""
+      OR MBUFO_NPU_LIB_DIR STREQUAL "")
+    message(FATAL_ERROR
+      "MBUFO_ENABLE_NPU needs MBUFO_NPU_INCLUDE_DIR, "
+      "MBUFO_NPU_HRX_INCLUDE_DIR and MBUFO_NPU_LIB_DIR")
+  endif()
+  add_library(mbufo_npu STATIC src/core/compute/npu/npu_device_hrx.cpp)
+  target_include_directories(mbufo_npu PRIVATE
+    ${MBUFO_NPU_INCLUDE_DIR} ${MBUFO_NPU_HRX_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR})
+  # MBUFO_ENABLE_NPU selects our seam; FLM_USE_HRX selects the HRX (amdxdna)
+  # branch inside the FastFlow headers (without it they demand XRT headers,
+  # which are not installed).
+  target_compile_definitions(mbufo_npu PUBLIC MBUFO_ENABLE_NPU=1 FLM_USE_HRX=1)
+  find_library(MBUFO_HRX_LIB NAMES hrx PATHS ${MBUFO_NPU_LIB_DIR}
+    NO_DEFAULT_PATH)
+  if (NOT MBUFO_HRX_LIB)
+    message(FATAL_ERROR "libhrx not found under ${MBUFO_NPU_LIB_DIR}")
+  endif()
+  target_link_libraries(mbufo_npu PUBLIC ${MBUFO_HRX_LIB} Threads::Threads)
+  target_link_libraries(mbufo_core PUBLIC mbufo_npu)
+endif()
+
 add_library(mbufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp)
