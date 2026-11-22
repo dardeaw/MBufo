@@ -21,6 +21,9 @@ namespace mbufo::server::admin_ops {
 
 struct DefaultModelConfig {
   bool configured{false};
+  bool primary{false};
+  bool sidecar{false};
+  std::string task;
   std::string id;
   std::vector<std::string> aliases;
   std::string path;
@@ -34,6 +37,10 @@ struct DefaultModelConfig {
   std::string vision_model_path;
   bool enable_yarn{false};
   bool enable_disk_cache{false};
+  std::string image_dtype;
+  int image_steps{0};
+  std::string image_size;
+  std::string image_cpu_offload;
 };
 
 struct ServerConfig {
@@ -46,6 +53,7 @@ struct ServerConfig {
   std::string api_key_salt;
   std::string api_key_hash;
   DefaultModelConfig default_model;
+  std::vector<DefaultModelConfig> startup_models;
 };
 
 [[nodiscard]] bool LoadServerConfigFile(const std::filesystem::path& path,

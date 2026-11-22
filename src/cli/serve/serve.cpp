@@ -37,6 +37,7 @@
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/npu_sidecar_proxy.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
 
@@ -1383,11 +1384,13 @@ int RunServe(std::span<const char* const> args) {
     bool startup_kv_overridden = false;
     std::string startup_kv_raw = kv_cache_quant;
     bool startup_enable_disk_cache = !cache_disk_directory.empty();
+    std::vector<server::admin_ops::DefaultModelConfig> extra_startup_models;
 
     if (!config_file.empty()) {
       server::admin_ops::ServerConfig seed_cfg;
       seed_cfg.port = port;
       seed_cfg.default_model.configured = !model.empty();
+      seed_cfg.default_model.primary = !model.empty();
       if (!served_model_names.empty()) {
         seed_cfg.default_model.id = served_model_names.front();
         seed_cfg.default_model.aliases.assign(
@@ -1411,6 +1414,9 @@ int RunServe(std::span<const char* const> args) {
       seed_cfg.default_model.vision_model_path = vision_model_path;
       seed_cfg.default_model.enable_yarn = enable_yarn;
       seed_cfg.default_model.enable_disk_cache = !cache_disk_directory.empty();
+      if (seed_cfg.default_model.configured) {
+        seed_cfg.startup_models.push_back(seed_cfg.default_model);
+      }
       (void)server::admin_ops::SeedServerConfigIfMissing(config_file, seed_cfg);
 
       server::admin_ops::ServerConfig loaded_cfg;
@@ -1418,49 +1424,76 @@ int RunServe(std::span<const char* const> args) {
         if (loaded_cfg.port >= 1 && loaded_cfg.port <= 65535) {
           port = loaded_cfg.port;
         }
-        if (loaded_cfg.default_model.configured &&
-            !loaded_cfg.default_model.path.empty()) {
+        std::size_t primary_idx = loaded_cfg.startup_models.size();
+        for (std::size_t i = 0; i < loaded_cfg.startup_models.size(); ++i) {
+          const auto& sm = loaded_cfg.startup_models[i];
           std::error_code m_ec;
-          if (std::filesystem::exists(loaded_cfg.default_model.path, m_ec)) {
-            const auto& dm = loaded_cfg.default_model;
-            model = dm.path;
-            served_model_names.clear();
-            if (!dm.id.empty()) served_model_names.push_back(dm.id);
-            for (const auto& a : dm.aliases) {
-              if (!a.empty() && a != dm.id) served_model_names.push_back(a);
+          if (sm.configured && !sm.sidecar && !sm.path.empty() && sm.primary &&
+              std::filesystem::exists(sm.path, m_ec)) {
+            primary_idx = i;
+            break;
+          }
+        }
+        if (primary_idx == loaded_cfg.startup_models.size()) {
+          for (std::size_t i = 0; i < loaded_cfg.startup_models.size(); ++i) {
+            const auto& sm = loaded_cfg.startup_models[i];
+            std::error_code m_ec;
+            if (sm.configured && !sm.sidecar && !sm.path.empty() &&
+                std::filesystem::exists(sm.path, m_ec)) {
+              primary_idx = i;
+              break;
             }
-            max_context = dm.max_context;
-            session_count = std::max<std::size_t>(1, dm.session_count);
-            if (!dm.kv_cache_quant.empty()) {
-              kv_cache_quant = dm.kv_cache_quant;
-              startup_kv_raw = dm.kv_cache_quant;
-              startup_kv_overridden = true;
-            }
-            startup_device = dm.device.empty() ? "gpu" : dm.device;
-            startup_npu_quant = dm.npu_quant;
-            speculative_backend =
-                dm.speculative.empty() ? "off" : dm.speculative;
-            if (speculative_backend == "mtp") {
-              mtp_model_path = dm.draft_model_path;
-            } else if (speculative_backend == "dflash2") {
-              dflash_model_path = dm.draft_model_path;
-            } else if (speculative_backend == "dspark") {
-              dspark_model_path = dm.draft_model_path;
-            }
-            vision_model_path = dm.vision_model_path;
-            enable_yarn = dm.enable_yarn;
-            startup_enable_disk_cache = dm.enable_disk_cache;
-            server::Logger::Info(
-                "config", "event=startup_override config=" +
-                              config_file.string() + " port=" +
-                              std::to_string(port) + " model=" + model +
-                              " device=" + startup_device);
-          } else {
-            server::Logger::Warn(
-                "config",
-                "event=default_model_missing path=" +
-                    loaded_cfg.default_model.path +
-                    " fallback=" + model);
+          }
+        }
+        if (primary_idx < loaded_cfg.startup_models.size()) {
+          const auto& dm = loaded_cfg.startup_models[primary_idx];
+          model = dm.path;
+          served_model_names.clear();
+          if (!dm.id.empty()) served_model_names.push_back(dm.id);
+          for (const auto& a : dm.aliases) {
+            if (!a.empty() && a != dm.id) served_model_names.push_back(a);
+          }
+          max_context = dm.max_context;
+          session_count = std::max<std::size_t>(1, dm.session_count);
+          if (!dm.kv_cache_quant.empty()) {
+            startup_kv_raw = dm.kv_cache_quant;
+            kv_cache_quant =
+                (dm.kv_cache_quant == "fp16" || dm.kv_cache_quant == "FP16")
+                    ? "f16"
+                    : dm.kv_cache_quant;
+            startup_kv_overridden = true;
+          }
+          startup_device = dm.device.empty() ? "gpu" : dm.device;
+          startup_npu_quant = dm.npu_quant;
+          speculative_backend =
+              dm.speculative.empty() ? "off" : dm.speculative;
+          if (speculative_backend == "mtp") {
+            mtp_model_path = dm.draft_model_path;
+          } else if (speculative_backend == "dflash2") {
+            dflash_model_path = dm.draft_model_path;
+          } else if (speculative_backend == "dspark") {
+            dspark_model_path = dm.draft_model_path;
+          }
+          vision_model_path = dm.vision_model_path;
+          enable_yarn = dm.enable_yarn;
+          startup_enable_disk_cache = dm.enable_disk_cache;
+          server::Logger::Info(
+              "config", "event=startup_override config=" +
+                            config_file.string() + " port=" +
+                            std::to_string(port) + " model=" + model +
+                            " device=" + startup_device);
+        } else if (loaded_cfg.default_model.configured &&
+                   !loaded_cfg.default_model.path.empty()) {
+          server::Logger::Warn(
+              "config",
+              "event=default_model_missing path=" +
+                  loaded_cfg.default_model.path + " fallback=" + model);
+        }
+
+        for (std::size_t i = 0; i < loaded_cfg.startup_models.size(); ++i) {
+          if (i == primary_idx) continue;
+          if (loaded_cfg.startup_models[i].configured) {
+            extra_startup_models.push_back(loaded_cfg.startup_models[i]);
           }
         }
       }
@@ -1860,6 +1893,74 @@ int RunServe(std::span<const char* const> args) {
           !api_key.empty());
       admin =
           std::make_shared<server::ModelAdminService>(registry, loader, probe);
+      for (const auto& extra : extra_startup_models) {
+        if (extra.sidecar || server::FindSidecarSpec(extra.id) != nullptr) {
+          std::string sc_err;
+          server::SidecarStartOptions sc_opts;
+          sc_opts.dtype = extra.image_dtype;
+          sc_opts.steps = extra.image_steps;
+          sc_opts.default_size = extra.image_size;
+          sc_opts.cpu_offload = extra.image_cpu_offload;
+          if (server::GlobalSidecarManager().Start(extra.id, &sc_err, 120000,
+                                                   sc_opts)) {
+            server::Logger::Info("config", "event=startup_sidecar_loaded id=" +
+                                               extra.id);
+          } else {
+            server::Logger::Warn("config", "event=startup_sidecar_failed id=" +
+                                               extra.id + " error=" + sc_err);
+          }
+          continue;
+        }
+        std::error_code ex_ec;
+        if (!std::filesystem::exists(extra.path, ex_ec)) {
+          server::Logger::Warn("config", "event=startup_extra_missing id=" +
+                                             extra.id + " path=" + extra.path);
+          continue;
+        }
+        if (registry->HasName(extra.id)) continue;
+        server::AdminLoadRequest req;
+        req.id = extra.id;
+        req.aliases = extra.aliases;
+        req.path = extra.path;
+        req.max_context = extra.max_context;
+        req.session_count = std::max<std::size_t>(1, extra.session_count);
+        req.kv_cache_quant =
+            extra.kv_cache_quant.empty() ? "q8" : extra.kv_cache_quant;
+        req.kv_cache_quant_supplied = !extra.kv_cache_quant.empty();
+        req.device = extra.device.empty() ? "gpu" : extra.device;
+        req.npu_quant = extra.npu_quant;
+        req.speculative =
+            extra.speculative.empty() ? "off" : extra.speculative;
+        req.draft_model_path = extra.draft_model_path;
+        req.vision_model_path = extra.vision_model_path;
+        req.enable_yarn = extra.enable_yarn;
+        req.enable_disk_cache = extra.enable_disk_cache;
+        std::string ex_err;
+        auto extra_backend = loader(req, &ex_err);
+        if (extra_backend == nullptr) {
+          server::Logger::Warn("config", "event=startup_extra_load_failed id=" +
+                                             extra.id + " error=" + ex_err);
+          continue;
+        }
+        server::LoadedModelConfig extra_cfg;
+        extra_cfg.kv_cache_quant = req.kv_cache_quant;
+        extra_cfg.speculative = req.speculative;
+        extra_cfg.draft_model_path = req.draft_model_path;
+        extra_cfg.vision_model_path = req.vision_model_path;
+        extra_cfg.enable_yarn = req.enable_yarn;
+        extra_cfg.enable_disk_cache = req.enable_disk_cache;
+        extra_cfg.device = req.device;
+        extra_cfg.npu_quant = req.npu_quant;
+        if (registry->Add(extra.id, extra.aliases, std::move(extra_backend),
+                          &ex_err, std::move(extra_cfg))) {
+          server::Logger::Info("config", "event=startup_extra_loaded id=" +
+                                             extra.id + " device=" + req.device);
+        } else {
+          server::Logger::Warn("config",
+                               "event=startup_extra_register_failed id=" +
+                                   extra.id + " error=" + ex_err);
+        }
+      }
       server::Logger::Info(
           "server", "event=multi_model primary=" + primary +
                         " admin=/admin/models,/admin/load,/admin/eject");

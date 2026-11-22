@@ -803,29 +803,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       flex-direction: column;
       gap: 10px;
     }
-    .default-card-list {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-      gap: 8px;
-      max-height: 240px;
-      overflow-y: auto;
-      padding-right: 4px;
-    }
-    .default-card {
-      background: #090c10;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 9px 11px;
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-      cursor: pointer;
-      transition: border-color .15s, background .15s;
-    }
-    .default-card:hover { border-color: #475569; }
-    .default-card.selected {
-      border-color: var(--amber);
-      background: rgba(245, 158, 11, 0.08);
+    body.auth-pending header,
+    body.auth-pending .container {
+      visibility: hidden;
     }
     .cache-table-wrap {
       max-height: 300px;
@@ -952,7 +932,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     }
   </style>
 </head>
-<body>
+<body class="auth-pending">
   <header>
     <div class="brand">
       <div class="brand-logo">G</div>
@@ -964,8 +944,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     <div class="header-actions">
       <span id="version-pill" class="badge" style="font-family:var(--mono);cursor:pointer;padding:5px 9px;" onclick="checkServerUpdate(true)" title="Click to check GitHub (dardeaw/MBufo) release tags for updates">checking version...</span>
       <span id="conn-pill" class="status-pill"><span class="status-dot"></span> Online (:8741)</span>
-      <button id="btn-settings" onclick="openSettingsModal()" title="Settings: Default Model, Router Port, Password Auth, Disk Cache">⚙ Settings</button>
-      <button id="btn-logout" style="display:none;" onclick="logoutAdmin()" title="Lock Web UI & Sign Out">🔒 Lock</button>
+      <button id="btn-settings" onclick="openSettingsModal()" title="Settings: Startup Auto-Load Cards, Router Port, Password Auth, Disk Cache">⚙ Settings</button>
       <button class="btn-primary" id="btn-download-models" onclick="openDownloadModal()">⬇ Download Models</button>
       <button onclick="refreshAll(true)">↻ Refresh</button>
     </div>
@@ -1193,6 +1172,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           <label class="checkbox-row" id="lm-disk-cache-wrap" style="display:none;">
             <input type="checkbox" id="lm-disk-cache" checked /> Enable Prompt KV Disk Cache
           </label>
+          <label class="checkbox-row" id="lm-autoload-wrap">
+            <input type="checkbox" id="lm-autoload" /> Auto-Load on Startup (設為開機預設載入)
+          </label>
         </div>
       </div>
       <div id="lm-estimate" style="background:#090c10;border:1px solid var(--border);padding:10px 12px;border-radius:8px;font-size:12px;font-family:var(--mono);"></div>
@@ -1292,116 +1274,17 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         <button class="tab-btn" id="set-btn-cache" onclick="switchSettingsTab('cache')">💾 Disk Cache</button>
       </div>
 
-      <!-- Tab 1: Default Model -->
+      <!-- Tab 1: Startup Auto-Load Model Cards -->
       <div class="tab-pane active" id="set-tab-default">
         <div class="settings-section">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-            <div style="font-size:12px;display:flex;flex-direction:column;gap:4px;">
-              <div>Live Primary Model (active slot): <strong id="set-live-primary" style="color:#60a5fa;font-family:var(--mono);">--</strong></div>
-              <div>Startup Default Model (boot config): <strong id="set-saved-default" style="color:#fbbf24;font-family:var(--mono);">--</strong></div>
+            <div>
+              <strong id="set-startup-count" style="font-size:13px;">預設載入模型 (0)</strong>
+              <div style="font-size:11px;color:var(--muted);margin-top:2px;">開機或重啟服務時自動載入以下模型。可在主頁模型卡片按「📌 Auto-Load」或在載入設定視窗勾選。</div>
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn-sm" onclick="useLivePrimaryAsDefault()">★ Copy Current Live Primary</button>
-            </div>
+            <button class="btn-sm" onclick="confirmAndRestartServer()">↻ Restart Server</button>
           </div>
-        </div>
-
-        <div class="settings-section">
-          <div style="font-size:12px;font-weight:600;color:#cbd5e1;">Selected Startup Default Configuration</div>
-          <div class="form-grid">
-            <div>
-              <label class="field-label">Startup Model ID (Router Key)</label>
-              <input type="text" id="set-def-id" style="width:100%;" placeholder="e.g. gufo-qwen3.8-flash-next" />
-            </div>
-            <div>
-              <label class="field-label">Aliases (comma-separated)</label>
-              <input type="text" id="set-def-aliases" style="width:100%;" placeholder="e.g. default, main" />
-            </div>
-            <div class="form-full">
-              <label class="field-label">Model File / Dir Path</label>
-              <input type="text" id="set-def-path" style="width:100%;font-family:var(--mono);font-size:12px;" />
-            </div>
-            <div>
-              <label class="field-label">Device</label>
-              <select id="set-def-device" style="width:100%;" onchange="syncSettingsDefaultFields()">
-                <option value="gpu">🎮 GPU (HIP)</option>
-                <option value="npu">⚡ NPU (XDNA2)</option>
-              </select>
-            </div>
-            <div>
-              <label class="field-label">Context Length (-c)</label>
-              <select id="set-def-ctx" style="width:100%;">
-                <option value="8192">8,192 (8K)</option>
-                <option value="16384">16,384 (16K)</option>
-                <option value="32768">32,768 (32K)</option>
-                <option value="65536">65,536 (64K)</option>
-                <option value="131072">131,072 (128K)</option>
-                <option value="262144" selected>262,144 (256K)</option>
-                <option value="524288">524,288 (512K - YaRN)</option>
-                <option value="1048576">1,048,576 (1M - YaRN)</option>
-              </select>
-            </div>
-            <div>
-              <label class="field-label">Parallel Sessions</label>
-              <select id="set-def-sessions" style="width:100%;">
-                <option value="1">1 Session</option>
-                <option value="2" selected>2 Sessions</option>
-                <option value="4">4 Sessions</option>
-              </select>
-            </div>
-            <div>
-              <label class="field-label">KV Cache Quant</label>
-              <select id="set-def-kv" style="width:100%;">
-                <option value="q8">q8</option>
-                <option value="q4">q4</option>
-                <option value="k8v4">k8v4</option>
-                <option value="k4v8">k4v8</option>
-                <option value="fp16">fp16</option>
-              </select>
-            </div>
-            <div>
-              <label class="field-label">NPU Quant (if NPU)</label>
-              <select id="set-def-npu-quant" style="width:100%;">
-                <option value="">auto</option>
-                <option value="q8">q8</option>
-                <option value="q4">q4</option>
-                <option value="bf16">bf16</option>
-              </select>
-            </div>
-            <div>
-              <label class="field-label">Speculative Mode</label>
-              <select id="set-def-spec" style="width:100%;">
-                <option value="off">off</option>
-                <option value="mtp">mtp</option>
-                <option value="dflash2">dflash2</option>
-                <option value="dspark">dspark</option>
-              </select>
-            </div>
-            <div>
-              <label class="field-label">Draft Model Path (optional)</label>
-              <input type="text" id="set-def-draft" style="width:100%;font-family:var(--mono);font-size:11px;" />
-            </div>
-            <div>
-              <label class="field-label">Vision mmproj Path (optional)</label>
-              <input type="text" id="set-def-mmproj" style="width:100%;font-family:var(--mono);font-size:11px;" />
-            </div>
-            <div class="form-full" style="display:flex;gap:16px;flex-wrap:wrap;padding-top:2px;">
-              <label class="checkbox-row"><input type="checkbox" id="set-def-yarn" /> Enable YaRN Scaling</label>
-              <label class="checkbox-row"><input type="checkbox" id="set-def-disk-cache" checked /> Enable Disk Cache on Startup Model</label>
-            </div>
-          </div>
-          <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
-            <button class="btn-primary" onclick="saveDefaultModelSetting(false)">💾 Save Startup Default</button>
-            <button onclick="saveDefaultModelSetting(true)">🚀 Save & Restart Server Now</button>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-            <strong style="font-size:12px;">Pick Startup Default from Model Cards</strong>
-            <input type="text" id="set-default-search" placeholder="Search model cards..." oninput="renderDefaultModelCards()" style="width:220px;" />
-          </div>
-          <div class="default-card-list" id="set-default-cards"></div>
+          <div id="set-startup-cards" style="display:flex;flex-direction:column;gap:8px;"></div>
         </div>
       </div>
 
@@ -1576,6 +1459,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
     function handleWebAuthRequired(msg) {
       if (restartingServer) return;
+      document.body.classList.add('auth-pending');
       if (!authLocked) {
         authLocked = true;
         stopBackgroundPollers();
@@ -2000,6 +1884,72 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       legend.appendChild(freeItem);
     }
 
+    function findStartupEntry(m) {
+      const list = (stateSettings && stateSettings.startup_models) || [];
+      if (!m) return null;
+      const mp = m.model_path || m.path || '';
+      const mid = m.id || m.id_suggestion || '';
+      return list.find(x => (mid && x.id === mid) || (!m.sidecar && mp && x.path === mp)) || null;
+    }
+
+    function buildStartupRecordFromLoaded(loaded) {
+      return {
+        configured: true,
+        primary: !!loaded.is_default,
+        sidecar: !!loaded.sidecar,
+        task: loaded.task || '',
+        id: loaded.id,
+        aliases: Array.isArray(loaded.aliases) ? loaded.aliases : [],
+        path: loaded.model_path || loaded.path || '',
+        device: (loaded.backend || '').toLowerCase() === 'npu' ? 'npu' : 'gpu',
+        max_context: loaded.context_length || 0,
+        session_count: loaded.total_sessions || 1,
+        kv_cache_quant: loaded.kv_cache_quant || 'q8',
+        npu_quant: loaded.npu_quant || '',
+        speculative: loaded.speculative_mode || 'off',
+        draft_model_path: loaded.draft_model_path || '',
+        vision_model_path: loaded.vision_model_path || '',
+        enable_yarn: !!loaded.enable_yarn,
+        enable_disk_cache: loaded.enable_disk_cache !== false,
+        image_dtype: loaded.image_dtype || '',
+        image_steps: loaded.image_steps || 0,
+        image_size: loaded.image_size || '',
+        image_cpu_offload: loaded.image_cpu_offload || ''
+      };
+    }
+
+    async function toggleLoadedAutoLoad(id, add) {
+      const loaded = (stateModels.models || []).find(x => x.id === id);
+      if (!loaded) {
+        showToast('Loaded model "' + id + '" not found', true);
+        return;
+      }
+      const existing = findStartupEntry(loaded);
+      const body = add
+        ? { upsert_startup_model: buildStartupRecordFromLoaded(loaded) }
+        : { remove_startup_model: existing ? existing.id : loaded.id };
+      try {
+        const res = await fetch('/admin/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          showToast('更新預設載入失敗: ' + (data.error ? data.error.message : res.statusText), true);
+          return;
+        }
+        stateSettings = Object.assign({}, stateSettings || {}, data);
+        renderLoadedModels();
+        if (document.getElementById('settings-modal').classList.contains('open')) {
+          renderStartupModelCards();
+        }
+        showToast(add ? `已將 "${id}" 加入開機預設載入` : `已從開機預設載入移除 "${id}"`);
+      } catch (e) {
+        showToast('Error: ' + e.message, true);
+      }
+    }
+
     function renderLoadedModels() {
       const container = document.getElementById('loaded-list');
       const allModels = stateModels.models || [];
@@ -2018,6 +1968,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       models.forEach((m, idx) => {
         const card = document.createElement('div');
         const be = backendOf(m);
+        const isPinned = !!findStartupEntry(m);
         card.className = 'model-card' + (m.is_default ? ' is-default' : '');
         card.style.borderLeft = '3px solid ' + (be === 'NPU' ? NPU_COLOR : GPU_COLOR);
 
@@ -2026,6 +1977,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (m.sidecar) badges.push(`<span class="badge badge-green">RUNNING</span>`);
         if (m.is_default) badges.push(`<span class="badge badge-primary">★ PRIMARY DEFAULT</span>`);
         else if (m.lru_rank > 0 && !m.sidecar) badges.push(`<span class="badge">LRU #${m.lru_rank}</span>`);
+        if (isPinned) badges.push(`<span class="badge badge-amber" title="開機或重啟服務時自動載入">📌 AUTO-LOAD</span>`);
         if (m.ready && !m.sidecar) badges.push(`<span class="badge badge-green">READY</span>`);
         badges.push(renderCapabilityBadges(m.capabilities || []));
         if (!m.sidecar) badges.push(`<span class="badge">CTX: ${(m.context_length / 1024).toFixed(0)}K</span>`);
@@ -2048,6 +2000,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               <div class="model-path">${m.model_path}</div>
             </div>
           <div class="model-actions">
+            <button class="btn-sm ${isPinned ? 'badge-amber' : ''}" onclick="toggleLoadedAutoLoad(decodeURIComponent('${encodeURIComponent(m.id)}'), ${isPinned ? 'false' : 'true'})" title="${isPinned ? '從開機預設載入清單移除' : '加入開機預設載入清單'}">${isPinned ? '📌 Unpin' : '📌 Auto-Load'}</button>
             <button class="btn-sm" onclick="openReloadModal(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="Reconfigure parameters & reload this model">⚙ Configure</button>
             ${m.sidecar
               ? `<button class="btn-sm btn-danger" onclick="ejectModel(decodeURIComponent('${encodeURIComponent(m.id)}'), false)">⏏ Eject</button>`
@@ -2363,9 +2316,11 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       }
 
       // Checkboxes: Primary Default (GPU Chat only), LRU Eviction (non-sidecar), YaRN (Qwen3.8-Flash-Next GPU only).
+      const isStartupEdit = (window._modalMode === 'startup_edit');
       const canDefault = isGpuChat;
-      const canEvict = !isSidecar;
+      const canEvict = !isSidecar && !isStartupEdit;
       const canYarn = isGpuChat && !!m.supports_yarn;
+      const canAutoLoad = !isStartupEdit;
       document.getElementById('lm-default-wrap').style.display = canDefault ? 'flex' : 'none';
       if (!canDefault) document.getElementById('lm-default').checked = false;
       document.getElementById('lm-evict-wrap').style.display = canEvict ? 'flex' : 'none';
@@ -2373,7 +2328,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       if (!canYarn) document.getElementById('lm-yarn').checked = false;
       const diskWrap = document.getElementById('lm-disk-cache-wrap');
       if (diskWrap) diskWrap.style.display = isGpuChat ? 'flex' : 'none';
-      document.getElementById('lm-checks-wrap').style.display = (canDefault || canEvict || canYarn || isGpuChat) ? 'flex' : 'none';
+      const autoWrap = document.getElementById('lm-autoload-wrap');
+      if (autoWrap) autoWrap.style.display = canAutoLoad ? 'flex' : 'none';
+      document.getElementById('lm-checks-wrap').style.display = (canDefault || canEvict || canYarn || isGpuChat || canAutoLoad) ? 'flex' : 'none';
 
       updateModalEstimate();
     }
@@ -2437,6 +2394,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       document.getElementById('lm-evict').checked = true;
       document.getElementById('lm-yarn').checked = false;
       document.getElementById('lm-disk-cache').checked = true;
+      document.getElementById('lm-autoload').checked = !!findStartupEntry(m);
 
       syncModalVisibility(true);
       document.getElementById('load-modal').classList.add('open');
@@ -2533,6 +2491,102 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       document.getElementById('lm-evict').checked = loaded.allow_evict !== false;
       document.getElementById('lm-yarn').checked = !!loaded.enable_yarn;
       document.getElementById('lm-disk-cache').checked = loaded.enable_disk_cache !== false;
+      document.getElementById('lm-autoload').checked = !!findStartupEntry(loaded);
+
+      syncModalVisibility(false);
+      document.getElementById('load-modal').classList.add('open');
+    }
+
+    function openStartupEditModal(id) {
+      const items = (stateSettings && stateSettings.startup_models) || [];
+      const item = items.find(x => x.id === id);
+      if (!item) {
+        showToast('Startup model "' + id + '" not found', true);
+        return;
+      }
+      const catList = (stateCatalog && stateCatalog.models) || [];
+      const cat = catList.find(c =>
+        (!item.sidecar && item.path && c.path && c.path === item.path) ||
+        c.id === item.id ||
+        c.id_suggestion === item.id
+      ) || null;
+
+      const merged = Object.assign({}, cat || {}, {
+        id_suggestion: item.id,
+        path: item.path || (cat && cat.path) || '',
+        backend: item.device || (cat && cat.backend) || 'gpu',
+        sidecar: !!(item.sidecar || (cat && cat.sidecar)),
+        task: item.task || (cat && cat.task) || 'chat',
+        size_mib: (cat && cat.size_mib) || 4096,
+        default_port: (cat && cat.default_port) || 0,
+        endpoint: (cat && cat.endpoint) || '',
+        supports_yarn: (cat && cat.supports_yarn) || !!item.enable_yarn || ((item.max_context || 0) > 262144),
+        supports_speculative: (cat && cat.supports_speculative) || !!(item.speculative && item.speculative !== 'off'),
+        supported_speculative: (cat && Array.isArray(cat.supported_speculative) && cat.supported_speculative.length)
+          ? cat.supported_speculative
+          : ((item.speculative && item.speculative !== 'off') ? [item.speculative] : []),
+        compatible_drafts: (cat && Array.isArray(cat.compatible_drafts) && cat.compatible_drafts.length)
+          ? cat.compatible_drafts
+          : (item.draft_model_path ? [item.draft_model_path] : []),
+        supports_mmproj: (cat && cat.supports_mmproj) || !!item.vision_model_path,
+        compatible_mmprojs: (cat && Array.isArray(cat.compatible_mmprojs) && cat.compatible_mmprojs.length)
+          ? cat.compatible_mmprojs
+          : (item.vision_model_path ? [item.vision_model_path] : []),
+        npu_capable: (cat && cat.npu_capable) || (item.device === 'npu'),
+        _startup_primary: !!item.primary
+      });
+      if (!merged._mapping) merged._mapping = findMappingForCatalog(merged);
+
+      window._modalMode = 'startup_edit';
+      window._reloadTargetId = item.id;
+      window._modalModel = merged;
+      document.getElementById('lm-title').textContent = `Configure Startup Auto-Load "${item.id}"`;
+      document.getElementById('lm-submit').textContent = '💾 Save Startup Config';
+
+      document.getElementById('lm-id').value = item.id;
+      document.getElementById('lm-aliases').value = Array.isArray(item.aliases) ? item.aliases.join(', ') : '';
+      document.getElementById('lm-path').value = merged.path;
+
+      const devSel = document.getElementById('lm-device');
+      const curDev = (item.device || '').toLowerCase() === 'npu' ? 'npu' : 'gpu';
+      if (merged.sidecar) {
+        devSel.value = curDev;
+        devSel.disabled = true;
+      } else {
+        const dual = isDualCapable(merged);
+        const npuOk = !!(merged.npu_capable || (merged._mapping && mappingSupportsNpu(merged._mapping)) || curDev === 'npu');
+        const gpuOk = !merged._mapping || mappingSupportsGpu(merged._mapping) || curDev === 'gpu';
+        devSel.value = curDev;
+        devSel.disabled = !(dual || (npuOk && gpuOk));
+      }
+
+      const initYarn = !!item.enable_yarn || ((item.max_context || 0) > 262144);
+      populateCtxOptions(merged.supports_yarn || initYarn, item.max_context || 32768);
+
+      document.getElementById('lm-img-dtype').value = item.image_dtype || 'bf16';
+      document.getElementById('lm-img-steps').value = item.image_steps || (item.id.includes('z-image') ? 9 : 4);
+      document.getElementById('lm-img-size').value = item.image_size || '1024x1024';
+      document.getElementById('lm-img-offload').value = item.image_cpu_offload || 'none';
+
+      syncModalVisibility(true);
+
+      ensureSelectValue('lm-ctx', item.max_context || 32768, v => Number(v).toLocaleString());
+      ensureSelectValue('lm-sessions', item.session_count || 1, v => v + ' Sessions');
+      ensureSelectValue('lm-kv', item.kv_cache_quant || 'q8');
+      if (item.npu_quant) ensureSelectValue('lm-npu-quant', item.npu_quant);
+      if (item.speculative && document.getElementById('lm-spec-wrap').style.display !== 'none') {
+        ensureSelectValue('lm-spec', item.speculative);
+      }
+      if (item.draft_model_path && document.getElementById('lm-draft').options.length > 0) {
+        ensureSelectValue('lm-draft', item.draft_model_path, p => p.replace(/^.*\/mbufo-models\//, ''));
+      }
+      if (item.vision_model_path && document.getElementById('lm-mmproj-wrap').style.display !== 'none') {
+        ensureSelectValue('lm-mmproj', item.vision_model_path, p => p.replace(/^.*\/mbufo-models\//, ''));
+      }
+
+      document.getElementById('lm-default').checked = !!item.primary;
+      document.getElementById('lm-yarn').checked = !!item.enable_yarn;
+      document.getElementById('lm-disk-cache').checked = item.enable_disk_cache !== false;
 
       syncModalVisibility(false);
       document.getElementById('load-modal').classList.add('open');
@@ -2624,30 +2678,85 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       await doLoadRequest(payload);
     }
 
+    async function syncModalAutoLoad(rec, wantAutoLoad, prevTargetId) {
+      const existing = findStartupEntry({ id: prevTargetId || rec.id, path: rec.path, sidecar: rec.sidecar });
+      if (wantAutoLoad) {
+        const res = await fetch('/admin/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ upsert_startup_model: rec })
+        });
+        if (res.ok) {
+          stateSettings = Object.assign({}, stateSettings || {}, await res.json());
+          renderLoadedModels();
+          if (document.getElementById('settings-modal').classList.contains('open')) renderStartupModelCards();
+        }
+      } else if (existing) {
+        const res = await fetch('/admin/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ remove_startup_model: existing.id })
+        });
+        if (res.ok) {
+          stateSettings = Object.assign({}, stateSettings || {}, await res.json());
+          renderLoadedModels();
+          if (document.getElementById('settings-modal').classList.contains('open')) renderStartupModelCards();
+        }
+      }
+    }
+
     async function submitLoadModal() {
       const m = window._modalModel || {};
       const dev = document.getElementById('lm-device').value;
-      const isReload = (window._modalMode === 'reload');
+      const mode = window._modalMode || 'load';
+      const isReload = (mode === 'reload');
+      const isStartupEdit = (mode === 'startup_edit');
+      const wantAutoLoad = document.getElementById('lm-autoload').checked;
+
       if (m.sidecar) {
         const id = document.getElementById('lm-id').value.trim();
         const scPayload = { id, device: dev };
+        const scRecord = {
+          configured: true,
+          primary: false,
+          sidecar: true,
+          task: m.task || '',
+          id,
+          aliases: [],
+          path: m.path || '',
+          device: dev
+        };
         if (m.task === 'image_generation') {
           scPayload.image_dtype = document.getElementById('lm-img-dtype').value;
           scPayload.image_steps = Math.max(1, parseInt(document.getElementById('lm-img-steps').value, 10) || 4);
           scPayload.image_size = document.getElementById('lm-img-size').value;
           scPayload.image_cpu_offload = document.getElementById('lm-img-offload').value;
+          scRecord.image_dtype = scPayload.image_dtype;
+          scRecord.image_steps = scPayload.image_steps;
+          scRecord.image_size = scPayload.image_size;
+          scRecord.image_cpu_offload = scPayload.image_cpu_offload;
         }
-        if (isReload) {
+        if (isStartupEdit) {
+          scRecord.target_id = window._reloadTargetId;
+          closeLoadModal();
+          await syncModalAutoLoad(scRecord, true, window._reloadTargetId);
+          showToast(`已更新開機預設載入 "${id}"`);
+        } else if (isReload) {
           if (!confirm(`Confirm reload of sidecar "${window._reloadTargetId}" with updated settings?`)) return;
           scPayload.target_id = window._reloadTargetId;
           closeLoadModal();
-          await doReloadRequest(scPayload);
+          if (await doReloadRequest(scPayload)) {
+            await syncModalAutoLoad(scRecord, wantAutoLoad, window._reloadTargetId);
+          }
         } else {
           closeLoadModal();
-          await doLoadRequest(scPayload);
+          if (await doLoadRequest(scPayload)) {
+            if (wantAutoLoad) await syncModalAutoLoad(scRecord, true, id);
+          }
         }
         return;
       }
+
       const isEnc = (m.task === 'embedding' || m.task === 'reranker');
       const isGpuChat = (dev === 'gpu' && !isEnc && (!m.task || m.task === 'chat'));
       const aliasesRaw = document.getElementById('lm-aliases').value.trim();
@@ -2660,6 +2769,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       const mmVisible = document.getElementById('lm-mmproj-wrap').style.display !== 'none';
       const mmVal = (isGpuChat && mmVisible) ? document.getElementById('lm-mmproj').value : '';
       const yarnVisible = document.getElementById('lm-yarn-wrap').style.display !== 'none';
+      const isDefChecked = (isGpuChat && document.getElementById('lm-default-wrap').style.display !== 'none')
+        ? document.getElementById('lm-default').checked
+        : false;
       const payload = {
         id: document.getElementById('lm-id').value.trim(),
         aliases: aliases,
@@ -2680,18 +2792,44 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         enable_yarn: (isGpuChat && yarnVisible) ? document.getElementById('lm-yarn').checked : false,
         enable_disk_cache: isGpuChat ? document.getElementById('lm-disk-cache').checked : false,
         allow_evict: document.getElementById('lm-evict').checked,
-        set_default: (isGpuChat && document.getElementById('lm-default-wrap').style.display !== 'none')
-          ? document.getElementById('lm-default').checked
-          : false
+        set_default: isDefChecked
       };
-      if (isReload) {
+      const startupRec = {
+        configured: true,
+        primary: isStartupEdit ? (isGpuChat ? isDefChecked : !!m._startup_primary) : isDefChecked,
+        sidecar: false,
+        task: m.task || '',
+        id: payload.id,
+        aliases: payload.aliases,
+        path: payload.path,
+        max_context: payload.context_length,
+        session_count: payload.sessions,
+        kv_cache_quant: payload.kv_quant,
+        device: payload.device,
+        npu_quant: payload.npu_quant,
+        speculative: payload.speculative,
+        draft_model_path: payload.draft_model_path,
+        vision_model_path: payload.vision_model_path,
+        enable_yarn: payload.enable_yarn,
+        enable_disk_cache: payload.enable_disk_cache
+      };
+      if (isStartupEdit) {
+        startupRec.target_id = window._reloadTargetId;
+        closeLoadModal();
+        await syncModalAutoLoad(startupRec, true, window._reloadTargetId);
+        showToast(`已更新開機預設載入 "${payload.id}"`);
+      } else if (isReload) {
         if (!confirm(`Confirm reload of "${window._reloadTargetId}" with new settings? Previous Primary status is preserved.`)) return;
         payload.target_id = window._reloadTargetId;
         closeLoadModal();
-        await doReloadRequest(payload);
+        if (await doReloadRequest(payload)) {
+          await syncModalAutoLoad(startupRec, wantAutoLoad, window._reloadTargetId);
+        }
       } else {
         closeLoadModal();
-        await doLoadRequest(payload);
+        if (await doLoadRequest(payload)) {
+          if (wantAutoLoad) await syncModalAutoLoad(startupRec, true, payload.id);
+        }
       }
     }
 
@@ -3134,12 +3272,15 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (!res.ok || data.error) {
           const msg = data.error ? data.error.message : res.statusText;
           showToast('Reload failed' + (data.rolled_back ? ' (rolled back)' : '') + ': ' + msg, true);
+          return false;
         } else {
           showToast(`Reloaded "${data.id || payload.id}" cleanly!`);
+          return true;
         }
       } catch (e) {
         clearInterval(pollTimer);
         showToast('Reload request error: ' + e.message, true);
+        return false;
       }
     }
 
@@ -3158,13 +3299,16 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         renderCatalog();
         if (!res.ok || data.error) {
           showToast('Load failed: ' + (data.error ? data.error.message : res.statusText), true);
+          return false;
         } else {
           const ev = (data.evicted && data.evicted.length) ? ` (Evicted: ${data.evicted.join(', ')})` : '';
           showToast(`Loaded "${payload.id}" in ${(data.load_ms / 1000).toFixed(1)}s!${ev}`);
+          return true;
         }
       } catch (e) {
         clearInterval(pollTimer);
         showToast('Network error loading model: ' + e.message, true);
+        return false;
       }
     }
 
@@ -3217,8 +3361,10 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (!res.ok) return null;
         stateSettings = await res.json();
         updatePortDisplays();
-        const logoutBtn = document.getElementById('btn-logout');
-        if (logoutBtn) logoutBtn.style.display = stateSettings.web_auth_enabled ? 'inline-block' : 'none';
+        renderLoadedModels();
+        if (document.getElementById('settings-modal').classList.contains('open')) {
+          renderStartupModelCards();
+        }
         return stateSettings;
       } catch (_) {
         return null;
@@ -3250,15 +3396,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     }
 
     function populateSettingsForms(s) {
-      const def = s.default_model || {};
-      const liveDef = s.live_default_id || '(none)';
-      document.getElementById('set-live-primary').textContent = liveDef;
-      document.getElementById('set-saved-default').textContent = (def.configured && def.id)
-        ? `${def.id} (${def.device || 'gpu'}, ctx=${def.max_context || 'auto'})`
-        : '(using CLI startup flags)';
-
-      applyDefaultModelFieldsToForm(def);
-      renderDefaultModelCards();
+      renderStartupModelCards();
 
       document.getElementById('set-port-running').textContent = ':' + (s.running_port || 8741);
       document.getElementById('set-port-configured').textContent = ':' + (s.configured_port || s.running_port || 8741);
@@ -3283,164 +3421,113 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       syncAuthFieldState();
     }
 
-    function applyDefaultModelFieldsToForm(d) {
-      document.getElementById('set-def-id').value = d.id || '';
-      document.getElementById('set-def-aliases').value = Array.isArray(d.aliases) ? d.aliases.join(', ') : '';
-      document.getElementById('set-def-path').value = d.path || '';
-      document.getElementById('set-def-device').value = (d.device === 'npu') ? 'npu' : 'gpu';
-      ensureSelectValue('set-def-ctx', d.max_context || 262144, v => Number(v).toLocaleString());
-      ensureSelectValue('set-def-sessions', d.session_count || 1, v => v + ' Sessions');
-      ensureSelectValue('set-def-kv', d.kv_cache_quant || 'q8');
-      document.getElementById('set-def-npu-quant').value = d.npu_quant || '';
-      document.getElementById('set-def-spec').value = d.speculative || 'off';
-      document.getElementById('set-def-draft').value = d.draft_model_path || '';
-      document.getElementById('set-def-mmproj').value = d.vision_model_path || '';
-      document.getElementById('set-def-yarn').checked = !!d.enable_yarn;
-      document.getElementById('set-def-disk-cache').checked = d.enable_disk_cache !== false;
-      syncSettingsDefaultFields();
-    }
-
-    function syncSettingsDefaultFields() {
-      const dev = document.getElementById('set-def-device').value;
-      const isNpu = (dev === 'npu');
-      document.getElementById('set-def-npu-quant').disabled = !isNpu;
-      document.getElementById('set-def-ctx').disabled = isNpu;
-      document.getElementById('set-def-kv').disabled = isNpu;
-    }
-
-    function useLivePrimaryAsDefault() {
-      const models = (stateModels && stateModels.models) || [];
-      const cur = models.find(m => m.is_default) || models[0];
-      if (!cur) {
-        showToast('No non-sidecar model currently loaded', true);
-        return;
-      }
-      applyDefaultModelFieldsToForm({
-        configured: true,
-        id: cur.id,
-        aliases: cur.aliases || [],
-        path: cur.model_path || cur.path || '',
-        device: (cur.backend || '').toLowerCase() === 'npu' ? 'npu' : 'gpu',
-        max_context: cur.context_length || 262144,
-        session_count: cur.total_sessions || 1,
-        kv_cache_quant: cur.kv_cache_quant || 'q8',
-        npu_quant: cur.npu_quant || '',
-        speculative: cur.speculative_mode || 'off',
-        draft_model_path: cur.draft_model_path || '',
-        vision_model_path: cur.vision_model_path || '',
-        enable_yarn: !!cur.enable_yarn,
-        enable_disk_cache: cur.enable_disk_cache !== false
-      });
-      renderDefaultModelCards();
-      showToast(`Copied live Primary "${cur.id}" — click Save Startup Default to persist`);
-    }
-
-    function selectDefaultModelCard(idx) {
-      const m = (window._defaultCardModels && window._defaultCardModels[idx]) || null;
-      if (!m) return;
-      const dev = defaultDeviceFor(m);
-      const useSpec = (dev === 'gpu' && m.supports_speculative && m.suggested_speculative && m.suggested_draft);
-      applyDefaultModelFieldsToForm({
-        configured: true,
-        id: m.id_suggestion,
-        aliases: [],
-        path: m.path || '',
-        device: dev,
-        max_context: (dev === 'npu') ? 0 : 32768,
-        session_count: 1,
-        kv_cache_quant: (dev === 'gpu') ? 'q8' : 'fp16',
-        npu_quant: (dev === 'npu') ? 'q8' : '',
-        speculative: useSpec ? m.suggested_speculative : 'off',
-        draft_model_path: useSpec ? m.suggested_draft : '',
-        vision_model_path: (dev === 'gpu' && m.supports_mmproj && m.suggested_mmproj) ? m.suggested_mmproj : '',
-        enable_yarn: false,
-        enable_disk_cache: true
-      });
-      renderDefaultModelCards();
-    }
-
-    function renderDefaultModelCards() {
-      const box = document.getElementById('set-default-cards');
+    function renderStartupModelCards() {
+      const box = document.getElementById('set-startup-cards');
+      const countEl = document.getElementById('set-startup-count');
       if (!box) return;
-      const q = (document.getElementById('set-default-search').value || '').toLowerCase().trim();
-      const curPath = (document.getElementById('set-def-path').value || '').trim();
-      const curId = (document.getElementById('set-def-id').value || '').trim();
-      const all = (stateCatalog && stateCatalog.models ? stateCatalog.models : []).filter(m =>
-        !m.sidecar && m.actionable !== false && (!m.task || m.task === 'chat')
-      );
-      const filtered = all.filter(m => !q || (m.id_suggestion || '').toLowerCase().includes(q) || (m.relative_path || '').toLowerCase().includes(q));
-      window._defaultCardModels = filtered;
-      if (!filtered.length) {
-        box.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:12px;">No matching runnable chat models in catalog.</div>`;
+      const items = (stateSettings && Array.isArray(stateSettings.startup_models)) ? stateSettings.startup_models : [];
+      if (countEl) countEl.textContent = `預設載入模型 (${items.length})`;
+      if (!items.length) {
+        box.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted);border:1px dashed var(--border);border-radius:8px;font-size:12px;">尚未設定任何開機預設載入模型。可於主頁模型卡片按「📌 Auto-Load」加入。</div>`;
         return;
       }
-      box.innerHTML = filtered.map((m, idx) => {
-        const isSel = (curPath && m.path === curPath) || (curId && m.id_suggestion === curId);
+      const loadedList = (stateModels && stateModels.models) || [];
+      box.innerHTML = items.map(m => {
+        const dev = (m.device || 'gpu').toLowerCase() === 'npu' ? 'NPU' : 'GPU';
+        const isLoaded = loadedList.some(lm => lm.id === m.id || (!m.sidecar && m.path && (lm.model_path === m.path || lm.path === m.path)));
+        const badges = [];
+        badges.push(dev === 'NPU' ? '<span class="badge badge-amber">⚡ NPU</span>' : '<span class="badge badge-primary">🎮 GPU</span>');
+        if (m.primary) badges.push('<span class="badge badge-primary">★ PRIMARY</span>');
+        if (isLoaded) badges.push('<span class="badge badge-green">LOADED</span>');
+        if (m.sidecar) {
+          badges.push('<span class="badge">SIDECAR</span>');
+        } else if (dev === 'NPU') {
+          if (m.npu_quant) badges.push(`<span class="badge">${escHtml(m.npu_quant.toUpperCase())}</span>`);
+        } else {
+          if (m.max_context > 0) badges.push(`<span class="badge">CTX: ${Math.round(m.max_context / 1024)}K</span>`);
+          if (m.session_count > 1) badges.push(`<span class="badge">${m.session_count} Sessions</span>`);
+          if (m.kv_cache_quant) badges.push(`<span class="badge">KV: ${escHtml(m.kv_cache_quant)}</span>`);
+          if (m.speculative && m.speculative !== 'off') badges.push(`<span class="badge">${escHtml(m.speculative.toUpperCase())}</span>`);
+          if (m.vision_model_path) badges.push('<span class="badge">VISION</span>');
+          if (m.enable_yarn) badges.push('<span class="badge">YARN</span>');
+          if (m.enable_disk_cache) badges.push('<span class="badge">DISK CACHE</span>');
+        }
+        if (m.task === 'image_generation' || m.image_dtype) {
+          if (m.image_dtype) badges.push(`<span class="badge">${escHtml(m.image_dtype)}</span>`);
+          if (m.image_steps) badges.push(`<span class="badge">${m.image_steps} steps</span>`);
+          if (m.image_size) badges.push(`<span class="badge">${escHtml(m.image_size)}</span>`);
+          if (m.image_cpu_offload) badges.push(`<span class="badge">offload: ${escHtml(m.image_cpu_offload)}</span>`);
+        }
+        const canPrimary = !m.sidecar && !m.primary && (!m.task || m.task === 'chat');
+        const subText = m.path || (m.sidecar ? `${m.task || 'sidecar'} managed process` : '');
         return `
-          <div class="default-card${isSel ? ' selected' : ''}" onclick="selectDefaultModelCard(${idx})">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
-              <strong style="font-size:12px;word-break:break-word;">${escHtml(m.id_suggestion)}</strong>
-              ${isSel ? '<span class="badge badge-amber">SELECTED</span>' : '<span class="badge">' + fmtGiB(m.size_mib) + '</span>'}
-            </div>
-            <div style="font-size:10px;color:var(--muted);font-family:var(--mono);word-break:break-all;">${escHtml(m.relative_path || m.path)}</div>
-            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:2px;">
-              ${renderBackendBadge(m)}
-              ${renderCapabilityBadges((m.capabilities || []).slice(0, 3))}
+          <div class="model-card${m.primary ? ' is-default' : ''}" style="border-left:3px solid ${dev === 'NPU' ? NPU_COLOR : GPU_COLOR};">
+            <div class="model-top">
+              <div>
+                <div class="model-id">
+                  <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dev === 'NPU' ? NPU_COLOR : GPU_COLOR}"></span>
+                  <span>${escHtml(m.id)}</span>
+                  ${badges.join('')}
+                </div>
+                <div class="model-path">${escHtml(subText)}</div>
+              </div>
+              <div class="model-actions">
+                ${canPrimary ? `<button class="btn-sm" onclick="setStartupPrimary(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="設為預設主模型">★ Primary</button>` : ''}
+                <button class="btn-sm" onclick="openStartupEditModal(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="編輯此模型的開機預設載入參數">⚙ Configure</button>
+                <button class="btn-sm btn-danger" onclick="removeStartupModel(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="從開機預設清單移除">✕ Remove</button>
+              </div>
             </div>
           </div>
         `;
       }).join('');
     }
 
-    async function saveDefaultModelSetting(andRestart) {
-      const id = document.getElementById('set-def-id').value.trim();
-      const path = document.getElementById('set-def-path').value.trim();
-      if (!id || !path) {
-        showToast('Please select a model card or specify Model ID & Path', true);
-        return;
-      }
-      if (andRestart && !confirm(`Save "${id}" as Startup Default and restart server now?`)) return;
-      const aliasesRaw = document.getElementById('set-def-aliases').value.trim();
-      const aliases = aliasesRaw ? aliasesRaw.split(',').map(x => x.trim()).filter(Boolean) : [];
-      const dev = document.getElementById('set-def-device').value;
-      const payload = {
-        default_model: {
-          configured: true,
-          id,
-          aliases,
-          path,
-          device: dev,
-          max_context: dev === 'gpu' ? (parseInt(document.getElementById('set-def-ctx').value, 10) || 262144) : 0,
-          session_count: parseInt(document.getElementById('set-def-sessions').value, 10) || 1,
-          kv_cache_quant: document.getElementById('set-def-kv').value,
-          npu_quant: dev === 'npu' ? document.getElementById('set-def-npu-quant').value : '',
-          speculative: document.getElementById('set-def-spec').value,
-          draft_model_path: document.getElementById('set-def-draft').value.trim(),
-          vision_model_path: document.getElementById('set-def-mmproj').value.trim(),
-          enable_yarn: document.getElementById('set-def-yarn').checked,
-          enable_disk_cache: document.getElementById('set-def-disk-cache').checked
-        }
-      };
+    async function setStartupPrimary(id) {
       try {
         const res = await fetch('/admin/settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify({ set_primary_startup_model: id })
         });
         const data = await res.json();
         if (!res.ok || data.error) {
-          showToast('Save failed: ' + (data.error ? data.error.message : res.statusText), true);
+          showToast('設定主模型失敗: ' + (data.error ? data.error.message : res.statusText), true);
           return;
         }
         stateSettings = Object.assign({}, stateSettings || {}, data);
-        populateSettingsForms(stateSettings);
-        showToast(`Saved startup default "${id}" to server_config.json`);
-        if (andRestart) {
-          await triggerServerRestart(stateSettings.configured_port || livePort());
-        }
+        renderStartupModelCards();
+        showToast(`已將 "${id}" 設為開機預設主模型`);
       } catch (e) {
-        showToast('Save error: ' + e.message, true);
+        showToast('Error: ' + e.message, true);
       }
+    }
+
+    async function removeStartupModel(id) {
+      if (!confirm(`從開機預設載入清單移除 "${id}"？`)) return;
+      try {
+        const res = await fetch('/admin/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ remove_startup_model: id })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          showToast('移除失敗: ' + (data.error ? data.error.message : res.statusText), true);
+          return;
+        }
+        stateSettings = Object.assign({}, stateSettings || {}, data);
+        renderStartupModelCards();
+        renderLoadedModels();
+        showToast(`已從開機預設載入清單移除 "${id}"`);
+      } catch (e) {
+        showToast('Error: ' + e.message, true);
+      }
+    }
+
+    async function confirmAndRestartServer() {
+      const targetPort = (stateSettings && stateSettings.configured_port) || livePort();
+      if (!confirm(`立即重啟 MBufo 伺服器（:${targetPort}）以套用預設載入模型設定？連線將短暫中斷。`)) return;
+      await triggerServerRestart(targetPort);
     }
 
     async function savePortSetting(andRestart) {
@@ -3769,6 +3856,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         }
         authLocked = false;
         document.getElementById('auth-overlay').classList.remove('open');
+        document.body.classList.remove('auth-pending');
         btn.disabled = false;
         startDashboardBoot();
       } catch (e) {
@@ -3778,12 +3866,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       }
     }
 
-    async function logoutAdmin() {
-      try { await fetch('/admin/auth/logout', { method: 'POST' }); } catch (_) {}
-      handleWebAuthRequired('Signed out. Enter Web UI password to unlock.');
-    }
-
     function startDashboardBoot() {
+      document.body.classList.remove('auth-pending');
       refreshAll();
       if (statusPollTimer) clearInterval(statusPollTimer);
       statusPollTimer = setInterval(fetchStatus, 3000);
@@ -3794,8 +3878,6 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         const res = await fetch('/admin/auth/status', { cache: 'no-store' });
         if (res.ok) {
           const st = await res.json();
-          const logoutBtn = document.getElementById('btn-logout');
-          if (logoutBtn) logoutBtn.style.display = st.web_auth_enabled ? 'inline-block' : 'none';
           if (st.web_auth_enabled && !st.authenticated) {
             handleWebAuthRequired('Password authentication is enabled. Enter Web UI password to unlock.');
             return;

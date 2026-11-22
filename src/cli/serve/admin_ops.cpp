@@ -716,6 +716,9 @@ bool WritePrivateFileAtomic(const fs::path& p, const std::string& content,
 json::Value DefaultModelToJson(const DefaultModelConfig& d) {
   json::Value obj = json::Value::object();
   obj["configured"] = d.configured;
+  obj["primary"] = d.primary;
+  obj["sidecar"] = d.sidecar;
+  obj["task"] = d.task;
   obj["id"] = d.id;
   json::Value aliases = json::Value::array();
   for (const auto& a : d.aliases) {
@@ -733,7 +736,73 @@ json::Value DefaultModelToJson(const DefaultModelConfig& d) {
   obj["vision_model_path"] = d.vision_model_path;
   obj["enable_yarn"] = d.enable_yarn;
   obj["enable_disk_cache"] = d.enable_disk_cache;
+  obj["image_dtype"] = d.image_dtype;
+  obj["image_steps"] = static_cast<std::size_t>(std::max(0, d.image_steps));
+  obj["image_size"] = d.image_size;
+  obj["image_cpu_offload"] = d.image_cpu_offload;
   return obj;
+}
+
+json::Value StartupModelsToJson(const std::vector<DefaultModelConfig>& items) {
+  json::Value arr = json::Value::array();
+  for (const auto& m : items) {
+    arr.push_back(DefaultModelToJson(m));
+  }
+  return arr;
+}
+
+void SyncStartupModels(ServerConfig* cfg) {
+  if (cfg == nullptr) return;
+  std::vector<DefaultModelConfig> clean;
+  clean.reserve(cfg->startup_models.size());
+  for (auto& m : cfg->startup_models) {
+    if (m.id.empty()) continue;
+    if (!m.sidecar && m.path.empty()) continue;
+    m.configured = true;
+    if (m.sidecar) m.primary = false;
+    bool dup = false;
+    for (const auto& prev : clean) {
+      if (prev.id == m.id) {
+        dup = true;
+        break;
+      }
+    }
+    if (!dup) clean.push_back(std::move(m));
+  }
+
+  std::size_t primary_idx = clean.size();
+  for (std::size_t i = 0; i < clean.size(); ++i) {
+    if (!clean[i].sidecar && clean[i].primary) {
+      primary_idx = i;
+      break;
+    }
+  }
+  if (primary_idx == clean.size()) {
+    for (std::size_t i = 0; i < clean.size(); ++i) {
+      if (!clean[i].sidecar &&
+          (clean[i].task.empty() || clean[i].task == "chat")) {
+        primary_idx = i;
+        break;
+      }
+    }
+  }
+  if (primary_idx == clean.size()) {
+    for (std::size_t i = 0; i < clean.size(); ++i) {
+      if (!clean[i].sidecar) {
+        primary_idx = i;
+        break;
+      }
+    }
+  }
+  for (std::size_t i = 0; i < clean.size(); ++i) {
+    clean[i].primary = (i == primary_idx);
+  }
+  cfg->startup_models = std::move(clean);
+  if (primary_idx < cfg->startup_models.size()) {
+    cfg->default_model = cfg->startup_models[primary_idx];
+  } else {
+    cfg->default_model = DefaultModelConfig{};
+  }
 }
 
 json::Value ServerConfigToJson(const ServerConfig& cfg) {
@@ -747,6 +816,7 @@ json::Value ServerConfigToJson(const ServerConfig& cfg) {
   obj["api_key_salt"] = cfg.api_key_salt;
   obj["api_key_hash"] = cfg.api_key_hash;
   obj["default_model"] = DefaultModelToJson(cfg.default_model);
+  obj["startup_models"] = StartupModelsToJson(cfg.startup_models);
   return obj;
 }
 
@@ -755,6 +825,11 @@ bool ParseDefaultModelJson(const json::Value& v, DefaultModelConfig* out) {
   DefaultModelConfig d;
   if (const auto* f = v.find("configured"); f != nullptr && f->is_bool())
     d.configured = f->as_bool(false);
+  if (const auto* f = v.find("primary"); f != nullptr && f->is_bool())
+    d.primary = f->as_bool(false);
+  if (const auto* f = v.find("sidecar"); f != nullptr && f->is_bool())
+    d.sidecar = f->as_bool(false);
+  d.task = v.member_str("task");
   d.id = v.member_str("id");
   if (const auto* al = v.find("aliases"); al != nullptr && al->is_array()) {
     for (const auto& x : al->items()) {
@@ -777,7 +852,12 @@ bool ParseDefaultModelJson(const json::Value& v, DefaultModelConfig* out) {
     d.enable_yarn = f->as_bool(false);
   if (const auto* f = v.find("enable_disk_cache"); f != nullptr && f->is_bool())
     d.enable_disk_cache = f->as_bool(false);
-  if (!d.path.empty() && v.find("configured") == nullptr) d.configured = true;
+  d.image_dtype = v.member_str("image_dtype");
+  d.image_steps = static_cast<int>(v.member_size("image_steps", 0));
+  d.image_size = v.member_str("image_size");
+  d.image_cpu_offload = v.member_str("image_cpu_offload");
+  if ((!d.path.empty() || d.sidecar) && v.find("configured") == nullptr)
+    d.configured = true;
   *out = std::move(d);
   return true;
 }
@@ -1684,6 +1764,22 @@ bool LoadServerConfigFile(const fs::path& path, ServerConfig* out,
     if (const auto* dm = v.find("default_model"); dm != nullptr) {
       ParseDefaultModelJson(*dm, &cfg.default_model);
     }
+    if (const auto* sm = v.find("startup_models");
+        sm != nullptr && sm->is_array()) {
+      for (const auto& item : sm->items()) {
+        DefaultModelConfig entry;
+        if (ParseDefaultModelJson(item, &entry) && !entry.id.empty() &&
+            (entry.sidecar || !entry.path.empty())) {
+          cfg.startup_models.push_back(std::move(entry));
+        }
+      }
+    } else if (cfg.default_model.configured &&
+               (!cfg.default_model.path.empty() ||
+                cfg.default_model.sidecar)) {
+      cfg.default_model.primary = true;
+      cfg.startup_models.push_back(cfg.default_model);
+    }
+    SyncStartupModels(&cfg);
     *out = std::move(cfg);
     return true;
   } catch (const std::exception& e) {
@@ -1890,6 +1986,7 @@ HttpResponse HandleGetSettings(const HttpRequest&,
   resp["cli_api_key_active"] = cli_api;
   resp["live_default_id"] = live_default_id;
   resp["default_model"] = DefaultModelToJson(cfg.default_model);
+  resp["startup_models"] = StartupModelsToJson(cfg.startup_models);
   resp["cache_disk_dir"] = cache_dir.string();
   resp["cache_disk_bytes"] = static_cast<std::size_t>(cache_bytes);
   return OkJson(std::move(resp));
@@ -1974,18 +2071,125 @@ HttpResponse HandleSaveSettings(const HttpRequest& req) {
     }
   }
 
+  if (const auto* sm = body.find("startup_models"); sm != nullptr) {
+    if (!sm->is_array()) {
+      return ErrJson(400, "Bad Request", "startup_models must be an array",
+                     "invalid_startup_models");
+    }
+    std::vector<DefaultModelConfig> parsed_list;
+    for (const auto& item : sm->items()) {
+      DefaultModelConfig entry;
+      if (!ParseDefaultModelJson(item, &entry) || entry.id.empty() ||
+          (!entry.sidecar && entry.path.empty())) {
+        return ErrJson(400, "Bad Request",
+                       "Each startup_models item requires id and path (or sidecar=true)",
+                       "invalid_startup_model_item");
+      }
+      entry.configured = true;
+      parsed_list.push_back(std::move(entry));
+    }
+    next.startup_models = std::move(parsed_list);
+  }
+
+  if (const auto* um = body.find("upsert_startup_model"); um != nullptr) {
+    DefaultModelConfig entry;
+    if (!ParseDefaultModelJson(*um, &entry) || entry.id.empty() ||
+        (!entry.sidecar && entry.path.empty())) {
+      return ErrJson(400, "Bad Request",
+                     "upsert_startup_model requires an object with id and path (or sidecar=true)",
+                     "invalid_startup_model");
+    }
+    entry.configured = true;
+    const std::string target_id =
+        !um->member_str("target_id").empty() ? um->member_str("target_id")
+                                             : body.member_str("target_id");
+    std::size_t match_idx = next.startup_models.size();
+    for (std::size_t i = 0; i < next.startup_models.size(); ++i) {
+      const auto& cur = next.startup_models[i];
+      if (!target_id.empty()) {
+        if (cur.id == target_id) {
+          match_idx = i;
+          break;
+        }
+      } else if (cur.id == entry.id ||
+                 (!entry.sidecar && !entry.path.empty() &&
+                  cur.path == entry.path)) {
+        match_idx = i;
+        break;
+      }
+    }
+    if (um->find("primary") == nullptr &&
+        match_idx < next.startup_models.size()) {
+      entry.primary = next.startup_models[match_idx].primary;
+    }
+    if (entry.primary && !entry.sidecar) {
+      for (auto& cur : next.startup_models) cur.primary = false;
+    }
+    if (match_idx < next.startup_models.size()) {
+      next.startup_models[match_idx] = std::move(entry);
+    } else {
+      next.startup_models.push_back(std::move(entry));
+    }
+  }
+
+  if (const std::string rem_id = body.member_str("remove_startup_model");
+      !rem_id.empty()) {
+    std::erase_if(next.startup_models, [&](const DefaultModelConfig& cur) {
+      return cur.id == rem_id;
+    });
+  }
+
+  if (const std::string prim_id = body.member_str("set_primary_startup_model");
+      !prim_id.empty()) {
+    bool found = false;
+    for (const auto& cur : next.startup_models) {
+      if (cur.id == prim_id && !cur.sidecar) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return ErrJson(400, "Bad Request",
+                     "set_primary_startup_model must match a non-sidecar startup model",
+                     "invalid_primary_target");
+    }
+    for (auto& cur : next.startup_models) {
+      cur.primary = (!cur.sidecar && cur.id == prim_id);
+    }
+  }
+
   if (const auto* dm = body.find("default_model"); dm != nullptr) {
     DefaultModelConfig parsed_dm;
     if (!ParseDefaultModelJson(*dm, &parsed_dm)) {
       return ErrJson(400, "Bad Request", "default_model must be an object",
                      "invalid_default_model");
     }
-    if (parsed_dm.configured && parsed_dm.path.empty()) {
+    if (parsed_dm.configured && !parsed_dm.sidecar && parsed_dm.path.empty()) {
       return ErrJson(400, "Bad Request", "default_model.path is required",
                      "missing_default_path");
     }
-    next.default_model = std::move(parsed_dm);
+    if (parsed_dm.configured) {
+      if (parsed_dm.id.empty()) {
+        parsed_dm.id = fs::path(parsed_dm.path).stem().string();
+      }
+      parsed_dm.primary = true;
+      for (auto& cur : next.startup_models) cur.primary = false;
+      bool replaced = false;
+      for (auto& cur : next.startup_models) {
+        if (cur.id == parsed_dm.id ||
+            (!parsed_dm.sidecar && cur.path == parsed_dm.path)) {
+          cur = parsed_dm;
+          replaced = true;
+          break;
+        }
+      }
+      if (!replaced) {
+        next.startup_models.insert(next.startup_models.begin(), parsed_dm);
+      }
+    }
   }
+
+  SyncStartupModels(&next);
 
   const fs::path cfg_path = ActiveConfigPathLocked();
   std::string err;
@@ -2008,6 +2212,7 @@ HttpResponse HandleSaveSettings(const HttpRequest& req) {
   resp["api_auth_share_web_password"] = next.api_auth_share_web_password;
   resp["api_key_set"] = !next.api_key_hash.empty();
   resp["default_model"] = DefaultModelToJson(next.default_model);
+  resp["startup_models"] = StartupModelsToJson(next.startup_models);
 
   HttpResponse r = OkJson(std::move(resp));
   if (next.web_auth_enabled && !next.web_password_hash.empty()) {
