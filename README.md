@@ -238,19 +238,17 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 
 ### ⚡ NPU Models (XDNA2 Strix Halo NPU)
 
-Below the line are the 9 NPU entries. The flm sidecars are served today through the router proxy (`/admin` "📋 啟動指令" + "🔍 探針", on demand, never at boot). The native IRON / quant-engine rows are verified end-to-end on silicon; HTTP serving integration is pending where marked 🧪.
-
-| Model | Device | Params | Format / Backend | HTTP Route | Status |
-| --- | --- | --- | --- | --- | --- |
-| **D3-Lite / Nano / Mini / Turbo / Ultra** | ⚡ NPU sidecar (flm) | 0.8B / 2B / 4B / — / — | Q4NX (flm NPU2) | `POST /v1/systemone` | ✅ Served (router proxy + admin cards; ⚡ DECIDE only, qwen3.8 stays CHAT) |
-| **Whisper-V3-Turbo** | ⚡ NPU sidecar (flm) | 0.8B | Q4NX NPU2 (5 xclbins) | `POST /v1/audio/transcriptions` | ✅ Served (proxy; 1.4 s audio → 2.3 s verified) |
-| **EmbeddingGemma 2** | ⚡ NPU native (IRON) | ~0.3B | Q8 bfp16ebs8 / Q4 q4nx | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (24-layer E2E cos > 0.993; engine seam wired, default kNone) |
-| **bge-m3** | ⚡ NPU native (IRON) | 0.6B XLM-R | Q8 / Q4 | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (64×1024 GEMM cos 0.999988; encoder cos 0.999924) |
-| **bge-reranker-v2-m3** | ⚡ NPU native (IRON) | Cross-Encoder | Q8 / Q4 | `/v1/reranking` (NPU lane) | 🧪 Runtime verified (score diff ~1e-5) |
-| **Qwen3-ASR 1.7B** | ⚡ NPU native (quant engine) | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions` (served via GPU sidecar) | 🧪 NPU runtime verified (cos > 0.967, top-1 match) |
-| **Qwen3-TTS 12Hz 1.7B** | ⚡ NPU native (quant engine) | 1.7B | Q8 / Q4 | `/v1/audio/speech` (served via GPU sidecar) | 🧪 NPU runtime verified (wav produced, cos > 0.98) |
-| **FLUX.2-klein-4B** | ⚡ NPU native (quant engine) | 4B DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
-| **Z-Image-Turbo** | ⚡ NPU native (quant engine) | DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
+| Model | Params | Format / Backend | HTTP Route | Status |
+| --- | --- | --- | --- | --- |
+| **D3-Lite / Nano / Mini / Turbo / Ultra** | 0.8B / 2B / 4B / — / — | Q4NX (flm NPU2) | `POST /v1/systemone` | ✅ Served (router proxy + admin cards; ⚡ DECIDE only, qwen3.8 stays CHAT) |
+| **Whisper-V3-Turbo** | 0.8B | Q4NX NPU2 (5 xclbins) | `POST /v1/audio/transcriptions` | ✅ Served (proxy; 1.4 s audio → 2.3 s verified) |
+| **EmbeddingGemma 2** | ~0.3B | Q8 bfp16ebs8 / Q4 q4nx | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (24-layer E2E cos > 0.993; engine seam wired, default kNone) |
+| **bge-m3** | 0.6B XLM-R | Q8 / Q4 | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (64×1024 GEMM cos 0.999988; encoder cos 0.999924) |
+| **bge-reranker-v2-m3** | Cross-Encoder | Q8 / Q4 | `/v1/reranking` (NPU lane) | 🧪 Runtime verified (score diff ~1e-5) |
+| **Qwen3-ASR 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions` (served via GPU sidecar) | 🧪 NPU runtime verified (cos > 0.967, top-1 match) |
+| **Qwen3-TTS 12Hz 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/speech` (served via GPU sidecar) | 🧪 NPU runtime verified (wav produced, cos > 0.98) |
+| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
+| **Z-Image-Turbo** | DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
 
 ### Supported Quantization Formats
 

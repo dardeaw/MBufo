@@ -235,19 +235,17 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 
 ### ⚡ NPU 模型（XDNA2 Strix Halo NPU）
 
-分隔线下方为 9 个 NPU 项目。flm sidecar 已通过 router 代理提供服务（`/admin`「📋 启动指令」＋「🔍 探针」，按需拉起，绝不开机自启）。原生 IRON／量化引擎行已在实机上端到端验证；标 🧪 者 HTTP 转接尚待完成。
-
-| 模型 | 设备 | 参数量 | 格式／后端 | HTTP 路由 | 状态 |
-| --- | --- | --- | --- | --- | --- |
-| **D3-Lite / Nano / Mini / Turbo / Ultra** | ⚡ NPU sidecar（flm） | 0.8B / 2B / 4B / — / — | Q4NX（flm NPU2） | `POST /v1/systemone` | ✅ 已上线（router 代理＋admin 卡片；⚡ DECIDE 专用，qwen3.8 维持 CHAT） |
-| **Whisper-V3-Turbo** | ⚡ NPU sidecar（flm） | 0.8B | Q4NX NPU2（5 个 xclbin） | `POST /v1/audio/transcriptions` | ✅ 已上线（代理；1.4 秒音频 → 2.3 秒已验证） |
-| **EmbeddingGemma 2** | ⚡ NPU 原生（IRON） | 约 0.3B | Q8 bfp16ebs8 / Q4 q4nx | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（24 层端到端 cos > 0.993；引擎已接缝，默认 kNone） |
-| **bge-m3** | ⚡ NPU 原生（IRON） | 0.6B XLM-R | Q8 / Q4 | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（64×1024 GEMM cos 0.999988；编码器 cos 0.999924） |
-| **bge-reranker-v2-m3** | ⚡ NPU 原生（IRON） | Cross-Encoder | Q8 / Q4 | `/v1/reranking`（NPU lane） | 🧪 运行时已验证（评分差约 1e-5） |
-| **Qwen3-ASR 1.7B** | ⚡ NPU 原生（量化引擎） | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（cos > 0.967，top-1 吻合） |
-| **Qwen3-TTS 12Hz 1.7B** | ⚡ NPU 原生（量化引擎） | 1.7B | Q8 / Q4 | `/v1/audio/speech`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（已产出 wav，cos > 0.98） |
-| **FLUX.2-klein-4B** | ⚡ NPU 原生（量化引擎） | 4B DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
-| **Z-Image-Turbo** | ⚡ NPU 原生（量化引擎） | DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
+| 模型 | 参数量 | 格式／后端 | HTTP 路由 | 状态 |
+| --- | --- | --- | --- | --- |
+| **D3-Lite / Nano / Mini / Turbo / Ultra** | 0.8B / 2B / 4B / — / — | Q4NX（flm NPU2） | `POST /v1/systemone` | ✅ 已上线（router 代理＋admin 卡片；⚡ DECIDE 专用，qwen3.8 维持 CHAT） |
+| **Whisper-V3-Turbo** | 0.8B | Q4NX NPU2（5 个 xclbin） | `POST /v1/audio/transcriptions` | ✅ 已上线（代理；1.4 秒音频 → 2.3 秒已验证） |
+| **EmbeddingGemma 2** | 约 0.3B | Q8 bfp16ebs8 / Q4 q4nx | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（24 层端到端 cos > 0.993；引擎已接缝，默认 kNone） |
+| **bge-m3** | 0.6B XLM-R | Q8 / Q4 | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（64×1024 GEMM cos 0.999988；编码器 cos 0.999924） |
+| **bge-reranker-v2-m3** | Cross-Encoder | Q8 / Q4 | `/v1/reranking`（NPU lane） | 🧪 运行时已验证（评分差约 1e-5） |
+| **Qwen3-ASR 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（cos > 0.967，top-1 吻合） |
+| **Qwen3-TTS 12Hz 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/speech`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（已产出 wav，cos > 0.98） |
+| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
+| **Z-Image-Turbo** | DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
 
 ### 支持的量化格式
 
