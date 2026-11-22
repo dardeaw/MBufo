@@ -384,6 +384,8 @@ if (MBUFO_ENABLE_NPU)
     src/core/compute/npu/npu_quant_gemm.cpp
     src/core/compute/npu/npu_quant_models.cpp
     src/core/compute/npu/npu_thinker_decode.cpp
+    src/core/compute/npu/qwen3_talker_decode.cpp
+    src/core/compute/npu/qwen3_predictor_decode.cpp
     src/core/compute/npu/npu_embgemma2_runtime.cpp
     src/core/compute/npu/npu_bge_runtime.cpp)
 endif()
@@ -643,6 +645,27 @@ if (BUILD_TESTING)
     target_link_libraries(npu_thinker_decode_test PRIVATE mbufo_core mbufo_npu)
     add_test(NAME npu_thinker_decode_test COMMAND npu_thinker_decode_test)
     set_tests_properties(npu_thinker_decode_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_talker_decode_test tests/core/npu_talker_decode_test.cpp)
+    target_link_libraries(npu_talker_decode_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_talker_decode_test COMMAND npu_talker_decode_test)
+    set_tests_properties(npu_talker_decode_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_predictor_decode_test tests/core/npu_predictor_decode_test.cpp)
+    target_link_libraries(npu_predictor_decode_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_predictor_decode_test COMMAND npu_predictor_decode_test)
+    set_tests_properties(npu_predictor_decode_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_tts_frame_test tests/core/npu_tts_frame_test.cpp)
+    target_link_libraries(npu_tts_frame_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_tts_frame_test COMMAND npu_tts_frame_test)
+    set_tests_properties(npu_tts_frame_test PROPERTIES
       LABELS "npu;hardware;quant"
       RESOURCE_LOCK npu)
   endif()
