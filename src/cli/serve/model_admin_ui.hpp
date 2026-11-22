@@ -1032,7 +1032,10 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
     async function fetchModelMapping() {
       try {
-        const res = await fetch(GH_MAPPING_URL, { cache: 'no-store' });
+        const ctrl = new AbortController();
+        const tid = setTimeout(() => ctrl.abort(), 3500);
+        const res = await fetch(GH_MAPPING_URL, { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(tid);
         if (res.ok) {
           stateMapping = await res.json();
           mappingSource = 'GitHub (dardeaw/MBufo)';
@@ -1069,7 +1072,14 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       if (!devContainer) return;
       const models = stateCatalog.models || [];
       const counts = { ALL: models.length, GPU: 0, NPU: 0 };
-      models.forEach(m => { counts[backendOf(m)] = (counts[backendOf(m)] || 0) + 1; });
+      models.forEach(m => {
+        if (isDualCapable(m)) {
+          counts.GPU += 1;
+          counts.NPU += 1;
+        } else {
+          counts[backendOf(m)] = (counts[backendOf(m)] || 0) + 1;
+        }
+      });
       const defs = [
         { key: 'ALL', label: 'All Devices' },
         { key: 'GPU', label: '🎮 GPU' },
@@ -1085,21 +1095,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         el.onclick = () => {
           selectedDevice = dd.key;
           renderDevicePills();
+          renderCapPills();
           renderCatalog();
           renderLoadedModels();
         };
         devContainer.appendChild(el);
       });
-    }
-
-    async function probeSidecar(base) {
-      const url = (base || '').replace(/\/$/, '');
-      try {
-        const res = await fetch(url + '/v1/models', { cache: 'no-store' });
-        showToast(`Sidecar ${url} responded HTTP ${res.status}(any response counts as online)`, res.ok ? false : true);
-      } catch (e) {
-        showToast(`Sidecar ${url} not responding (offline); start it with the launch command`, true);
-      }
     }
 
     function renderCapabilityBadges(caps) {
@@ -1209,6 +1210,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (!res.ok) return false;
         stateCatalog = await res.json();
         renderDevicePills();
+        renderCapPills();
         renderCatalog();
         const rootsEl = document.getElementById('catalog-roots');
         if (rootsEl) {
@@ -1223,9 +1225,17 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     }
 
     async function refreshAll(manual = false) {
-      await fetchModelMapping();
+      const mappingPromise = fetchModelMapping().then(ok => {
+        if (ok && stateCatalog && stateCatalog.models) {
+          renderDevicePills();
+          renderCapPills();
+          renderCatalog();
+        }
+        return ok;
+      });
       const [okStatus] = await Promise.all([fetchStatus(), fetchCatalog()]);
       if (manual) {
+        await mappingPromise;
         if (okStatus) showToast(`Refreshed (mapping: ${mappingSource})`);
         else showToast('Cannot reach :8741 — mbufo.service is currently stopped', true);
       }
@@ -1416,7 +1426,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       });
     }
 
-    function renderFamilyPills() {
+    function renderCapPills() {
       const capContainer = document.getElementById('cap-pills');
       const models = stateCatalog.models || [];
       const capDefs = [
@@ -1440,7 +1450,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           el.innerHTML = `<span>${cd.label}</span><span class="cap-cnt">${cnt}</span>`;
           el.onclick = () => {
             selectedCap = cd.key;
-            renderFamilyPills();
+            renderCapPills();
             renderCatalog();
           };
           capContainer.appendChild(el);
@@ -1784,227 +1794,6 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       }
     }
 
-    function updatePlaygroundModelSelect() {
-      const sel = document.getElementById('pg-model');
-      const prev = sel.value;
-      const models = stateModels.models || [];
-      const defModel = models.find(m => m.is_default);
-
-      sel.innerHTML = '';
-      const defOpt = document.createElement('option');
-      defOpt.value = '';
-      defOpt.textContent = `(Default Route → ${defModel ? defModel.id : 'Primary'})`;
-      sel.appendChild(defOpt);
-
-      models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = m.id + (m.is_default ? ' (Primary)' : '');
-        sel.appendChild(opt);
-      });
-
-      if ([...sel.options].some(o => o.value === prev)) {
-        sel.value = prev;
-      }
-      updateCurlSnippet();
-    }
-
-    function selectInPlayground(id) {
-      const sel = document.getElementById('pg-model');
-      sel.value = id;
-      const m = (stateModels.models || []).find(x => x.id === id);
-      if (m) {
-        const epSel = document.getElementById('pg-endpoint');
-        if (m.task === 'embedding') epSel.value = '/v1/embeddings';
-        else if (m.task === 'reranker') epSel.value = '/v1/reranking';
-        else if (m.task === 'decide') epSel.value = '/v1/systemone';
-        else if (epSel.value === '/v1/embeddings' || epSel.value === '/v1/reranking')
-          epSel.value = '/v1/chat/completions';
-      }
-      updateCurlSnippet();
-      document.getElementById('pg-input').focus();
-    }
-
-    function updateCurlSnippet() {
-      const model = document.getElementById('pg-model').value || (stateModels.default_model || 'default');
-      const ep = document.getElementById('pg-endpoint').value;
-      const host = window.location.origin;
-      if (ep === '/v1/embeddings') {
-        document.getElementById('pg-curl').textContent =
-`curl ${host}/v1/embeddings \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${model}", "input": "MBufo Strix Halo unified memory inference"}'`;
-      } else if (ep === '/v1/reranking') {
-        document.getElementById('pg-curl').textContent =
-`curl ${host}/v1/reranking \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${model}", "query": "GPU memory", "documents": ["UMA shares 128GB RAM", "Apples are red"]}'`;
-      } else {
-        document.getElementById('pg-curl').textContent =
-`curl ${host}${ep} \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${model}", "messages": [{"role": "user", "content": "Hello!"}]}'`;
-      }
-    }
-
-    document.getElementById('pg-model').addEventListener('change', updateCurlSnippet);
-    document.getElementById('pg-endpoint').addEventListener('change', updateCurlSnippet);
-
-    function clearChat() {
-      document.getElementById('pg-messages').innerHTML = '';
-    }
-
-    async function sendPlayground() {
-      const input = document.getElementById('pg-input');
-      const prompt = input.value.trim();
-      if (!prompt) return;
-      input.value = '';
-
-      const model = document.getElementById('pg-model').value;
-      const ep = document.getElementById('pg-endpoint').value;
-      const maxTokens = parseInt(document.getElementById('pg-max-tokens').value, 10) || 256;
-      const temperature = parseFloat(document.getElementById('pg-temp').value) || 0.6;
-
-      const msgs = document.getElementById('pg-messages');
-      const userDiv = document.createElement('div');
-      userDiv.className = 'msg msg-user';
-      userDiv.textContent = `[To: ${model || 'Default Route'}] ${prompt}`;
-      msgs.appendChild(userDiv);
-
-      const botDiv = document.createElement('div');
-      botDiv.className = 'msg msg-assistant';
-      botDiv.textContent = '...';
-      msgs.appendChild(botDiv);
-      msgs.scrollTop = msgs.scrollHeight;
-
-      const t0 = performance.now();
-      let tFirst = null;
-      let outText = '';
-      let outTokens = 0;
-
-      document.getElementById('m-model').textContent = model || '(Default)';
-      document.getElementById('m-ttft').textContent = '...';
-      document.getElementById('m-tps').textContent = '...';
-      document.getElementById('m-tokens').textContent = '...';
-
-      try {
-        if (ep === '/v1/embeddings') {
-          const body = { input: prompt };
-          if (model) body.model = model;
-          const res = await fetch(ep, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-          });
-          const data = await res.json();
-          const dt = (performance.now() - t0).toFixed(1);
-          document.getElementById('m-ttft').textContent = dt + ' ms';
-          if (!res.ok || data.error) {
-            botDiv.textContent = 'Error: ' + (data.error ? data.error.message : res.statusText);
-            return;
-          }
-          const vec = (data.data && data.data[0] && data.data[0].embedding) || [];
-          const tok = (data.usage && data.usage.prompt_tokens) || '-';
-          document.getElementById('m-tokens').textContent = tok + ' prompt tok';
-          document.getElementById('m-tps').textContent = 'dim=' + vec.length;
-          botDiv.textContent = `Embedding Vector (dim=${vec.length}, ${dt} ms):\n[` +
-            vec.slice(0, 8).map(v => v.toFixed(6)).join(', ') + ', ...]';
-          return;
-        }
-        if (ep === '/v1/reranking') {
-          const parts = prompt.split('|').map(s => s.trim()).filter(Boolean);
-          const qText = parts[0] || prompt;
-          const docs = parts.length > 1 ? parts.slice(1) : [
-            'Strix Halo gfx1151 unified memory supports multi-model co-residency.',
-            'Bananas and oranges are tropical fruits.'
-          ];
-          const body = { query: qText, documents: docs };
-          if (model) body.model = model;
-          const res = await fetch(ep, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-          });
-          const data = await res.json();
-          const dt = (performance.now() - t0).toFixed(1);
-          document.getElementById('m-ttft').textContent = dt + ' ms';
-          if (!res.ok || data.error) {
-            botDiv.textContent = 'Error: ' + (data.error ? data.error.message : res.statusText);
-            return;
-          }
-          const results = data.results || [];
-          document.getElementById('m-tokens').textContent = ((data.usage && data.usage.prompt_tokens) || '-') + ' tok';
-          document.getElementById('m-tps').textContent = results.length + ' docs scored';
-          botDiv.textContent = `Rerank Results (query: "${qText}", ${dt} ms):\n` +
-            results.map(r => `  #${r.index} [score=${Number(r.relevance_score).toFixed(4)}] ${docs[r.index] || ''}`).join('\n');
-          return;
-        }
-        const body = {
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: maxTokens,
-          temperature: temperature,
-          stream: true
-        };
-        if (model) body.model = model;
-
-        const res = await fetch(ep, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        });
-
-        if (!res.ok) {
-          const errText = await res.text();
-          botDiv.textContent = 'Error HTTP ' + res.status + ': ' + errText;
-          return;
-        }
-
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = '';
-
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop();
-
-          for (const line of lines) {
-            if (!line.startsWith('data:')) continue;
-            const payload = line.slice(5).trim();
-            if (!payload || payload === '[DONE]') continue;
-            try {
-              const ev = JSON.parse(payload);
-              let delta = '';
-              if (ev.choices && ev.choices[0] && ev.choices[0].delta) {
-                delta = ev.choices[0].delta.content || ev.choices[0].delta.reasoning_content || '';
-              } else if (ev.type === 'content_block_delta' && ev.delta) {
-                delta = ev.delta.text || ev.delta.thinking || '';
-              }
-              if (delta) {
-                if (!tFirst) {
-                  tFirst = performance.now();
-                  document.getElementById('m-ttft').textContent = ((tFirst - t0) / 1000).toFixed(2) + 's';
-                }
-                outText += delta;
-                outTokens++;
-                botDiv.textContent = outText;
-                msgs.scrollTop = msgs.scrollHeight;
-              }
-            } catch (_) {}
-          }
-        }
-
-        const tEnd = performance.now();
-        const decodeSec = tFirst ? Math.max(0.001, (tEnd - tFirst) / 1000) : ((tEnd - t0) / 1000);
-        document.getElementById('m-tps').textContent = (outTokens / decodeSec).toFixed(1) + ' tok/s';
-        document.getElementById('m-tokens').textContent = outTokens + ' chunks';
-        fetchStatus();
-      } catch (e) {
-        botDiv.textContent = 'Request failed: ' + e.message;
-      }
-    }
 
     refreshAll();
     setInterval(fetchStatus, 3000);
