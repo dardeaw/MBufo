@@ -47,6 +47,17 @@ class TeNpuDecoder {
                             double* npu_ms = nullptr,
                             std::string* error = nullptr);
 
+  /// Tap encode for DiT conditioning: raw post-layer snapshots at the given
+  /// layer indices plus the raw final sequence (shell: taps at layer 0,
+  /// layer n/2, final, concatenated 3x2560 -> 7680).
+  [[nodiscard]] bool EncodeTaps(std::span<const float> prompt_hidden,
+                                std::size_t T,
+                                std::span<const std::size_t> tap_layers,
+                                std::vector<std::vector<float>>* taps,
+                                std::vector<float>* final_raw,
+                                double* npu_ms = nullptr,
+                                std::string* error = nullptr);
+
   // Prefill/DecodeStep exposed for the decode-consistency gate (same
   // prefill-vs-incremental math check as P1/P2a on TE weights).
   [[nodiscard]] bool Prefill(std::span<const float> prompt_hidden,

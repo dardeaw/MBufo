@@ -187,6 +187,33 @@ class Qwen3NpuDecoder {
     return true;
   }
 
+  /// Prefill variant with intermediate layer snapshots (TE tap capture:
+  /// snapshots are raw post-layer hidden rows, no final norm).
+  [[nodiscard]] bool PrefillFullTaps(std::span<const float> hidden_rows,
+                                    std::size_t T,
+                                    std::span<const std::size_t> tap_layers,
+                                    std::vector<std::vector<float>>* taps,
+                                    std::vector<float>* all_last,
+                                    double* npu_ms = nullptr,
+                                    std::string* error = nullptr) {
+    if (T == 0 || hidden_rows.size() < T * cfg_.hidden) {
+      if (error != nullptr) *error = "bad prefill input";
+      return false;
+    }
+    if (T > cfg_.max_seq) {
+      if (error != nullptr) *error = "prefill exceeds max_seq";
+      return false;
+    }
+    std::vector<float> h(hidden_rows.begin(),
+                         hidden_rows.begin() + T * cfg_.hidden);
+    std::vector<std::size_t> layers(tap_layers.begin(), tap_layers.end());
+    taps->clear();
+    if (!RunLayers(&h, T, 0, true, npu_ms, error, &layers, taps)) return false;
+    pos_ = T;
+    *all_last = h;
+    return true;
+  }
+
   /// Single decode step at absolute position pos().
   [[nodiscard]] bool DecodeStep(std::span<const float> hidden_row,
                                 std::vector<float>* next_hidden,
@@ -303,7 +330,9 @@ class Qwen3NpuDecoder {
 
   [[nodiscard]] bool RunLayers(std::vector<float>* h, std::size_t T,
                               std::size_t pos_base, bool append_kv,
-                              double* npu_ms, std::string* error) {
+                              double* npu_ms, std::string* error,
+                              const std::vector<std::size_t>* tap_layers = nullptr,
+                              std::vector<std::vector<float>>* tap_snaps = nullptr) {
     const std::size_t H = cfg_.hidden;
     const std::size_t F = cfg_.inter;
     const std::size_t nh = cfg_.n_heads;
@@ -417,6 +446,14 @@ class Qwen3NpuDecoder {
         return false;
       }
       for (std::size_t i = 0; i < T * H; ++i) (*h)[i] += down[i];
+      if (tap_layers != nullptr && tap_snaps != nullptr) {
+        for (std::size_t tl : *tap_layers) {
+          if (tl == li) {
+            tap_snaps->push_back(*h);
+            break;
+          }
+        }
+      }
     }
 
     // Commit K/V to the cache in position order (fixes cross-layer staging).
