@@ -1,6 +1,10 @@
 #include "src/cache/disk_catalog.hpp"
 
+#include <sys/stat.h>
+
+#include <algorithm>
 #include <map>
+#include <set>
 #include <stdexcept>
 
 namespace mbufo::cache {
@@ -231,6 +235,85 @@ std::size_t DiskCatalog::ReclaimInvalid() {
   }
   return retired;
 }
+std::vector<DiskCatalogEntryInfo> DiskCatalog::ListEntries(
+    const std::filesystem::path& directory,
+    std::span<const std::uint8_t> active_compatibility) const {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::vector<DiskCatalogEntryInfo> out;
+  out.reserve(impl_->records.size());
+  for (const auto& [id, record] : impl_->records) {
+    (void)id;
+    const auto& desc = *record.description;
+    const auto& m = desc.Manifest();
+    DiskCatalogEntryInfo info;
+    info.checkpoint_id = m.checkpoint.value;
+    info.lineage_id = m.lineage.value;
+    info.manifest_file = DiskFileName(desc.ManifestFile());
+    info.compatibility_hex.reserve(m.compatibility.size() * 2);
+    for (std::uint8_t b : m.compatibility) {
+      info.compatibility_hex.push_back(kHex[b >> 4]);
+      info.compatibility_hex.push_back(kHex[b & 15]);
+    }
+    info.compatible =
+        active_compatibility.size() == m.compatibility.size() &&
+        std::equal(m.compatibility.begin(), m.compatibility.end(),
+                   active_compatibility.begin());
+    info.token_count = m.tokens.size();
+    info.purpose = m.purpose == CheckpointPurpose::kLearned ? "learned" : "prompt";
+    info.invalid = record.invalid || desc.Quarantined();
+
+    std::set<DiskFileId> seen_chunks;
+    std::set<DiskFileId> seen_private;
+    for (const auto& c : m.components) {
+      for (const auto& p : c.chunks) {
+        if (seen_chunks.insert(p.file).second) {
+          info.chunk_bytes += p.bytes;
+        }
+      }
+      for (const auto& opt : {c.tail, c.private_state}) {
+        if (opt && seen_private.insert(opt->file).second) {
+          info.private_bytes += opt->bytes;
+        }
+      }
+    }
+    info.chunk_count = seen_chunks.size();
+
+    if (!directory.empty()) {
+      const auto mf_path =
+          directory / ("v" + std::to_string(kDiskFormatVersion)) /
+          "manifests" / info.manifest_file;
+      struct stat st{};
+      if (::stat(mf_path.c_str(), &st) == 0) {
+        info.manifest_bytes = static_cast<std::uint64_t>(st.st_size);
+        info.mtime_epoch = static_cast<std::int64_t>(st.st_mtime);
+      }
+    }
+    out.push_back(std::move(info));
+  }
+  std::sort(out.begin(), out.end(),
+            [](const DiskCatalogEntryInfo& a, const DiskCatalogEntryInfo& b) {
+              if (a.mtime_epoch != b.mtime_epoch)
+                return a.mtime_epoch > b.mtime_epoch;
+              return a.checkpoint_id > b.checkpoint_id;
+            });
+  return out;
+}
+
+DiskRetireResult DiskCatalog::Retire(CheckpointId id) {
+  Reconcile();
+  auto record = impl_->records.find(id.value);
+  if (record == impl_->records.end())
+    return DiskRetireResult::kMissing;
+  const auto& description = *record->second.description;
+  const auto result = impl_->store->TryRetire(
+      description.Manifest().checkpoint, description.Epoch());
+  if (result == DiskRetireResult::kBusy || result == DiskRetireResult::kPinned)
+    return result;
+  impl_->index->RemoveDurable(description, record->second.invalid);
+  impl_->Erase(record);
+  return result;
+}
+
 std::size_t DiskCatalog::Size() const {
   return impl_->records.size();
 }

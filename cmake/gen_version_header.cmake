@@ -28,14 +28,23 @@ if(NOT RC_SHORT EQUAL 0 OR GIT_SHORT STREQUAL "")
 endif()
 
 execute_process(
-  COMMAND git -C "${SRC_DIR}" describe --tags --abbrev=0
+  COMMAND git -C "${SRC_DIR}" describe --tags --match "mbufo-v*" --abbrev=0
   OUTPUT_VARIABLE GIT_TAG
   OUTPUT_STRIP_TRAILING_WHITESPACE
   ERROR_QUIET
   RESULT_VARIABLE RC_TAG
 )
 if(NOT RC_TAG EQUAL 0 OR GIT_TAG STREQUAL "")
-  set(GIT_TAG "v0.36.0")
+  execute_process(
+    COMMAND git -C "${SRC_DIR}" describe --tags --abbrev=0
+    OUTPUT_VARIABLE GIT_TAG
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE RC_TAG
+  )
+endif()
+if(NOT RC_TAG EQUAL 0 OR GIT_TAG STREQUAL "")
+  set(GIT_TAG "mbufo-v0.37.0")
 endif()
 
 string(TIMESTAMP BUILD_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)

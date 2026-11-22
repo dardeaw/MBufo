@@ -311,8 +311,34 @@ HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
     return admin_ops::HandleUpdateApply(req);
   if (req.path == "/admin/update/status" && req.method == "GET")
     return admin_ops::HandleUpdateStatus(req);
+  if (req.path == "/admin/auth/status" && req.method == "GET")
+    return admin_ops::HandleAuthStatus(req);
+  if (req.path == "/admin/auth/login" && req.method == "POST")
+    return admin_ops::HandleAuthLogin(req);
+  if (req.path == "/admin/auth/logout" && req.method == "POST")
+    return admin_ops::HandleAuthLogout(req);
+  if (req.path == "/admin/settings" && req.method == "GET") {
+    std::string live_def;
+    for (const auto& info : registry_->List()) {
+      if (info.is_default) {
+        live_def = info.id;
+        break;
+      }
+    }
+    return admin_ops::HandleGetSettings(req, live_def);
+  }
+  if (req.path == "/admin/settings" && req.method == "POST")
+    return admin_ops::HandleSaveSettings(req);
+  if (req.path == "/admin/server/restart" && req.method == "POST")
+    return admin_ops::HandleServerRestart(req);
+  if (req.path == "/admin/disk-cache" && req.method == "GET")
+    return HandleDiskCacheList(req);
+  if (req.path == "/admin/disk-cache/delete" && req.method == "POST")
+    return HandleDiskCacheDelete(req);
   if (req.path == "/admin/load" && req.method == "POST")
     return HandleLoad(req);
+  if (req.path == "/admin/reload" && req.method == "POST")
+    return HandleReload(req);
   if (req.path == "/admin/eject" && req.method == "POST")
     return HandleEject(req);
   if (req.path == "/admin/default" && req.method == "POST")
@@ -353,9 +379,15 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["supports_images"] = info.supports_images;
     row["speculative"] = info.speculative;
     {
-      const std::string spec_s = info.speculative ? "mtp" : "";
-      const auto prof = ClassifyModelCapabilities(info.id, "", info.path,
-                                            info.supports_images, spec_s);
+      const std::string spec_s =
+          (!info.config.speculative.empty() &&
+           info.config.speculative != "off")
+              ? info.config.speculative
+              : (info.speculative ? std::string("mtp") : std::string{});
+      const auto prof = ClassifyModelCapabilities(
+          info.id, "", info.path,
+          info.supports_images || !info.config.vision_model_path.empty(),
+          spec_s);
       row["task"] = prof.task;
       row["has_vision"] = prof.has_vision;
       row["has_audio"] = prof.has_audio;
@@ -364,6 +396,21 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
       for (const auto& b : prof.badges) caps.push_back(b);
       row["capabilities"] = std::move(caps);
     }
+    {
+      json::Value aliases = json::Value::array();
+      for (const auto& n : info.names) {
+        if (n != info.id) aliases.push_back(n);
+      }
+      row["aliases"] = std::move(aliases);
+    }
+    row["kv_cache_quant"] = info.config.kv_cache_quant;
+    row["speculative_mode"] =
+        info.config.speculative.empty() ? "off" : info.config.speculative;
+    row["draft_model_path"] = info.config.draft_model_path;
+    row["vision_model_path"] = info.config.vision_model_path;
+    row["enable_yarn"] = info.config.enable_yarn;
+    row["enable_disk_cache"] = info.config.enable_disk_cache;
+    row["npu_quant"] = info.config.npu_quant;
     row["total_sessions"] = info.total_sessions;
     row["active_sessions"] = info.active_sessions;
     row["busy"] = info.active_sessions > 0;
@@ -438,6 +485,7 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["file_size_mib"] = 0;
     row["estimated_resident_mib"] =
         static_cast<std::uint64_t>(spec->estimated_resident_mib);
+    row["id_suggestion"] = spec->id;
     row["backend"] = spec->backend;
     row["sidecar"] = true;
     row["default_port"] = spec->port;
@@ -445,6 +493,14 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["pid"] = static_cast<std::int64_t>(st.pid);
     row["external"] = st.external;
     row["lru_rank"] = -1;
+    if (spec->kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
+      row["file_size_mib"] =
+          static_cast<std::uint64_t>(spec->estimated_resident_mib);
+      row["image_dtype"] = st.options.dtype;
+      row["image_steps"] = static_cast<std::size_t>(st.options.steps);
+      row["image_size"] = st.options.default_size;
+      row["image_cpu_offload"] = st.options.cpu_offload;
+    }
     json::Value sessions = json::Value::array();
     row["sessions"] = std::move(sessions);
     data.push_back(std::move(row));
@@ -842,10 +898,6 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       const char* note;
     };
     const ExtraDir kExtraDirs[] = {
-        {"flux2-klein-4b", "flux2-klein-4b", "image_generation", "IMAGE", "npu", true,
-         "NPU2 Q8/Q4 verified (no HTTP /v1/images server yet)"},
-        {"z-image-turbo", "z-image-turbo", "image_generation", "IMAGE", "npu", true,
-         "NPU2 Q8/Q4 verified (no HTTP /v1/images server yet)"},
         {"qwen-image-2.1", "qwen-image-2.1", "image_generation", "IMAGE", "gpu", false,
          "GPU safetensors image model (mbufo serve image)"},
     };
@@ -920,11 +972,38 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
   // spawns from); launched on demand via /admin/load, never at boot.
   {
     auto push_sidecar = [&](const SidecarLaunchSpec& spec) {
+      const auto sc_status = GlobalSidecarManager().GetStatus(spec.id);
+      std::filesystem::path img_dir;
+      std::uint64_t disk_mib = spec.estimated_resident_mib;
+      if (spec.kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
+        for (const auto& r : roots) {
+          std::error_code dec;
+          auto cand = r / spec.flm_model;
+          if (std::filesystem::is_directory(cand, dec)) {
+            img_dir = cand;
+            break;
+          }
+        }
+        if (img_dir.empty() && !sc_status.running) return;
+        if (!img_dir.empty()) {
+          std::uintmax_t bytes = 0;
+          std::error_code wec;
+          std::filesystem::recursive_directory_iterator it(img_dir, wec);
+          std::filesystem::recursive_directory_iterator end;
+          for (; !wec && it != end; it.increment(wec)) {
+            std::error_code fec;
+            if (it->is_regular_file(fec)) bytes += it->file_size(fec);
+          }
+          if (bytes > 0) disk_mib = static_cast<std::uint64_t>(bytes >> 20);
+        }
+      }
+
       json::Value item = json::Value::object();
       item["id"] = spec.id;
       item["id_suggestion"] = spec.id;
       item["name"] = spec.display_name;
-      item["relative_path"] = spec.base_url;
+      item["relative_path"] =
+          img_dir.empty() ? spec.base_url : (spec.flm_model + "/");
       item["family"] = "sidecar";
       item["task"] = spec.task;
       item["has_vision"] = false;
@@ -939,15 +1018,21 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["default_port"] = spec.port;
       item["endpoint"] = spec.endpoint;
       item["launch_cmd"] = SidecarLaunchDisplay(spec);
-      item["size_mib"] = spec.estimated_resident_mib;
-      item["file_size_mib"] = spec.estimated_resident_mib;
+      item["size_mib"] = disk_mib;
+      item["file_size_mib"] = disk_mib;
       item["estimated_resident_mib"] = spec.estimated_resident_mib;
       item["shards"] = 1;
-      item["loaded"] = false;
-      item["loaded_id"] = "";
+      item["loaded"] = sc_status.running;
+      item["loaded_id"] = sc_status.running ? spec.id : std::string{};
       item["is_default"] = false;
-      item["running"] = GlobalSidecarManager().IsRunning(spec.id);
+      item["running"] = sc_status.running;
       item["path"] = spec.base_url;
+      if (spec.kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
+        item["image_dtype"] = sc_status.options.dtype;
+        item["image_steps"] = static_cast<std::size_t>(sc_status.options.steps);
+        item["image_size"] = sc_status.options.default_size;
+        item["image_cpu_offload"] = sc_status.options.cpu_offload;
+      }
       item["suggested_mmproj"] = "";
       item["suggested_draft"] = "";
       item["suggested_mtp"] = "";
@@ -1056,10 +1141,18 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
         loading_path_ = sc0->base_url;
         loading_started_ms_ = NowSteadyMs();
       }
+      SidecarStartOptions sc_opts;
+      sc_opts.dtype = body.member_str("image_dtype", "bf16");
+      sc_opts.steps = static_cast<int>(
+          body.member_size("image_steps", sc0->default_steps));
+      sc_opts.default_size = body.member_str("image_size", "1024x1024");
+      sc_opts.cpu_offload = body.member_str("image_cpu_offload", "none");
+
       const std::uint64_t t_load_start = NowSteadyMs();
       std::string sc_err;
       const bool was_running = GlobalSidecarManager().IsRunning(request.id);
-      const bool ok = GlobalSidecarManager().Start(request.id, &sc_err);
+      const bool ok =
+          GlobalSidecarManager().Start(request.id, &sc_err, 180000, sc_opts);
       {
         std::lock_guard lock(loading_state_mutex_);
         loading_id_.clear();
@@ -1085,6 +1178,12 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
           static_cast<std::uint64_t>(sc0->estimated_resident_mib);
       resp["pid"] = static_cast<std::int64_t>(st.pid);
       resp["external"] = st.external;
+      if (sc0->kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
+        resp["image_dtype"] = st.options.dtype;
+        resp["image_steps"] = static_cast<std::size_t>(st.options.steps);
+        resp["image_size"] = st.options.default_size;
+        resp["image_cpu_offload"] = st.options.cpu_offload;
+      }
       resp["load_ms"] = NowSteadyMs() >= t_load_start
                             ? NowSteadyMs() - t_load_start
                             : std::uint64_t{0};
@@ -1163,7 +1262,17 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
   if (backend == nullptr)
     return AdminErr(500, "Internal Server Error",
                     error.empty() ? "load failed" : error, "load_failed");
-  if (!registry_->Add(request.id, request.aliases, std::move(backend), &error))
+  LoadedModelConfig reg_cfg;
+  reg_cfg.kv_cache_quant = request.kv_cache_quant;
+  reg_cfg.speculative = request.speculative;
+  reg_cfg.draft_model_path = request.draft_model_path;
+  reg_cfg.vision_model_path = request.vision_model_path;
+  reg_cfg.enable_yarn = request.enable_yarn;
+  reg_cfg.enable_disk_cache = request.enable_disk_cache;
+  reg_cfg.device = request.device;
+  reg_cfg.npu_quant = request.npu_quant;
+  if (!registry_->Add(request.id, request.aliases, std::move(backend), &error,
+                      std::move(reg_cfg)))
     return AdminErr(409, "Conflict", error, "register_failed");
   if (set_default) {
     std::string def_err;
@@ -1267,6 +1376,411 @@ HttpResponse ModelAdminService::HandleSetDefault(const HttpRequest& req) {
   json::Value resp = json::Value::object();
   resp["id"] = id;
   resp["status"] = "default_updated";
+  return AdminOk(std::move(resp));
+}
+
+HttpResponse ModelAdminService::HandleReload(const HttpRequest& req) {
+  if (!loader_)
+    return AdminErr(503, "Service Unavailable",
+                    "dynamic model loading is not enabled", "loader_disabled");
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return AdminErr(400, "Bad Request", e.what(), "parse_error");
+  }
+  if (!body.is_object())
+    return AdminErr(400, "Bad Request", "request body must be an object",
+                    "invalid_request");
+
+  const std::string target_id =
+      body.member_str("target_id", body.member_str("id"));
+  if (target_id.empty())
+    return AdminErr(400, "Bad Request", "'target_id' or 'id' is required",
+                    "missing_id");
+
+  // Sidecar reload: stop existing process and restart with updated options
+  if (const auto* sc0 = FindSidecarSpec(target_id); sc0 != nullptr) {
+    SidecarStartOptions sc_opts;
+    sc_opts.dtype = body.member_str("image_dtype", "bf16");
+    sc_opts.steps = static_cast<int>(
+        body.member_size("image_steps", sc0->default_steps));
+    sc_opts.default_size = body.member_str("image_size", "1024x1024");
+    sc_opts.cpu_offload = body.member_str("image_cpu_offload", "none");
+
+    std::lock_guard serialize(load_mutex_);
+    {
+      std::lock_guard lock(loading_state_mutex_);
+      loading_id_ = target_id;
+      loading_path_ = sc0->base_url;
+      loading_started_ms_ = NowSteadyMs();
+    }
+    struct ClearSidecarGuard {
+      ModelAdminService* self;
+      ~ClearSidecarGuard() {
+        std::lock_guard lock(self->loading_state_mutex_);
+        self->loading_id_.clear();
+        self->loading_path_.clear();
+        self->loading_started_ms_ = 0;
+      }
+    } sc_guard{this};
+
+    const std::uint64_t t_start = NowSteadyMs();
+    std::string sc_err;
+    if (GlobalSidecarManager().IsRunning(target_id)) {
+      if (!GlobalSidecarManager().Stop(target_id, &sc_err)) {
+        return AdminErr(502, "Bad Gateway",
+                        sc_err.empty() ? "failed stopping sidecar" : sc_err,
+                        "sidecar_stop_failed");
+      }
+    }
+    if (!GlobalSidecarManager().Start(target_id, &sc_err, 180000, sc_opts)) {
+      return AdminErr(502, "Bad Gateway",
+                      sc_err.empty() ? "failed restarting sidecar" : sc_err,
+                      "sidecar_start_failed");
+    }
+    const auto st = GlobalSidecarManager().GetStatus(target_id);
+    json::Value resp = json::Value::object();
+    resp["id"] = target_id;
+    resp["status"] = "reloaded";
+    resp["sidecar"] = true;
+    resp["backend"] = sc0->backend;
+    resp["pid"] = static_cast<std::int64_t>(st.pid);
+    resp["image_dtype"] = st.options.dtype;
+    resp["image_steps"] = static_cast<std::size_t>(st.options.steps);
+    resp["image_size"] = st.options.default_size;
+    resp["image_cpu_offload"] = st.options.cpu_offload;
+    resp["load_ms"] = NowSteadyMs() >= t_start ? NowSteadyMs() - t_start : 0;
+    return AdminOk(std::move(resp));
+  }
+
+  std::lock_guard serialize(load_mutex_);
+  std::optional<ModelRegistry::Info> old_info;
+  for (const auto& info : registry_->List()) {
+    if (info.id == target_id) {
+      old_info = info;
+      break;
+    }
+  }
+  if (!old_info.has_value())
+    return AdminErr(404, "Not Found", "model '" + target_id + "' is not loaded",
+                    "not_loaded");
+
+  AdminLoadRequest request;
+  request.id = body.member_str("id", target_id);
+  if (request.id.empty()) request.id = target_id;
+  if (request.id != target_id && registry_->HasName(request.id)) {
+    return AdminErr(409, "Conflict",
+                    "target id '" + request.id + "' is already in use",
+                    "id_conflict");
+  }
+  request.path = body.member_str("path", old_info->path);
+  if (request.path.empty())
+    return AdminErr(400, "Bad Request", "'path' is required", "missing_path");
+
+  if (const auto* aliases = body.find("aliases");
+      aliases != nullptr && aliases->is_array()) {
+    for (const auto& item : aliases->items()) {
+      if (item.is_string() && !item.str().empty())
+        request.aliases.push_back(item.str());
+    }
+  } else if (body.find("aliases") == nullptr) {
+    for (const auto& n : old_info->names) {
+      if (n != old_info->id) request.aliases.push_back(n);
+    }
+  }
+
+  request.max_context = static_cast<std::uint32_t>(body.member_size(
+      "max_context",
+      body.member_size("context_length", old_info->max_context)));
+  request.session_count = body.member_size(
+      "session_count",
+      body.member_size("sessions", std::max<std::size_t>(1, old_info->total_sessions)));
+  request.kv_cache_quant = body.member_str(
+      "kv_cache_quant",
+      body.member_str("kv_quant", old_info->config.kv_cache_quant));
+  request.kv_cache_quant_supplied = true;
+  request.device = body.member_str(
+      "device", old_info->backend.empty() ? "gpu" : old_info->backend);
+  if (request.device != "gpu" && request.device != "npu") {
+    return AdminErr(400, "Bad Request", "device must be 'gpu' or 'npu'",
+                    "invalid_device");
+  }
+  request.npu_quant = body.member_str("npu_quant", old_info->config.npu_quant);
+  request.vision_model_path = body.member_str(
+      "vision_model_path",
+      body.member_str("mmproj_path", old_info->config.vision_model_path));
+  request.enable_yarn =
+      body.find("enable_yarn") != nullptr
+          ? body.find("enable_yarn")->as_bool(false)
+          : old_info->config.enable_yarn;
+  request.speculative = body.member_str(
+      "speculative", old_info->config.speculative.empty()
+                         ? "off"
+                         : old_info->config.speculative);
+  request.draft_model_path =
+      body.member_str("draft_model_path", old_info->config.draft_model_path);
+  request.max_draft_tokens = body.member_size("max_draft_tokens", 0);
+  request.enable_disk_cache =
+      body.find("enable_disk_cache") != nullptr
+          ? body.find("enable_disk_cache")->as_bool(false)
+          : old_info->config.enable_disk_cache;
+
+  const bool was_default = old_info->is_default;
+  const bool set_default =
+      was_default || (body.find("set_default") != nullptr &&
+                      body.find("set_default")->as_bool(false));
+  const bool allow_evict = body.find("allow_evict") == nullptr ||
+                           body.find("allow_evict")->as_bool(true);
+
+  AdminLoadRequest rollback_req;
+  rollback_req.id = old_info->id;
+  for (const auto& n : old_info->names) {
+    if (n != old_info->id) rollback_req.aliases.push_back(n);
+  }
+  rollback_req.path = old_info->path;
+  rollback_req.max_context = old_info->max_context;
+  rollback_req.session_count = std::max<std::size_t>(1, old_info->total_sessions);
+  rollback_req.kv_cache_quant = old_info->config.kv_cache_quant;
+  rollback_req.kv_cache_quant_supplied = true;
+  rollback_req.vision_model_path = old_info->config.vision_model_path;
+  rollback_req.enable_yarn = old_info->config.enable_yarn;
+  rollback_req.speculative = old_info->config.speculative;
+  rollback_req.draft_model_path = old_info->config.draft_model_path;
+  rollback_req.enable_disk_cache = old_info->config.enable_disk_cache;
+  rollback_req.device = old_info->config.device.empty() ? old_info->backend
+                                                      : old_info->config.device;
+  rollback_req.npu_quant = old_info->config.npu_quant;
+
+  {
+    std::lock_guard lock(loading_state_mutex_);
+    loading_id_ = request.id;
+    loading_path_ = request.path;
+    loading_started_ms_ = NowSteadyMs();
+  }
+  struct ClearReloadGuard {
+    ModelAdminService* self;
+    ~ClearReloadGuard() {
+      std::lock_guard lock(self->loading_state_mutex_);
+      self->loading_id_.clear();
+      self->loading_path_.clear();
+      self->loading_started_ms_ = 0;
+    }
+  } clear_guard{this};
+
+  std::string rm_err;
+  if (!registry_->Remove(target_id, &rm_err))
+    return AdminErr(409, "Conflict", rm_err, "eject_failed");
+#if defined(__GLIBC__)
+  ::malloc_trim(0);
+#endif
+
+  auto try_rollback = [&](const std::string& reason) -> HttpResponse {
+    std::string rb_err;
+    auto rb_backend = loader_(rollback_req, &rb_err);
+    if (rb_backend != nullptr) {
+      std::string add_err;
+      if (registry_->Add(rollback_req.id, rollback_req.aliases,
+                         std::move(rb_backend), &add_err, old_info->config)) {
+        if (was_default) {
+          std::string def_err;
+          (void)registry_->SetDefault(rollback_req.id, &def_err);
+        }
+        return AdminErr(
+            500, "Internal Server Error",
+            reason + " (restored previous configuration for '" + rollback_req.id + "')",
+            "reload_rolled_back");
+      }
+    }
+    return AdminErr(500, "Internal Server Error",
+                    reason + " (rollback also failed: " + rb_err + ")",
+                    "reload_failed");
+  };
+
+  json::Value evicted = json::Value::array();
+  const std::size_t needed = EstimateResidentBytes(request.path);
+  if (probe_ && needed > 0) {
+    auto free_bytes = probe_();
+    if (free_bytes.has_value() && *free_bytes < needed) {
+      if (!allow_evict) {
+        return try_rollback("insufficient free device memory for '" + request.id +
+                            "': need ~" + std::to_string(needed >> 20) +
+                            " MiB, have ~" + std::to_string(*free_bytes >> 20) +
+                            " MiB");
+      }
+      for (const auto& victim : registry_->LruCandidates()) {
+        std::string v_err;
+        if (!registry_->Remove(victim, &v_err)) continue;
+        evicted.push_back(victim);
+        free_bytes = probe_();
+        if (!free_bytes.has_value() || *free_bytes >= needed) break;
+      }
+      if (free_bytes.has_value() && *free_bytes < needed) {
+        return try_rollback("insufficient free device memory for '" +
+                            request.id + "' after LRU eviction");
+      }
+    }
+  }
+
+  const std::uint64_t t_load_start = NowSteadyMs();
+  std::string load_err;
+  auto backend = loader_(request, &load_err);
+  if (backend == nullptr) {
+    return try_rollback(load_err.empty() ? "reload failed" : load_err);
+  }
+  LoadedModelConfig reg_cfg;
+  reg_cfg.kv_cache_quant = request.kv_cache_quant;
+  reg_cfg.speculative = request.speculative;
+  reg_cfg.draft_model_path = request.draft_model_path;
+  reg_cfg.vision_model_path = request.vision_model_path;
+  reg_cfg.enable_yarn = request.enable_yarn;
+  reg_cfg.enable_disk_cache = request.enable_disk_cache;
+  reg_cfg.device = request.device;
+  reg_cfg.npu_quant = request.npu_quant;
+  std::string add_err;
+  if (!registry_->Add(request.id, request.aliases, std::move(backend),
+                      &add_err, std::move(reg_cfg))) {
+    return try_rollback(add_err);
+  }
+  if (set_default) {
+    std::string def_err;
+    (void)registry_->SetDefault(request.id, &def_err);
+  }
+  const std::uint64_t load_ms = NowSteadyMs() - t_load_start;
+
+  json::Value resp = json::Value::object();
+  resp["id"] = request.id;
+  resp["target_id"] = target_id;
+  resp["path"] = request.path;
+  resp["backend"] = request.device;
+  resp["status"] = "reloaded";
+  resp["is_default"] = set_default;
+  resp["load_ms"] = static_cast<std::size_t>(load_ms);
+  resp["estimated_resident_mib"] = needed >> 20;
+  if (!evicted.empty()) resp["evicted"] = std::move(evicted);
+  return AdminOk(std::move(resp));
+}
+
+HttpResponse ModelAdminService::HandleDiskCacheList(const HttpRequest&) {
+  bool live = false;
+  DiskCacheSnapshot snap;
+  if (auto live_snap = registry_->InspectDiskCache()) {
+    live = true;
+    snap = std::move(*live_snap);
+  } else {
+    snap = admin_ops::ListDiskCacheOffline(
+        admin_ops::GetConfiguredCacheDiskDir(),
+        admin_ops::GetConfiguredCacheDiskBytes());
+  }
+
+  std::uint64_t total_chunk_refs_bytes = 0;
+  std::uint64_t total_private_bytes = 0;
+  std::uint64_t total_manifest_bytes = 0;
+  std::size_t compat_count = 0;
+  std::size_t incompat_count = 0;
+
+  json::Value entries = json::Value::array();
+  for (const auto& e : snap.entries) {
+    total_chunk_refs_bytes += e.chunk_bytes;
+    total_private_bytes += e.private_bytes;
+    total_manifest_bytes += e.manifest_bytes;
+    if (e.compatible) ++compat_count;
+    else ++incompat_count;
+
+    json::Value row = json::Value::object();
+    row["checkpoint_id"] = static_cast<std::size_t>(e.checkpoint_id);
+    row["lineage_id"] = static_cast<std::size_t>(e.lineage_id);
+    row["manifest_file"] = e.manifest_file;
+    row["compatibility_hex"] = e.compatibility_hex;
+    row["token_count"] = e.token_count;
+    row["chunk_count"] = e.chunk_count;
+    row["chunk_bytes"] = static_cast<std::size_t>(e.chunk_bytes);
+    row["private_bytes"] = static_cast<std::size_t>(e.private_bytes);
+    row["manifest_bytes"] = static_cast<std::size_t>(e.manifest_bytes);
+    row["total_referenced_bytes"] = static_cast<std::size_t>(
+        e.chunk_bytes + e.private_bytes + e.manifest_bytes);
+    row["mtime_epoch"] = static_cast<std::size_t>(
+        e.mtime_epoch > 0 ? e.mtime_epoch : 0);
+    row["purpose"] = e.purpose;
+    row["compatible"] = e.compatible;
+    row["invalid"] = e.invalid;
+    entries.push_back(std::move(row));
+  }
+
+  json::Value resp = json::Value::object();
+  resp["enabled"] = snap.enabled;
+  resp["live"] = live;
+  resp["directory"] = snap.directory;
+  resp["capacity_bytes"] = static_cast<std::size_t>(snap.capacity_bytes);
+  resp["managed_bytes"] = static_cast<std::size_t>(snap.managed_bytes);
+  resp["active_compatibility"] = snap.active_compatibility;
+  resp["checkpoint_count"] = snap.entries.size();
+  resp["compatible_count"] = compat_count;
+  resp["incompatible_count"] = incompat_count;
+  resp["sum_private_bytes"] = static_cast<std::size_t>(total_private_bytes);
+  resp["sum_manifest_bytes"] = static_cast<std::size_t>(total_manifest_bytes);
+  resp["sum_chunk_referenced_bytes"] =
+      static_cast<std::size_t>(total_chunk_refs_bytes);
+  resp["entries"] = std::move(entries);
+  return AdminOk(std::move(resp));
+}
+
+HttpResponse ModelAdminService::HandleDiskCacheDelete(const HttpRequest& req) {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return AdminErr(400, "Bad Request", e.what(), "parse_error");
+  }
+  if (!body.is_object())
+    return AdminErr(400, "Bad Request", "request body must be an object",
+                    "invalid_request");
+
+  std::vector<std::uint64_t> ids;
+  if (const auto* arr = body.find("ids"); arr != nullptr && arr->is_array()) {
+    for (const auto& item : arr->items()) {
+      if (item.is_number()) {
+        ids.push_back(static_cast<std::uint64_t>(item.as_size(0)));
+      } else if (item.is_string()) {
+        try {
+          ids.push_back(std::stoull(item.str()));
+        } catch (...) {
+        }
+      }
+    }
+  }
+  const bool delete_all = body.find("delete_all") != nullptr &&
+                          body.find("delete_all")->as_bool(false);
+  const bool delete_incompatible =
+      body.find("delete_incompatible") != nullptr &&
+      body.find("delete_incompatible")->as_bool(false);
+
+  if (!delete_all && !delete_incompatible && ids.empty()) {
+    return AdminErr(400, "Bad Request",
+                    "Specify ids, delete_incompatible=true, or delete_all=true",
+                    "missing_targets");
+  }
+
+  DiskCacheDeleteResult res;
+  bool live = false;
+  if (auto live_res =
+          registry_->RetireDiskCache(ids, delete_all, delete_incompatible)) {
+    live = true;
+    res = *live_res;
+  } else {
+    res = admin_ops::DeleteDiskCacheOffline(
+        admin_ops::GetConfiguredCacheDiskDir(), ids, delete_all,
+        delete_incompatible, "");
+  }
+
+  json::Value resp = json::Value::object();
+  resp["live"] = live;
+  resp["deleted"] = res.deleted;
+  resp["skipped_pinned"] = res.skipped_pinned;
+  resp["skipped_busy"] = res.skipped_busy;
+  resp["not_found"] = res.not_found;
+  resp["remaining_managed_bytes"] =
+      static_cast<std::size_t>(res.remaining_managed_bytes);
   return AdminOk(std::move(resp));
 }
 

@@ -29,6 +29,7 @@
 
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/sampling_options.hpp"
+#include "src/cli/serve/admin_ops.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/model_admin_api.hpp"
@@ -1185,6 +1186,7 @@ int RunServe(std::span<const char* const> args) {
     bool enable_yarn = false;
     bool multi_model = false;
     std::string trace_path;
+    std::filesystem::path config_file;
 
     mbufo::cli::ArgParser llm_parser(
         "mbufo serve llm",
@@ -1338,6 +1340,10 @@ int RunServe(std::span<const char* const> args) {
                        "Logging", &log_progress);
     llm_parser.AddOption("", "--trace", "PATH", kTraceHelp, "Logging",
                          &trace_path);
+    llm_parser.AddOption(
+        "", "--config", "PATH",
+        "Persistent server_config.json path (default: $MBUFO_CONFIG_FILE)",
+        "Server", &config_file);
 
     add_server_options(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
@@ -1363,6 +1369,101 @@ int RunServe(std::span<const char* const> args) {
     }
     if (!prepare_server_options()) {
       return 2;
+    }
+
+    if (config_file.empty()) {
+      if (const char* env_cfg = std::getenv("MBUFO_CONFIG_FILE");
+          env_cfg != nullptr && *env_cfg != '\0') {
+        config_file = env_cfg;
+      }
+    }
+
+    std::string startup_device = "gpu";
+    std::string startup_npu_quant;
+    bool startup_kv_overridden = false;
+    std::string startup_kv_raw = kv_cache_quant;
+    bool startup_enable_disk_cache = !cache_disk_directory.empty();
+
+    if (!config_file.empty()) {
+      server::admin_ops::ServerConfig seed_cfg;
+      seed_cfg.port = port;
+      seed_cfg.default_model.configured = !model.empty();
+      if (!served_model_names.empty()) {
+        seed_cfg.default_model.id = served_model_names.front();
+        seed_cfg.default_model.aliases.assign(
+            served_model_names.begin() + 1, served_model_names.end());
+      } else if (!model.empty()) {
+        seed_cfg.default_model.id = std::filesystem::path(model).stem().string();
+      }
+      seed_cfg.default_model.path = model;
+      seed_cfg.default_model.max_context = max_context;
+      seed_cfg.default_model.session_count = session_count;
+      seed_cfg.default_model.kv_cache_quant = kv_cache_quant;
+      seed_cfg.default_model.device = "gpu";
+      seed_cfg.default_model.speculative =
+          speculative_backend.empty() ? "off" : speculative_backend;
+      seed_cfg.default_model.draft_model_path =
+          seed_cfg.default_model.speculative == "dspark"
+              ? dspark_model_path
+          : seed_cfg.default_model.speculative == "mtp"
+              ? mtp_model_path
+              : dflash_model_path;
+      seed_cfg.default_model.vision_model_path = vision_model_path;
+      seed_cfg.default_model.enable_yarn = enable_yarn;
+      seed_cfg.default_model.enable_disk_cache = !cache_disk_directory.empty();
+      (void)server::admin_ops::SeedServerConfigIfMissing(config_file, seed_cfg);
+
+      server::admin_ops::ServerConfig loaded_cfg;
+      if (server::admin_ops::LoadServerConfigFile(config_file, &loaded_cfg)) {
+        if (loaded_cfg.port >= 1 && loaded_cfg.port <= 65535) {
+          port = loaded_cfg.port;
+        }
+        if (loaded_cfg.default_model.configured &&
+            !loaded_cfg.default_model.path.empty()) {
+          std::error_code m_ec;
+          if (std::filesystem::exists(loaded_cfg.default_model.path, m_ec)) {
+            const auto& dm = loaded_cfg.default_model;
+            model = dm.path;
+            served_model_names.clear();
+            if (!dm.id.empty()) served_model_names.push_back(dm.id);
+            for (const auto& a : dm.aliases) {
+              if (!a.empty() && a != dm.id) served_model_names.push_back(a);
+            }
+            max_context = dm.max_context;
+            session_count = std::max<std::size_t>(1, dm.session_count);
+            if (!dm.kv_cache_quant.empty()) {
+              kv_cache_quant = dm.kv_cache_quant;
+              startup_kv_raw = dm.kv_cache_quant;
+              startup_kv_overridden = true;
+            }
+            startup_device = dm.device.empty() ? "gpu" : dm.device;
+            startup_npu_quant = dm.npu_quant;
+            speculative_backend =
+                dm.speculative.empty() ? "off" : dm.speculative;
+            if (speculative_backend == "mtp") {
+              mtp_model_path = dm.draft_model_path;
+            } else if (speculative_backend == "dflash2") {
+              dflash_model_path = dm.draft_model_path;
+            } else if (speculative_backend == "dspark") {
+              dspark_model_path = dm.draft_model_path;
+            }
+            vision_model_path = dm.vision_model_path;
+            enable_yarn = dm.enable_yarn;
+            startup_enable_disk_cache = dm.enable_disk_cache;
+            server::Logger::Info(
+                "config", "event=startup_override config=" +
+                              config_file.string() + " port=" +
+                              std::to_string(port) + " model=" + model +
+                              " device=" + startup_device);
+          } else {
+            server::Logger::Warn(
+                "config",
+                "event=default_model_missing path=" +
+                    loaded_cfg.default_model.path +
+                    " fallback=" + model);
+          }
+        }
+      }
     }
     // Progress lines are INFO-tier. Under a quieter threshold `--log-progress`
     // would be accepted and then silently discarded, so reject the combination
@@ -1467,7 +1568,8 @@ int RunServe(std::span<const char* const> args) {
       ::setenv("MBUFO_KV_Q4", key4 ? "1" : "0", 1);
       ::setenv("MBUFO_KV_V4", val4 ? "1" : "0", 1);
       kv_cache_quant = "q8";
-    } else if (llm_parser.WasSupplied("--kv-quant") &&
+    } else if ((llm_parser.WasSupplied("--kv-quant") ||
+                startup_kv_overridden) &&
                kv_cache_quant == "q8") {
       // An explicit q8 wins over any inherited 4-bit grid env vars.
       ::setenv("MBUFO_KV_Q4", "0", 1);
@@ -1532,7 +1634,9 @@ int RunServe(std::span<const char* const> args) {
           vision_model_path,
           server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes},
           kv_cache_quant, enable_yarn,
-          llm_parser.WasSupplied("--kv-quant"));
+          llm_parser.WasSupplied("--kv-quant") ||
+              (startup_kv_overridden && startup_kv_raw == "q8"),
+          startup_device, startup_npu_quant);
       loading.stop();
       if (!load_ok) {
         std::cerr << "Error loading model '" << model << "': " << err << "\n";
@@ -1604,7 +1708,19 @@ int RunServe(std::span<const char* const> args) {
         primary = ids.empty() ? backend->model_id() : ids.front();
         std::vector<std::string> aliases(ids.begin() + (ids.empty() ? 0 : 1),
                                          ids.end());
-        if (!registry->Add(primary, std::move(aliases), std::move(backend), &reg_err)) {
+        server::LoadedModelConfig startup_loaded_cfg;
+        startup_loaded_cfg.kv_cache_quant = startup_kv_raw;
+        startup_loaded_cfg.speculative =
+            speculative_backend.empty() ? "off" : speculative_backend;
+        startup_loaded_cfg.draft_model_path =
+            speculative_config.draft_model_path;
+        startup_loaded_cfg.vision_model_path = vision_model_path;
+        startup_loaded_cfg.enable_yarn = enable_yarn;
+        startup_loaded_cfg.enable_disk_cache = startup_enable_disk_cache;
+        startup_loaded_cfg.device = startup_device;
+        startup_loaded_cfg.npu_quant = startup_npu_quant;
+        if (!registry->Add(primary, std::move(aliases), std::move(backend),
+                           &reg_err, std::move(startup_loaded_cfg))) {
           std::cerr << "Error: registry add failed: " << reg_err << "\n";
           return 1;
         }
@@ -1739,6 +1855,9 @@ int RunServe(std::span<const char* const> args) {
         }
         return best;
       };
+      server::admin_ops::InitServerRuntime(
+          config_file, port, cache_disk_directory, cache_disk_bytes,
+          !api_key.empty());
       admin =
           std::make_shared<server::ModelAdminService>(registry, loader, probe);
       server::Logger::Info(

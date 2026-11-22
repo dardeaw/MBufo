@@ -167,6 +167,14 @@ SidecarProxyConfig SidecarProxyConfig::FromEnvironment(bool default_enabled) {
       u != nullptr && *u != '\0') {
     cfg.tts_base_url = u;
   }
+  if (const char* u = std::getenv("MBUFO_FLUX2_IMAGE_UPSTREAM");
+      u != nullptr && *u != '\0') {
+    cfg.flux2_image_base_url = u;
+  }
+  if (const char* u = std::getenv("MBUFO_ZIMAGE_UPSTREAM");
+      u != nullptr && *u != '\0') {
+    cfg.zimage_base_url = u;
+  }
   return cfg;
 }
 
@@ -394,6 +402,48 @@ std::string AsrModelDir() {
   return "/mnt/nvme-data/mbufo-models/qwen3-asr-1.7b";
 }
 
+std::string ResolveRepoDir() {
+  if (const char* e = std::getenv("MBUFO_REPO_DIR");
+      e != nullptr && *e != '\0') {
+    return e;
+  }
+  std::error_code ec;
+  if (std::filesystem::exists("/home/dardeaw/git/gufo-final2", ec)) {
+    return "/home/dardeaw/git/gufo-final2";
+  }
+  return std::filesystem::current_path(ec).string();
+}
+
+std::string ResolveModelsRoot() {
+  if (const char* e = std::getenv("MBUFO_MODELS_DIR");
+      e != nullptr && *e != '\0') {
+    return e;
+  }
+  std::error_code ec;
+  if (std::filesystem::exists("/mnt/nvme-data/mbufo-models", ec)) {
+    return "/mnt/nvme-data/mbufo-models";
+  }
+  return "models";
+}
+
+std::string ResolveImagePython() {
+  if (const char* e = std::getenv("MBUFO_IMAGE_PYTHON");
+      e != nullptr && *e != '\0' && ::access(e, X_OK) == 0) {
+    return e;
+  }
+  if (::access("/usr/bin/python3", X_OK) == 0) return "/usr/bin/python3";
+  return "python3";
+}
+
+SidecarStartOptions NormalizeSidecarOptions(const SidecarLaunchSpec& spec,
+                                            SidecarStartOptions opts) {
+  if (opts.dtype.empty()) opts.dtype = "bf16";
+  if (opts.steps <= 0) opts.steps = spec.default_steps > 0 ? spec.default_steps : 4;
+  if (opts.default_size.empty()) opts.default_size = "1024x1024";
+  if (opts.cpu_offload.empty()) opts.cpu_offload = "none";
+  return opts;
+}
+
 std::string SidecarLogPath(const std::string& id) {
   const char* d = std::getenv("MBUFO_SIDECAR_LOG_DIR");
   const std::string dir =
@@ -405,9 +455,10 @@ std::string SidecarLogPath(const std::string& id) {
 
 // Build argv (no shell anywhere). Returns false when misconfigured.
 bool BuildArgv(const SidecarLaunchSpec& spec, std::vector<std::string>* out,
-               std::string* error) {
+               std::string* error, const SidecarStartOptions& raw_opts = {}) {
   out->clear();
   const std::string port = std::to_string(spec.port);
+  const auto opts = NormalizeSidecarOptions(spec, raw_opts);
   switch (spec.kind) {
     case SidecarLaunchSpec::Kind::kFlmDecision:
       *out = {ResolveFlmBinary(), "serve", spec.flm_model, "--decision",
@@ -425,6 +476,43 @@ bool BuildArgv(const SidecarLaunchSpec& spec, std::vector<std::string>* out,
       *out = {SelfExePath(), "serve", "asr", "--model", AsrModelDir(),
               "--port", port};
       break;
+    case SidecarLaunchSpec::Kind::kPyImageSidecar: {
+      const std::filesystem::path script =
+          std::filesystem::path(ResolveRepoDir()) /
+          "scripts/mbufo_image_sidecar.py";
+      const std::filesystem::path model_dir =
+          std::filesystem::path(ResolveModelsRoot()) / spec.flm_model;
+      std::error_code ec;
+      if (!std::filesystem::exists(script, ec)) {
+        if (error != nullptr)
+          *error = "missing image sidecar script: " + script.string();
+        return false;
+      }
+      if (!std::filesystem::is_directory(model_dir, ec)) {
+        if (error != nullptr)
+          *error = "missing image model directory: " + model_dir.string();
+        return false;
+      }
+      *out = {ResolveImagePython(),
+              script.string(),
+              "--model-id",
+              spec.id,
+              "--model-dir",
+              model_dir.string(),
+              "--host",
+              "127.0.0.1",
+              "--port",
+              port,
+              "--dtype",
+              opts.dtype,
+              "--steps",
+              std::to_string(opts.steps),
+              "--default-size",
+              opts.default_size,
+              "--cpu-offload",
+              opts.cpu_offload};
+      break;
+    }
   }
   if (out->empty() || (*out)[0].empty()) {
     if (error != nullptr) *error = "cannot resolve launcher binary";
@@ -461,6 +549,14 @@ const std::vector<SidecarLaunchSpec>& KnownSidecars() noexcept {
       {"qwen3-asr-1.7b", "Qwen3-ASR-1.7B (gufo sidecar)", "gpu", "asr", "AUDIO", 8767,
        "http://127.0.0.1:8767", "/health", "/v1/audio/transcriptions", 4500,
        SidecarLaunchSpec::Kind::kGufoAsr, "", ""},
+      {"flux2-klein-4b", "FLUX.2-klein-4B (ROCm GPU diffusers)", "gpu",
+       "image_generation", "IMAGE", 8768, "http://127.0.0.1:8768", "/health",
+       "/v1/images/generations", 15500,
+       SidecarLaunchSpec::Kind::kPyImageSidecar, "flux2-klein-4b", "", 4},
+      {"z-image-turbo", "Z-Image-Turbo (ROCm GPU diffusers)", "gpu",
+       "image_generation", "IMAGE", 8769, "http://127.0.0.1:8769", "/health",
+       "/v1/images/generations", 18000,
+       SidecarLaunchSpec::Kind::kPyImageSidecar, "z-image-turbo", "", 9},
   };
   return kSpecs;
 }
@@ -511,6 +607,7 @@ SidecarManager::Status SidecarManager::GetStatus(const std::string& id) {
   Status st;
   const SidecarLaunchSpec* spec = FindSidecarSpec(id);
   if (spec == nullptr) return st;
+  st.id = spec->id;
   st.base_url = spec->base_url;
   std::lock_guard<std::mutex> lock(mu_);
   auto it = table_.find(id);
@@ -518,6 +615,9 @@ SidecarManager::Status SidecarManager::GetStatus(const std::string& id) {
     st.running = true;
     st.external = it->second.external;
     st.pid = it->second.pid;
+    st.options = it->second.options;
+  } else if (spec != nullptr) {
+    st.options = NormalizeSidecarOptions(*spec, {});
   }
   return st;
 }
@@ -532,7 +632,7 @@ std::vector<SidecarManager::Status> SidecarManager::ListRunning() {
 }
 
 bool SidecarManager::Start(const std::string& id, std::string* error,
-                           long timeout_ms) {
+                           long timeout_ms, const SidecarStartOptions& options) {
   const SidecarLaunchSpec* spec = FindSidecarSpec(id);
   if (spec == nullptr) {
     if (error != nullptr) *error = "unknown sidecar id: " + id;
@@ -566,14 +666,20 @@ bool SidecarManager::Start(const std::string& id, std::string* error,
       case SidecarLaunchSpec::Kind::kGufoAsr:
         needles = {"serve", "asr", "--port", std::to_string(spec->port)};
         break;
+      case SidecarLaunchSpec::Kind::kPyImageSidecar:
+        needles = {"mbufo_image_sidecar.py", "--port",
+                   std::to_string(spec->port)};
+        break;
     }
     const long pid = FindPidByArgv(needles);
     std::lock_guard<std::mutex> lock(mu_);
-    table_[id] = Entry{pid, true, spec->base_url};
+    table_[id] = Entry{pid, true, spec->base_url,
+                       NormalizeSidecarOptions(*spec, options)};
     return true;
   }
+  const auto norm_opts = NormalizeSidecarOptions(*spec, options);
   std::vector<std::string> args;
-  if (!BuildArgv(*spec, &args, error)) return false;
+  if (!BuildArgv(*spec, &args, error, norm_opts)) return false;
   std::vector<char*> argv;
   argv.reserve(args.size() + 1);
   for (auto& a : args) argv.push_back(a.data());
@@ -649,7 +755,7 @@ bool SidecarManager::Start(const std::string& id, std::string* error,
     return false;
   }
   std::lock_guard<std::mutex> lock(mu_);
-  table_[id] = Entry{static_cast<long>(child), false, spec->base_url};
+  table_[id] = Entry{static_cast<long>(child), false, spec->base_url, norm_opts};
   return true;
 }
 

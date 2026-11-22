@@ -1805,6 +1805,7 @@ std::shared_ptr<const DiskDescription> DiskStore::Describe(CheckpointId id) {
         ResourceCategory::kMetadata,
         Add(entry.metadata_.Info().bytes, sizeof(DiskDescription) + 64));
     auto description = std::make_shared<DiskDescription>();
+    description->file_ = entry.file_;
     description->manifest_ = entry.manifest_;
     description->store_ = this;
     description->epoch_ = entry.epoch_;

@@ -7,8 +7,11 @@
 
 #include "src/cache/checkpoint.hpp"
 #include "src/cache/streaming.hpp"
+#include <vector>
+
 #include "src/cli/serve/component_cache_metrics.hpp"
 #include "src/cli/serve/continuation_cache.hpp"
+#include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
 
 namespace mbufo::server {
@@ -121,6 +124,10 @@ public:
       std::span<const ContinuationToken>, const TextPromptContext*,
       bool common = false) const;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  [[nodiscard]] std::optional<DiskCacheSnapshot> ListDiskCache() const;
+  [[nodiscard]] DiskCacheDeleteResult RetireDiskCache(
+      const std::vector<std::uint64_t>& ids, bool delete_all,
+      bool delete_incompatible);
 
 private:
   std::unique_ptr<Impl> impl_;

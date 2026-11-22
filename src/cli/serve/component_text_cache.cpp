@@ -204,6 +204,7 @@ struct ComponentTextCache::Impl {
       pending;
   std::array<std::shared_ptr<DurableCapture>, 2 * kPersistenceDepth>
       pending_durable;
+  std::filesystem::path disk_directory;
   std::size_t disk_capacity{}, disk_step{};
   // The cache's own RAM budget. The ledger limit adds what the slots pinned.
   std::size_t budget{};
@@ -249,6 +250,7 @@ struct ComponentTextCache::Impl {
                          std::to_string(ledger.Limits().staging_bytes));
       // Take directory ownership before slots and backing commit, so a
       // second server fails without claiming its RAM budget first.
+      disk_directory = options->directory;
       disk = std::make_unique<cache::DiskStore>(ledger, options->directory,
                                                 options->capacity_bytes);
     }
@@ -1373,6 +1375,84 @@ std::size_t ComponentTextCache::CachedPrefixTokens(
   const cache::PrefixQuery query{impl_->identity, prompt, input};
   return common ? impl_->index.CommonPrefixTokens(query)
                 : impl_->index.CachedPrefixTokens(query);
+}
+
+std::optional<DiskCacheSnapshot> ComponentTextCache::ListDiskCache() const {
+  const std::lock_guard lock(impl_->mutex);
+  if (!impl_->disk || !impl_->catalog)
+    return std::nullopt;
+  constexpr char kHex[] = "0123456789abcdef";
+  DiskCacheSnapshot snap;
+  snap.enabled = true;
+  snap.directory = impl_->disk_directory.string();
+  snap.capacity_bytes = impl_->disk_capacity;
+  snap.managed_bytes = impl_->disk->Stats().managed_bytes;
+  snap.active_compatibility.reserve(impl_->digest.size() * 2);
+  for (std::uint8_t b : impl_->digest) {
+    snap.active_compatibility.push_back(kHex[b >> 4]);
+    snap.active_compatibility.push_back(kHex[b & 15]);
+  }
+  auto items = impl_->catalog->ListEntries(impl_->disk_directory, impl_->digest);
+  snap.entries.reserve(items.size());
+  for (auto& e : items) {
+    DiskCacheEntryInfo row;
+    row.checkpoint_id = e.checkpoint_id;
+    row.lineage_id = e.lineage_id;
+    row.manifest_file = std::move(e.manifest_file);
+    row.compatibility_hex = std::move(e.compatibility_hex);
+    row.token_count = e.token_count;
+    row.chunk_count = e.chunk_count;
+    row.chunk_bytes = e.chunk_bytes;
+    row.private_bytes = e.private_bytes;
+    row.manifest_bytes = e.manifest_bytes;
+    row.mtime_epoch = e.mtime_epoch;
+    row.purpose = std::move(e.purpose);
+    row.compatible = e.compatible;
+    row.invalid = e.invalid;
+    snap.entries.push_back(std::move(row));
+  }
+  return snap;
+}
+
+DiskCacheDeleteResult ComponentTextCache::RetireDiskCache(
+    const std::vector<std::uint64_t>& ids, bool delete_all,
+    bool delete_incompatible) {
+  const std::lock_guard lock(impl_->mutex);
+  DiskCacheDeleteResult res;
+  if (!impl_->disk || !impl_->catalog)
+    return res;
+
+  std::vector<std::uint64_t> targets;
+  if (delete_all || delete_incompatible) {
+    const auto entries =
+        impl_->catalog->ListEntries(impl_->disk_directory, impl_->digest);
+    for (const auto& e : entries) {
+      if (delete_all || (delete_incompatible && !e.compatible))
+        targets.push_back(e.checkpoint_id);
+    }
+  } else {
+    targets = ids;
+  }
+
+  for (const auto id : targets) {
+    const auto st = impl_->catalog->Retire(cache::CheckpointId{id});
+    switch (st) {
+      case cache::DiskRetireResult::kRetired:
+        ++res.deleted;
+        break;
+      case cache::DiskRetireResult::kPinned:
+        ++res.skipped_pinned;
+        break;
+      case cache::DiskRetireResult::kBusy:
+        ++res.skipped_busy;
+        break;
+      case cache::DiskRetireResult::kMissing:
+        ++res.not_found;
+        break;
+    }
+  }
+  res.remaining_managed_bytes = impl_->disk->Stats().managed_bytes;
+  return res;
 }
 ComponentTextCache::Lease::Lease(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}

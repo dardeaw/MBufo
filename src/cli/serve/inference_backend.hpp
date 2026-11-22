@@ -212,6 +212,11 @@ public:
   [[nodiscard]] bool supports_images() const override;
   [[nodiscard]] std::string model_path() const override;
   [[nodiscard]] std::string device_target() const override;
+  [[nodiscard]] std::optional<DiskCacheSnapshot> disk_cache_snapshot()
+      const override;
+  DiskCacheDeleteResult retire_disk_cache(
+      const std::vector<std::uint64_t>& ids, bool delete_all,
+      bool delete_incompatible) override;
   [[nodiscard]] std::string build_info() const override;
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] std::uint32_t max_context() const override;

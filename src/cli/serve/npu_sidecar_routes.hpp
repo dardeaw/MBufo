@@ -43,5 +43,17 @@ namespace mbufo::server::npu {
 [[nodiscard]] inline constexpr std::string_view VoicesPath() noexcept {
   return "/v1/audio/voices";
 }
+[[nodiscard]] inline constexpr std::string_view Flux2ImageSidecarDefault() noexcept {
+  return "http://127.0.0.1:8768";
+}
+[[nodiscard]] inline constexpr std::string_view ZImageSidecarDefault() noexcept {
+  return "http://127.0.0.1:8769";
+}
+[[nodiscard]] inline constexpr std::string_view ImagesGenerationsPath() noexcept {
+  return "/v1/images/generations";
+}
+[[nodiscard]] inline constexpr std::string_view ImagesEditsPath() noexcept {
+  return "/v1/images/edits";
+}
 
 }  // namespace mbufo::server::npu

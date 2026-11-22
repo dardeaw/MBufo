@@ -2599,4 +2599,18 @@ std::size_t TextRunnerPool::CachedPrefixTokens(
                                           context->cache_prefixes);
 }
 
+std::optional<DiskCacheSnapshot> TextRunnerPool::ListDiskCache() const {
+  return impl_->component_cache ? impl_->component_cache->ListDiskCache()
+                                : std::nullopt;
+}
+
+DiskCacheDeleteResult TextRunnerPool::RetireDiskCache(
+    const std::vector<std::uint64_t>& ids, bool delete_all,
+    bool delete_incompatible) {
+  return impl_->component_cache
+             ? impl_->component_cache->RetireDiskCache(ids, delete_all,
+                                                       delete_incompatible)
+             : DiskCacheDeleteResult{};
+}
+
 }  // namespace mbufo::server

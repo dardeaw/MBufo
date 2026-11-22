@@ -7148,6 +7148,31 @@ std::string InferenceBackend::device_target() const {
 #endif
 }
 
+std::optional<DiskCacheSnapshot> InferenceBackend::disk_cache_snapshot() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state != nullptr && state->scheduler != nullptr)
+    return state->scheduler->ListDiskCache();
+#endif
+  return std::nullopt;
+}
+
+DiskCacheDeleteResult InferenceBackend::retire_disk_cache(
+    const std::vector<std::uint64_t>& ids, bool delete_all,
+    bool delete_incompatible) {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state != nullptr && state->scheduler != nullptr)
+    return state->scheduler->RetireDiskCache(ids, delete_all,
+                                             delete_incompatible);
+#else
+  (void)ids;
+  (void)delete_all;
+  (void)delete_incompatible;
+#endif
+  return {};
+}
+
 std::string InferenceBackend::build_info() const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();

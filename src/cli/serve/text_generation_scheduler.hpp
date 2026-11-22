@@ -132,6 +132,10 @@ public:
   [[nodiscard]] bool device_lost() const noexcept;
   /// One entry per session; admitted requests hold one until terminal.
   [[nodiscard]] std::vector<SessionState> SessionStates() const;
+  [[nodiscard]] std::optional<DiskCacheSnapshot> ListDiskCache() const;
+  [[nodiscard]] DiskCacheDeleteResult RetireDiskCache(
+      const std::vector<std::uint64_t>& ids, bool delete_all,
+      bool delete_incompatible);
   [[nodiscard]] std::size_t buffered_output_bytes() const noexcept;
   [[nodiscard]] std::size_t max_buffered_output_bytes() const noexcept;
 

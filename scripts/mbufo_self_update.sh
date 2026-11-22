@@ -52,9 +52,9 @@ trap 'on_err $LINENO' ERR
 echo "========================================"
 echo "[self-update] started at $STARTED_AT (pid=$SERVER_PID, repo=$REPO_DIR)"
 
-write_status "fetching" "Fetching latest main branch from GitHub (fork/main)..."
+write_status "fetching" "Fetching latest main branch and release tags from GitHub (fork/main)..."
 cd "$REPO_DIR"
-git fetch fork main
+git fetch fork main --tags
 TARGET_SHA="$(git rev-parse fork/main)"
 
 if ! git merge --ff-only fork/main; then
@@ -94,14 +94,25 @@ if kill -0 "$SERVER_PID" 2>/dev/null; then
   kill -TERM "$SERVER_PID" || true
 fi
 
+HEALTH_PORT=$(python3 - <<'PY' 2>/dev/null || echo 8741
+import json, os
+cfg = os.environ.get("MBUFO_CONFIG_FILE", "/home/dardeaw/.config/mbufo/server_config.json")
+try:
+    with open(cfg, "r", encoding="utf-8") as f:
+        p = int(json.load(f).get("port", 8741))
+    print(p if 1 <= p <= 65535 else 8741)
+except Exception:
+    print(8741)
+PY
+)
 for i in $(seq 1 90); do
-  if curl -sf http://127.0.0.1:8741/health >/dev/null 2>&1; then
+  if curl -sf "http://127.0.0.1:${HEALTH_PORT}/health" >/dev/null 2>&1; then
     write_status "completed" "Server updated to ${TARGET_SHA:0:8} and restarted cleanly."
-    echo "[self-update] completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "[self-update] completed at $(date -u +%Y-%m-%dT%H:%M:%SZ) port=${HEALTH_PORT}"
     exit 0
   fi
   sleep 2
 done
 
-write_status "failed" "Restart timed out waiting for :8741/health" "Health check timeout after restart"
+write_status "failed" "Restart timed out waiting for :${HEALTH_PORT}/health" "Health check timeout after restart"
 exit 1

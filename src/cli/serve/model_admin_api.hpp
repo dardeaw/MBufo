@@ -69,8 +69,11 @@ private:
   HttpResponse HandleList(const HttpRequest& req);
   HttpResponse HandleCatalog(const HttpRequest& req);
   HttpResponse HandleLoad(const HttpRequest& req);
+  HttpResponse HandleReload(const HttpRequest& req);
   HttpResponse HandleEject(const HttpRequest& req);
   HttpResponse HandleSetDefault(const HttpRequest& req);
+  HttpResponse HandleDiskCacheList(const HttpRequest& req);
+  HttpResponse HandleDiskCacheDelete(const HttpRequest& req);
 
   std::shared_ptr<ModelRegistry> registry_;
   ModelLoader loader_;

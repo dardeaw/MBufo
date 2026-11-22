@@ -722,6 +722,10 @@ public:
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(
       std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
       std::uint64_t checkpoint_id = 0) const;
+  [[nodiscard]] std::optional<DiskCacheSnapshot> ListDiskCache() const;
+  [[nodiscard]] DiskCacheDeleteResult RetireDiskCache(
+      const std::vector<std::uint64_t>& ids, bool delete_all,
+      bool delete_incompatible);
 
 private:
   struct Impl;

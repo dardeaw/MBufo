@@ -766,6 +766,117 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .settings-modal {
+      max-width: 880px;
+      width: min(880px, 96vw);
+    }
+    .tab-bar {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+    }
+    .tab-btn {
+      padding: 7px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: #0d1117;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      background: rgba(59,130,246,0.18);
+      border-color: rgba(59,130,246,0.55);
+      color: #93c5fd;
+    }
+    .tab-pane { display: none; flex-direction: column; gap: 12px; }
+    .tab-pane.active { display: flex; }
+    .settings-section {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .default-card-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 8px;
+      max-height: 240px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+    .default-card {
+      background: #090c10;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .default-card:hover { border-color: #475569; }
+    .default-card.selected {
+      border-color: var(--amber);
+      background: rgba(245, 158, 11, 0.08);
+    }
+    .cache-table-wrap {
+      max-height: 300px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #090c10;
+    }
+    .cache-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      font-family: var(--mono);
+    }
+    .cache-table th, .cache-table td {
+      padding: 7px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      text-align: left;
+      white-space: nowrap;
+    }
+    .cache-table th {
+      position: sticky;
+      top: 0;
+      background: #111827;
+      color: var(--muted);
+      z-index: 2;
+    }
+    .auth-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(6, 9, 14, 0.94);
+      backdrop-filter: blur(8px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+      padding: 16px;
+    }
+    .auth-overlay.open { display: flex; }
+    .auth-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      width: min(420px, 95vw);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.75);
+    }
+
     .toast {
       position: fixed;
       bottom: 20px;
@@ -847,12 +958,14 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       <div class="brand-logo">G</div>
       <div>
         <h1>MBufo Multi-Model Router & Control Plane</h1>
-        <div class="brand-sub">Unified Port :8741 · OpenAI /v1/chat/completions · Anthropic /v1/messages · Dynamic Hot-Load & LRU Eviction</div>
+        <div class="brand-sub">Unified Port :<span id="brand-port">8741</span> · OpenAI /v1/chat/completions · Anthropic /v1/messages · Dynamic Hot-Load & LRU Eviction</div>
       </div>
     </div>
     <div class="header-actions">
-      <span id="version-pill" class="badge" style="font-family:var(--mono);cursor:pointer;padding:5px 9px;" onclick="checkServerUpdate(true)" title="Click to check GitHub (dardeaw/MBufo) for updates">checking version...</span>
+      <span id="version-pill" class="badge" style="font-family:var(--mono);cursor:pointer;padding:5px 9px;" onclick="checkServerUpdate(true)" title="Click to check GitHub (dardeaw/MBufo) release tags for updates">checking version...</span>
       <span id="conn-pill" class="status-pill"><span class="status-dot"></span> Online (:8741)</span>
+      <button id="btn-settings" onclick="openSettingsModal()" title="Settings: Default Model, Router Port, Password Auth, Disk Cache">⚙ Settings</button>
+      <button id="btn-logout" style="display:none;" onclick="logoutAdmin()" title="Lock Web UI & Sign Out">🔒 Lock</button>
       <button class="btn-primary" id="btn-download-models" onclick="openDownloadModal()">⬇ Download Models</button>
       <button onclick="refreshAll(true)">↻ Refresh</button>
     </div>
@@ -864,7 +977,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
           <span id="update-phase-badge" class="badge badge-amber">UPDATE AVAILABLE</span>
-          <strong id="update-title" style="font-size:13px;">New commit available on GitHub (dardeaw/MBufo)</strong>
+          <strong id="update-title" style="font-size:13px;">New release tag available on GitHub (dardeaw/MBufo)</strong>
           <span id="update-detail" style="font-size:12px;color:var(--muted);font-family:var(--mono);"></span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
@@ -955,7 +1068,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
   <div class="modal-backdrop" id="load-modal">
     <div class="modal">
       <div style="display:flex;justify-content:space-between;align-items:center;">
-        <h3 style="font-size:16px;">Configure & Hot-Load Model into :8741</h3>
+        <h3 id="lm-title" style="font-size:16px;">Configure & Hot-Load Model into :8741</h3>
         <button class="btn-sm" onclick="closeLoadModal()">✕</button>
       </div>
       <div class="form-grid">
@@ -1033,6 +1146,40 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           <label class="field-label">Vision mmproj Sidecar Path (Auto-Selected)</label>
           <select id="lm-mmproj" style="width:100%;font-family:var(--mono);font-size:12px;" onchange="updateModalEstimate()"></select>
         </div>
+        <div class="form-full" id="lm-image-wrap" style="display:none;background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
+          <div style="font-size:12px;font-weight:600;color:#93c5fd;margin-bottom:8px;">🎨 Image Generation Sidecar Parameters (ROCm HIP / diffusers)</div>
+          <div class="form-grid">
+            <div>
+              <label class="field-label">Precision (dtype)</label>
+              <select id="lm-img-dtype" style="width:100%;" onchange="updateModalEstimate()">
+                <option value="bf16" selected>bf16 (Recommended)</option>
+                <option value="fp16">fp16</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Default Inference Steps</label>
+              <input type="number" id="lm-img-steps" min="1" max="50" value="4" style="width:100%;" />
+            </div>
+            <div>
+              <label class="field-label">Default Image Size</label>
+              <select id="lm-img-size" style="width:100%;">
+                <option value="512x512">512x512 (Fast)</option>
+                <option value="768x768">768x768 (Balanced)</option>
+                <option value="1024x1024" selected>1024x1024 (Full Quality)</option>
+                <option value="1024x768">1024x768 (Landscape)</option>
+                <option value="768x1024">768x1024 (Portrait)</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">CPU Offload Strategy</label>
+              <select id="lm-img-offload" style="width:100%;" onchange="updateModalEstimate()">
+                <option value="none" selected>none (Keep full pipeline in UMA/GPU VRAM)</option>
+                <option value="model">model (Offload idle components between stages)</option>
+                <option value="sequential">sequential (Lowest VRAM / slowest)</option>
+              </select>
+            </div>
+          </div>
+        </div>
         <div class="form-full" id="lm-checks-wrap" style="display:flex;gap:18px;flex-wrap:wrap;padding-top:4px;">
           <label class="checkbox-row" id="lm-default-wrap">
             <input type="checkbox" id="lm-default" /> Set as Primary Default Model
@@ -1042,6 +1189,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           </label>
           <label class="checkbox-row" id="lm-yarn-wrap" style="display:none;">
             <input type="checkbox" id="lm-yarn" onchange="onModalYarnChange()" /> Enable YaRN Scaling (&gt;256K)
+          </label>
+          <label class="checkbox-row" id="lm-disk-cache-wrap" style="display:none;">
+            <input type="checkbox" id="lm-disk-cache" checked /> Enable Prompt KV Disk Cache
           </label>
         </div>
       </div>
@@ -1059,10 +1209,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
         <div>
           <h3 style="font-size:16px;">Server-Side HuggingFace Model Downloader</h3>
-          <div id="dl-source-note" style="font-size:11px;color:var(--muted);margin-top:2px;font-family:var(--mono);">Local Cache: /admin/model-mapping</div>
+          <div id="dl-source-note" style="font-size:11px;color:var(--muted);margin-top:2px;font-family:var(--mono);">Local model_mapping.json (bundled with server release)</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
-          <button class="btn-sm" onclick="syncModelMapping()">↻ Sync Mapping from GH</button>
           <button class="btn-sm" onclick="closeDownloadModal()">✕</button>
         </div>
       </div>
@@ -1125,6 +1274,262 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Settings Modal -->
+  <div class="modal-backdrop" id="settings-modal">
+    <div class="modal settings-modal">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+        <div>
+          <h3 style="font-size:16px;">Server Settings & Storage Management</h3>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px;">Persistent across reboots via server_config.json · Live Auth & Disk Cache Controls</div>
+        </div>
+        <button class="btn-sm" onclick="closeSettingsModal()">✕</button>
+      </div>
+
+      <div class="tab-bar">
+        <button class="tab-btn active" id="set-btn-default" onclick="switchSettingsTab('default')">★ Default Model</button>
+        <button class="tab-btn" id="set-btn-port" onclick="switchSettingsTab('port')">🔌 Router Port</button>
+        <button class="tab-btn" id="set-btn-auth" onclick="switchSettingsTab('auth')">🔐 Passwords & Auth</button>
+        <button class="tab-btn" id="set-btn-cache" onclick="switchSettingsTab('cache')">💾 Disk Cache</button>
+      </div>
+
+      <!-- Tab 1: Default Model -->
+      <div class="tab-pane active" id="set-tab-default">
+        <div class="settings-section">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div style="font-size:12px;display:flex;flex-direction:column;gap:4px;">
+              <div>Live Primary Model (active slot): <strong id="set-live-primary" style="color:#60a5fa;font-family:var(--mono);">--</strong></div>
+              <div>Startup Default Model (boot config): <strong id="set-saved-default" style="color:#fbbf24;font-family:var(--mono);">--</strong></div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn-sm" onclick="useLivePrimaryAsDefault()">★ Copy Current Live Primary</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div style="font-size:12px;font-weight:600;color:#cbd5e1;">Selected Startup Default Configuration</div>
+          <div class="form-grid">
+            <div>
+              <label class="field-label">Startup Model ID (Router Key)</label>
+              <input type="text" id="set-def-id" style="width:100%;" placeholder="e.g. gufo-qwen3.8-flash-next" />
+            </div>
+            <div>
+              <label class="field-label">Aliases (comma-separated)</label>
+              <input type="text" id="set-def-aliases" style="width:100%;" placeholder="e.g. default, main" />
+            </div>
+            <div class="form-full">
+              <label class="field-label">Model File / Dir Path</label>
+              <input type="text" id="set-def-path" style="width:100%;font-family:var(--mono);font-size:12px;" />
+            </div>
+            <div>
+              <label class="field-label">Device</label>
+              <select id="set-def-device" style="width:100%;" onchange="syncSettingsDefaultFields()">
+                <option value="gpu">🎮 GPU (HIP)</option>
+                <option value="npu">⚡ NPU (XDNA2)</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Context Length (-c)</label>
+              <select id="set-def-ctx" style="width:100%;">
+                <option value="8192">8,192 (8K)</option>
+                <option value="16384">16,384 (16K)</option>
+                <option value="32768">32,768 (32K)</option>
+                <option value="65536">65,536 (64K)</option>
+                <option value="131072">131,072 (128K)</option>
+                <option value="262144" selected>262,144 (256K)</option>
+                <option value="524288">524,288 (512K - YaRN)</option>
+                <option value="1048576">1,048,576 (1M - YaRN)</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Parallel Sessions</label>
+              <select id="set-def-sessions" style="width:100%;">
+                <option value="1">1 Session</option>
+                <option value="2" selected>2 Sessions</option>
+                <option value="4">4 Sessions</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">KV Cache Quant</label>
+              <select id="set-def-kv" style="width:100%;">
+                <option value="q8">q8</option>
+                <option value="q4">q4</option>
+                <option value="k8v4">k8v4</option>
+                <option value="k4v8">k4v8</option>
+                <option value="fp16">fp16</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">NPU Quant (if NPU)</label>
+              <select id="set-def-npu-quant" style="width:100%;">
+                <option value="">auto</option>
+                <option value="q8">q8</option>
+                <option value="q4">q4</option>
+                <option value="bf16">bf16</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Speculative Mode</label>
+              <select id="set-def-spec" style="width:100%;">
+                <option value="off">off</option>
+                <option value="mtp">mtp</option>
+                <option value="dflash2">dflash2</option>
+                <option value="dspark">dspark</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Draft Model Path (optional)</label>
+              <input type="text" id="set-def-draft" style="width:100%;font-family:var(--mono);font-size:11px;" />
+            </div>
+            <div>
+              <label class="field-label">Vision mmproj Path (optional)</label>
+              <input type="text" id="set-def-mmproj" style="width:100%;font-family:var(--mono);font-size:11px;" />
+            </div>
+            <div class="form-full" style="display:flex;gap:16px;flex-wrap:wrap;padding-top:2px;">
+              <label class="checkbox-row"><input type="checkbox" id="set-def-yarn" /> Enable YaRN Scaling</label>
+              <label class="checkbox-row"><input type="checkbox" id="set-def-disk-cache" checked /> Enable Disk Cache on Startup Model</label>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+            <button class="btn-primary" onclick="saveDefaultModelSetting(false)">💾 Save Startup Default</button>
+            <button onclick="saveDefaultModelSetting(true)">🚀 Save & Restart Server Now</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <strong style="font-size:12px;">Pick Startup Default from Model Cards</strong>
+            <input type="text" id="set-default-search" placeholder="Search model cards..." oninput="renderDefaultModelCards()" style="width:220px;" />
+          </div>
+          <div class="default-card-list" id="set-default-cards"></div>
+        </div>
+      </div>
+
+      <!-- Tab 2: Router Port -->
+      <div class="tab-pane" id="set-tab-port">
+        <div class="settings-section">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px;font-family:var(--mono);">
+            <div>Running Port: <strong id="set-port-running" style="color:var(--green);">:8741</strong></div>
+            <div>Configured Boot Port: <strong id="set-port-configured" style="color:#60a5fa;">:8741</strong></div>
+            <div style="grid-column:1 / -1;color:var(--muted);">Config File: <span id="set-port-config-path">--</span></div>
+          </div>
+          <div id="set-port-restart-note" style="display:none;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.35);color:#fbbf24;padding:8px 10px;border-radius:8px;font-size:12px;">
+            Configured port differs from running port — click Restart Server to bind the new port.
+          </div>
+          <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+            <div>
+              <label class="field-label">New Router Port (1-65535)</label>
+              <input type="number" id="set-port" min="1" max="65535" value="8741" style="width:160px;font-family:var(--mono);" />
+            </div>
+            <button onclick="savePortSetting(false)">💾 Save Port Only</button>
+            <button class="btn-primary" onclick="savePortSetting(true)">🚀 Save Port & Restart Server</button>
+          </div>
+          <div id="set-restart-status" style="display:none;background:#090c10;border:1px solid var(--border);padding:10px 12px;border-radius:8px;font-size:12px;font-family:var(--mono);"></div>
+        </div>
+      </div>
+
+      <!-- Tab 3: Passwords & Auth -->
+      <div class="tab-pane" id="set-tab-auth">
+        <div class="settings-section">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <strong style="font-size:13px;">Layer 1 · Web UI & Control Plane (/admin/*)</strong>
+            <span id="set-web-pwd-badge" class="badge">Not Set</span>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="set-web-auth-enabled" /> Require password login to access Web UI & /admin/* APIs
+          </label>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <input type="password" id="set-web-password" placeholder="Enter new Web UI password (blank = keep existing)" style="flex:1;min-width:220px;" />
+            <button class="btn-sm btn-danger" onclick="clearWebPassword()">Clear Password</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <strong style="font-size:13px;">Layer 2 · Inference API Endpoints (/v1/*)</strong>
+            <span id="set-api-key-badge" class="badge">Not Set</span>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="set-api-auth-enabled" /> Require Authorization: Bearer &lt;key&gt; or x-api-key on /v1/*
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="set-api-share-web" onchange="syncAuthFieldState()" /> Share Web UI password as the API key
+          </label>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <input type="text" id="set-api-key" placeholder="Enter or generate dedicated API key (blank = keep existing)" style="flex:1;min-width:220px;font-family:var(--mono);font-size:12px;" />
+            <button class="btn-sm" onclick="generateRandomApiKey()">🎲 Generate</button>
+            <button class="btn-sm" onclick="copyApiKeyInput()">📋 Copy</button>
+            <button class="btn-sm btn-danger" onclick="clearApiKeySetting()">Clear Key</button>
+          </div>
+          <div id="set-cli-key-note" style="display:none;font-size:11px;color:#fbbf24;">Note: Server was launched with CLI --api-key (also accepted on /v1/*).</div>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;gap:8px;">
+          <button class="btn-primary" onclick="saveAuthSettings()">💾 Save Security Settings (Immediate)</button>
+        </div>
+      </div>
+
+      <!-- Tab 4: Disk Cache -->
+      <div class="tab-pane" id="set-tab-cache">
+        <div class="settings-section">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;font-family:var(--mono);">
+            <div>Dir: <strong id="cache-summary-dir" style="color:#93c5fd;">--</strong></div>
+            <div>Store Mode: <strong id="cache-summary-mode">--</strong></div>
+            <div>Entries: <strong id="cache-summary-counts">--</strong></div>
+            <div>Managed Usage: <strong id="cache-summary-usage">--</strong></div>
+            <div style="grid-column:1 / -1;color:var(--muted);">Active Compatibility: <span id="cache-summary-compat">--</span></div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <input type="text" id="cache-search" placeholder="Filter by checkpoint ID, compat, purpose..." oninput="renderDiskCacheTable()" style="flex:1;min-width:180px;" />
+            <label class="checkbox-row" style="font-size:12px;">
+              <input type="checkbox" id="cache-select-all" onchange="toggleSelectAllCache()" /> Select Visible
+            </label>
+            <button class="btn-sm btn-danger" id="btn-cache-del-sel" onclick="deleteSelectedCache()">🗑 Delete Selected</button>
+            <button class="btn-sm" id="btn-cache-del-incompat" onclick="deleteIncompatibleCache()">🧹 Clean Incompatible</button>
+            <button class="btn-sm btn-danger" id="btn-cache-del-all" onclick="deleteAllCache()">🔥 Delete All</button>
+            <button class="btn-sm" onclick="loadDiskCache(true)">↻ Refresh</button>
+          </div>
+          <div class="cache-table-wrap">
+            <table class="cache-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Checkpoint ID</th>
+                  <th>Purpose / Compat</th>
+                  <th>Tokens</th>
+                  <th>Chunks</th>
+                  <th>Private / Manifest / Refs</th>
+                  <th>Last Modified</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="cache-tbody">
+                <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:16px;">Open Disk Cache tab to inspect checkpoints...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;">
+        <button onclick="closeSettingsModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Web UI Auth Overlay -->
+  <div class="auth-overlay" id="auth-overlay">
+    <div class="auth-card">
+      <div>
+        <h3 style="font-size:18px;margin-bottom:4px;">🔐 MBufo Control Plane</h3>
+        <div id="auth-lock-subtitle" style="font-size:12px;color:var(--muted);">Password authentication is enabled for /admin/*. Enter Web UI password to unlock.</div>
+      </div>
+      <input type="password" id="auth-login-password" placeholder="Web UI password..." style="width:100%;" onkeydown="if(event.key==='Enter')submitLogin()" />
+      <div id="auth-login-error" style="display:none;font-size:12px;color:var(--red);"></div>
+      <button class="btn-primary" id="auth-login-btn" style="width:100%;padding:9px;" onclick="submitLogin()">Unlock Dashboard</button>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script>
@@ -1134,6 +1539,15 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     let stateCatalog = { models: [], mmproj_files: [], draft_files: [] };
     let stateMapping = { models: [] };
     let stateUpdate = null;
+    let stateSettings = null;
+    let stateDiskCache = null;
+    let authLocked = false;
+    let restartingServer = false;
+    let statusPollTimer = null;
+    window._modalMode = 'load';
+    window._reloadTargetId = '';
+    window._settingsTab = 'default';
+    window._selectedCacheIds = new Set();
     let dlPollTimer = null;
     let updPollTimer = null;
     let lastCompletedDlIds = new Set();
@@ -1144,6 +1558,50 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     let selectedDevice = 'ALL';
     let previewModel = null;
     window._catalogFiltered = [];
+
+    function livePort() {
+      return (stateSettings && stateSettings.running_port) || window.location.port || '8741';
+    }
+
+    function updatePortDisplays() {
+      const p = livePort();
+      const bp = document.getElementById('brand-port');
+      if (bp) bp.textContent = p;
+    }
+
+    function stopBackgroundPollers() {
+      if (statusPollTimer) { clearInterval(statusPollTimer); statusPollTimer = null; }
+      if (dlPollTimer) { clearInterval(dlPollTimer); dlPollTimer = null; }
+    }
+
+    function handleWebAuthRequired(msg) {
+      if (restartingServer) return;
+      if (!authLocked) {
+        authLocked = true;
+        stopBackgroundPollers();
+        const ov = document.getElementById('auth-overlay');
+        if (ov) ov.classList.add('open');
+        const sub = document.getElementById('auth-lock-subtitle');
+        if (sub && msg) sub.textContent = msg;
+        const errEl = document.getElementById('auth-login-error');
+        if (errEl) errEl.style.display = 'none';
+        const inp = document.getElementById('auth-login-password');
+        if (inp) { inp.value = ''; setTimeout(() => inp.focus(), 50); }
+      }
+    }
+
+    (function installAdminAuthFetchHook() {
+      const rawFetch = window.fetch.bind(window);
+      window.fetch = async function(input, init) {
+        const opts = Object.assign({ credentials: 'same-origin' }, init || {});
+        const res = await rawFetch(input, opts);
+        const url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
+        if (res.status === 401 && url.startsWith('/admin') && !url.startsWith('/admin/auth/')) {
+          handleWebAuthRequired('Authentication required or session expired. Enter Web UI password to continue.');
+        }
+        return res;
+      };
+    })();
 
     function globToRegex(pat) {
       const esc = pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
@@ -1181,7 +1639,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
     function defaultDeviceFor(m) {
       const entry = m._mapping || findMappingForCatalog(m);
-      if (m.sidecar || (m.backend || '').toLowerCase() === 'npu') return 'npu';
+      if (m.sidecar) return backendOf(m) === 'NPU' ? 'npu' : 'gpu';
+      if ((m.backend || '').toLowerCase() === 'npu') return 'npu';
       if (entry) {
         const hasGpu = mappingSupportsGpu(entry);
         const hasNpu = mappingSupportsNpu(entry);
@@ -1205,26 +1664,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     }
 
     async function syncModelMapping() {
-      showToast('Syncing model_mapping.json from GitHub...');
-      try {
-        const res = await fetch('/admin/model-mapping/sync', { method: 'POST' });
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          showToast('Sync failed: ' + (data.error ? data.error.message : res.statusText), true);
-          return;
-        }
-        stateMapping = data;
-        mappingSource = 'Synced from GitHub (cached locally)';
-        document.getElementById('dl-source-note').textContent =
-          `Local Cache: /admin/model-mapping (${mappingSource}, ${(stateMapping.models || []).length} models)`;
-        renderDevicePills();
-        renderCapPills();
-        renderCatalog();
-        renderDownloadList();
-        showToast(`Synced ${(stateMapping.models || []).length} models from GitHub!`);
-      } catch (e) {
-        showToast('Sync error: ' + e.message, true);
-      }
+      await fetchModelMapping();
+      renderDownloadList();
+      showToast(`Loaded local model_mapping.json (${(stateMapping.models || []).length} models)`);
     }
 
     const GPU_COLOR = '#3b82f6';
@@ -1347,11 +1789,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     }
 
     async function fetchStatus() {
+      if (authLocked || restartingServer) return false;
       try {
         const res = await fetch('/admin/models', { cache: 'no-store' });
+        if (res.status === 401) return false;
         if (res.status === 503) {
           isServerOnline = false;
-          setConnStatus('starting', 'Starting (:8741)');
+          setConnStatus('starting', `Starting (:${livePort()})`);
           const b = document.getElementById('loading-banner');
           b.style.display = 'flex';
           document.getElementById('loading-title').textContent = 'Starting mbufo service & loading primary model into GPU/UMA...';
@@ -1371,14 +1815,15 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           }
         }
         isServerOnline = true;
-        setConnStatus('online', 'Online (:8741)');
+        setConnStatus('online', `Online (:${livePort()})`);
         renderLoadingBanner();
         renderMemoryBar();
         renderLoadedModels();
         return true;
       } catch (e) {
+        if (authLocked || restartingServer) return false;
         isServerOnline = false;
-        setConnStatus('offline', 'Offline (:8741 Stopped)');
+        setConnStatus('offline', `Offline (:${livePort()} Stopped)`);
         stateModels = { models: [], memory: {}, loading: { active: false } };
         const b = document.getElementById('loading-banner');
         b.style.display = 'flex';
@@ -1429,12 +1874,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         fetchStatus(),
         fetchCatalog(),
         fetchDownloads(false),
-        checkServerUpdate(manual)
+        checkServerUpdate(manual),
+        loadSettingsSummary()
       ]);
-      if (manual) {
+      if (manual && !authLocked) {
         await mappingPromise;
         if (okStatus) showToast(`Refreshed (mapping: ${mappingSource})`);
-        else showToast('Cannot reach :8741 — mbufo.service is currently stopped', true);
+        else showToast(`Cannot reach :${livePort()} — mbufo.service is currently stopped`, true);
       }
     }
 
@@ -1602,15 +2048,18 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               <div class="model-path">${m.model_path}</div>
             </div>
           <div class="model-actions">
+            <button class="btn-sm" onclick="openReloadModal(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="Reconfigure parameters & reload this model">⚙ Configure</button>
             ${m.sidecar
-              ? `<button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', false)">⏏ Eject</button>`
-              : `${(!m.is_default && m.task !== 'embedding' && m.task !== 'reranker') ? `<button class="btn-sm" onclick="setPrimaryModel('${m.id}')">★ Set Primary</button>` : ''}
-                  <button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', ${m.busy})">⏏ Eject</button>`}
+              ? `<button class="btn-sm btn-danger" onclick="ejectModel(decodeURIComponent('${encodeURIComponent(m.id)}'), false)">⏏ Eject</button>`
+              : `${(!m.is_default && m.task !== 'embedding' && m.task !== 'reranker') ? `<button class="btn-sm" onclick="setPrimaryModel(decodeURIComponent('${encodeURIComponent(m.id)}'))">★ Set Primary</button>` : ''}
+                  <button class="btn-sm btn-danger" onclick="ejectModel(decodeURIComponent('${encodeURIComponent(m.id)}'), ${m.busy})">⏏ Eject</button>`}
           </div>
         </div>
         ${m.sidecar
           ? `<div class="slots-bar">
-               <span style="font-size:11px;color:var(--muted);">Sidecar process${m.pid > 0 ? ' · pid ' + m.pid : ''}${m.external ? ' (externally started, adopted)' : ''} · POST ${m.endpoint || ''}</span>
+               <span style="font-size:11px;color:var(--muted);">${m.task === 'image_generation'
+                 ? `ROCm diffusers sidecar · dtype: ${escHtml(m.image_dtype || 'bf16')} · steps: ${m.image_steps || 4} · size: ${escHtml(m.image_size || '1024x1024')} · offload: ${escHtml(m.image_cpu_offload || 'none')}`
+                 : 'Sidecar process'}${m.pid > 0 ? ' · pid ' + m.pid : ''}${m.external ? ' (externally started, adopted)' : ''} · POST ${escHtml(m.endpoint || '')}</span>
              </div>`
           : be === 'NPU'
             ? `<div class="slots-bar">
@@ -1721,7 +2170,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           : m.sidecar
             ? (m.running
               ? `<button class="btn-sm" onclick="openLoadModal(${idx})">⚙ Configure</button>
-                 <button class="btn-sm btn-danger" onclick="ejectModel('${m.id_suggestion}', false)">⏏ Eject</button>`
+                 <button class="btn-sm btn-danger" onclick="ejectModel(decodeURIComponent('${encodeURIComponent(m.id_suggestion)}'), false)">⏏ Eject</button>`
               : `<button class="btn-sm" onclick="openLoadModal(${idx})">⚙ Configure</button>
                  <button class="btn-sm btn-primary" onclick="quickLoadModel(${idx})">⚡ Load</button>`)
             : (isLoaded
@@ -1818,9 +2267,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       if (!m) return;
       const dev = document.getElementById('lm-device').value;
       const isSidecar = !!m.sidecar;
+      const isImage = (m.task === 'image_generation');
       const isEnc = (m.task === 'embedding' || m.task === 'reranker');
       const isChatTask = (!m.task || m.task === 'chat');
       const isGpuChat = (!isSidecar && dev === 'gpu' && isChatTask);
+
+      const imgWrap = document.getElementById('lm-image-wrap');
+      if (imgWrap) imgWrap.style.display = isImage ? 'block' : 'none';
 
       document.getElementById('lm-id').readOnly = isSidecar;
       document.getElementById('lm-aliases-wrap').style.display = isSidecar ? 'none' : 'block';
@@ -1918,7 +2371,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       document.getElementById('lm-evict-wrap').style.display = canEvict ? 'flex' : 'none';
       document.getElementById('lm-yarn-wrap').style.display = canYarn ? 'flex' : 'none';
       if (!canYarn) document.getElementById('lm-yarn').checked = false;
-      document.getElementById('lm-checks-wrap').style.display = (canDefault || canEvict || canYarn) ? 'flex' : 'none';
+      const diskWrap = document.getElementById('lm-disk-cache-wrap');
+      if (diskWrap) diskWrap.style.display = isGpuChat ? 'flex' : 'none';
+      document.getElementById('lm-checks-wrap').style.display = (canDefault || canEvict || canYarn || isGpuChat) ? 'flex' : 'none';
 
       updateModalEstimate();
     }
@@ -1927,10 +2382,28 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       syncModalVisibility(true);
     }
 
+    function ensureSelectValue(selId, val, labelTransform) {
+      const sel = document.getElementById(selId);
+      if (!sel || val === undefined || val === null || val === '') return;
+      const sval = String(val);
+      const exists = Array.from(sel.options).some(o => o.value === sval);
+      if (!exists) {
+        const opt = document.createElement('option');
+        opt.value = sval;
+        opt.textContent = labelTransform ? labelTransform(sval) : sval;
+        sel.appendChild(opt);
+      }
+      sel.value = sval;
+    }
+
     function openLoadModal(idx) {
       const m = (window._catalogFiltered && window._catalogFiltered[idx]) || null;
       if (!m) return;
+      window._modalMode = 'load';
+      window._reloadTargetId = '';
       window._modalModel = m;
+      document.getElementById('lm-title').textContent = `Configure & Hot-Load Model into :${livePort()}`;
+      document.getElementById('lm-submit').textContent = 'Load Model Now';
       document.getElementById('lm-id').value = m.id_suggestion;
       document.getElementById('lm-aliases').value = '';
       document.getElementById('lm-path').value = m.path || '';
@@ -1939,21 +2412,129 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       document.getElementById('lm-sessions').value = '1';
       document.getElementById('lm-kv').value = isEnc ? 'fp16' : 'q4';
 
-      const dual = isDualCapable(m);
-      const npuOk = !!(m.npu_capable || m.sidecar || (m._mapping && mappingSupportsNpu(m._mapping)) || backendOf(m) === 'NPU');
-      const gpuOk = !m.sidecar && (!m._mapping || mappingSupportsGpu(m._mapping) || backendOf(m) === 'GPU');
       const devSel = document.getElementById('lm-device');
-      devSel.value = defaultDeviceFor(m);
-      devSel.disabled = !(dual || (npuOk && gpuOk));
-      devSel.title = (dual || (npuOk && gpuOk))
-        ? 'Dual-capable: defaults to NPU, switchable between NPU and GPU'
-        : (npuOk ? 'NPU model' : 'GPU model');
+      if (m.sidecar) {
+        devSel.value = backendOf(m) === 'NPU' ? 'npu' : 'gpu';
+        devSel.disabled = true;
+        devSel.title = (backendOf(m) === 'NPU') ? 'NPU sidecar' : 'GPU sidecar';
+      } else {
+        const dual = isDualCapable(m);
+        const npuOk = !!(m.npu_capable || (m._mapping && mappingSupportsNpu(m._mapping)) || backendOf(m) === 'NPU');
+        const gpuOk = !m._mapping || mappingSupportsGpu(m._mapping) || backendOf(m) === 'GPU';
+        devSel.value = defaultDeviceFor(m);
+        devSel.disabled = !(dual || (npuOk && gpuOk));
+        devSel.title = (dual || (npuOk && gpuOk))
+          ? 'Dual-capable: defaults to NPU, switchable between NPU and GPU'
+          : (npuOk ? 'NPU model' : 'GPU model');
+      }
+
+      document.getElementById('lm-img-dtype').value = m.image_dtype || 'bf16';
+      document.getElementById('lm-img-steps').value = m.image_steps || (m.id_suggestion && m.id_suggestion.includes('z-image') ? 9 : 4);
+      document.getElementById('lm-img-size').value = m.image_size || '1024x1024';
+      document.getElementById('lm-img-offload').value = m.image_cpu_offload || 'none';
 
       document.getElementById('lm-default').checked = false;
       document.getElementById('lm-evict').checked = true;
       document.getElementById('lm-yarn').checked = false;
+      document.getElementById('lm-disk-cache').checked = true;
 
       syncModalVisibility(true);
+      document.getElementById('load-modal').classList.add('open');
+    }
+
+    function openReloadModal(id) {
+      const loaded = (stateModels.models || []).find(x => x.id === id);
+      if (!loaded) {
+        showToast('Loaded model "' + id + '" not found', true);
+        return;
+      }
+      const catList = (stateCatalog && stateCatalog.models) || [];
+      const loadedPath = loaded.model_path || loaded.path || '';
+      const cat = catList.find(c =>
+        (loadedPath && c.path && c.path === loadedPath) ||
+        c.id === loaded.id ||
+        c.id_suggestion === loaded.id
+      ) || null;
+
+      const merged = Object.assign({}, cat || {}, {
+        id_suggestion: loaded.id,
+        path: loadedPath || (cat && cat.path) || '',
+        backend: loaded.backend || (cat && cat.backend) || 'gpu',
+        sidecar: !!loaded.sidecar,
+        task: loaded.task || (cat && cat.task) || 'chat',
+        size_mib: loaded.file_size_mib || (cat && cat.size_mib) || 4096,
+        default_port: loaded.sidecar_port || (cat && cat.default_port) || 0,
+        endpoint: loaded.endpoint || (cat && cat.endpoint) || '',
+        supports_yarn: (cat && cat.supports_yarn) || !!loaded.enable_yarn || ((loaded.context_length || 0) > 262144),
+        supports_speculative: (cat && cat.supports_speculative) || !!(loaded.speculative_mode && loaded.speculative_mode !== 'off'),
+        supported_speculative: (cat && Array.isArray(cat.supported_speculative) && cat.supported_speculative.length)
+          ? cat.supported_speculative
+          : ((loaded.speculative_mode && loaded.speculative_mode !== 'off') ? [loaded.speculative_mode] : []),
+        compatible_drafts: (cat && Array.isArray(cat.compatible_drafts) && cat.compatible_drafts.length)
+          ? cat.compatible_drafts
+          : (loaded.draft_model_path ? [loaded.draft_model_path] : []),
+        supports_mmproj: (cat && cat.supports_mmproj) || !!loaded.vision_model_path,
+        compatible_mmprojs: (cat && Array.isArray(cat.compatible_mmprojs) && cat.compatible_mmprojs.length)
+          ? cat.compatible_mmprojs
+          : (loaded.vision_model_path ? [loaded.vision_model_path] : []),
+        npu_capable: (cat && cat.npu_capable) || (loaded.backend === 'npu')
+      });
+      if (!merged._mapping) merged._mapping = findMappingForCatalog(merged);
+
+      window._modalMode = 'reload';
+      window._reloadTargetId = loaded.id;
+      window._modalModel = merged;
+      document.getElementById('lm-title').textContent = `Reconfigure & Reload "${loaded.id}" on :${livePort()}`;
+      document.getElementById('lm-submit').textContent = 'Confirm & Reload Model';
+
+      document.getElementById('lm-id').value = loaded.id;
+      document.getElementById('lm-aliases').value = Array.isArray(loaded.aliases) ? loaded.aliases.join(', ') : '';
+      document.getElementById('lm-path').value = merged.path;
+
+      const devSel = document.getElementById('lm-device');
+      const curDev = (loaded.backend || '').toLowerCase() === 'npu' ? 'npu' : 'gpu';
+      if (merged.sidecar) {
+        devSel.value = curDev;
+        devSel.disabled = true;
+      } else {
+        const dual = isDualCapable(merged);
+        const npuOk = !!(merged.npu_capable || (merged._mapping && mappingSupportsNpu(merged._mapping)) || curDev === 'npu');
+        const gpuOk = !merged._mapping || mappingSupportsGpu(merged._mapping) || curDev === 'gpu';
+        devSel.value = curDev;
+        devSel.disabled = !(dual || (npuOk && gpuOk));
+      }
+
+      const initYarn = !!loaded.enable_yarn || ((loaded.context_length || 0) > 262144);
+      populateCtxOptions(merged.supports_yarn || initYarn, loaded.context_length || 32768);
+
+      document.getElementById('lm-img-dtype').value = loaded.image_dtype || 'bf16';
+      document.getElementById('lm-img-steps').value = loaded.image_steps || (loaded.id.includes('z-image') ? 9 : 4);
+      document.getElementById('lm-img-size').value = loaded.image_size || '1024x1024';
+      document.getElementById('lm-img-offload').value = loaded.image_cpu_offload || 'none';
+
+      // Build option lists first, then apply exact live values.
+      syncModalVisibility(true);
+
+      ensureSelectValue('lm-ctx', loaded.context_length || 32768, v => Number(v).toLocaleString());
+      ensureSelectValue('lm-sessions', loaded.total_sessions || 1, v => v + ' Sessions');
+      ensureSelectValue('lm-kv', loaded.kv_cache_quant || 'q8');
+      if (loaded.npu_quant) ensureSelectValue('lm-npu-quant', loaded.npu_quant);
+      if (loaded.speculative_mode && document.getElementById('lm-spec-wrap').style.display !== 'none') {
+        ensureSelectValue('lm-spec', loaded.speculative_mode);
+      }
+      if (loaded.draft_model_path && document.getElementById('lm-draft').options.length > 0) {
+        ensureSelectValue('lm-draft', loaded.draft_model_path, p => p.replace(/^.*\/mbufo-models\//, ''));
+      }
+      if (loaded.vision_model_path && document.getElementById('lm-mmproj-wrap').style.display !== 'none') {
+        ensureSelectValue('lm-mmproj', loaded.vision_model_path, p => p.replace(/^.*\/mbufo-models\//, ''));
+      }
+
+      document.getElementById('lm-default').checked = !!loaded.is_default;
+      document.getElementById('lm-evict').checked = loaded.allow_evict !== false;
+      document.getElementById('lm-yarn').checked = !!loaded.enable_yarn;
+      document.getElementById('lm-disk-cache').checked = loaded.enable_disk_cache !== false;
+
+      syncModalVisibility(false);
       document.getElementById('load-modal').classList.add('open');
     }
 
@@ -1969,8 +2550,15 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       const avail = (stateModels.memory && stateModels.memory.host_available_mib) || 0;
       const el = document.getElementById('lm-estimate');
       if (isSidecar) {
-        el.innerHTML =
-          `Sidecar Process: <strong>~${fmtGiB(m.size_mib)}</strong> (managed on port :${m.default_port || '?'} · Serialized NPU/sidecar execution · Current Available: ${fmtGiB(avail)})`;
+        if (m.task === 'image_generation') {
+          const offload = document.getElementById('lm-img-offload') ? document.getElementById('lm-img-offload').value : 'none';
+          const dtype = document.getElementById('lm-img-dtype') ? document.getElementById('lm-img-dtype').value : 'bf16';
+          el.innerHTML =
+            `ROCm Image Sidecar (diffusers): <strong>~${fmtGiB(m.size_mib)}</strong> on disk · dtype: ${dtype} · offload: ${offload} · port :${m.default_port || '?'} · Available: ${fmtGiB(avail)}`;
+        } else {
+          el.innerHTML =
+            `Sidecar Process: <strong>~${fmtGiB(m.size_mib)}</strong> (managed on port :${m.default_port || '?'} · Serialized execution · Current Available: ${fmtGiB(avail)})`;
+        }
         return;
       }
       if (dev === 'npu') {
@@ -2005,7 +2593,14 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       if (!m) return;
       const dev = defaultDeviceFor(m);
       if (m.sidecar) {
-        await doLoadRequest({ id: m.id_suggestion, device: dev });
+        const scPayload = { id: m.id_suggestion, device: dev };
+        if (m.task === 'image_generation') {
+          scPayload.image_dtype = m.image_dtype || 'bf16';
+          scPayload.image_steps = m.image_steps || (m.id_suggestion && m.id_suggestion.includes('z-image') ? 9 : 4);
+          scPayload.image_size = m.image_size || '1024x1024';
+          scPayload.image_cpu_offload = m.image_cpu_offload || 'none';
+        }
+        await doLoadRequest(scPayload);
         return;
       }
       const isEnc = (m.task === 'embedding' || m.task === 'reranker');
@@ -2032,10 +2627,25 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     async function submitLoadModal() {
       const m = window._modalModel || {};
       const dev = document.getElementById('lm-device').value;
+      const isReload = (window._modalMode === 'reload');
       if (m.sidecar) {
         const id = document.getElementById('lm-id').value.trim();
-        closeLoadModal();
-        await doLoadRequest({ id, device: dev });
+        const scPayload = { id, device: dev };
+        if (m.task === 'image_generation') {
+          scPayload.image_dtype = document.getElementById('lm-img-dtype').value;
+          scPayload.image_steps = Math.max(1, parseInt(document.getElementById('lm-img-steps').value, 10) || 4);
+          scPayload.image_size = document.getElementById('lm-img-size').value;
+          scPayload.image_cpu_offload = document.getElementById('lm-img-offload').value;
+        }
+        if (isReload) {
+          if (!confirm(`Confirm reload of sidecar "${window._reloadTargetId}" with updated settings?`)) return;
+          scPayload.target_id = window._reloadTargetId;
+          closeLoadModal();
+          await doReloadRequest(scPayload);
+        } else {
+          closeLoadModal();
+          await doLoadRequest(scPayload);
+        }
         return;
       }
       const isEnc = (m.task === 'embedding' || m.task === 'reranker');
@@ -2048,6 +2658,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         ? document.getElementById('lm-draft').value
         : '';
       const mmVisible = document.getElementById('lm-mmproj-wrap').style.display !== 'none';
+      const mmVal = (isGpuChat && mmVisible) ? document.getElementById('lm-mmproj').value : '';
       const yarnVisible = document.getElementById('lm-yarn-wrap').style.display !== 'none';
       const payload = {
         id: document.getElementById('lm-id').value.trim(),
@@ -2064,15 +2675,24 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         npu_quant: (dev === 'npu' && document.getElementById('lm-npu-quant-wrap').style.display !== 'none') ? document.getElementById('lm-npu-quant').value : '',
         speculative: specVal,
         draft_model_path: draftVal,
-        mmproj_path: (isGpuChat && mmVisible) ? document.getElementById('lm-mmproj').value : '',
+        mmproj_path: mmVal,
+        vision_model_path: mmVal,
         enable_yarn: (isGpuChat && yarnVisible) ? document.getElementById('lm-yarn').checked : false,
+        enable_disk_cache: isGpuChat ? document.getElementById('lm-disk-cache').checked : false,
         allow_evict: document.getElementById('lm-evict').checked,
         set_default: (isGpuChat && document.getElementById('lm-default-wrap').style.display !== 'none')
           ? document.getElementById('lm-default').checked
           : false
       };
-      closeLoadModal();
-      await doLoadRequest(payload);
+      if (isReload) {
+        if (!confirm(`Confirm reload of "${window._reloadTargetId}" with new settings? Previous Primary status is preserved.`)) return;
+        payload.target_id = window._reloadTargetId;
+        closeLoadModal();
+        await doReloadRequest(payload);
+      } else {
+        closeLoadModal();
+        await doLoadRequest(payload);
+      }
     }
 
     function fmtBytes(bytes) {
@@ -2094,7 +2714,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         await fetchModelMapping();
       }
       document.getElementById('dl-source-note').textContent =
-        `Local Cache: /admin/model-mapping (${mappingSource}, ${(stateMapping.models || []).length} models)`;
+        `Local Repository: /admin/model-mapping (${(stateMapping.models || []).length} models bundled with server version)`;
       renderDownloadList();
       await fetchDownloads(true);
     }
@@ -2392,20 +3012,21 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (pill) {
           const shortSha = data.running_short || 'unknown';
           const tag = data.running_tag || 'dev';
+          const rtag = data.remote_tag || '';
           if (data.update_available) {
             pill.className = 'badge badge-amber';
-            pill.textContent = `${tag} · ${shortSha} (Update Ready!)`;
+            pill.textContent = `${tag} → ${rtag || data.remote_short || 'new'} (Update!)`;
           } else {
             pill.className = 'badge badge-green';
-            pill.textContent = `${tag} · ${shortSha} (Up to date)`;
+            pill.textContent = `${tag} · ${shortSha}`;
           }
-          pill.title = `Built: ${data.build_time_utc || ''} | GitHub main: ${data.remote_short || '?'}`;
+          pill.title = `Running: ${tag} (${shortSha}) | GitHub Latest Tag: ${rtag || 'none'} (${data.build_time_utc || ''})`;
         }
         renderUpdateBanner(data, data.status || {});
         if (manual) {
           if (data.check_error) showToast('Update check warning: ' + data.check_error, true);
-          else if (data.update_available) showToast(`New GitHub commit ${data.remote_short}: ${data.remote_message}`);
-          else showToast(`Server is up to date (${data.running_short})`);
+          else if (data.update_available) showToast(`New release tag available: ${data.remote_tag || data.remote_short}`);
+          else showToast(`Server is up to date (${data.running_tag || data.running_short})`);
         }
       } catch (_) {}
     }
@@ -2441,9 +3062,11 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         btn.textContent = '🚀 Retry Update & Restart';
       } else if (checkData && checkData.update_available) {
         badge.className = 'badge badge-amber';
-        badge.textContent = 'UPDATE AVAILABLE';
-        title.textContent = `New commit on GitHub (${checkData.remote_short}): ${checkData.remote_message || ''}`;
-        detail.textContent = `running ${checkData.running_short} → remote ${checkData.remote_short}`;
+        badge.textContent = 'RELEASE UPDATE';
+        const rTag = checkData.remote_tag || checkData.remote_short || 'latest';
+        const lTag = checkData.running_tag || checkData.running_short || 'current';
+        title.textContent = `New GitHub release tag ${rTag} is available (includes latest code & model_mapping.json)`;
+        detail.textContent = `running ${lTag} (${checkData.running_short || ''}) → latest tag ${rTag}${checkData.remote_short ? ' (' + checkData.remote_short + ')' : ''}`;
         btn.disabled = false;
         btn.textContent = '🚀 Update & Restart Server';
       }
@@ -2495,8 +3118,33 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       }
     }
 
+    async function doReloadRequest(payload) {
+      showToast(`Reloading "${payload.target_id}" on :${livePort()}...`);
+      const pollTimer = setInterval(fetchStatus, 1000);
+      try {
+        const res = await fetch('/admin/reload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        clearInterval(pollTimer);
+        await fetchStatus();
+        renderCatalog();
+        if (!res.ok || data.error) {
+          const msg = data.error ? data.error.message : res.statusText;
+          showToast('Reload failed' + (data.rolled_back ? ' (rolled back)' : '') + ': ' + msg, true);
+        } else {
+          showToast(`Reloaded "${data.id || payload.id}" cleanly!`);
+        }
+      } catch (e) {
+        clearInterval(pollTimer);
+        showToast('Reload request error: ' + e.message, true);
+      }
+    }
+
     async function doLoadRequest(payload) {
-      showToast('Loading "' + payload.id + '" into :8741...');
+      showToast(`Loading "${payload.id}" into :${livePort()}...`);
       const pollTimer = setInterval(fetchStatus, 1000);
       try {
         const res = await fetch('/admin/load', {
@@ -2561,8 +3209,603 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     }
 
 
-    refreshAll();
-    setInterval(fetchStatus, 3000);
+    // ---------------- Settings, Auth & Disk Cache Management ----------------
+    async function loadSettingsSummary() {
+      if (authLocked || restartingServer) return null;
+      try {
+        const res = await fetch('/admin/settings', { cache: 'no-store' });
+        if (!res.ok) return null;
+        stateSettings = await res.json();
+        updatePortDisplays();
+        const logoutBtn = document.getElementById('btn-logout');
+        if (logoutBtn) logoutBtn.style.display = stateSettings.web_auth_enabled ? 'inline-block' : 'none';
+        return stateSettings;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function switchSettingsTab(tab) {
+      window._settingsTab = tab;
+      ['default', 'port', 'auth', 'cache'].forEach(k => {
+        const btn = document.getElementById('set-btn-' + k);
+        const pane = document.getElementById('set-tab-' + k);
+        if (btn) btn.classList.toggle('active', k === tab);
+        if (pane) pane.classList.toggle('active', k === tab);
+      });
+      if (tab === 'cache') {
+        loadDiskCache(false);
+      }
+    }
+
+    async function openSettingsModal(initialTab) {
+      document.getElementById('settings-modal').classList.add('open');
+      switchSettingsTab(initialTab || window._settingsTab || 'default');
+      const s = await loadSettingsSummary();
+      if (s) populateSettingsForms(s);
+    }
+
+    function closeSettingsModal() {
+      document.getElementById('settings-modal').classList.remove('open');
+    }
+
+    function populateSettingsForms(s) {
+      const def = s.default_model || {};
+      const liveDef = s.live_default_id || '(none)';
+      document.getElementById('set-live-primary').textContent = liveDef;
+      document.getElementById('set-saved-default').textContent = (def.configured && def.id)
+        ? `${def.id} (${def.device || 'gpu'}, ctx=${def.max_context || 'auto'})`
+        : '(using CLI startup flags)';
+
+      applyDefaultModelFieldsToForm(def);
+      renderDefaultModelCards();
+
+      document.getElementById('set-port-running').textContent = ':' + (s.running_port || 8741);
+      document.getElementById('set-port-configured').textContent = ':' + (s.configured_port || s.running_port || 8741);
+      document.getElementById('set-port-config-path').textContent = s.config_path || '';
+      document.getElementById('set-port').value = s.configured_port || s.running_port || 8741;
+      document.getElementById('set-port-restart-note').style.display = s.restart_required ? 'block' : 'none';
+      document.getElementById('set-restart-status').style.display = 'none';
+
+      document.getElementById('set-web-auth-enabled').checked = !!s.web_auth_enabled;
+      const webBadge = document.getElementById('set-web-pwd-badge');
+      webBadge.textContent = s.web_password_set ? 'Password Set' : 'Not Set';
+      webBadge.className = 'badge ' + (s.web_password_set ? 'badge-green' : '');
+      document.getElementById('set-web-password').value = '';
+
+      document.getElementById('set-api-auth-enabled').checked = !!s.api_auth_enabled;
+      document.getElementById('set-api-share-web').checked = !!s.api_auth_share_web_password;
+      const apiBadge = document.getElementById('set-api-key-badge');
+      apiBadge.textContent = s.api_key_set ? 'Key Set' : (s.cli_api_key_active ? 'CLI Key Active' : 'Not Set');
+      apiBadge.className = 'badge ' + ((s.api_key_set || s.cli_api_key_active) ? 'badge-green' : '');
+      document.getElementById('set-api-key').value = '';
+      document.getElementById('set-cli-key-note').style.display = s.cli_api_key_active ? 'block' : 'none';
+      syncAuthFieldState();
+    }
+
+    function applyDefaultModelFieldsToForm(d) {
+      document.getElementById('set-def-id').value = d.id || '';
+      document.getElementById('set-def-aliases').value = Array.isArray(d.aliases) ? d.aliases.join(', ') : '';
+      document.getElementById('set-def-path').value = d.path || '';
+      document.getElementById('set-def-device').value = (d.device === 'npu') ? 'npu' : 'gpu';
+      ensureSelectValue('set-def-ctx', d.max_context || 262144, v => Number(v).toLocaleString());
+      ensureSelectValue('set-def-sessions', d.session_count || 1, v => v + ' Sessions');
+      ensureSelectValue('set-def-kv', d.kv_cache_quant || 'q8');
+      document.getElementById('set-def-npu-quant').value = d.npu_quant || '';
+      document.getElementById('set-def-spec').value = d.speculative || 'off';
+      document.getElementById('set-def-draft').value = d.draft_model_path || '';
+      document.getElementById('set-def-mmproj').value = d.vision_model_path || '';
+      document.getElementById('set-def-yarn').checked = !!d.enable_yarn;
+      document.getElementById('set-def-disk-cache').checked = d.enable_disk_cache !== false;
+      syncSettingsDefaultFields();
+    }
+
+    function syncSettingsDefaultFields() {
+      const dev = document.getElementById('set-def-device').value;
+      const isNpu = (dev === 'npu');
+      document.getElementById('set-def-npu-quant').disabled = !isNpu;
+      document.getElementById('set-def-ctx').disabled = isNpu;
+      document.getElementById('set-def-kv').disabled = isNpu;
+    }
+
+    function useLivePrimaryAsDefault() {
+      const models = (stateModels && stateModels.models) || [];
+      const cur = models.find(m => m.is_default) || models[0];
+      if (!cur) {
+        showToast('No non-sidecar model currently loaded', true);
+        return;
+      }
+      applyDefaultModelFieldsToForm({
+        configured: true,
+        id: cur.id,
+        aliases: cur.aliases || [],
+        path: cur.model_path || cur.path || '',
+        device: (cur.backend || '').toLowerCase() === 'npu' ? 'npu' : 'gpu',
+        max_context: cur.context_length || 262144,
+        session_count: cur.total_sessions || 1,
+        kv_cache_quant: cur.kv_cache_quant || 'q8',
+        npu_quant: cur.npu_quant || '',
+        speculative: cur.speculative_mode || 'off',
+        draft_model_path: cur.draft_model_path || '',
+        vision_model_path: cur.vision_model_path || '',
+        enable_yarn: !!cur.enable_yarn,
+        enable_disk_cache: cur.enable_disk_cache !== false
+      });
+      renderDefaultModelCards();
+      showToast(`Copied live Primary "${cur.id}" — click Save Startup Default to persist`);
+    }
+
+    function selectDefaultModelCard(idx) {
+      const m = (window._defaultCardModels && window._defaultCardModels[idx]) || null;
+      if (!m) return;
+      const dev = defaultDeviceFor(m);
+      const useSpec = (dev === 'gpu' && m.supports_speculative && m.suggested_speculative && m.suggested_draft);
+      applyDefaultModelFieldsToForm({
+        configured: true,
+        id: m.id_suggestion,
+        aliases: [],
+        path: m.path || '',
+        device: dev,
+        max_context: (dev === 'npu') ? 0 : 32768,
+        session_count: 1,
+        kv_cache_quant: (dev === 'gpu') ? 'q8' : 'fp16',
+        npu_quant: (dev === 'npu') ? 'q8' : '',
+        speculative: useSpec ? m.suggested_speculative : 'off',
+        draft_model_path: useSpec ? m.suggested_draft : '',
+        vision_model_path: (dev === 'gpu' && m.supports_mmproj && m.suggested_mmproj) ? m.suggested_mmproj : '',
+        enable_yarn: false,
+        enable_disk_cache: true
+      });
+      renderDefaultModelCards();
+    }
+
+    function renderDefaultModelCards() {
+      const box = document.getElementById('set-default-cards');
+      if (!box) return;
+      const q = (document.getElementById('set-default-search').value || '').toLowerCase().trim();
+      const curPath = (document.getElementById('set-def-path').value || '').trim();
+      const curId = (document.getElementById('set-def-id').value || '').trim();
+      const all = (stateCatalog && stateCatalog.models ? stateCatalog.models : []).filter(m =>
+        !m.sidecar && m.actionable !== false && (!m.task || m.task === 'chat')
+      );
+      const filtered = all.filter(m => !q || (m.id_suggestion || '').toLowerCase().includes(q) || (m.relative_path || '').toLowerCase().includes(q));
+      window._defaultCardModels = filtered;
+      if (!filtered.length) {
+        box.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:12px;">No matching runnable chat models in catalog.</div>`;
+        return;
+      }
+      box.innerHTML = filtered.map((m, idx) => {
+        const isSel = (curPath && m.path === curPath) || (curId && m.id_suggestion === curId);
+        return `
+          <div class="default-card${isSel ? ' selected' : ''}" onclick="selectDefaultModelCard(${idx})">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+              <strong style="font-size:12px;word-break:break-word;">${escHtml(m.id_suggestion)}</strong>
+              ${isSel ? '<span class="badge badge-amber">SELECTED</span>' : '<span class="badge">' + fmtGiB(m.size_mib) + '</span>'}
+            </div>
+            <div style="font-size:10px;color:var(--muted);font-family:var(--mono);word-break:break-all;">${escHtml(m.relative_path || m.path)}</div>
+            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:2px;">
+              ${renderBackendBadge(m)}
+              ${renderCapabilityBadges((m.capabilities || []).slice(0, 3))}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function saveDefaultModelSetting(andRestart) {
+      const id = document.getElementById('set-def-id').value.trim();
+      const path = document.getElementById('set-def-path').value.trim();
+      if (!id || !path) {
+        showToast('Please select a model card or specify Model ID & Path', true);
+        return;
+      }
+      if (andRestart && !confirm(`Save "${id}" as Startup Default and restart server now?`)) return;
+      const aliasesRaw = document.getElementById('set-def-aliases').value.trim();
+      const aliases = aliasesRaw ? aliasesRaw.split(',').map(x => x.trim()).filter(Boolean) : [];
+      const dev = document.getElementById('set-def-device').value;
+      const payload = {
+        default_model: {
+          configured: true,
+          id,
+          aliases,
+          path,
+          device: dev,
+          max_context: dev === 'gpu' ? (parseInt(document.getElementById('set-def-ctx').value, 10) || 262144) : 0,
+          session_count: parseInt(document.getElementById('set-def-sessions').value, 10) || 1,
+          kv_cache_quant: document.getElementById('set-def-kv').value,
+          npu_quant: dev === 'npu' ? document.getElementById('set-def-npu-quant').value : '',
+          speculative: document.getElementById('set-def-spec').value,
+          draft_model_path: document.getElementById('set-def-draft').value.trim(),
+          vision_model_path: document.getElementById('set-def-mmproj').value.trim(),
+          enable_yarn: document.getElementById('set-def-yarn').checked,
+          enable_disk_cache: document.getElementById('set-def-disk-cache').checked
+        }
+      };
+      try {
+        const res = await fetch('/admin/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          showToast('Save failed: ' + (data.error ? data.error.message : res.statusText), true);
+          return;
+        }
+        stateSettings = Object.assign({}, stateSettings || {}, data);
+        populateSettingsForms(stateSettings);
+        showToast(`Saved startup default "${id}" to server_config.json`);
+        if (andRestart) {
+          await triggerServerRestart(stateSettings.configured_port || livePort());
+        }
+      } catch (e) {
+        showToast('Save error: ' + e.message, true);
+      }
+    }
+
+    async function savePortSetting(andRestart) {
+      const port = parseInt(document.getElementById('set-port').value, 10);
+      if (!port || port < 1 || port > 65535) {
+        showToast('Invalid port (must be 1-65535)', true);
+        return;
+      }
+      if (andRestart && !confirm(`Save router port :${port} and restart mbufo server now? Active connections will reconnect.`)) {
+        return;
+      }
+      try {
+        const res = await fetch('/admin/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ port })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          showToast('Port save failed: ' + (data.error ? data.error.message : res.statusText), true);
+          return;
+        }
+        stateSettings = Object.assign({}, stateSettings || {}, data);
+        populateSettingsForms(stateSettings);
+        showToast(`Configured port :${port} saved`);
+        if (andRestart) {
+          await triggerServerRestart(port);
+        }
+      } catch (e) {
+        showToast('Port save error: ' + e.message, true);
+      }
+    }
+
+    async function triggerServerRestart(targetPort) {
+      const stBox = document.getElementById('set-restart-status');
+      const newUrl = `${location.protocol}//${location.hostname}:${targetPort}/admin`;
+      const healthUrl = `${location.protocol}//${location.hostname}:${targetPort}/health`;
+      restartingServer = true;
+      stopBackgroundPollers();
+      if (stBox) {
+        stBox.style.display = 'block';
+        stBox.innerHTML = `Restarting mbufo server on port <strong>:${targetPort}</strong>... Waiting for /health... (<a href="${newUrl}" style="color:#60a5fa;">${newUrl}</a>)`;
+      }
+      try {
+        await fetch('/admin/server/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      } catch (_) {}
+      setTimeout(() => {
+        let tries = 0;
+        const timer = setInterval(async () => {
+          tries += 1;
+          try {
+            await fetch(healthUrl, { mode: 'no-cors', cache: 'no-store' });
+            clearInterval(timer);
+            showToast(`Server ready on :${targetPort}! Redirecting...`);
+            window.location.href = newUrl;
+          } catch (_) {
+            if (tries >= 60) {
+              clearInterval(timer);
+              restartingServer = false;
+              if (stBox) stBox.innerHTML += '<br/><span style="color:var(--red);">Timed out waiting — click link above manually.</span>';
+            }
+          }
+        }, 1200);
+      }, 1500);
+    }
+
+    function syncAuthFieldState() {
+      const share = document.getElementById('set-api-share-web').checked;
+      document.getElementById('set-api-key').disabled = share;
+    }
+
+    function generateRandomApiKey() {
+      const bytes = new Uint8Array(24);
+      if (window.crypto && window.crypto.getRandomValues) {
+        window.crypto.getRandomValues(bytes);
+      } else {
+        for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+      }
+      const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+      document.getElementById('set-api-share-web').checked = false;
+      syncAuthFieldState();
+      document.getElementById('set-api-key').value = 'mb-' + hex;
+      showToast('Generated new API key — remember to copy & Save Security Settings!');
+    }
+
+    async function copyApiKeyInput() {
+      const val = document.getElementById('set-api-key').value.trim();
+      if (!val) { showToast('Nothing in API Key box to copy', true); return; }
+      try { await navigator.clipboard.writeText(val); showToast('Copied API key'); }
+      catch (_) { showToast('Copy blocked by browser', true); }
+    }
+
+    async function saveAuthSettings() {
+      const webEnabled = document.getElementById('set-web-auth-enabled').checked;
+      const webPwd = document.getElementById('set-web-password').value;
+      const apiEnabled = document.getElementById('set-api-auth-enabled').checked;
+      const apiShare = document.getElementById('set-api-share-web').checked;
+      const apiKey = document.getElementById('set-api-key').value.trim();
+
+      if (webEnabled && !webPwd && !(stateSettings && stateSettings.web_password_set)) {
+        showToast('Enter a Web UI password before enabling Layer 1 Web UI Auth', true);
+        return;
+      }
+      if (apiEnabled && !apiShare && !apiKey && !(stateSettings && (stateSettings.api_key_set || stateSettings.cli_api_key_active))) {
+        showToast('Enter/generate an API key (or enable Share Web Password) before enabling Layer 2 API Auth', true);
+        return;
+      }
+      if (apiEnabled && apiShare && !webPwd && !(stateSettings && stateSettings.web_password_set)) {
+        showToast('Layer 2 is set to share Web UI password, so please enter a Web UI password above', true);
+        return;
+      }
+
+      const payload = {
+        web_auth_enabled: webEnabled,
+        api_auth_enabled: apiEnabled,
+        api_auth_share_web_password: apiShare
+      };
+      if (webPwd) payload.web_password = webPwd;
+      if (!apiShare && apiKey) payload.api_key = apiKey;
+
+      try {
+        const res = await fetch('/admin/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          showToast('Auth save failed: ' + (data.error ? data.error.message : res.statusText), true);
+          return;
+        }
+        // Keep current operator session signed in seamlessly if password just got set/updated
+        if (webEnabled && webPwd) {
+          await fetch('/admin/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: webPwd })
+          });
+        }
+        const s = await loadSettingsSummary();
+        if (s) populateSettingsForms(s);
+        showToast('Security & Auth settings updated cleanly!');
+      } catch (e) {
+        showToast('Auth save error: ' + e.message, true);
+      }
+    }
+
+    async function clearWebPassword() {
+      if (!confirm('Clear Web UI password and disable Layer 1 Web UI Auth?')) return;
+      const res = await fetch('/admin/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clear_web_password: true, web_auth_enabled: false })
+      });
+      if (res.ok) {
+        const s = await loadSettingsSummary();
+        if (s) populateSettingsForms(s);
+        showToast('Cleared Web UI password');
+      }
+    }
+
+    async function clearApiKeySetting() {
+      if (!confirm('Clear dedicated API key? (You can still leave Layer 2 off or share Web UI password.)')) return;
+      const res = await fetch('/admin/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clear_api_key: true, api_auth_enabled: false })
+      });
+      if (res.ok) {
+        const s = await loadSettingsSummary();
+        if (s) populateSettingsForms(s);
+        showToast('Cleared dedicated API key');
+      }
+    }
+
+    // --- Disk Cache Tab ---
+    async function loadDiskCache(showBanner) {
+      try {
+        const res = await fetch('/admin/disk-cache', { cache: 'no-store' });
+        if (!res.ok) return;
+        stateDiskCache = await res.json();
+        renderDiskCacheSummary();
+        renderDiskCacheTable();
+        if (showBanner) showToast(`Disk cache refreshed (${stateDiskCache.checkpoint_count || 0} checkpoints)`);
+      } catch (e) {
+        showToast('Failed to query disk cache: ' + e.message, true);
+      }
+    }
+
+    function renderDiskCacheSummary() {
+      const c = stateDiskCache || {};
+      document.getElementById('cache-summary-dir').textContent = c.directory || '(disabled)';
+      document.getElementById('cache-summary-mode').textContent = c.enabled
+        ? (c.live ? 'LIVE (DiskCatalog::Retire)' : 'OFFLINE (Direct Manifest Cleanup)')
+        : 'DISABLED';
+      document.getElementById('cache-summary-counts').textContent =
+        `${c.checkpoint_count || 0} total (${c.compatible_count || 0} compat / ${c.incompatible_count || 0} incompat)`;
+      document.getElementById('cache-summary-usage').textContent =
+        `${fmtBytes(c.managed_bytes || 0)} / ${fmtBytes(c.capacity_bytes || 0)} (priv ${fmtBytes(c.sum_private_bytes || 0)} + chunks ${fmtBytes(c.sum_chunk_referenced_bytes || 0)})`;
+      document.getElementById('cache-summary-compat').textContent = c.active_compatibility || '(no active runner loaded)';
+      const btnIncompat = document.getElementById('btn-cache-del-incompat');
+      if (btnIncompat) {
+        btnIncompat.textContent = `🧹 Clean Incompatible (${c.incompatible_count || 0})`;
+        btnIncompat.disabled = !(c.incompatible_count > 0);
+      }
+    }
+
+    function filteredCacheEntries() {
+      const entries = (stateDiskCache && stateDiskCache.entries) || [];
+      const q = (document.getElementById('cache-search').value || '').toLowerCase().trim();
+      return entries.filter(e => {
+        if (!q) return true;
+        return String(e.checkpoint_id).includes(q) ||
+               (e.compatibility_hex || '').toLowerCase().includes(q) ||
+               (e.purpose || '').toLowerCase().includes(q) ||
+               (e.manifest_file || '').toLowerCase().includes(q);
+      });
+    }
+
+    function toggleSelectAllCache() {
+      const checked = document.getElementById('cache-select-all').checked;
+      filteredCacheEntries().forEach(e => {
+        if (checked) window._selectedCacheIds.add(String(e.checkpoint_id));
+        else window._selectedCacheIds.delete(String(e.checkpoint_id));
+      });
+      renderDiskCacheTable();
+    }
+
+    function toggleCacheRow(idStr, checked) {
+      if (checked) window._selectedCacheIds.add(idStr);
+      else window._selectedCacheIds.delete(idStr);
+    }
+
+    function renderDiskCacheTable() {
+      const tbody = document.getElementById('cache-tbody');
+      const rows = filteredCacheEntries();
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:18px;">No disk cache checkpoints found.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.map(e => {
+        const idStr = String(e.checkpoint_id);
+        const chk = window._selectedCacheIds.has(idStr) ? 'checked' : '';
+        const dt = e.mtime_epoch ? new Date(e.mtime_epoch * 1000).toLocaleString() : '--';
+        const compatBadge = e.invalid
+          ? `<span class="badge badge-red">INVALID</span>`
+          : (e.compatible
+              ? `<span class="badge badge-green">COMPAT</span>`
+              : `<span class="badge badge-amber">INCOMPAT</span>`);
+        return `
+          <tr>
+            <td><input type="checkbox" ${chk} onchange="toggleCacheRow('${idStr}', this.checked)" /></td>
+            <td title="lineage ${e.lineage_id} · ${escHtml(e.manifest_file || '')}">#${idStr}</td>
+            <td>${compatBadge} ${escHtml(e.purpose || '')} <span style="color:var(--muted);">${escHtml((e.compatibility_hex || '').slice(0, 12))}</span></td>
+            <td>${Number(e.token_count || 0).toLocaleString()}</td>
+            <td>${e.chunk_count || 0}</td>
+            <td>${fmtBytes(e.private_bytes || 0)} / ${fmtBytes(e.manifest_bytes || 0)} / ${fmtBytes(e.chunk_bytes || 0)}</td>
+            <td style="color:var(--muted);">${escHtml(dt)}</td>
+            <td><button class="btn-sm btn-danger" onclick="deleteCacheIds(['${idStr}'])">🗑 Delete</button></td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function doCacheDelete(payload, confirmMsg) {
+      if (!confirm(confirmMsg)) return;
+      try {
+        const res = await fetch('/admin/disk-cache/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          showToast('Cache delete failed: ' + (data.error ? data.error.message : res.statusText), true);
+          return;
+        }
+        window._selectedCacheIds.clear();
+        document.getElementById('cache-select-all').checked = false;
+        showToast(`Deleted ${data.deleted} checkpoint(s) (pinned skipped: ${data.skipped_pinned}, busy skipped: ${data.skipped_busy})`);
+        await loadDiskCache(false);
+      } catch (e) {
+        showToast('Cache delete error: ' + e.message, true);
+      }
+    }
+
+    function deleteCacheIds(idStrings) {
+      const ids = idStrings.map(x => Number(x)).filter(n => Number.isFinite(n));
+      if (!ids.length) return;
+      doCacheDelete({ ids }, `Delete ${ids.length} disk cache checkpoint(s)?`);
+    }
+
+    function deleteSelectedCache() {
+      const ids = Array.from(window._selectedCacheIds);
+      if (!ids.length) { showToast('No checkpoints selected', true); return; }
+      deleteCacheIds(ids);
+    }
+
+    function deleteIncompatibleCache() {
+      doCacheDelete({ delete_incompatible: true }, 'Delete all incompatible disk cache checkpoints?');
+    }
+
+    function deleteAllCache() {
+      doCacheDelete({ delete_all: true }, 'PURGE ALL disk cache checkpoints? Unpinned checkpoints and unreferenced chunks will be removed.');
+    }
+
+    // --- Auth Overlay & Boot ---
+    async function submitLogin() {
+      const pwd = document.getElementById('auth-login-password').value;
+      const errEl = document.getElementById('auth-login-error');
+      const btn = document.getElementById('auth-login-btn');
+      errEl.style.display = 'none';
+      btn.disabled = true;
+      try {
+        const res = await fetch('/admin/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pwd })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error || !data.authenticated) {
+          errEl.textContent = (data.error && data.error.message) ? data.error.message : 'Invalid password';
+          errEl.style.display = 'block';
+          btn.disabled = false;
+          return;
+        }
+        authLocked = false;
+        document.getElementById('auth-overlay').classList.remove('open');
+        btn.disabled = false;
+        startDashboardBoot();
+      } catch (e) {
+        errEl.textContent = 'Login request error: ' + e.message;
+        errEl.style.display = 'block';
+        btn.disabled = false;
+      }
+    }
+
+    async function logoutAdmin() {
+      try { await fetch('/admin/auth/logout', { method: 'POST' }); } catch (_) {}
+      handleWebAuthRequired('Signed out. Enter Web UI password to unlock.');
+    }
+
+    function startDashboardBoot() {
+      refreshAll();
+      if (statusPollTimer) clearInterval(statusPollTimer);
+      statusPollTimer = setInterval(fetchStatus, 3000);
+    }
+
+    async function checkAuthAndBoot() {
+      try {
+        const res = await fetch('/admin/auth/status', { cache: 'no-store' });
+        if (res.ok) {
+          const st = await res.json();
+          const logoutBtn = document.getElementById('btn-logout');
+          if (logoutBtn) logoutBtn.style.display = st.web_auth_enabled ? 'inline-block' : 'none';
+          if (st.web_auth_enabled && !st.authenticated) {
+            handleWebAuthRequired('Password authentication is enabled. Enter Web UI password to unlock.');
+            return;
+          }
+        }
+      } catch (_) {}
+      startDashboardBoot();
+    }
+
+    checkAuthAndBoot();
   </script>
 </body>
 </html>

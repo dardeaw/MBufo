@@ -3,11 +3,13 @@
 #include <curl/curl.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -18,13 +20,17 @@
 #include <map>
 #include <mutex>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "mbufo_build_version.hpp"
+#include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
 
 namespace mbufo::server::admin_ops {
@@ -32,12 +38,8 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr const char* kGithubRawMappingUrl =
-    "https://raw.githubusercontent.com/dardeaw/MBufo/main/model_mapping.json";
-constexpr const char* kGithubCommitsMainUrl =
-    "https://api.github.com/repos/dardeaw/MBufo/commits/main";
 constexpr const char* kGithubTagsUrl =
-    "https://api.github.com/repos/dardeaw/MBufo/tags?per_page=1";
+    "https://api.github.com/repos/dardeaw/MBufo/tags?per_page=100";
 constexpr std::uint64_t kSafetyDiskMarginBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
 
 HttpResponse OkJson(json::Value body) {
@@ -539,13 +541,434 @@ struct UpdateCheckCache {
   std::string remote_sha;
   std::string remote_short;
   std::string remote_tag;
-  std::string remote_message;
-  std::string remote_date;
-  std::string remote_author;
   std::string check_error;
 };
 
 UpdateCheckCache g_upd_cache;
+
+struct SemverTag {
+  int major{0};
+  int minor{0};
+  int patch{0};
+  bool mbufo_prefixed{false};
+  bool valid{false};
+};
+
+SemverTag ParseSemverTag(std::string_view tag) {
+  SemverTag res;
+  if (tag.rfind("mbufo-v", 0) == 0) {
+    res.mbufo_prefixed = true;
+    tag.remove_prefix(7);
+  } else if (!tag.empty() && tag.front() == 'v') {
+    tag.remove_prefix(1);
+  } else {
+    return {};
+  }
+  auto parse_num = [&](std::string_view sv, int* out) -> bool {
+    if (sv.empty()) return false;
+    long v = 0;
+    for (char c : sv) {
+      if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+      v = v * 10 + (c - '0');
+      if (v > 999999) return false;
+    }
+    *out = static_cast<int>(v);
+    return true;
+  };
+  const std::size_t d1 = tag.find('.');
+  if (d1 == std::string_view::npos) return {};
+  const std::size_t d2 = tag.find('.', d1 + 1);
+  if (d2 == std::string_view::npos) return {};
+  std::string_view tail = tag.substr(d2 + 1);
+  if (const auto dash = tail.find('-'); dash != std::string_view::npos) {
+    tail = tail.substr(0, dash);
+  }
+  if (!parse_num(tag.substr(0, d1), &res.major) ||
+      !parse_num(tag.substr(d1 + 1, d2 - d1 - 1), &res.minor) ||
+      !parse_num(tail, &res.patch)) {
+    return {};
+  }
+  res.valid = true;
+  return res;
+}
+
+bool SemverGreater(const SemverTag& a, const SemverTag& b) {
+  return std::tie(a.major, a.minor, a.patch) >
+         std::tie(b.major, b.minor, b.patch);
+}
+
+std::string RandomHex(std::size_t num_bytes) {
+  std::vector<std::uint8_t> buf(num_bytes, 0);
+  std::ifstream urand("/dev/urandom", std::ios::binary);
+  if (urand) {
+    urand.read(reinterpret_cast<char*>(buf.data()),
+               static_cast<std::streamsize>(buf.size()));
+  }
+  if (!urand || urand.gcount() < static_cast<std::streamsize>(buf.size())) {
+    const std::uint64_t seed =
+        NowEpochSec() ^ static_cast<std::uint64_t>(::getpid());
+    for (std::size_t i = 0; i < buf.size(); ++i) {
+      buf[i] = static_cast<std::uint8_t>((seed >> ((i % 8) * 8)) ^ (i * 37U));
+    }
+  }
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(buf.size() * 2);
+  for (std::uint8_t b : buf) {
+    out.push_back(kHex[b >> 4]);
+    out.push_back(kHex[b & 15]);
+  }
+  return out;
+}
+
+std::string HashSecret(std::string_view salt, std::string_view secret) {
+  const std::string material =
+      std::string(salt) + ":" + std::string(secret);
+  return crypto::Sha256Hex(std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(material.data()),
+      material.size()));
+}
+
+std::string ComputeWebSessionToken(const ServerConfig& cfg) {
+  if (cfg.web_password_hash.empty()) return {};
+  return HashSecret(cfg.web_password_salt + ":session", cfg.web_password_hash);
+}
+
+std::string TrimOws(std::string_view s) {
+  while (!s.empty() &&
+         (s.front() == ' ' || s.front() == '\t' || s.front() == '\r' ||
+          s.front() == '\n')) {
+    s.remove_prefix(1);
+  }
+  while (!s.empty() &&
+         (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' ||
+          s.back() == '\n')) {
+    s.remove_suffix(1);
+  }
+  return std::string(s);
+}
+
+std::string ExtractCookie(std::string_view cookie_hdr, std::string_view key) {
+  while (!cookie_hdr.empty()) {
+    const std::size_t semi = cookie_hdr.find(';');
+    const std::string_view part =
+        semi == std::string_view::npos ? cookie_hdr
+                                       : cookie_hdr.substr(0, semi);
+    const std::size_t eq = part.find('=');
+    if (eq != std::string_view::npos) {
+      if (TrimOws(part.substr(0, eq)) == key) {
+        return TrimOws(part.substr(eq + 1));
+      }
+    }
+    if (semi == std::string_view::npos) break;
+    cookie_hdr.remove_prefix(semi + 1);
+  }
+  return {};
+}
+
+std::string ExtractBearerToken(std::string_view auth_hdr) {
+  const std::string trimmed = TrimOws(auth_hdr);
+  const std::size_t sp = trimmed.find(' ');
+  if (sp == std::string::npos) return {};
+  if (ToLower(trimmed.substr(0, sp)) != "bearer") return {};
+  return TrimOws(trimmed.substr(sp + 1));
+}
+
+bool WritePrivateFileAtomic(const fs::path& p, const std::string& content,
+                            std::string* error = nullptr) {
+  std::error_code ec;
+  if (p.has_parent_path()) {
+    fs::create_directories(p.parent_path(), ec);
+    if (ec) {
+      if (error != nullptr) *error = "mkdir failed: " + ec.message();
+      return false;
+    }
+  }
+  const fs::path tmp = p.string() + ".tmp";
+  const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (fd < 0) {
+    if (error != nullptr) *error = "cannot open temp file: " + tmp.string();
+    return false;
+  }
+  std::size_t off = 0;
+  while (off < content.size()) {
+    const ssize_t w = ::write(fd, content.data() + off, content.size() - off);
+    if (w <= 0) {
+      ::close(fd);
+      ::unlink(tmp.c_str());
+      if (error != nullptr) *error = "write failed: " + tmp.string();
+      return false;
+    }
+    off += static_cast<std::size_t>(w);
+  }
+  ::fchmod(fd, 0600);
+  ::fsync(fd);
+  ::close(fd);
+  fs::rename(tmp, p, ec);
+  if (ec) {
+    ::unlink(tmp.c_str());
+    if (error != nullptr) *error = "rename failed: " + ec.message();
+    return false;
+  }
+  return true;
+}
+
+json::Value DefaultModelToJson(const DefaultModelConfig& d) {
+  json::Value obj = json::Value::object();
+  obj["configured"] = d.configured;
+  obj["id"] = d.id;
+  json::Value aliases = json::Value::array();
+  for (const auto& a : d.aliases) {
+    if (!a.empty()) aliases.push_back(a);
+  }
+  obj["aliases"] = std::move(aliases);
+  obj["path"] = d.path;
+  obj["max_context"] = static_cast<std::size_t>(d.max_context);
+  obj["session_count"] = d.session_count;
+  obj["kv_cache_quant"] = d.kv_cache_quant;
+  obj["device"] = d.device;
+  obj["npu_quant"] = d.npu_quant;
+  obj["speculative"] = d.speculative;
+  obj["draft_model_path"] = d.draft_model_path;
+  obj["vision_model_path"] = d.vision_model_path;
+  obj["enable_yarn"] = d.enable_yarn;
+  obj["enable_disk_cache"] = d.enable_disk_cache;
+  return obj;
+}
+
+json::Value ServerConfigToJson(const ServerConfig& cfg) {
+  json::Value obj = json::Value::object();
+  obj["port"] = static_cast<std::size_t>(cfg.port);
+  obj["web_auth_enabled"] = cfg.web_auth_enabled;
+  obj["web_password_salt"] = cfg.web_password_salt;
+  obj["web_password_hash"] = cfg.web_password_hash;
+  obj["api_auth_enabled"] = cfg.api_auth_enabled;
+  obj["api_auth_share_web_password"] = cfg.api_auth_share_web_password;
+  obj["api_key_salt"] = cfg.api_key_salt;
+  obj["api_key_hash"] = cfg.api_key_hash;
+  obj["default_model"] = DefaultModelToJson(cfg.default_model);
+  return obj;
+}
+
+bool ParseDefaultModelJson(const json::Value& v, DefaultModelConfig* out) {
+  if (!v.is_object()) return false;
+  DefaultModelConfig d;
+  if (const auto* f = v.find("configured"); f != nullptr && f->is_bool())
+    d.configured = f->as_bool(false);
+  d.id = v.member_str("id");
+  if (const auto* al = v.find("aliases"); al != nullptr && al->is_array()) {
+    for (const auto& x : al->items()) {
+      if (x.is_string() && !x.str().empty()) d.aliases.push_back(x.str());
+    }
+  }
+  d.path = v.member_str("path");
+  d.max_context = static_cast<std::uint32_t>(
+      v.member_size("max_context", v.member_size("context_length", 0)));
+  d.session_count = std::max<std::size_t>(
+      1, v.member_size("session_count", v.member_size("sessions", 1)));
+  d.kv_cache_quant = v.member_str("kv_cache_quant", "q8");
+  d.device = v.member_str("device", "gpu");
+  if (d.device != "gpu" && d.device != "npu") d.device = "gpu";
+  d.npu_quant = v.member_str("npu_quant");
+  d.speculative = v.member_str("speculative", "off");
+  d.draft_model_path = v.member_str("draft_model_path");
+  d.vision_model_path = v.member_str("vision_model_path");
+  if (const auto* f = v.find("enable_yarn"); f != nullptr && f->is_bool())
+    d.enable_yarn = f->as_bool(false);
+  if (const auto* f = v.find("enable_disk_cache"); f != nullptr && f->is_bool())
+    d.enable_disk_cache = f->as_bool(false);
+  if (!d.path.empty() && v.find("configured") == nullptr) d.configured = true;
+  *out = std::move(d);
+  return true;
+}
+
+struct RuntimeConfigState {
+  std::mutex mu;
+  fs::path config_path;
+  int running_port{8741};
+  fs::path cache_disk_dir;
+  std::size_t cache_disk_bytes{0};
+  bool cli_api_key_active{false};
+  ServerConfig cfg;
+};
+
+RuntimeConfigState g_rt;
+
+fs::path ActiveConfigPathLocked() {
+  if (!g_rt.config_path.empty()) return g_rt.config_path;
+  if (const char* e = std::getenv("MBUFO_CONFIG_FILE");
+      e != nullptr && *e != '\0') {
+    return fs::path(e);
+  }
+  return ResolveCacheRoot() / "server_config.json";
+}
+
+struct OfflineManifestMeta {
+  std::string path;
+  std::string filename;
+  std::uint64_t checkpoint_id{0};
+  std::uint64_t lineage_id{0};
+  std::string compatibility_hex;
+  std::size_t token_count{0};
+  std::size_t chunk_count{0};
+  std::uint64_t chunk_bytes{0};
+  std::uint64_t private_bytes{0};
+  std::uint64_t manifest_bytes{0};
+  std::int64_t mtime_epoch{0};
+  std::string purpose;
+  std::vector<std::string> chunk_filenames;
+  std::vector<std::string> private_filenames;
+};
+
+std::string DiskIdToFilename(const std::uint8_t* bytes16) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(36);
+  for (int i = 0; i < 16; ++i) {
+    out.push_back(kHex[bytes16[i] >> 4]);
+    out.push_back(kHex[bytes16[i] & 15]);
+  }
+  out += ".bin";
+  return out;
+}
+
+std::uint32_t ReadLe32(const std::uint8_t* p) {
+  return static_cast<std::uint32_t>(p[0]) |
+         (static_cast<std::uint32_t>(p[1]) << 8) |
+         (static_cast<std::uint32_t>(p[2]) << 16) |
+         (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
+std::uint64_t ReadLe64(const std::uint8_t* p) {
+  std::uint64_t v = 0;
+  for (int i = 0; i < 8; ++i) {
+    v |= (static_cast<std::uint64_t>(p[i]) << (8 * i));
+  }
+  return v;
+}
+
+bool ParseOfflineManifest(const fs::path& file_path, OfflineManifestMeta* out) {
+  std::ifstream ifs(file_path, std::ios::binary);
+  if (!ifs) return false;
+  std::vector<std::uint8_t> b(
+      (std::istreambuf_iterator<char>(ifs)),
+      std::istreambuf_iterator<char>());
+  if (b.size() < 8 + 4 + 8 + 8 + 32 + 1 + 4 + 4 + 4 + 4 + 8) return false;
+  if (std::memcmp(b.data(), "GUFOMNF2", 8) != 0) return false;
+  std::size_t pos = 8;
+  auto need = [&](std::size_t n) { return pos + n <= b.size(); };
+  if (!need(4)) return false;
+  const std::uint32_t ver = ReadLe32(b.data() + pos);
+  pos += 4;
+  if (ver != 2) return false;
+  if (!need(16)) return false;
+  const std::uint64_t ckpt = ReadLe64(b.data() + pos);
+  const std::uint64_t lin = ReadLe64(b.data() + pos + 8);
+  pos += 16;
+  if (!need(32)) return false;
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string compat_hex;
+  compat_hex.reserve(64);
+  for (std::size_t i = 0; i < 32; ++i) {
+    compat_hex.push_back(kHex[b[pos + i] >> 4]);
+    compat_hex.push_back(kHex[b[pos + i] & 15]);
+  }
+  pos += 32;
+  if (!need(1 + 4 + 4)) return false;
+  const std::uint8_t purpose = b[pos];
+  pos += 1;
+  pos += 4;
+  const std::uint32_t in_len = ReadLe32(b.data() + pos);
+  pos += 4;
+  if (!need(in_len + 4)) return false;
+  pos += in_len;
+  const std::uint32_t tok_cnt = ReadLe32(b.data() + pos);
+  pos += 4;
+  if (static_cast<std::uint64_t>(tok_cnt) * 4ULL + 4ULL > b.size() - pos)
+    return false;
+  pos += static_cast<std::size_t>(tok_cnt) * 4;
+  if (!need(4)) return false;
+  const std::uint32_t comp_cnt = ReadLe32(b.data() + pos);
+  pos += 4;
+
+  std::set<std::string> seen_chunks;
+  std::set<std::string> seen_priv;
+  std::uint64_t chunk_bytes = 0;
+  std::uint64_t priv_bytes = 0;
+
+  for (std::uint32_t ci = 0; ci < comp_cnt; ++ci) {
+    if (!need(41 + 4)) return false;
+    pos += 41;
+    const std::uint32_t cc = ReadLe32(b.data() + pos);
+    pos += 4;
+    for (std::uint32_t j = 0; j < cc; ++j) {
+      if (!need(32)) return false;
+      std::string fname = DiskIdToFilename(b.data() + pos);
+      const std::uint64_t sz = ReadLe64(b.data() + pos + 16);
+      pos += 32;
+      if (seen_chunks.insert(fname).second) {
+        chunk_bytes += sz;
+      }
+    }
+    if (!need(1)) return false;
+    const std::uint8_t has_tail = b[pos++];
+    if (has_tail) {
+      if (!need(32)) return false;
+      std::string fname = DiskIdToFilename(b.data() + pos);
+      const std::uint64_t sz = ReadLe64(b.data() + pos + 16);
+      pos += 32;
+      if (seen_priv.insert(fname).second) priv_bytes += sz;
+    }
+    if (!need(1)) return false;
+    const std::uint8_t has_ps = b[pos++];
+    if (has_ps) {
+      if (!need(32)) return false;
+      std::string fname = DiskIdToFilename(b.data() + pos);
+      const std::uint64_t sz = ReadLe64(b.data() + pos + 16);
+      pos += 32;
+      if (seen_priv.insert(fname).second) priv_bytes += sz;
+    }
+  }
+
+  OfflineManifestMeta meta;
+  meta.path = file_path.string();
+  meta.filename = file_path.filename().string();
+  meta.checkpoint_id = ckpt;
+  meta.lineage_id = lin;
+  meta.compatibility_hex = std::move(compat_hex);
+  meta.token_count = tok_cnt;
+  meta.chunk_count = seen_chunks.size();
+  meta.chunk_bytes = chunk_bytes;
+  meta.private_bytes = priv_bytes;
+  meta.manifest_bytes = b.size();
+  meta.purpose = purpose == 1 ? "learned" : "prompt";
+  meta.chunk_filenames.assign(seen_chunks.begin(), seen_chunks.end());
+  meta.private_filenames.assign(seen_priv.begin(), seen_priv.end());
+
+  struct stat st{};
+  if (::stat(file_path.c_str(), &st) == 0) {
+    meta.mtime_epoch = static_cast<std::int64_t>(st.st_mtime);
+  }
+  *out = std::move(meta);
+  return true;
+}
+
+std::vector<OfflineManifestMeta> ScanOfflineManifests(const fs::path& dir) {
+  std::vector<OfflineManifestMeta> list;
+  const fs::path mf_dir = dir / "v2" / "manifests";
+  std::error_code ec;
+  if (!fs::exists(mf_dir, ec) || !fs::is_directory(mf_dir, ec)) return list;
+  for (const auto& entry : fs::directory_iterator(mf_dir, ec)) {
+    if (ec) break;
+    if (!entry.is_regular_file(ec)) continue;
+    if (entry.path().extension() != ".bin") continue;
+    OfflineManifestMeta meta;
+    if (ParseOfflineManifest(entry.path(), &meta)) {
+      list.push_back(std::move(meta));
+    }
+  }
+  return list;
+}
 
 json::Value ReadPersistentUpdateStatus() {
   const fs::path sf = ResolveCacheRoot() / "update_status.json";
@@ -569,67 +992,30 @@ json::Value ReadPersistentUpdateStatus() {
 
 }  // namespace
 
-// ---- Local model_mapping.json cache & sync ----
+// ---- Local repository model_mapping.json ----
 
 HttpResponse HandleGetModelMapping(const HttpRequest&) {
-  const fs::path cache_file = ResolveCacheRoot() / "model_mapping.json";
-  std::string content = ReadWholeFile(cache_file);
-  if (!content.empty()) {
-    try {
-      auto parsed = json::parse(content);
-      if (parsed.is_object()) return OkRawJson(std::move(content));
-    } catch (...) {
-    }
-  }
-
   const fs::path repo_dir = ResolveRepoDir();
+  const fs::path cache_file = ResolveCacheRoot() / "model_mapping.json";
   for (const fs::path& cand :
-       {repo_dir / "model_mapping.json", fs::path("model_mapping.json")}) {
-    content = ReadWholeFile(cand);
+       {repo_dir / "model_mapping.json", fs::path("model_mapping.json"),
+        cache_file}) {
+    std::string content = ReadWholeFile(cand);
     if (!content.empty()) {
-      WriteFileAtomic(cache_file, content);
-      return OkRawJson(std::move(content));
+      try {
+        auto parsed = json::parse(content);
+        if (parsed.is_object()) return OkRawJson(std::move(content));
+      } catch (...) {
+      }
     }
   }
   return ErrJson(404, "Not Found",
-                 "model_mapping.json not found in cache or repository",
+                 "model_mapping.json not found in local repository",
                  "mapping_not_found");
 }
 
-HttpResponse HandleSyncModelMapping(const HttpRequest&) {
-  long status = 0;
-  std::string body;
-  std::string err;
-  if (!HttpGet(kGithubRawMappingUrl, {}, 15, &status, &body, &err)) {
-    return ErrJson(502, "Bad Gateway", "GitHub fetch failed: " + err,
-                   "github_fetch_failed");
-  }
-  if (status != 200) {
-    return ErrJson(502, "Bad Gateway",
-                   "GitHub returned HTTP " + std::to_string(status),
-                   "github_http_error");
-  }
-  try {
-    auto parsed = json::parse(body);
-    if (!parsed.is_object() || parsed.find("models") == nullptr ||
-        !parsed.find("models")->is_array()) {
-      return ErrJson(502, "Bad Gateway",
-                     "Invalid model_mapping.json payload from GitHub",
-                     "invalid_mapping");
-    }
-  } catch (const std::exception& e) {
-    return ErrJson(502, "Bad Gateway",
-                   std::string("JSON parse error: ") + e.what(),
-                   "invalid_mapping_json");
-  }
-
-  const fs::path cache_file = ResolveCacheRoot() / "model_mapping.json";
-  if (!WriteFileAtomic(cache_file, body, &err)) {
-    return ErrJson(500, "Internal Server Error",
-                   "Failed writing local mapping cache: " + err,
-                   "cache_write_failed");
-  }
-  return OkRawJson(std::move(body));
+HttpResponse HandleSyncModelMapping(const HttpRequest& req) {
+  return HandleGetModelMapping(req);
 }
 
 // ---- Option B: Dynamic HF Repo File Browser ----
@@ -1079,7 +1465,7 @@ HttpResponse HandleCancelDownload(const HttpRequest& req) {
                  "job_not_found");
 }
 
-// ---- Real-Time GitHub Self-Update Endpoints ----
+// ---- Real-Time GitHub Tag-Based Self-Update Check ----
 
 HttpResponse HandleUpdateCheck(const HttpRequest& req) {
   const bool force = (req.query_param("force") == "1" ||
@@ -1099,62 +1485,77 @@ HttpResponse HandleUpdateCheck(const HttpRequest& req) {
       hdrs.push_back("Authorization: Bearer " + std::string(ght));
     }
 
-    long code = 0;
-    std::string body;
-    std::string err;
-    g_upd_cache.check_error.clear();
-
-    if (HttpGet(kGithubCommitsMainUrl, hdrs, 10, &code, &body, &err) &&
-        code == 200) {
-      try {
-        auto c = json::parse(body);
-        g_upd_cache.remote_sha = c.member_str("sha");
-        g_upd_cache.remote_short =
-            g_upd_cache.remote_sha.size() >= 8
-                ? g_upd_cache.remote_sha.substr(0, 8)
-                : g_upd_cache.remote_sha;
-        if (const auto* cm = c.find("commit"); cm != nullptr && cm->is_object()) {
-          std::string msg = cm->member_str("message");
-          const auto nl = msg.find('\n');
-          if (nl != std::string::npos) msg = msg.substr(0, nl);
-          g_upd_cache.remote_message = std::move(msg);
-          if (const auto* auth = cm->find("author");
-              auth != nullptr && auth->is_object()) {
-            g_upd_cache.remote_date = auth->member_str("date");
-            g_upd_cache.remote_author = auth->member_str("name");
-          }
-        }
-      } catch (const std::exception& e) {
-        g_upd_cache.check_error =
-            std::string("GitHub commit parse error: ") + e.what();
-      }
-    } else {
-      g_upd_cache.check_error =
-          err.empty() ? ("GitHub HTTP " + std::to_string(code)) : err;
-    }
-
-    // Fetch latest tag if reachable (best effort)
     long tcode = 0;
     std::string tbody;
     std::string terr;
-    if (HttpGet(kGithubTagsUrl, hdrs, 8, &tcode, &tbody, &terr) && tcode == 200) {
+    g_upd_cache.check_error.clear();
+
+    if (HttpGet(kGithubTagsUrl, hdrs, 10, &tcode, &tbody, &terr) &&
+        tcode == 200) {
       try {
         auto tags = json::parse(tbody);
-        if (tags.is_array() && !tags.items().empty() &&
-            tags.items()[0].is_object()) {
-          g_upd_cache.remote_tag = tags.items()[0].member_str("name");
+        if (tags.is_array()) {
+          std::string best_mbufo_name, best_mbufo_sha;
+          SemverTag best_mbufo_ver;
+          std::string best_any_name, best_any_sha;
+          SemverTag best_any_ver;
+
+          for (const auto& t : tags.items()) {
+            if (!t.is_object()) continue;
+            const std::string name = t.member_str("name");
+            const SemverTag sv = ParseSemverTag(name);
+            if (!sv.valid) continue;
+            std::string sha;
+            if (const auto* co = t.find("commit");
+                co != nullptr && co->is_object()) {
+              sha = co->member_str("sha");
+            }
+            if (sv.mbufo_prefixed) {
+              if (!best_mbufo_ver.valid || SemverGreater(sv, best_mbufo_ver)) {
+                best_mbufo_ver = sv;
+                best_mbufo_name = name;
+                best_mbufo_sha = sha;
+              }
+            } else {
+              if (!best_any_ver.valid || SemverGreater(sv, best_any_ver)) {
+                best_any_ver = sv;
+                best_any_name = name;
+                best_any_sha = sha;
+              }
+            }
+          }
+          if (best_mbufo_ver.valid) {
+            g_upd_cache.remote_tag = best_mbufo_name;
+            g_upd_cache.remote_sha = best_mbufo_sha;
+          } else if (best_any_ver.valid) {
+            g_upd_cache.remote_tag = best_any_name;
+            g_upd_cache.remote_sha = best_any_sha;
+          } else {
+            g_upd_cache.check_error = "No semantic release tags found on GitHub";
+          }
+          g_upd_cache.remote_short =
+              g_upd_cache.remote_sha.size() >= 8
+                  ? g_upd_cache.remote_sha.substr(0, 8)
+                  : g_upd_cache.remote_sha;
         }
-      } catch (...) {
+      } catch (const std::exception& e) {
+        g_upd_cache.check_error =
+            std::string("GitHub tags parse error: ") + e.what();
       }
+    } else {
+      g_upd_cache.check_error =
+          terr.empty() ? ("GitHub HTTP " + std::to_string(tcode)) : terr;
     }
     g_upd_cache.fetched_epoch = now;
   }
 
+  const SemverTag local_sv = ParseSemverTag(running_tag);
+  const SemverTag remote_sv = ParseSemverTag(g_upd_cache.remote_tag);
   const bool update_available =
-      !g_upd_cache.remote_sha.empty() && running_sha != "unknown" &&
-      g_upd_cache.remote_sha != running_sha;
+      local_sv.valid && remote_sv.valid && SemverGreater(remote_sv, local_sv);
 
   json::Value resp = json::Value::object();
+  resp["compare_mode"] = "tag";
   resp["running_sha"] = running_sha;
   resp["running_short"] = running_short;
   resp["running_tag"] = running_tag;
@@ -1162,9 +1563,10 @@ HttpResponse HandleUpdateCheck(const HttpRequest& req) {
   resp["remote_sha"] = g_upd_cache.remote_sha;
   resp["remote_short"] = g_upd_cache.remote_short;
   resp["remote_tag"] = g_upd_cache.remote_tag;
-  resp["remote_message"] = g_upd_cache.remote_message;
-  resp["remote_date"] = g_upd_cache.remote_date;
-  resp["remote_author"] = g_upd_cache.remote_author;
+  resp["remote_message"] =
+      g_upd_cache.remote_tag.empty()
+          ? ""
+          : ("Release tag " + g_upd_cache.remote_tag);
   resp["update_available"] = update_available;
   resp["check_error"] = g_upd_cache.check_error;
   resp["checked_at_utc"] = NowIsoUtc();
@@ -1247,6 +1649,498 @@ HttpResponse HandleUpdateStatus(const HttpRequest&) {
   resp["build_time_utc"] = mbufo::build::kBuildTimeUtc;
   resp["log_tail"] = ReadTailLines(cache_dir / "update.log", 25);
   return OkJson(std::move(resp));
+}
+
+// ---- Persistent ServerConfig, Dual-Layer Auth & Offline Disk Cache ----
+
+bool LoadServerConfigFile(const fs::path& path, ServerConfig* out,
+                          std::string* error) {
+  if (out == nullptr) return false;
+  const std::string raw = ReadWholeFile(path);
+  if (raw.empty()) {
+    if (error != nullptr) *error = "config file empty or missing";
+    return false;
+  }
+  try {
+    const auto v = json::parse(raw);
+    if (!v.is_object()) {
+      if (error != nullptr) *error = "config JSON must be an object";
+      return false;
+    }
+    ServerConfig cfg;
+    const int p = static_cast<int>(v.member_size("port", 8741));
+    cfg.port = (p >= 1 && p <= 65535) ? p : 8741;
+    if (const auto* f = v.find("web_auth_enabled"); f != nullptr && f->is_bool())
+      cfg.web_auth_enabled = f->as_bool(false);
+    cfg.web_password_salt = v.member_str("web_password_salt");
+    cfg.web_password_hash = v.member_str("web_password_hash");
+    if (const auto* f = v.find("api_auth_enabled"); f != nullptr && f->is_bool())
+      cfg.api_auth_enabled = f->as_bool(false);
+    if (const auto* f = v.find("api_auth_share_web_password");
+        f != nullptr && f->is_bool())
+      cfg.api_auth_share_web_password = f->as_bool(false);
+    cfg.api_key_salt = v.member_str("api_key_salt");
+    cfg.api_key_hash = v.member_str("api_key_hash");
+    if (const auto* dm = v.find("default_model"); dm != nullptr) {
+      ParseDefaultModelJson(*dm, &cfg.default_model);
+    }
+    *out = std::move(cfg);
+    return true;
+  } catch (const std::exception& e) {
+    if (error != nullptr) *error = e.what();
+    return false;
+  }
+}
+
+bool SeedServerConfigIfMissing(const fs::path& path, const ServerConfig& seed,
+                               std::string* error) {
+  std::error_code ec;
+  if (fs::exists(path, ec)) return true;
+  return WritePrivateFileAtomic(path, ServerConfigToJson(seed).dump(), error);
+}
+
+void InitServerRuntime(const fs::path& config_path, int running_port,
+                       const fs::path& cache_disk_dir,
+                       std::size_t cache_disk_bytes,
+                       bool cli_api_key_active) {
+  std::lock_guard<std::mutex> lock(g_rt.mu);
+  g_rt.config_path = config_path;
+  g_rt.running_port = running_port > 0 ? running_port : 8741;
+  g_rt.cache_disk_dir = cache_disk_dir;
+  g_rt.cache_disk_bytes = cache_disk_bytes;
+  g_rt.cli_api_key_active = cli_api_key_active;
+  g_rt.cfg = ServerConfig{};
+  g_rt.cfg.port = g_rt.running_port;
+  if (!config_path.empty()) {
+    ServerConfig loaded;
+    if (LoadServerConfigFile(config_path, &loaded)) {
+      g_rt.cfg = std::move(loaded);
+    }
+  }
+}
+
+int GetRunningPort() {
+  std::lock_guard<std::mutex> lock(g_rt.mu);
+  return g_rt.running_port;
+}
+
+fs::path GetConfiguredCacheDiskDir() {
+  std::lock_guard<std::mutex> lock(g_rt.mu);
+  if (!g_rt.cache_disk_dir.empty()) return g_rt.cache_disk_dir;
+  return ResolveCacheRoot();
+}
+
+std::size_t GetConfiguredCacheDiskBytes() {
+  std::lock_guard<std::mutex> lock(g_rt.mu);
+  return g_rt.cache_disk_bytes;
+}
+
+bool IsWebAuthEnabled() {
+  std::lock_guard<std::mutex> lock(g_rt.mu);
+  return g_rt.cfg.web_auth_enabled && !g_rt.cfg.web_password_hash.empty();
+}
+
+bool CheckWebAuth(const HttpRequest& req) {
+  ServerConfig cfg;
+  {
+    std::lock_guard<std::mutex> lock(g_rt.mu);
+    if (!g_rt.cfg.web_auth_enabled || g_rt.cfg.web_password_hash.empty())
+      return true;
+    cfg = g_rt.cfg;
+  }
+  const std::string expected_cookie = ComputeWebSessionToken(cfg);
+  const std::string cookie_tok =
+      ExtractCookie(req.header("Cookie"), "mbufo_admin_session");
+  if (!cookie_tok.empty() && cookie_tok == expected_cookie) return true;
+
+  const std::string bearer = ExtractBearerToken(req.header("Authorization"));
+  if (!bearer.empty() &&
+      HashSecret(cfg.web_password_salt, bearer) == cfg.web_password_hash) {
+    return true;
+  }
+  const std::string hdr_pw = req.header("X-Admin-Password");
+  if (!hdr_pw.empty() &&
+      HashSecret(cfg.web_password_salt, hdr_pw) == cfg.web_password_hash) {
+    return true;
+  }
+  return false;
+}
+
+bool IsApiAuthEnabled() {
+  std::lock_guard<std::mutex> lock(g_rt.mu);
+  if (!g_rt.cfg.api_auth_enabled) return false;
+  if (g_rt.cfg.api_auth_share_web_password)
+    return !g_rt.cfg.web_password_hash.empty();
+  return !g_rt.cfg.api_key_hash.empty();
+}
+
+bool CheckApiAuth(const HttpRequest& req) {
+  ServerConfig cfg;
+  {
+    std::lock_guard<std::mutex> lock(g_rt.mu);
+    if (!g_rt.cfg.api_auth_enabled) return true;
+    cfg = g_rt.cfg;
+  }
+  std::string supplied = ExtractBearerToken(req.header("Authorization"));
+  if (supplied.empty()) supplied = TrimOws(req.header("x-api-key"));
+  if (supplied.empty()) return false;
+
+  if (cfg.api_auth_share_web_password) {
+    return !cfg.web_password_hash.empty() &&
+           HashSecret(cfg.web_password_salt, supplied) == cfg.web_password_hash;
+  }
+  return !cfg.api_key_hash.empty() &&
+         HashSecret(cfg.api_key_salt, supplied) == cfg.api_key_hash;
+}
+
+HttpResponse HandleAuthStatus(const HttpRequest& req) {
+  bool web_enabled = false;
+  bool api_enabled = false;
+  bool web_set = false;
+  {
+    std::lock_guard<std::mutex> lock(g_rt.mu);
+    web_set = !g_rt.cfg.web_password_hash.empty();
+    web_enabled = g_rt.cfg.web_auth_enabled && web_set;
+    api_enabled = g_rt.cfg.api_auth_enabled &&
+                  (g_rt.cfg.api_auth_share_web_password
+                       ? web_set
+                       : !g_rt.cfg.api_key_hash.empty());
+  }
+  const bool authenticated = !web_enabled || CheckWebAuth(req);
+  json::Value resp = json::Value::object();
+  resp["web_auth_enabled"] = web_enabled;
+  resp["api_auth_enabled"] = api_enabled;
+  resp["authenticated"] = authenticated;
+  return OkJson(std::move(resp));
+}
+
+HttpResponse HandleAuthLogin(const HttpRequest& req) {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return ErrJson(400, "Bad Request", e.what(), "parse_error");
+  }
+  const std::string password =
+      body.is_object() ? body.member_str("password") : "";
+  ServerConfig cfg;
+  {
+    std::lock_guard<std::mutex> lock(g_rt.mu);
+    cfg = g_rt.cfg;
+  }
+  if (!cfg.web_auth_enabled || cfg.web_password_hash.empty()) {
+    json::Value resp = json::Value::object();
+    resp["authenticated"] = true;
+    resp["web_auth_enabled"] = false;
+    return OkJson(std::move(resp));
+  }
+  if (HashSecret(cfg.web_password_salt, password) != cfg.web_password_hash) {
+    return ErrJson(401, "Unauthorized", "Invalid Web UI password",
+                   "invalid_password");
+  }
+  const std::string tok = ComputeWebSessionToken(cfg);
+  json::Value resp = json::Value::object();
+  resp["authenticated"] = true;
+  HttpResponse r = OkJson(std::move(resp));
+  r.headers.emplace_back(
+      "Set-Cookie",
+      "mbufo_admin_session=" + tok +
+          "; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800");
+  return r;
+}
+
+HttpResponse HandleAuthLogout(const HttpRequest&) {
+  json::Value resp = json::Value::object();
+  resp["authenticated"] = false;
+  HttpResponse r = OkJson(std::move(resp));
+  r.headers.emplace_back(
+      "Set-Cookie",
+      "mbufo_admin_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  return r;
+}
+
+HttpResponse HandleGetSettings(const HttpRequest&,
+                               const std::string& live_default_id) {
+  ServerConfig cfg;
+  int running_port = 8741;
+  bool cli_api = false;
+  fs::path cfg_path;
+  fs::path cache_dir;
+  std::size_t cache_bytes = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_rt.mu);
+    cfg = g_rt.cfg;
+    running_port = g_rt.running_port;
+    cli_api = g_rt.cli_api_key_active;
+    cfg_path = ActiveConfigPathLocked();
+    cache_dir =
+        g_rt.cache_disk_dir.empty() ? ResolveCacheRoot() : g_rt.cache_disk_dir;
+    cache_bytes = g_rt.cache_disk_bytes;
+  }
+  json::Value resp = json::Value::object();
+  resp["config_path"] = cfg_path.string();
+  resp["running_port"] = static_cast<std::size_t>(running_port);
+  resp["configured_port"] = static_cast<std::size_t>(cfg.port);
+  resp["restart_required"] = (cfg.port != running_port);
+  resp["web_auth_enabled"] = cfg.web_auth_enabled;
+  resp["web_password_set"] = !cfg.web_password_hash.empty();
+  resp["api_auth_enabled"] = cfg.api_auth_enabled;
+  resp["api_auth_share_web_password"] = cfg.api_auth_share_web_password;
+  resp["api_key_set"] = !cfg.api_key_hash.empty();
+  resp["cli_api_key_active"] = cli_api;
+  resp["live_default_id"] = live_default_id;
+  resp["default_model"] = DefaultModelToJson(cfg.default_model);
+  resp["cache_disk_dir"] = cache_dir.string();
+  resp["cache_disk_bytes"] = static_cast<std::size_t>(cache_bytes);
+  return OkJson(std::move(resp));
+}
+
+HttpResponse HandleSaveSettings(const HttpRequest& req) {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return ErrJson(400, "Bad Request", e.what(), "parse_error");
+  }
+  if (!body.is_object()) {
+    return ErrJson(400, "Bad Request", "request body must be an object",
+                   "invalid_request");
+  }
+
+  std::lock_guard<std::mutex> lock(g_rt.mu);
+  ServerConfig next = g_rt.cfg;
+
+  if (const auto* pf = body.find("port"); pf != nullptr && pf->is_number()) {
+    const int p = static_cast<int>(pf->as_size(0));
+    if (p < 1 || p > 65535) {
+      return ErrJson(400, "Bad Request", "port must be in 1..65535",
+                     "invalid_port");
+    }
+    next.port = p;
+  }
+
+  if (const auto* f = body.find("clear_web_password");
+      f != nullptr && f->as_bool(false)) {
+    next.web_password_salt.clear();
+    next.web_password_hash.clear();
+    next.web_auth_enabled = false;
+  }
+  if (const std::string new_pw = body.member_str("web_password");
+      !new_pw.empty()) {
+    next.web_password_salt = RandomHex(16);
+    next.web_password_hash = HashSecret(next.web_password_salt, new_pw);
+  }
+  if (const auto* f = body.find("web_auth_enabled");
+      f != nullptr && f->is_bool()) {
+    next.web_auth_enabled = f->as_bool(false);
+  }
+  if (next.web_auth_enabled && next.web_password_hash.empty()) {
+    return ErrJson(400, "Bad Request",
+                   "Set a Web UI password before enabling Web UI authentication",
+                   "missing_web_password");
+  }
+
+  if (const auto* f = body.find("clear_api_key");
+      f != nullptr && f->as_bool(false)) {
+    next.api_key_salt.clear();
+    next.api_key_hash.clear();
+    if (!next.api_auth_share_web_password) next.api_auth_enabled = false;
+  }
+  if (const std::string new_key = body.member_str("api_key");
+      !new_key.empty()) {
+    next.api_key_salt = RandomHex(16);
+    next.api_key_hash = HashSecret(next.api_key_salt, new_key);
+  }
+  if (const auto* f = body.find("api_auth_share_web_password");
+      f != nullptr && f->is_bool()) {
+    next.api_auth_share_web_password = f->as_bool(false);
+  }
+  if (const auto* f = body.find("api_auth_enabled");
+      f != nullptr && f->is_bool()) {
+    next.api_auth_enabled = f->as_bool(false);
+  }
+  if (next.api_auth_enabled) {
+    if (next.api_auth_share_web_password) {
+      if (next.web_password_hash.empty()) {
+        return ErrJson(
+            400, "Bad Request",
+            "Set a Web UI password before sharing it with /v1/* API auth",
+            "missing_web_password");
+      }
+    } else if (next.api_key_hash.empty()) {
+      return ErrJson(400, "Bad Request",
+                     "Set an API Key before enabling /v1/* API authentication",
+                     "missing_api_key");
+    }
+  }
+
+  if (const auto* dm = body.find("default_model"); dm != nullptr) {
+    DefaultModelConfig parsed_dm;
+    if (!ParseDefaultModelJson(*dm, &parsed_dm)) {
+      return ErrJson(400, "Bad Request", "default_model must be an object",
+                     "invalid_default_model");
+    }
+    if (parsed_dm.configured && parsed_dm.path.empty()) {
+      return ErrJson(400, "Bad Request", "default_model.path is required",
+                     "missing_default_path");
+    }
+    next.default_model = std::move(parsed_dm);
+  }
+
+  const fs::path cfg_path = ActiveConfigPathLocked();
+  std::string err;
+  if (!WritePrivateFileAtomic(cfg_path, ServerConfigToJson(next).dump(), &err)) {
+    return ErrJson(500, "Internal Server Error",
+                   "Failed writing server_config.json: " + err,
+                   "config_write_failed");
+  }
+  g_rt.cfg = next;
+
+  json::Value resp = json::Value::object();
+  resp["saved"] = true;
+  resp["config_path"] = cfg_path.string();
+  resp["running_port"] = static_cast<std::size_t>(g_rt.running_port);
+  resp["configured_port"] = static_cast<std::size_t>(next.port);
+  resp["restart_required"] = (next.port != g_rt.running_port);
+  resp["web_auth_enabled"] = next.web_auth_enabled;
+  resp["web_password_set"] = !next.web_password_hash.empty();
+  resp["api_auth_enabled"] = next.api_auth_enabled;
+  resp["api_auth_share_web_password"] = next.api_auth_share_web_password;
+  resp["api_key_set"] = !next.api_key_hash.empty();
+  resp["default_model"] = DefaultModelToJson(next.default_model);
+
+  HttpResponse r = OkJson(std::move(resp));
+  if (next.web_auth_enabled && !next.web_password_hash.empty()) {
+    const std::string tok = ComputeWebSessionToken(next);
+    r.headers.emplace_back(
+        "Set-Cookie",
+        "mbufo_admin_session=" + tok +
+            "; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800");
+  }
+  return r;
+}
+
+HttpResponse HandleServerRestart(const HttpRequest&) {
+  int target_port = 8741;
+  {
+    std::lock_guard<std::mutex> lock(g_rt.mu);
+    target_port = g_rt.cfg.port;
+  }
+  json::Value resp = json::Value::object();
+  resp["status"] = "restarting";
+  resp["target_port"] = static_cast<std::size_t>(target_port);
+  std::thread([]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    ::kill(::getpid(), SIGTERM);
+  }).detach();
+  return OkJson(std::move(resp));
+}
+
+DiskCacheSnapshot ListDiskCacheOffline(const fs::path& directory,
+                                       std::uint64_t capacity_bytes) {
+  DiskCacheSnapshot snap;
+  snap.directory = directory.string();
+  snap.capacity_bytes = capacity_bytes;
+  if (directory.empty()) return snap;
+  const fs::path v2_dir = directory / "v2";
+  std::error_code ec;
+  snap.enabled = fs::exists(v2_dir, ec);
+  if (!snap.enabled) return snap;
+
+  snap.managed_bytes =
+      SumDirectoryBytes(v2_dir / "manifests") +
+      SumDirectoryBytes(v2_dir / "chunks") +
+      SumDirectoryBytes(v2_dir / "private");
+
+  auto metas = ScanOfflineManifests(directory);
+  std::sort(metas.begin(), metas.end(),
+            [](const OfflineManifestMeta& a, const OfflineManifestMeta& b) {
+              if (a.mtime_epoch != b.mtime_epoch)
+                return a.mtime_epoch > b.mtime_epoch;
+              return a.checkpoint_id > b.checkpoint_id;
+            });
+  snap.entries.reserve(metas.size());
+  for (auto& m : metas) {
+    DiskCacheEntryInfo row;
+    row.checkpoint_id = m.checkpoint_id;
+    row.lineage_id = m.lineage_id;
+    row.manifest_file = std::move(m.filename);
+    row.compatibility_hex = std::move(m.compatibility_hex);
+    row.token_count = m.token_count;
+    row.chunk_count = m.chunk_count;
+    row.chunk_bytes = m.chunk_bytes;
+    row.private_bytes = m.private_bytes;
+    row.manifest_bytes = m.manifest_bytes;
+    row.mtime_epoch = m.mtime_epoch;
+    row.purpose = std::move(m.purpose);
+    row.compatible = false;
+    row.invalid = false;
+    snap.entries.push_back(std::move(row));
+  }
+  return snap;
+}
+
+DiskCacheDeleteResult DeleteDiskCacheOffline(
+    const fs::path& directory, const std::vector<std::uint64_t>& ids,
+    bool delete_all, bool delete_incompatible,
+    std::string_view active_compatibility) {
+  DiskCacheDeleteResult res;
+  if (directory.empty()) return res;
+  auto metas = ScanOfflineManifests(directory);
+
+  std::set<std::uint64_t> target_ids(ids.begin(), ids.end());
+  auto is_target = [&](const OfflineManifestMeta& m) {
+    if (delete_all) return true;
+    if (delete_incompatible &&
+        (active_compatibility.empty() ||
+         m.compatibility_hex != active_compatibility)) {
+      return true;
+    }
+    return target_ids.count(m.checkpoint_id) != 0;
+  };
+
+  std::map<std::string, int> chunk_refs;
+  std::map<std::string, int> priv_refs;
+  for (const auto& m : metas) {
+    for (const auto& f : m.chunk_filenames) ++chunk_refs[f];
+    for (const auto& f : m.private_filenames) ++priv_refs[f];
+  }
+
+  std::vector<OfflineManifestMeta> removed;
+  std::set<std::uint64_t> found_ids;
+  for (const auto& m : metas) {
+    if (is_target(m)) {
+      found_ids.insert(m.checkpoint_id);
+      removed.push_back(m);
+    }
+  }
+  if (!delete_all && !delete_incompatible) {
+    for (const auto id : ids) {
+      if (found_ids.count(id) == 0) ++res.not_found;
+    }
+  }
+
+  const fs::path mf_dir = directory / "v2" / "manifests";
+  const fs::path ch_dir = directory / "v2" / "chunks";
+  const fs::path pr_dir = directory / "v2" / "private";
+
+  std::error_code ec;
+  for (const auto& m : removed) {
+    if (fs::remove(mf_dir / m.filename, ec) || !fs::exists(mf_dir / m.filename)) {
+      ++res.deleted;
+      for (const auto& f : m.chunk_filenames) {
+        if (--chunk_refs[f] <= 0) fs::remove(ch_dir / f, ec);
+      }
+      for (const auto& f : m.private_filenames) {
+        if (--priv_refs[f] <= 0) fs::remove(pr_dir / f, ec);
+      }
+    }
+  }
+
+  res.remaining_managed_bytes =
+      SumDirectoryBytes(mf_dir) + SumDirectoryBytes(ch_dir) +
+      SumDirectoryBytes(pr_dir);
+  return res;
 }
 
 }  // namespace mbufo::server::admin_ops

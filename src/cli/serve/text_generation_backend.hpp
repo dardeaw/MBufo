@@ -144,6 +144,39 @@ struct RerankResult {
   double prefill_ms{0.0};
 };
 
+struct DiskCacheEntryInfo {
+  std::uint64_t checkpoint_id{0};
+  std::uint64_t lineage_id{0};
+  std::string manifest_file;
+  std::string compatibility_hex;
+  std::size_t token_count{0};
+  std::size_t chunk_count{0};
+  std::uint64_t chunk_bytes{0};
+  std::uint64_t private_bytes{0};
+  std::uint64_t manifest_bytes{0};
+  std::int64_t mtime_epoch{0};
+  std::string purpose;
+  bool compatible{false};
+  bool invalid{false};
+};
+
+struct DiskCacheSnapshot {
+  bool enabled{false};
+  std::string directory;
+  std::uint64_t capacity_bytes{0};
+  std::uint64_t managed_bytes{0};
+  std::string active_compatibility;
+  std::vector<DiskCacheEntryInfo> entries;
+};
+
+struct DiskCacheDeleteResult {
+  std::size_t deleted{0};
+  std::size_t skipped_pinned{0};
+  std::size_t skipped_busy{0};
+  std::size_t not_found{0};
+  std::uint64_t remaining_managed_bytes{0};
+};
+
 /// Model-agnostic text generation boundary used by the HTTP transport.
 ///
 /// Implementations retain ownership of tokenization, templates, complete
@@ -335,6 +368,14 @@ public:
   /// reports them. Empty when unknown.
   [[nodiscard]] virtual std::string model_path() const { return {}; }
   [[nodiscard]] virtual std::string device_target() const { return "gpu"; }
+  [[nodiscard]] virtual std::optional<DiskCacheSnapshot> disk_cache_snapshot()
+      const {
+    return std::nullopt;
+  }
+  virtual DiskCacheDeleteResult retire_disk_cache(
+      const std::vector<std::uint64_t>&, bool, bool) {
+    return {};
+  }
   [[nodiscard]] virtual std::string build_info() const { return {}; }
   [[nodiscard]] virtual SamplingDefaults sampling_defaults() const {
     return {};

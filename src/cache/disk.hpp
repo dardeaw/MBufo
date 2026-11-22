@@ -142,6 +142,7 @@ class DiskStore;
 class DiskDescription {
 public:
   [[nodiscard]] const DiskManifest& Manifest() const { return manifest_; }
+  [[nodiscard]] DiskFileId ManifestFile() const { return file_; }
   [[nodiscard]] std::uint64_t Epoch() const { return epoch_; }
   [[nodiscard]] DiskStore& Store() const { return *store_; }
   [[nodiscard]] DiskReadPin Pin() const;
@@ -152,6 +153,7 @@ public:
 private:
   friend class DiskStore;
   ResourceCharge metadata_;
+  DiskFileId file_{};
   DiskManifest manifest_;
   std::shared_ptr<detail::DiskAvailability> availability_;
   DiskStore* store_{};

@@ -24,6 +24,8 @@ struct SidecarProxyConfig {
   std::string decide_base_url{std::string(npu::DecideSidecarDefault())};
   std::string asr_base_url{std::string(npu::AsrSidecarDefault())};
   std::string tts_base_url{std::string(npu::TtsSidecarDefault())};
+  std::string flux2_image_base_url{std::string(npu::Flux2ImageSidecarDefault())};
+  std::string zimage_base_url{std::string(npu::ZImageSidecarDefault())};
   long connect_timeout_ms{2000};
   long request_timeout_ms{120000};
 
@@ -50,12 +52,19 @@ struct SidecarProxyConfig {
 // ---------------------------------------------------------------------------
 
 /// Static launch descriptor. argv is executed directly (no shell).
+struct SidecarStartOptions {
+  std::string dtype{"bf16"};
+  int steps{0};
+  std::string default_size{"1024x1024"};
+  std::string cpu_offload{"none"};
+};
+
 struct SidecarLaunchSpec {
   std::string id;                     // catalog id, e.g. "whisper-turbo-npu"
   std::string display_name;         // card title, e.g. "D3-Lite-NPU2 (flm sidecar)"
   std::string backend;              // "npu" or "gpu" (UI badge)
-  std::string task;                 // "decide" | "asr" | "tts"
-  std::string capability;           // badge: "DECIDE" | "AUDIO"
+  std::string task;                 // "decide" | "asr" | "tts" | "image_generation"
+  std::string capability;           // badge: "DECIDE" | "AUDIO" | "IMAGE"
   int port{0};                      // loopback port
   std::string base_url;             // e.g. http://127.0.0.1:8764
   std::string health_path;          // readiness probe path
@@ -63,9 +72,16 @@ struct SidecarLaunchSpec {
   std::size_t estimated_resident_mib{0};  // memory bar + UI size
   // argv builders need runtime env (flm path, TTS model dir), so the
   // table stores a kind tag and argv is materialized per Start() call.
-  enum class Kind { kFlmDecision, kFlmAsr, kGufoTts, kGufoAsr } kind;
-  std::string flm_model;  // e.g. "llama3.2:1b" (decision chat host) — see below
+  enum class Kind {
+    kFlmDecision,
+    kFlmAsr,
+    kGufoTts,
+    kGufoAsr,
+    kPyImageSidecar
+  } kind;
+  std::string flm_model;  // e.g. "llama3.2:1b" or model subdir for image sidecars
   std::string flm_flag;   // e.g. "d3:lite" / "whisper-v3:turbo"
+  int default_steps{0};
 };
 
 /// The 7 known sidecars. Single source of truth for the admin catalog
@@ -80,10 +96,12 @@ struct SidecarLaunchSpec {
 class SidecarManager {
  public:
   struct Status {
+    std::string id;
     bool running{false};
     bool external{false};  // alive but not our child (adopted or untracked)
     long pid{-1};          // -1 when unknown
     std::string base_url;
+    SidecarStartOptions options;
   };
 
   SidecarManager() = default;
@@ -93,7 +111,8 @@ class SidecarManager {
   // Spawn (or adopt, if already listening) the sidecar. Blocks until the
   // health endpoint answers or timeout_ms elapses. Idempotent.
   [[nodiscard]] bool Start(const std::string& id, std::string* error,
-                           long timeout_ms = 180000);
+                           long timeout_ms = 180000,
+                           const SidecarStartOptions& options = {});
   // SIGTERM, then SIGKILL after a grace period. Refuses untracked
   // externals (no pid) with an explanatory error.
   [[nodiscard]] bool Stop(const std::string& id, std::string* error);
@@ -106,6 +125,7 @@ class SidecarManager {
     long pid{-1};
     bool external{false};
     std::string base_url;
+    SidecarStartOptions options;
   };
   std::mutex mu_;
   std::unordered_map<std::string, Entry> table_;

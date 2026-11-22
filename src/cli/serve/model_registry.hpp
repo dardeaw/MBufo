@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -22,6 +23,17 @@ namespace mbufo::server {
 /// a shared_ptr for the whole request, so an ejected model stays alive until
 /// its last in-flight request finishes: Remove() drops the registry's own
 /// reference immediately, and the GPU memory follows the last shared_ptr.
+struct LoadedModelConfig {
+  std::string kv_cache_quant{"q4"};
+  std::string speculative{"off"};
+  std::string draft_model_path;
+  std::string vision_model_path;
+  bool enable_yarn{false};
+  bool enable_disk_cache{false};
+  std::string device{"gpu"};
+  std::string npu_quant;
+};
+
 class ModelRegistry final {
 public:
   ModelRegistry() = default;
@@ -33,7 +45,8 @@ public:
   [[nodiscard]] bool Add(const std::string& primary,
                          std::vector<std::string> extra_names,
                          std::shared_ptr<TextGenerationBackend> backend,
-                         std::string* error);
+                         std::string* error,
+                         LoadedModelConfig config = {});
 
   /// Drops the registry's reference to the model whose *primary* id is `id`.
   /// Returns false when no primary id matches.
@@ -66,6 +79,7 @@ public:
     bool is_default{false};
     bool supports_images{false};
     bool speculative{false};
+    LoadedModelConfig config;
     std::size_t total_sessions{0};
     std::size_t active_sessions{0};
     std::vector<TextGenerationBackend::SessionState> sessions;
@@ -85,6 +99,10 @@ public:
   [[nodiscard]] std::vector<std::string> LruCandidates() const;
 
   [[nodiscard]] bool AnyDeviceLost() const;
+  [[nodiscard]] std::optional<DiskCacheSnapshot> InspectDiskCache() const;
+  [[nodiscard]] std::optional<DiskCacheDeleteResult> RetireDiskCache(
+      const std::vector<std::uint64_t>& ids, bool delete_all,
+      bool delete_incompatible) const;
   [[nodiscard]] std::size_t Size() const;
 
 private:
@@ -92,6 +110,7 @@ private:
     std::string id;
     std::vector<std::string> names;  // primary + aliases
     std::shared_ptr<TextGenerationBackend> backend;
+    LoadedModelConfig config;
     std::atomic<std::uint64_t> last_used{0};  // steady_clock ms since epoch
   };
 

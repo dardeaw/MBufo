@@ -2744,6 +2744,20 @@ TextGenerationScheduler::SessionStates() const {
   return impl_->SessionSnapshot();
 }
 
+std::optional<DiskCacheSnapshot> TextGenerationScheduler::ListDiskCache() const {
+  return impl_->runner_pool ? impl_->runner_pool->ListDiskCache()
+                            : std::nullopt;
+}
+
+DiskCacheDeleteResult TextGenerationScheduler::RetireDiskCache(
+    const std::vector<std::uint64_t>& ids, bool delete_all,
+    bool delete_incompatible) {
+  return impl_->runner_pool
+             ? impl_->runner_pool->RetireDiskCache(ids, delete_all,
+                                                   delete_incompatible)
+             : DiskCacheDeleteResult{};
+}
+
 std::size_t TextGenerationScheduler::buffered_output_bytes() const noexcept {
   return impl_->output_budget->buffered_bytes.load(std::memory_order_relaxed);
 }

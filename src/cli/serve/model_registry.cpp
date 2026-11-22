@@ -18,7 +18,8 @@ std::uint64_t NowMs() {
 bool ModelRegistry::Add(const std::string& primary,
                         std::vector<std::string> extra_names,
                         std::shared_ptr<TextGenerationBackend> backend,
-                        std::string* error) {
+                        std::string* error,
+                        LoadedModelConfig config) {
   if (backend == nullptr) {
     if (error != nullptr) *error = "backend is null";
     return false;
@@ -42,6 +43,7 @@ bool ModelRegistry::Add(const std::string& primary,
   entry->id = primary;
   entry->names = std::move(names);
   entry->backend = std::move(backend);
+  entry->config = std::move(config);
   entry->last_used.store(NowMs(), std::memory_order_relaxed);
   for (const auto& name : entry->names) by_name_[name] = entry;
   order_.push_back(std::move(entry));
@@ -132,6 +134,7 @@ std::vector<ModelRegistry::Info> ModelRegistry::List() const {
         now_ms >= info.last_used_ms ? (now_ms - info.last_used_ms) : 0;
     info.ready = entry->backend != nullptr && entry->backend->ready();
     info.is_default = (entry->id == default_id);
+    info.config = entry->config;
     if (entry->backend) {
       info.path = entry->backend->model_path();
       info.backend = entry->backend->device_target();
@@ -193,6 +196,40 @@ bool ModelRegistry::AnyDeviceLost() const {
     if (entry->backend && entry->backend->device_lost()) return true;
   }
   return false;
+}
+
+std::optional<DiskCacheSnapshot> ModelRegistry::InspectDiskCache() const {
+  std::vector<std::shared_ptr<TextGenerationBackend>> backends;
+  {
+    std::lock_guard lock(mutex_);
+    backends.reserve(order_.size());
+    for (const auto& entry : order_) {
+      if (entry->backend) backends.push_back(entry->backend);
+    }
+  }
+  for (const auto& b : backends) {
+    if (auto snap = b->disk_cache_snapshot()) return snap;
+  }
+  return std::nullopt;
+}
+
+std::optional<DiskCacheDeleteResult> ModelRegistry::RetireDiskCache(
+    const std::vector<std::uint64_t>& ids, bool delete_all,
+    bool delete_incompatible) const {
+  std::vector<std::shared_ptr<TextGenerationBackend>> backends;
+  {
+    std::lock_guard lock(mutex_);
+    backends.reserve(order_.size());
+    for (const auto& entry : order_) {
+      if (entry->backend) backends.push_back(entry->backend);
+    }
+  }
+  for (const auto& b : backends) {
+    if (auto snap = b->disk_cache_snapshot(); snap.has_value()) {
+      return b->retire_disk_cache(ids, delete_all, delete_incompatible);
+    }
+  }
+  return std::nullopt;
 }
 
 std::size_t ModelRegistry::Size() const {

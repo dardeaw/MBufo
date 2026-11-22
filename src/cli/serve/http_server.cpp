@@ -39,6 +39,7 @@
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
+#include "src/cli/serve/admin_ops.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/model_admin_api.hpp"
@@ -922,6 +923,19 @@ HttpResponse RegistryModels(const ModelRegistry& registry,
     m["id"] = images->model_id(); m["object"] = "model"; m["created"] = Now();
     m["owned_by"] = "operator-supplied-qwen"; m["capability"] = "image";
     data.push_back(std::move(m));
+  }
+  for (const auto& st : GlobalSidecarManager().ListRunning()) {
+    const auto* spec = FindSidecarSpec(st.id);
+    if (spec != nullptr &&
+        spec->kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
+      json::Value m = json::Value::object();
+      m["id"] = spec->id;
+      m["object"] = "model";
+      m["created"] = Now();
+      m["owned_by"] = "mbufo-image-sidecar";
+      m["capability"] = "image_generation";
+      data.push_back(std::move(m));
+    }
   }
   resp["data"] = std::move(data);
   return Ok(resp);
@@ -2318,10 +2332,35 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     response.headers.emplace_back("WWW-Authenticate", "Bearer");
     return response;
   }
-  if (admin_ != nullptr &&
+  const bool is_admin_path =
+      admin_ != nullptr &&
       (req.path == "/admin" || req.path.rfind("/admin/", 0) == 0 ||
-       (req.method == "GET" && req.path == "/"))) {
+       (req.method == "GET" && req.path == "/"));
+  if (is_admin_path) {
+    const bool is_public_ui_or_auth =
+        (req.method == "GET" &&
+         (req.path == "/" || req.path == "/admin" || req.path == "/admin/" ||
+          req.path == "/admin/ui")) ||
+        req.path == "/admin/auth/status" || req.path == "/admin/auth/login" ||
+        req.path == "/admin/auth/logout";
+    if (!is_public_ui_or_auth && admin_ops::IsWebAuthEnabled() &&
+        !admin_ops::CheckWebAuth(req)) {
+      return Err(401, "Unauthorized", "Web UI authentication required",
+                 "authentication_error", "web_auth_required");
+    }
     return admin_->Handle(req);
+  }
+  const bool is_health_probe =
+      req.method == "GET" &&
+      (req.path == "/health" || req.path == "/v1/health" ||
+       req.path == "/healthz" || req.path == "/ready" ||
+       req.path == "/v1/ready" || req.path == "/readyz");
+  if (!is_health_probe && admin_ops::IsApiAuthEnabled() &&
+      !admin_ops::CheckApiAuth(req)) {
+    auto response = Err(401, "Unauthorized", "missing or invalid API key",
+                        "authentication_error", "invalid_api_key");
+    response.headers.emplace_back("WWW-Authenticate", "Bearer");
+    return response;
   }
   // `/health` and `/ready` are the native spelling and match llama-server's
   // `/health`. `/healthz` and `/readyz` are aliases so Kubernetes-style probe
@@ -2373,10 +2412,41 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                       images_.get());
   }
   if (req.path == "/v1/images/generations" || req.path == "/v1/images/edits") {
-    if (!images_)
-      return Err(503, "Service Unavailable", "image service is not configured",
+    if (images_ != nullptr) {
+      return HandleImageApiRequest(req, *images_);
+    }
+    if (options_.sidecar_proxy.enabled) {
+      std::string req_model = RequestedModelName(req);
+      for (char& c : req_model) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+      const bool flux_up = GlobalSidecarManager().IsRunning("flux2-klein-4b");
+      const bool zimg_up = GlobalSidecarManager().IsRunning("z-image-turbo");
+      std::string target_base;
+      if (req_model.find("flux") != std::string::npos) {
+        if (flux_up) target_base = options_.sidecar_proxy.flux2_image_base_url;
+      } else if (req_model.find("z-image") != std::string::npos ||
+                 req_model.find("zimage") != std::string::npos) {
+        if (zimg_up) target_base = options_.sidecar_proxy.zimage_base_url;
+      } else if (req_model.empty()) {
+        if (flux_up) target_base = options_.sidecar_proxy.flux2_image_base_url;
+        else if (zimg_up) target_base = options_.sidecar_proxy.zimage_base_url;
+      } else {
+        return Err(404, "Not Found",
+                   ("image model '" + req_model + "' is not loaded").c_str(),
+                   "invalid_request_error", "model_not_found");
+      }
+      if (!target_base.empty()) {
+        return ForwardSidecarRequest(req, target_base,
+                                     options_.sidecar_proxy.connect_timeout_ms,
+                                     600000L);
+      }
+      return Err(503, "Service Unavailable",
+                 "no matching image model is loaded (Load flux2-klein-4b or z-image-turbo in /admin)",
                  "server_error", "image_service_unavailable");
-    return HandleImageApiRequest(req, *images_);
+    }
+    return Err(503, "Service Unavailable", "image service is not configured",
+               "server_error", "image_service_unavailable");
   }
   if (req.path == "/v1/audio/speech/stream") {
     if (!tts_ || !tts_->ready())
@@ -2652,7 +2722,8 @@ void HttpServer::handle_connection(int client_fd) {
     } else {
       // A client without the API key cannot write into the trace.
       traced = Trace::Enabled() && IsTracedRoute(req) &&
-               IsAuthorized(req, api_key_hash_);
+               IsAuthorized(req, api_key_hash_) &&
+               (!admin_ops::IsApiAuthEnabled() || admin_ops::CheckApiAuth(req));
       if (traced) {
         TraceRequest(req);
       }
