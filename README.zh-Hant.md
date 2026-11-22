@@ -5,7 +5,7 @@
 最初源自 [gufo](https://github.com/gufo-org/gufo)，之後已大幅重寫。
 
 > [English Version](README.md) · [简体中文版](README.zh-CN.md)
-<img width="1429" height="829" alt="image" src="https://github.com/user-attachments/assets/fb3f41c3-5883-48c6-872e-fbf327dcf3f3" />
+<img width="1429" alt="MBufo Multi-Model Router & Control Plane (/admin)" src="assets/mbufo-admin.png" />
 
 **核心特點**
 
