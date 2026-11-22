@@ -166,6 +166,27 @@ class Qwen3NpuDecoder {
     return true;
   }
 
+  /// Prefill variant returning the full final-layer sequence [T, hidden]
+  /// (text-encoder serving needs every row, not just the last).
+  [[nodiscard]] bool PrefillFull(std::span<const float> hidden_rows,
+                                 std::size_t T, std::vector<float>* all_hidden,
+                                 double* npu_ms = nullptr,
+                                 std::string* error = nullptr) {
+    if (T == 0 || hidden_rows.size() < T * cfg_.hidden) {
+      if (error != nullptr) *error = "bad prefill input";
+      return false;
+    }
+    if (T > cfg_.max_seq) {
+      if (error != nullptr) *error = "prefill exceeds max_seq";
+      return false;
+    }
+    all_hidden->assign(hidden_rows.begin(),
+                       hidden_rows.begin() + T * cfg_.hidden);
+    if (!RunLayers(all_hidden, T, 0, true, npu_ms, error)) return false;
+    pos_ = T;
+    return true;
+  }
+
   /// Single decode step at absolute position pos().
   [[nodiscard]] bool DecodeStep(std::span<const float> hidden_row,
                                 std::vector<float>* next_hidden,
