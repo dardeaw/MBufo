@@ -1604,10 +1604,11 @@ int RunServe(std::span<const char* const> args) {
         primary = ids.empty() ? backend->model_id() : ids.front();
         std::vector<std::string> aliases(ids.begin() + (ids.empty() ? 0 : 1),
                                          ids.end());
-        if (!registry->Add(primary, std::move(aliases), backend, &reg_err)) {
+        if (!registry->Add(primary, std::move(aliases), std::move(backend), &reg_err)) {
           std::cerr << "Error: registry add failed: " << reg_err << "\n";
           return 1;
         }
+        backend.reset();  // Registry is sole owner so /admin/eject frees all VRAM/RAM.
       }
       const auto loader =
           [prefill_chunk_tokens, max_pending_requests,
@@ -1771,8 +1772,10 @@ int RunServe(std::span<const char* const> args) {
   // Releasing model state on a lost device crashes; the kernel reclaims it.
   // The backend is checked as well: an external SIGTERM can stop the server
   // after the scheduler records the loss but before a request fires the hook.
-  const auto exit_if_device_lost = [&device_lost, &backend] {
-    if (device_lost.load() || (backend != nullptr && backend->device_lost())) {
+  const auto exit_if_device_lost = [&device_lost, &backend, &registry] {
+    if (device_lost.load() ||
+        (backend != nullptr && backend->device_lost()) ||
+        (registry != nullptr && registry->AnyDeviceLost())) {
       ::_exit(kDeviceLostExitStatus);
     }
   };

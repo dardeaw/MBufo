@@ -1,6 +1,9 @@
 #include "src/cli/serve/inference_backend.hpp"
 
 #include <unistd.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -5661,7 +5664,24 @@ struct InferenceBackend::Impl {
 
 InferenceBackend::InferenceBackend() : impl_(std::make_unique<Impl>()) {}
 
-InferenceBackend::~InferenceBackend() = default;
+InferenceBackend::~InferenceBackend() {
+#if defined(ENGINE_ENABLE_HIP)
+  const bool lost = device_lost();
+  impl_.reset();
+  if (!lost) {
+    (void)hipDeviceSynchronize();
+    hipMemPool_t pool = nullptr;
+    if (hipDeviceGetDefaultMemPool(&pool, 0) == hipSuccess && pool != nullptr) {
+      (void)hipMemPoolTrimTo(pool, 0);
+    }
+  }
+#else
+  impl_.reset();
+#endif
+#if defined(__GLIBC__)
+  ::malloc_trim(0);
+#endif
+}
 
 // MoE engines must declare their geometry, expert formats and decode-kernel origin (core/engine/moe_contract.hpp). The registry enforces it
 // for models it creates; serve loads engines directly, so the same check runs here on the loaded model, and the declaration is logged.

@@ -2067,9 +2067,8 @@ HttpServer::HttpServer(std::string host, int port,
   if (!options_.api_key.empty()) {
     api_key_hash_ = CredentialHash(options_.api_key);
   }
-  // Multi-model mode: seed backend_ from the registry default so health probes
-  // and register_routes() behave exactly as in single-model mode.
-  if (registry_ != nullptr && backend_ == nullptr) backend_ = registry_->Default();
+  // In multi-model mode the registry owns all model lifetimes so /admin/eject
+  // drops the last shared_ptr reference and frees GPU/UMA memory immediately.
   register_routes();
 }
 
@@ -2086,7 +2085,7 @@ void HttpServer::add(const std::string& method, const std::string& path,
 }
 
 void HttpServer::register_routes() {
-  if (backend_ == nullptr) {
+  if (backend_ == nullptr && registry_ == nullptr) {
     return;
   }
   // ---- OpenAI ----
@@ -2464,7 +2463,10 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
 }
 
 bool HttpServer::device_lost() {
-  if (backend_ == nullptr || !backend_->device_lost())
+  const bool lost =
+      (backend_ != nullptr && backend_->device_lost()) ||
+      (registry_ != nullptr && registry_->AnyDeviceLost());
+  if (!lost)
     return false;
   if (options_.on_device_lost &&
       !device_lost_reported_.exchange(true, std::memory_order_acq_rel)) {

@@ -49,15 +49,25 @@ bool ModelRegistry::Add(const std::string& primary,
 }
 
 bool ModelRegistry::Remove(const std::string& id, std::string* error) {
-  std::lock_guard lock(mutex_);
-  for (std::size_t i = 0; i < order_.size(); ++i) {
-    if (order_[i]->id != id) continue;
-    for (const auto& name : order_[i]->names) by_name_.erase(name);
-    order_.erase(order_.begin() + static_cast<std::ptrdiff_t>(i));
-    return true;
+  std::shared_ptr<Entry> removed;
+  {
+    std::lock_guard lock(mutex_);
+    for (std::size_t i = 0; i < order_.size(); ++i) {
+      if (order_[i]->id != id) continue;
+      for (const auto& name : order_[i]->names) by_name_.erase(name);
+      removed = std::move(order_[i]);
+      order_.erase(order_.begin() + static_cast<std::ptrdiff_t>(i));
+      break;
+    }
   }
-  if (error != nullptr) *error = "model '" + id + "' is not loaded";
-  return false;
+  if (removed == nullptr) {
+    if (error != nullptr) *error = "model '" + id + "' is not loaded";
+    return false;
+  }
+  // Destroy outside mutex_ so freeing multi-GB VRAM/host buffers does not
+  // block concurrent Resolve()/List() calls.
+  removed.reset();
+  return true;
 }
 
 bool ModelRegistry::SetDefault(const std::string& id, std::string* error) {
@@ -175,6 +185,14 @@ std::vector<std::string> ModelRegistry::LruCandidates() const {
   out.reserve(ranked.size());
   for (const auto& [_, id] : ranked) out.push_back(id);
   return out;
+}
+
+bool ModelRegistry::AnyDeviceLost() const {
+  std::lock_guard lock(mutex_);
+  for (const auto& entry : order_) {
+    if (entry->backend && entry->backend->device_lost()) return true;
+  }
+  return false;
 }
 
 std::size_t ModelRegistry::Size() const {

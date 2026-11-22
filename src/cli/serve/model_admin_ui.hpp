@@ -1033,6 +1033,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
   <script>
     const MODEL_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#06b6d4', '#ec4899', '#eab308'];
     let stateModels = { models: [], memory: {}, loading: { active: false } };
+    let uiBootSha = null;
     let stateCatalog = { models: [], mmproj_files: [], draft_files: [] };
     let stateMapping = { models: [] };
     let stateUpdate = null;
@@ -1263,6 +1264,15 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         stateModels = await res.json();
+        if (stateModels.build_sha) {
+          if (uiBootSha === null) {
+            uiBootSha = stateModels.build_sha;
+          } else if (stateModels.build_sha !== uiBootSha) {
+            showToast('Server updated — reloading Admin UI...');
+            setTimeout(() => window.location.reload(), 600);
+            return true;
+          }
+        }
         isServerOnline = true;
         setConnStatus('online', 'Online (:8741)');
         renderLoadingBanner();
@@ -2426,8 +2436,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           showToast('Eject failed: ' + (data.error ? data.error.message : res.statusText), true);
         } else {
           showToast(`Ejected "${id}" and freed GPU/UMA memory`);
-          await fetchStatus();
-          renderCatalog();
+          await Promise.all([fetchStatus(), fetchCatalog()]);
         }
       } catch (e) {
         showToast('Error ejecting model: ' + e.message, true);

@@ -17,6 +17,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
+#include "mbufo_build_version.hpp"
+#include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/model_admin_ui.hpp"
 #include "src/core/json.hpp"
 
@@ -320,7 +326,8 @@ HttpResponse ModelAdminService::HandleUi(const HttpRequest&) {
   resp.status = 200;
   resp.reason = "OK";
   resp.headers.emplace_back("Content-Type", "text/html; charset=utf-8");
-  resp.headers.emplace_back("Cache-Control", "no-store");
+  resp.headers.emplace_back("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  resp.headers.emplace_back("Pragma", "no-cache");
   resp.body = std::string(kModelAdminUiHtml);
   return resp;
 }
@@ -442,6 +449,7 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["sessions"] = std::move(sessions);
     data.push_back(std::move(row));
   }
+  resp["build_sha"] = mbufo::build::kGitCommit;
   resp["models"] = data;
   resp["data"] = std::move(data);
   resp["memory"] = QueryMemorySnapshot(probe_).ToJson();
@@ -1209,17 +1217,34 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
                        : "sidecar process stopped; port released";
     return AdminOk(std::move(resp));
   }
+  std::lock_guard serialize(load_mutex_);
   if (!registry_->HasId(id))
     return AdminErr(404, "Not Found", "model '" + id + "' is not loaded",
                     "not_loaded");
+  const auto mem_before = QueryMemorySnapshot(probe_);
   std::string error;
   if (!registry_->Remove(id, &error))
     return AdminErr(409, "Conflict", error, "eject_failed");
+#if defined(__GLIBC__)
+  ::malloc_trim(0);
+#endif
+  const auto mem_after = QueryMemorySnapshot(probe_);
+  Logger::Info("admin",
+               "event=model_ejected id=" + id +
+                   " host_avail_before_mib=" +
+                   std::to_string(mem_before.host_available_bytes >> 20) +
+                   " host_avail_after_mib=" +
+                   std::to_string(mem_after.host_available_bytes >> 20) +
+                   " rss_before_mib=" +
+                   std::to_string(mem_before.process_rss_bytes >> 20) +
+                   " rss_after_mib=" +
+                   std::to_string(mem_after.process_rss_bytes >> 20));
   json::Value resp = json::Value::object();
   resp["id"] = id;
   resp["status"] = "ejected";
+  resp["memory"] = mem_after.ToJson();
   resp["note"] =
-      "in-flight requests finish on the released model before its memory frees";
+      "model dropped from registry and GPU/host memory reclaimed (in-flight requests finish cleanly first if busy)";
   return AdminOk(std::move(resp));
 }
 

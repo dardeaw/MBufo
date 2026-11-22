@@ -84,6 +84,7 @@ public:
   /// registry. Empty when there is nothing safe to evict.
   [[nodiscard]] std::vector<std::string> LruCandidates() const;
 
+  [[nodiscard]] bool AnyDeviceLost() const;
   [[nodiscard]] std::size_t Size() const;
 
 private:
