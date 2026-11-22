@@ -12,6 +12,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
   <title>MBufo Router & Multi-Model Control Plane (:8741)</title>
   <style>
     :root {
+      color-scheme: dark;
       --bg: #0b0e14;
       --panel: #131822;
       --panel-alt: #1a2130;
@@ -29,23 +30,30 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       --mono: "JetBrains Mono", "Fira Code", Consolas, monospace;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html {
+      height: 100%;
+      overflow: hidden;
+    }
     body {
       background: var(--bg);
       color: var(--text);
       font-family: var(--font);
       font-size: 14px;
       line-height: 1.5;
-      min-height: 100vh;
+      height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
     }
     header {
       background: var(--panel);
       border-bottom: 1px solid var(--border);
-      padding: 14px 24px;
+      padding: 10px 24px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      position: sticky;
-      top: 0;
+      flex-shrink: 0;
       z-index: 20;
     }
     .brand {
@@ -100,12 +108,16 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       box-shadow: 0 0 8px currentColor;
     }
     .container {
+      width: 100%;
       max-width: 1480px;
       margin: 0 auto;
-      padding: 20px 24px;
+      padding: 12px 24px 0;
       display: flex;
       flex-direction: column;
-      gap: 20px;
+      gap: 12px;
+      flex: 1 1 0%;
+      min-height: 0;
+      overflow: hidden;
     }
     .card {
       background: var(--panel);
@@ -120,6 +132,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       margin-bottom: 14px;
       gap: 12px;
       flex-wrap: wrap;
+      flex-shrink: 0;
     }
     .card-title {
       font-size: 15px;
@@ -217,7 +230,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       display: flex;
       flex-wrap: wrap;
       gap: 14px;
-      margin-top: 10px;
+      margin-top: 8px;
       font-size: 12px;
       color: var(--muted);
     }
@@ -232,7 +245,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       border-radius: 3px;
     }
     .gate-banner {
-      margin-top: 10px;
+      margin-top: 8px;
       padding: 0 12px;
       border-radius: 8px;
       font-size: 12px;
@@ -240,9 +253,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      height: 36px;
-      min-height: 36px;
-      max-height: 36px;
+      height: 32px;
+      min-height: 32px;
+      max-height: 32px;
       white-space: nowrap;
       overflow: hidden;
       background: rgba(148, 163, 184, 0.06);
@@ -262,28 +275,38 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       font-family: var(--mono);
     }
     .mem-card-sticky {
-      position: sticky;
-      top: 63px;
-      z-index: 15;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      flex-shrink: 0;
+      padding: 12px 18px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
     }
 
-    /* Main Grid — strictly locked column widths (no content-driven width jumping) */
+    /* Main Grid — viewport-docked 2-column layout (no outer double scrollbar) */
     .main-grid {
       display: grid;
       grid-template-columns: minmax(0, 46%) minmax(0, 54%);
-      gap: 20px;
+      grid-template-rows: minmax(0, 1fr);
+      gap: 16px;
       align-items: stretch;
       width: 100%;
+      flex: 1 1 0%;
+      min-height: 0;
     }
     .main-grid > .card {
+      display: flex;
+      flex-direction: column;
       min-width: 0;
+      min-height: 0;
       max-width: 100%;
       width: 100%;
+      height: 100%;
       overflow: hidden;
+      padding: 14px 18px 0;
+      border-bottom: none;
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
     }
-    @media (max-width: 1120px) {
-      .main-grid { grid-template-columns: minmax(0, 1fr); }
+    .main-grid > .card > .card-header {
+      margin-bottom: 10px;
     }
 
     /* Active Models */
@@ -291,8 +314,16 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       display: flex;
       flex-direction: column;
       gap: 12px;
+      flex: 1 1 0%;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-gutter: stable;
+      padding-right: 4px;
+      padding-bottom: 16px;
     }
     .model-card {
+      flex-shrink: 0;
       background: var(--panel-alt);
       border: 1px solid var(--border);
       border-radius: 10px;
@@ -414,19 +445,21 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     .catalog-controls {
       display: flex;
       gap: 8px;
-      margin-bottom: 12px;
+      margin-bottom: 8px;
       flex-wrap: wrap;
+      flex-shrink: 0;
     }
     .catalog-controls input { flex: 1; min-width: 180px; }
     .filter-panel {
       background: #0c1017;
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 10px 12px;
-      margin-bottom: 12px;
+      padding: 8px 12px;
+      margin-bottom: 10px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
+      flex-shrink: 0;
     }
     .filter-row {
       display: flex;
@@ -533,12 +566,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       display: flex;
       flex-direction: column;
       gap: 8px;
-      height: 540px;
-      min-height: 540px;
-      max-height: 540px;
-      overflow-y: scroll;
+      flex: 1 1 0%;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
       scrollbar-gutter: stable;
       padding-right: 4px;
+      padding-bottom: 16px;
       width: 100%;
       min-width: 0;
     }
@@ -688,6 +722,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       border-radius: 12px;
       width: 100%;
       max-width: 620px;
+      max-height: 92vh;
+      overflow-y: auto;
       padding: 20px;
       display: flex;
       flex-direction: column;
@@ -708,7 +744,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       cursor: pointer;
     }
 
-    /* Loading Banner */
+    /* Update & Loading Banners */
+    #update-banner { flex-shrink: 0; }
     .loading-banner {
       background: rgba(59, 130, 246, 0.14);
       border: 1px solid rgba(59, 130, 246, 0.45);
@@ -718,6 +755,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+      flex-shrink: 0;
     }
     .spinner {
       width: 16px;
@@ -741,6 +779,65 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       z-index: 100;
       display: none;
       box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    }
+
+    /* Subtle dark scrollbars for internal containers */
+    .loaded-list, .catalog-list, .modal, #dl-list, #dl-browse-files, #dl-jobs-box, #update-log-tail {
+      scrollbar-width: thin;
+      scrollbar-color: #2d3a52 transparent;
+    }
+    .loaded-list::-webkit-scrollbar, .catalog-list::-webkit-scrollbar, .modal::-webkit-scrollbar,
+    #dl-list::-webkit-scrollbar, #dl-browse-files::-webkit-scrollbar, #dl-jobs-box::-webkit-scrollbar, #update-log-tail::-webkit-scrollbar {
+      width: 7px;
+      height: 7px;
+    }
+    .loaded-list::-webkit-scrollbar-track, .catalog-list::-webkit-scrollbar-track, .modal::-webkit-scrollbar-track,
+    #dl-list::-webkit-scrollbar-track, #dl-browse-files::-webkit-scrollbar-track, #dl-jobs-box::-webkit-scrollbar-track, #update-log-tail::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .loaded-list::-webkit-scrollbar-thumb, .catalog-list::-webkit-scrollbar-thumb, .modal::-webkit-scrollbar-thumb,
+    #dl-list::-webkit-scrollbar-thumb, #dl-browse-files::-webkit-scrollbar-thumb, #dl-jobs-box::-webkit-scrollbar-thumb, #update-log-tail::-webkit-scrollbar-thumb {
+      background: #2d3a52;
+      border-radius: 999px;
+    }
+    .loaded-list::-webkit-scrollbar-thumb:hover, .catalog-list::-webkit-scrollbar-thumb:hover, .modal::-webkit-scrollbar-thumb:hover,
+    #dl-list::-webkit-scrollbar-thumb:hover, #dl-browse-files::-webkit-scrollbar-thumb:hover, #dl-jobs-box::-webkit-scrollbar-thumb:hover, #update-log-tail::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+
+    /* Responsive fallback for narrow or ultra-short viewports */
+    @media (max-width: 1120px), (max-height: 460px) {
+      html, body {
+        height: auto;
+        min-height: 100vh;
+        overflow-y: auto;
+      }
+      header {
+        position: sticky;
+        top: 0;
+      }
+      .container {
+        flex: none;
+        overflow: visible;
+        padding: 16px 20px 24px;
+      }
+      .main-grid {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto;
+        flex: none;
+      }
+      .main-grid > .card {
+        height: auto;
+        border-bottom: 1px solid var(--border);
+        border-bottom-left-radius: 12px;
+        border-bottom-right-radius: 12px;
+        padding-bottom: 16px;
+      }
+      .loaded-list, .catalog-list {
+        flex: none;
+        max-height: 60vh;
+        padding-bottom: 4px;
+      }
     }
   </style>
 </head>
