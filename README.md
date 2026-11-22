@@ -210,7 +210,7 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 
 | Model | Parameters | Speculative Draft | Architecture Highlights |
 | --- | --- | --- | --- |
-| **Qwen3.8 Flash-Next** (Primary) | 30B-A3B MoE | MTP | ROCmFP4-FAST / UD-Q4_K_XL, Blocked-Q8 KV |
+| **Qwen3.8 Flash-Next** (Primary) | 125B-A6B MoE | MTP | ROCmFP4-FAST / UD-Q4_K_XL, Blocked-Q8 KV |
 | **Qwen3.8 27B** | 27B Dense | DFlash2 (inc. Q8) | Dense + MoE paths; UD-Q4_K_XL recommended |
 | **Gemma 4 26B-A4B** | 26B-A4B | MTP (F16 mirror) | Native tool use, SWA shared Q8 layers |
 | **Gemma 4 E4B / E2B** | 4B / 2B effective (per-layer embeddings) | — | Q4_0 QAT; PLE (Q6_K gather), shared-KV layers, 8 heads x d256/d512, WMMA large-head prefill |

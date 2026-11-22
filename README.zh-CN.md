@@ -207,7 +207,7 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 
 | 模型 | 参数量 | 投机草稿支持 | 特性与架构亮点 |
 | --- | --- | --- | --- |
-| **Qwen3.8 Flash-Next**（主力） | 30B-A3B MoE | MTP | ROCmFP4-FAST / UD-Q4_K_XL、Blocked-Q8 KV |
+| **Qwen3.8 Flash-Next**（主力） | 125B-A6B MoE | MTP | ROCmFP4-FAST / UD-Q4_K_XL、Blocked-Q8 KV |
 | **Qwen3.8 27B** | 27B Dense | DFlash2 (含 Q8) | 支持 Dense 与 MoE 路径，推荐 UD-Q4_K_XL |
 | **Gemma 4 26B-A4B** | 26B-A4B | MTP (F16 镜像) | 具备原生 Tool 支持，SWA 共用 Q8 |
 | **Gemma 4 E4B / E2B** | 4B / 2B 有效參數（逐層嵌入） | — | Q4_0 QAT；PLE（Q6_K gather）、共用 KV 層、WMMA 大 head prefill |

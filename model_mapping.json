@@ -18,7 +18,7 @@
       "id": "qwen3.8-flash-next",
       "name": "Qwen3.8 Flash-Next",
       "task": "chat",
-      "params": "30B-A3B MoE",
+      "params": "125B-A6B MoE",
       "engine": "qwen38_flash_next",
       "format": "gguf",
       "match": {
@@ -32,8 +32,13 @@
         ]
       },
       "huggingface": {
-        "repo": "Qwen/Qwen3.8-Flash-Next",
-        "url": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+        "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+        "repos": [
+          "unsloth/Qwen3.8-Flash-Next-GGUF",
+          "kingjones777/Qwen3.8-Flash-Next-ROCmFP4-STRIX-GGUF",
+          "AtomicChat/Qwen3.8-Flash-Next-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF",
         "is_search_url": false
       },
       "quant_formats": {
@@ -87,7 +92,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "qwen3.8-flash-next"
     },
     {
       "id": "qwen3.8-27b",
@@ -106,8 +112,13 @@
         ]
       },
       "huggingface": {
-        "repo": "Qwen/Qwen3.8-27B",
-        "url": "https://huggingface.co/Qwen/Qwen3.8-27B",
+        "repo": "unsloth/Qwen3.8-27B-GGUF",
+        "repos": [
+          "unsloth/Qwen3.8-27B-GGUF",
+          "kingjones777/Qwen3.8-27B-ROCmFP4-STRIX-MTP-GGUF",
+          "z-lab/Qwen3.8-27B-DFlash2-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF",
         "is_search_url": false
       },
       "quant_formats": {
@@ -147,7 +158,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "qwen3.8-27b"
     },
     {
       "id": "gemma-4-26b-a4b",
@@ -166,9 +178,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Gemma+4+26B-A4B",
-        "is_search_url": true
+        "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "repos": [
+          "unsloth/gemma-4-26B-A4B-it-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -208,7 +223,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "gemma-4-26b"
     },
     {
       "id": "gemma-4-e4b",
@@ -227,9 +243,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Gemma+4+E4B",
-        "is_search_url": true
+        "repo": "unsloth/gemma-4-E4B-it-GGUF",
+        "repos": [
+          "unsloth/gemma-4-E4B-it-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -258,7 +277,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "gemma-4-e4b"
     },
     {
       "id": "gemma-4-e2b",
@@ -277,9 +297,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Gemma+4+E2B",
-        "is_search_url": true
+        "repo": "unsloth/gemma-4-E2B-it-GGUF",
+        "repos": [
+          "unsloth/gemma-4-E2B-it-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -308,7 +331,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "gemma-4-e2b"
     },
     {
       "id": "gemma-4-12b",
@@ -327,9 +351,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Gemma+4+12B",
-        "is_search_url": true
+        "repo": "unsloth/gemma-4-12b-it-GGUF",
+        "repos": [
+          "unsloth/gemma-4-12b-it-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -358,7 +385,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "gemma-4-12b"
     },
     {
       "id": "qwen3.5-35b-a3b",
@@ -377,9 +405,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Qwen3.5-35B-A3B",
-        "is_search_url": true
+        "repo": "unsloth/Qwen3.5-35B-A3B-GGUF",
+        "repos": [
+          "unsloth/Qwen3.5-35B-A3B-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -427,7 +458,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "qwen3.5-35b"
     },
     {
       "id": "qwen3.6-35b-a3b",
@@ -446,9 +478,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Qwen3.6-35B-A3B",
-        "is_search_url": true
+        "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+        "repos": [
+          "unsloth/Qwen3.6-35B-A3B-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -489,7 +524,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "qwen3.6-35b"
     },
     {
       "id": "ornith-1.5-35b-a3b",
@@ -508,9 +544,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Ornith-1.5-35B-A3B",
-        "is_search_url": true
+        "repo": "julianmb/Ornith-1.5-35B-A3B-ROCmFP4-GGUF",
+        "repos": [
+          "julianmb/Ornith-1.5-35B-A3B-ROCmFP4-GGUF"
+        ],
+        "url": "https://huggingface.co/julianmb/Ornith-1.5-35B-A3B-ROCmFP4-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -539,7 +578,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "ornith-1.5-35b"
     },
     {
       "id": "tiel-coder-35b-a3b",
@@ -594,7 +634,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "tiel-coder-35b-a3b"
     },
     {
       "id": "gpt-oss-20b",
@@ -614,9 +655,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=GPT-OSS+20B",
-        "is_search_url": true
+        "repo": "unsloth/gpt-oss-20b-GGUF",
+        "repos": [
+          "unsloth/gpt-oss-20b-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/gpt-oss-20b-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -648,7 +692,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "gpt-oss-20b"
     },
     {
       "id": "gpt-oss-120b",
@@ -668,9 +713,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=GPT-OSS+120B",
-        "is_search_url": true
+        "repo": "unsloth/gpt-oss-120b-GGUF",
+        "repos": [
+          "unsloth/gpt-oss-120b-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/gpt-oss-120b-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -702,7 +750,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "gpt-oss-120b"
     },
     {
       "id": "muse-glimmer-30b",
@@ -721,9 +770,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Muse+Glimmer+30B",
-        "is_search_url": true
+        "repo": "unsloth/Muse-Glimmer-30B-GGUF",
+        "repos": [
+          "unsloth/Muse-Glimmer-30B-GGUF"
+        ],
+        "url": "https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -755,7 +807,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "muse-glimmer-30b"
     },
     {
       "id": "llama-3.1-8b",
@@ -774,9 +827,13 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Llama-3.1-8B",
-        "is_search_url": true
+        "repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+        "repos": [
+          "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+          "MaziyarPanahi/Meta-Llama-3.1-8B-Instruct-GGUF"
+        ],
+        "url": "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -805,7 +862,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "llama-3.1-8b"
     },
     {
       "id": "deepseek-v4-flash",
@@ -825,8 +883,12 @@
         ]
       },
       "huggingface": {
-        "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
-        "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731",
+        "repo": "antirez/deepseek-v4-gguf",
+        "repos": [
+          "antirez/deepseek-v4-gguf",
+          "deepseek-ai/DeepSeek-V4-Flash-0731"
+        ],
+        "url": "https://huggingface.co/antirez/deepseek-v4-gguf",
         "is_search_url": false
       },
       "quant_formats": {
@@ -857,7 +919,8 @@
         "/v1/chat/completions",
         "/v1/messages"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "deepseek-v4-flash"
     },
     {
       "id": "laguna-xs-2.1",
@@ -877,6 +940,9 @@
       },
       "huggingface": {
         "repo": "poolside/Laguna-XS-2.1",
+        "repos": [
+          "poolside/Laguna-XS-2.1"
+        ],
         "url": "https://huggingface.co/poolside/Laguna-XS-2.1",
         "is_search_url": false
       },
@@ -913,7 +979,8 @@
         "/v1/messages",
         "/v1/completions"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "laguna-2.1-xs"
     },
     {
       "id": "laguna-s-2.1",
@@ -933,6 +1000,9 @@
       },
       "huggingface": {
         "repo": "poolside/Laguna-S-2.1",
+        "repos": [
+          "poolside/Laguna-S-2.1"
+        ],
         "url": "https://huggingface.co/poolside/Laguna-S-2.1",
         "is_search_url": false
       },
@@ -969,7 +1039,8 @@
         "/v1/messages",
         "/v1/completions"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "laguna-2.1-s"
     },
     {
       "id": "qwen3-embedding-0.6b",
@@ -1010,7 +1081,8 @@
       "http_routes": [
         "/v1/embeddings"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "qwen3-embedding-0.6b"
     },
     {
       "id": "bge-m3",
@@ -1029,9 +1101,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=bge-m3",
-        "is_search_url": true
+        "repo": "BAAI/bge-m3",
+        "repos": [
+          "BAAI/bge-m3"
+        ],
+        "url": "https://huggingface.co/BAAI/bge-m3",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -1056,7 +1131,8 @@
       "http_routes": [
         "/v1/embeddings"
       ],
-      "status": "production_gpu_plus_npu_verified"
+      "status": "production_gpu_plus_npu_verified",
+      "default_subdir": "bge-m3"
     },
     {
       "id": "embeddinggemma-2",
@@ -1075,9 +1151,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=EmbeddingGemma+2",
-        "is_search_url": true
+        "repo": "google/embeddinggemma-2",
+        "repos": [
+          "google/embeddinggemma-2"
+        ],
+        "url": "https://huggingface.co/google/embeddinggemma-2",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -1109,7 +1188,8 @@
       "http_routes": [
         "/v1/embeddings"
       ],
-      "status": "production_gpu_plus_npu_verified"
+      "status": "production_gpu_plus_npu_verified",
+      "default_subdir": "embeddinggemma-2"
     },
     {
       "id": "bge-reranker-v2-m3",
@@ -1128,9 +1208,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=bge-reranker-v2-m3",
-        "is_search_url": true
+        "repo": "BAAI/bge-reranker-v2-m3",
+        "repos": [
+          "BAAI/bge-reranker-v2-m3"
+        ],
+        "url": "https://huggingface.co/BAAI/bge-reranker-v2-m3",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -1154,7 +1237,8 @@
       "http_routes": [
         "/v1/reranking"
       ],
-      "status": "production_gpu_plus_npu_verified"
+      "status": "production_gpu_plus_npu_verified",
+      "default_subdir": "bge-reranker-v2-m3"
     },
     {
       "id": "qwen3-reranker-0.6b",
@@ -1193,7 +1277,8 @@
       "http_routes": [
         "/v1/reranking"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "qwen3-reranker-0.6b"
     },
     {
       "id": "qwen3-asr-1.7b",
@@ -1213,6 +1298,9 @@
       },
       "huggingface": {
         "repo": "Qwen/Qwen3-ASR-1.7B",
+        "repos": [
+          "Qwen/Qwen3-ASR-1.7B"
+        ],
         "url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B",
         "is_search_url": false
       },
@@ -1239,7 +1327,8 @@
       "http_routes": [
         "/v1/audio/transcriptions"
       ],
-      "status": "production_gpu_plus_npu_verified"
+      "status": "production_gpu_plus_npu_verified",
+      "default_subdir": "qwen3-asr-1.7b"
     },
     {
       "id": "qwen3-tts-12hz-1.7b",
@@ -1258,9 +1347,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Qwen3-TTS+12Hz+1.7B",
-        "is_search_url": true
+        "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        "repos": [
+          "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+        ],
+        "url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -1285,7 +1377,8 @@
       "http_routes": [
         "/v1/audio/speech"
       ],
-      "status": "production_gpu_plus_npu_verified"
+      "status": "production_gpu_plus_npu_verified",
+      "default_subdir": "qwen3-tts-1.7b-base"
     },
     {
       "id": "qwen-image-2.1",
@@ -1304,9 +1397,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Qwen-Image-2.1",
-        "is_search_url": true
+        "repo": "Qwen/Qwen-Image-2.1",
+        "repos": [
+          "Qwen/Qwen-Image-2.1"
+        ],
+        "url": "https://huggingface.co/Qwen/Qwen-Image-2.1",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -1323,7 +1419,8 @@
         "/v1/images/generations",
         "/v1/images/edits"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "qwen-image-2.1"
     },
     {
       "id": "minimax-h3",
@@ -1340,9 +1437,12 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=MiniMax+H3+FL2VA",
-        "is_search_url": true
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "repos": [
+          "MiniMaxAI/MiniMax-H3"
+        ],
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -1358,7 +1458,8 @@
       "http_routes": [
         "/v1/videos/generations"
       ],
-      "status": "production"
+      "status": "production",
+      "default_subdir": "minimax-h3"
     },
     {
       "id": "d3-decide",
@@ -1392,7 +1493,8 @@
       "http_routes": [
         "/v1/systemone"
       ],
-      "status": "served_via_router_proxy"
+      "status": "served_via_router_proxy",
+      "default_subdir": "d3-decide"
     },
     {
       "id": "whisper-v3-turbo",
@@ -1425,7 +1527,8 @@
       "http_routes": [
         "/v1/audio/transcriptions"
       ],
-      "status": "served_via_router_proxy"
+      "status": "served_via_router_proxy",
+      "default_subdir": "whisper-v3-turbo"
     },
     {
       "id": "flux2-klein-4b",
@@ -1442,6 +1545,9 @@
       },
       "huggingface": {
         "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "repos": [
+          "black-forest-labs/FLUX.2-klein-4B"
+        ],
         "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B",
         "is_search_url": false
       },
@@ -1466,7 +1572,8 @@
         "status": "runtime_verified"
       },
       "http_routes": [],
-      "status": "npu_runtime_verified_no_http"
+      "status": "npu_runtime_verified_no_http",
+      "default_subdir": "flux2-klein-4b"
     },
     {
       "id": "z-image-turbo",
@@ -1483,6 +1590,9 @@
       },
       "huggingface": {
         "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "repos": [
+          "Tongyi-MAI/Z-Image-Turbo"
+        ],
         "url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo",
         "is_search_url": false
       },
@@ -1507,7 +1617,8 @@
         "status": "runtime_verified"
       },
       "http_routes": [],
-      "status": "npu_runtime_verified_no_http"
+      "status": "npu_runtime_verified_no_http",
+      "default_subdir": "z-image-turbo"
     }
   ]
 }
