@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <utility>
@@ -189,15 +190,24 @@ void DequantTileQ4Q4nxToFloatKN(const std::uint8_t* in_2560,
 bool NpuQuantGemmEngine::Init(const std::string& kernel_dir,
                               std::string* error) {
   ready_ = false;
-  kernel_dir_ = kernel_dir;
+  std::string dir = kernel_dir;
+  if (dir.empty()) {
+    if (const char* env = std::getenv("MBUFO_NPU_QUANT_KERNELS");
+        env != nullptr && env[0] != '\0') {
+      dir = env;
+    } else {
+      dir = "/mnt/nvme-data/mbufo-models/npu-kernels/quant_gemm";
+    }
+  }
+  kernel_dir_ = dir;
   session_ = HrxSession::Open(0, error);
   if (session_ == nullptr) return false;
 
   const char* kNames[4] = {"q8_256x256", "q8_1024x1024", "q4_256x256",
                            "q4_1024x1024"};
   for (const char* name : kNames) {
-    const std::string xcl = kernel_dir + "/" + name + ".xclbin";
-    const std::string ins = kernel_dir + "/" + name + ".insts.bin";
+    const std::string xcl = dir + "/" + name + ".xclbin";
+    const std::string ins = dir + "/" + name + ".insts.bin";
     if (!session_->LoadIronKernel(name, xcl, ins, error)) return false;
   }
 
