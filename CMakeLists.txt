@@ -383,6 +383,7 @@ if (MBUFO_ENABLE_NPU)
   target_sources(mbufo_core PRIVATE
     src/core/compute/npu/npu_quant_gemm.cpp
     src/core/compute/npu/npu_quant_models.cpp
+    src/core/compute/npu/npu_thinker_decode.cpp
     src/core/compute/npu/npu_embgemma2_runtime.cpp
     src/core/compute/npu/npu_bge_runtime.cpp)
 endif()
@@ -635,6 +636,13 @@ if (BUILD_TESTING)
     target_link_libraries(npu_quant_models_test PRIVATE mbufo_core mbufo_npu)
     add_test(NAME npu_quant_models_test COMMAND npu_quant_models_test)
     set_tests_properties(npu_quant_models_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_thinker_decode_test tests/core/npu_thinker_decode_test.cpp)
+    target_link_libraries(npu_thinker_decode_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_thinker_decode_test COMMAND npu_thinker_decode_test)
+    set_tests_properties(npu_thinker_decode_test PROPERTIES
       LABELS "npu;hardware;quant"
       RESOURCE_LOCK npu)
   endif()
