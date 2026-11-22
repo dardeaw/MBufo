@@ -106,7 +106,8 @@ public:
             const std::string& kv_cache_quant = "f16",
             bool enable_yarn = false,
             bool kv_cache_quant_supplied = false,
-            const std::string& device_target = "gpu");
+            const std::string& device_target = "gpu",
+            const std::string& npu_quant = {});
 
 #if defined(ENGINE_ENABLE_HIP)
   /// Installs a previously loaded model without duplicating mapped weights.
@@ -210,6 +211,7 @@ public:
   [[nodiscard]] bool device_lost() const override;
   [[nodiscard]] bool supports_images() const override;
   [[nodiscard]] std::string model_path() const override;
+  [[nodiscard]] std::string device_target() const override;
   [[nodiscard]] std::string build_info() const override;
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] std::uint32_t max_context() const override;

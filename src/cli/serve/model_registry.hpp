@@ -57,6 +57,7 @@ public:
   struct Info {
     std::string id;
     std::string path;
+    std::string backend{"gpu"};
     std::vector<std::string> names;  // primary + aliases
     std::uint32_t max_context{0};
     std::uint64_t last_used_ms{0};

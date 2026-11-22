@@ -238,6 +238,24 @@ std::optional<std::vector<float>> EngineSession::ScoreBatch(
   for (const auto& ids : batch) {
     lmax = std::max(lmax, ids.size());
   }
+  const bool npu_ready =
+      npu_scheduler_ != nullptr && !npu_scheduler_->device_lost();
+  if (npu::DecideNpuScore(npu_config_, lmax, model_->npu_weights_resident(),
+                          npu_ready) == npu::ScoreNpuRoute::kIron &&
+      npu_scheduler_ != nullptr) {
+    std::vector<float> scores;
+    scores.reserve(batch.size());
+    double total_ms = 0.0;
+    for (const auto& ids : batch) {
+      auto r = Score(ids, false, error_msg);
+      if (!r.has_value()) return std::nullopt;
+      scores.push_back(r->score);
+      total_ms += r->prefill_ms;
+    }
+    if (total_prefill_ms != nullptr) *total_prefill_ms = total_ms;
+    if (prompt_tokens != nullptr) *prompt_tokens = tokens;
+    return scores;
+  }
   const auto& encoder = model_->Encoder();
   const std::size_t hidden = model_->Head().hidden_size;
 #ifdef ENGINE_ENABLE_HIP

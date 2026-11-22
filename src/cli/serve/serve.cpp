@@ -1695,7 +1695,7 @@ int RunServe(std::span<const char* const> args) {
                     .capacity_bytes = cache_ram_bytes},
                 spec_kv, spec.enable_yarn,
                 spec.kv_cache_quant_supplied && spec_kv == "q8",
-                spec.device)) {
+                spec.device, spec.npu_quant)) {
           return nullptr;
         }
         // Advertise the registry id + aliases so serves_model() accepts them.

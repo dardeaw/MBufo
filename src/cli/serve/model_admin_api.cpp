@@ -366,10 +366,7 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
         info.path.empty() ? 0 : EstimateResidentBytes(info.path);
     row["file_size_mib"] = file_bytes >> 20;
     row["estimated_resident_mib"] = est_bytes >> 20;
-    // Device backend for the router admin UI (NPU/GPU switch + badges).
-    // In-process registry models all run on HIP/GPU today; the NPU Iron
-    // route (src/core/compute/npu) will flip this per model when it lands.
-    row["backend"] = "gpu";
+    row["backend"] = info.backend.empty() ? "gpu" : info.backend;
 
     int lru_rank = -1;
     for (std::size_t i = 0; i < lru_order.size(); ++i) {
@@ -1016,6 +1013,7 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
     return AdminErr(400, "Bad Request",
                     "device must be 'gpu' or 'npu'", "invalid_device");
   }
+  request.npu_quant = body.member_str("npu_quant", "");
   request.vision_model_path =
       body.member_str("vision_model_path", body.member_str("mmproj_path", ""));
   request.enable_yarn = body.find("enable_yarn") != nullptr &&
@@ -1168,6 +1166,7 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
   json::Value resp = json::Value::object();
   resp["id"] = request.id;
   resp["path"] = request.path;
+  resp["backend"] = request.device;
   resp["status"] = "loaded";
   resp["load_ms"] = static_cast<std::size_t>(load_ms);
   resp["estimated_resident_mib"] = needed >> 20;

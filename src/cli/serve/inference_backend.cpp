@@ -78,10 +78,6 @@
 namespace mbufo::server {
 namespace {
 #ifdef MBUFO_ENABLE_NPU
-mbufo::core::npu::NpuScheduler& GlobalNpuScheduler() {
-  static mbufo::core::npu::NpuScheduler scheduler;
-  return scheduler;
-}
 mbufo::npu::NpuLaneConfig NpuLaneConfigForDevice(const std::string& device) {
   mbufo::npu::NpuLaneConfig cfg;
   if (device == "npu") {
@@ -92,6 +88,11 @@ mbufo::npu::NpuLaneConfig NpuLaneConfigForDevice(const std::string& device) {
     cfg.tts = true;
   }
   return cfg;
+}
+mbufo::core::npu::NpuScheduler& GlobalNpuScheduler() {
+  static mbufo::core::npu::NpuScheduler scheduler(
+      NpuLaneConfigForDevice("npu"));
+  return scheduler;
 }
 #else
 mbufo::npu::NpuLaneConfig NpuLaneConfigForDevice(const std::string&) {
@@ -5691,10 +5692,19 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const std::string& kv_cache_quant,
                             bool enable_yarn,
                             bool kv_cache_quant_supplied,
-                            const std::string& device_target) {
+                            const std::string& device_target,
+                            const std::string& npu_quant) {
+#ifndef MBUFO_ENABLE_NPU
+  (void)npu_quant;
+#endif
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
-  if (!device_target.empty()) impl_->device_target = device_target;
+  const std::string target_dev =
+      device_target.empty() ? std::string("gpu") : device_target;
+  {
+    const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+    impl_->device_target = target_dev;
+  }
   std::string load_error;
   auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
   if (reader_owner == nullptr) {
@@ -5704,6 +5714,14 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
   const auto architecture =
       reader->GetMetadataString("general.architecture").value_or("");
+  if (target_dev == "npu" && architecture != "embedding_gemma2" &&
+      architecture != "bert") {
+    SetError(error,
+             "NPU device is only supported for bge-m3, bge-reranker-v2-m3, "
+             "and embeddinggemma-2 GGUFs (got architecture '" +
+                 architecture + "')");
+    return false;
+  }
   if (enable_yarn && architecture != "qwen4exp") {
     SetError(error, "--enable-yarn applies only to Qwen3.8-Flash-Next");
     return false;
@@ -5946,13 +5964,35 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error, "Failed to create EmbeddingGemma 2 model: " + eg_error);
       return false;
     }
-    // NPU path: attach the process-wide scheduler + lane config. When the
-    // caller asked for device=npu, TryNpuEmbed picks it up per request;
-    // otherwise the seam stays cold and the engine runs HIP as before.
+    // NPU path: upload weights & kernels when target_dev == "npu".
+    if (target_dev == "npu") {
 #ifdef MBUFO_ENABLE_NPU
-    eg_model->SetNpuScheduler(&GlobalNpuScheduler());
+      if (!npu_quant.empty()) {
+        if (npu_quant == "bf16") {
+          ::unsetenv("MBUFO_NPU_QUANT");
+        } else {
+          ::setenv("MBUFO_NPU_QUANT", npu_quant.c_str(), 1);
+        }
+      }
+      std::string npu_err;
+      if (!eg_model->LoadNpuWeights("", &npu_err)) {
+        SetError(error, "EmbeddingGemma 2 NPU weight load failed: " + npu_err);
+        return false;
+      }
+      eg_model->SetNpuScheduler(&GlobalNpuScheduler());
+      eg_model->SetNpuLaneConfig(NpuLaneConfigForDevice("npu"));
+      Logger::Info("loader",
+                   "event=npu_loaded model=embeddinggemma-2 quant=" +
+                       (npu_quant.empty() ? std::string("default") : npu_quant));
+#else
+      SetError(error,
+               "NPU backend is disabled in this build (rebuild with "
+               "-DMBUFO_ENABLE_NPU=ON)");
+      return false;
 #endif
-    eg_model->SetNpuLaneConfig(NpuLaneConfigForDevice(device_target));
+    } else {
+      eg_model->SetNpuLaneConfig(NpuLaneConfigForDevice("gpu"));
+    }
     if (max_context == 0 || max_context > models::embeddinggemma2::kMaxTokens) {
       max_context = models::embeddinggemma2::kMaxTokens;
     }
@@ -5997,6 +6037,22 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         SetError(error, "Failed to create BERT embedding model: " + bge_error);
         return false;
       }
+      if (target_dev == "npu") {
+#ifdef MBUFO_ENABLE_NPU
+        std::string npu_err;
+        if (!bge_model->LoadNpuWeights("", &npu_err)) {
+          SetError(error, "bge-m3 NPU weight load failed: " + npu_err);
+          return false;
+        }
+        Logger::Info("loader",
+                     "event=npu_loaded model=bge-m3 runtime=NpuBgeRuntime");
+#else
+        SetError(error,
+                 "NPU backend is disabled in this build (rebuild with "
+                 "-DMBUFO_ENABLE_NPU=ON)");
+        return false;
+#endif
+      }
       // NPU scheduler/lane attach to the EngineSession (see Embed() below);
       // SetNpuLaneConfig lives on EngineSession, not EngineModel.
       const std::uint32_t native_context =
@@ -6033,6 +6089,22 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error,
                "Failed to create BERT reranker model: " + rerank_error);
       return false;
+    }
+    if (target_dev == "npu") {
+#ifdef MBUFO_ENABLE_NPU
+      std::string npu_err;
+      if (!rerank_model->LoadNpuWeights("", &npu_err)) {
+        SetError(error, "bge-reranker NPU weight load failed: " + npu_err);
+        return false;
+      }
+      Logger::Info("loader",
+                   "event=npu_loaded model=bge-reranker runtime=NpuBgeRuntime");
+#else
+      SetError(error,
+               "NPU backend is disabled in this build (rebuild with "
+               "-DMBUFO_ENABLE_NPU=ON)");
+      return false;
+#endif
     }
     // NPU scheduler attaches when the rerank session is created (see below);
     // SetNpuLaneConfig lives on EngineSession, not EngineModel.
@@ -6245,6 +6317,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   (void)ram_cache_config;
   (void)enable_yarn;
   (void)kv_cache_quant_supplied;
+  (void)device_target;
+  (void)npu_quant;
   SetError(error, "HTTP inference requires the HIP backend");
   return false;
 #endif
@@ -7041,6 +7115,16 @@ std::string InferenceBackend::model_path() const {
   return state != nullptr ? state->model_path : std::string{};
 #else
   return {};
+#endif
+}
+
+std::string InferenceBackend::device_target() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+  return impl_->device_target.empty() ? std::string("gpu")
+                                      : impl_->device_target;
+#else
+  return "gpu";
 #endif
 }
 

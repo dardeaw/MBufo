@@ -1497,7 +1497,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           <div class="model-actions">
             ${m.sidecar
               ? `<button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', false)">⏏ Eject</button>`
-              : `${!m.is_default ? `<button class="btn-sm" onclick="setPrimaryModel('${m.id}')">★ Set Primary</button>` : ''}
+              : `${(!m.is_default && m.task !== 'embedding' && m.task !== 'reranker') ? `<button class="btn-sm" onclick="setPrimaryModel('${m.id}')">★ Set Primary</button>` : ''}
                   <button class="btn-sm btn-danger" onclick="ejectModel('${m.id}', ${m.busy})">⏏ Eject</button>`}
           </div>
         </div>
@@ -1505,7 +1505,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           ? `<div class="slots-bar">
                <span style="font-size:11px;color:var(--muted);">Sidecar process${m.pid > 0 ? ' · pid ' + m.pid : ''}${m.external ? ' (externally started, adopted)' : ''} · POST ${m.endpoint || ''}</span>
              </div>`
-          : `<div class="slots-bar">
+          : be === 'NPU'
+            ? `<div class="slots-bar">
+                 <span style="font-size:11px;color:#fbbf24;">⚡ XDNA2 NPU2 · Serialized queue (NpuScheduler)</span>
+                 <span style="margin-left:auto;font-size:11px;color:var(--muted);">Idle: ${fmtDuration(m.idle_ms || 0)}</span>
+               </div>`
+            : `<div class="slots-bar">
           <span style="font-size:11px;color:var(--muted);margin-right:4px;">Sessions (${m.active_sessions}/${m.total_sessions} busy):</span>
           ${slotsHtml}
           <span style="margin-left:auto;font-size:11px;color:var(--muted);">Idle: ${fmtDuration(m.idle_ms || 0)}</span>
@@ -1731,7 +1736,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       document.getElementById('lm-kv-wrap').style.display = isGpuChat ? 'block' : 'none';
       if (!isGpuChat) document.getElementById('lm-kv').value = 'fp16';
 
-      document.getElementById('lm-npu-quant-wrap').style.display = (dev === 'npu' && !isSidecar) ? 'block' : 'none';
+      const isEmbGemma = (m.id_suggestion || '').toLowerCase().includes('embeddinggemma');
+      document.getElementById('lm-npu-quant-wrap').style.display = (dev === 'npu' && !isSidecar && isEmbGemma) ? 'block' : 'none';
       document.getElementById('lm-npu-note').style.display = (dev === 'npu') ? 'block' : 'none';
 
       // Speculative & Draft Path: auto-select default when supported; hide when unsupported.
@@ -1948,7 +1954,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           ? document.getElementById('lm-kv').value
           : 'fp16',
         device: dev,
-        npu_quant: dev === 'npu' ? document.getElementById('lm-npu-quant').value : '',
+        npu_quant: (dev === 'npu' && document.getElementById('lm-npu-quant-wrap').style.display !== 'none') ? document.getElementById('lm-npu-quant').value : '',
         speculative: specVal,
         draft_model_path: draftVal,
         mmproj_path: (isGpuChat && mmVisible) ? document.getElementById('lm-mmproj').value : '',

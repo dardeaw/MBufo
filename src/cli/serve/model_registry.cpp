@@ -124,6 +124,7 @@ std::vector<ModelRegistry::Info> ModelRegistry::List() const {
     info.is_default = (entry->id == default_id);
     if (entry->backend) {
       info.path = entry->backend->model_path();
+      info.backend = entry->backend->device_target();
       info.supports_images = entry->backend->supports_images();
       info.sessions = entry->backend->session_states();
       info.total_sessions = info.sessions.size();

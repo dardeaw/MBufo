@@ -334,6 +334,7 @@ public:
   /// The served model file and build revision, as llama-server's /props
   /// reports them. Empty when unknown.
   [[nodiscard]] virtual std::string model_path() const { return {}; }
+  [[nodiscard]] virtual std::string device_target() const { return "gpu"; }
   [[nodiscard]] virtual std::string build_info() const { return {}; }
   [[nodiscard]] virtual SamplingDefaults sampling_defaults() const {
     return {};
