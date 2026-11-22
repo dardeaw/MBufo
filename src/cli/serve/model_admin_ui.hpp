@@ -862,21 +862,22 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         <button class="btn-sm" onclick="closeLoadModal()">✕</button>
       </div>
       <div class="form-grid">
-        <div>
+        <div id="lm-id-wrap">
           <label class="field-label">Model ID (Router Key)</label>
           <input type="text" id="lm-id" style="width:100%;" />
         </div>
-        <div>
+        <div id="lm-aliases-wrap">
           <label class="field-label">Aliases (comma-separated)</label>
           <input type="text" id="lm-aliases" placeholder="e.g. coder, fast" style="width:100%;" />
         </div>
-        <div class="form-full">
+        <div class="form-full" id="lm-path-wrap">
           <label class="field-label">GGUF Path</label>
           <input type="text" id="lm-path" style="width:100%;font-family:var(--mono);font-size:12px;" />
         </div>
-        <div>
+        <div class="form-full" id="lm-sidecar-info" style="display:none;background:#090c10;border:1px solid var(--border);padding:8px 10px;border-radius:8px;font-size:12px;font-family:var(--mono);color:var(--muted);"></div>
+        <div id="lm-ctx-wrap">
           <label class="field-label">Context Length (-c)</label>
-          <select id="lm-ctx" style="width:100%;" onchange="updateModalEstimate()">
+          <select id="lm-ctx" style="width:100%;" onchange="onModalCtxChange()">
             <option value="8192">8,192 (8K - Low RAM)</option>
             <option value="16384">16,384 (16K)</option>
             <option value="32768" selected>32,768 (32K - Balanced)</option>
@@ -885,7 +886,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             <option value="262144">262,144 (256K - Full)</option>
           </select>
         </div>
-        <div>
+        <div id="lm-sessions-wrap">
           <label class="field-label">Parallel Sessions (--sessions)</label>
           <select id="lm-sessions" style="width:100%;" onchange="updateModalEstimate()">
             <option value="1" selected>1 Session</option>
@@ -893,7 +894,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             <option value="4">4 Sessions</option>
           </select>
         </div>
-        <div>
+        <div id="lm-kv-wrap">
           <label class="field-label">KV Cache Quantization</label>
           <select id="lm-kv" style="width:100%;" title="q4/k8v4/k4v8 use packed 4-bit key/value grids and apply server-wide (process-global)">
             <option value="q4" selected>q4 K4V4 (Recommended)</option>
@@ -903,7 +904,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             <option value="fp16">fp16</option>
           </select>
         </div>
-        <div>
+        <div id="lm-device-wrap">
           <label class="field-label">Compute Device</label>
           <select id="lm-device" style="width:100%;" onchange="onModalDeviceChange()" title="Dual-capable models default to NPU; switch between NPU and GPU here.">
             <option value="npu">&#x26A1; NPU (XDNA2)</option>
@@ -918,32 +919,32 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             <option value="bf16">BF16 (Native)</option>
           </select>
         </div>
-        <div>
+        <div class="form-full" id="lm-npu-note" style="display:none;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.35);color:#fbbf24;padding:8px 10px;border-radius:8px;font-size:12px;">
+          &#x26A1; NPU (XDNA2) executes requests serially via NpuDeviceLock + AdmissionQueue (1 active execution at a time — no GPU Parallel Sessions or KV Cache Quantization).
+        </div>
+        <div id="lm-spec-wrap" style="display:none;">
           <label class="field-label">Speculative / MTP Mode</label>
-          <select id="lm-spec" style="width:100%;">
-            <option value="off" selected>off (Safe for all architectures)</option>
-            <option value="mtp">mtp (Multi-Token Prediction)</option>
-            <option value="dflash2">dflash2 (Block Diffusion Draft)</option>
-            <option value="dspark">dspark (Draft Spark)</option>
+          <select id="lm-spec" style="width:100%;" onchange="onModalSpecChange()">
+            <option value="off" selected>off (Disabled)</option>
           </select>
         </div>
-        <div class="form-full">
-          <label class="field-label">Draft / MTP Sidecar Path (Optional)</label>
-          <select id="lm-draft" style="width:100%;font-family:var(--mono);font-size:12px;"></select>
+        <div class="form-full" id="lm-draft-wrap" style="display:none;">
+          <label class="field-label">Draft / MTP Sidecar Path (Auto-Selected)</label>
+          <select id="lm-draft" style="width:100%;font-family:var(--mono);font-size:12px;" onchange="updateModalEstimate()"></select>
         </div>
-        <div class="form-full">
-          <label class="field-label">Vision mmproj Sidecar Path (Optional)</label>
-          <select id="lm-mmproj" style="width:100%;font-family:var(--mono);font-size:12px;"></select>
+        <div class="form-full" id="lm-mmproj-wrap" style="display:none;">
+          <label class="field-label">Vision mmproj Sidecar Path (Auto-Selected)</label>
+          <select id="lm-mmproj" style="width:100%;font-family:var(--mono);font-size:12px;" onchange="updateModalEstimate()"></select>
         </div>
-        <div class="form-full" style="display:flex;gap:18px;flex-wrap:wrap;padding-top:4px;">
-          <label class="checkbox-row">
+        <div class="form-full" id="lm-checks-wrap" style="display:flex;gap:18px;flex-wrap:wrap;padding-top:4px;">
+          <label class="checkbox-row" id="lm-default-wrap">
             <input type="checkbox" id="lm-default" /> Set as Primary Default Model
           </label>
-          <label class="checkbox-row">
+          <label class="checkbox-row" id="lm-evict-wrap">
             <input type="checkbox" id="lm-evict" checked /> Allow LRU Auto-Eviction if RAM Full
           </label>
-          <label class="checkbox-row">
-            <input type="checkbox" id="lm-yarn" /> Enable YaRN Scaling
+          <label class="checkbox-row" id="lm-yarn-wrap" style="display:none;">
+            <input type="checkbox" id="lm-yarn" onchange="onModalYarnChange()" /> Enable YaRN Scaling (&gt;256K)
           </label>
         </div>
       </div>
@@ -1634,9 +1635,183 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       });
     }
 
-    function onModalDeviceChange() {
+    const SPEC_LABELS = {
+      off: 'off (Disabled)',
+      mtp: 'mtp (Multi-Token Prediction)',
+      dflash2: 'dflash2 (Block Diffusion Draft)',
+      dspark: 'dspark (Draft Spark)'
+    };
+
+    function populateCtxOptions(supportsYarn, defaultVal) {
+      const ctxSel = document.getElementById('lm-ctx');
+      const opts = [
+        ['8192', '8,192 (8K - Low RAM)'],
+        ['16384', '16,384 (16K)'],
+        ['32768', '32,768 (32K - Balanced)'],
+        ['65536', '65,536 (64K)'],
+        ['131072', '131,072 (128K)'],
+        ['262144', '262,144 (256K - Full)']
+      ];
+      if (supportsYarn) {
+        opts.push(['524288', '524,288 (512K - YaRN)']);
+        opts.push(['1048576', '1,048,576 (1M - YaRN)']);
+      }
+      ctxSel.innerHTML = '';
+      opts.forEach(([v, label]) => {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = label;
+        ctxSel.appendChild(o);
+      });
+      ctxSel.value = String(defaultVal || 32768);
+    }
+
+    function onModalCtxChange() {
+      const ctx = parseInt(document.getElementById('lm-ctx').value, 10) || 32768;
+      if (ctx > 262144 && document.getElementById('lm-yarn-wrap').style.display !== 'none') {
+        document.getElementById('lm-yarn').checked = true;
+      }
+      updateModalEstimate();
+    }
+
+    function onModalYarnChange() {
+      const yarnChecked = document.getElementById('lm-yarn').checked;
+      const ctxSel = document.getElementById('lm-ctx');
+      if (!yarnChecked && (parseInt(ctxSel.value, 10) || 0) > 262144) {
+        ctxSel.value = '262144';
+      }
+      updateModalEstimate();
+    }
+
+    function onModalSpecChange() {
+      const m = window._modalModel || {};
+      const specWrap = document.getElementById('lm-spec-wrap');
+      const draftWrap = document.getElementById('lm-draft-wrap');
+      const specSel = document.getElementById('lm-spec');
+      const draftSel = document.getElementById('lm-draft');
+      if (specWrap.style.display === 'none' || specSel.value === 'off') {
+        draftWrap.style.display = 'none';
+      } else {
+        draftWrap.style.display = 'block';
+        if (!draftSel.value) {
+          const compatDrafts = Array.isArray(m.compatible_drafts) ? m.compatible_drafts : [];
+          draftSel.value = m.suggested_draft || compatDrafts[0] || '';
+        }
+      }
+      updateModalEstimate();
+    }
+
+    function syncModalVisibility(resetSelections) {
+      const m = window._modalModel;
+      if (!m) return;
       const dev = document.getElementById('lm-device').value;
-      document.getElementById('lm-npu-quant-wrap').style.display = (dev === 'npu') ? 'block' : 'none';
+      const isSidecar = !!m.sidecar;
+      const isEnc = (m.task === 'embedding' || m.task === 'reranker');
+      const isChatTask = (!m.task || m.task === 'chat');
+      const isGpuChat = (!isSidecar && dev === 'gpu' && isChatTask);
+
+      document.getElementById('lm-id').readOnly = isSidecar;
+      document.getElementById('lm-aliases-wrap').style.display = isSidecar ? 'none' : 'block';
+      document.getElementById('lm-path-wrap').style.display = isSidecar ? 'none' : 'block';
+
+      const scInfo = document.getElementById('lm-sidecar-info');
+      if (isSidecar) {
+        scInfo.style.display = 'block';
+        scInfo.textContent = `Sidecar Endpoint: POST ${m.endpoint || ''} · Port :${m.default_port || ''}${m.launch_cmd ? ' · ' + m.launch_cmd : ''}`;
+      } else {
+        scInfo.style.display = 'none';
+      }
+
+      document.getElementById('lm-ctx-wrap').style.display = (dev === 'gpu' && !isSidecar) ? 'block' : 'none';
+
+      const canParallel = isGpuChat && (m.supports_parallel_sessions !== false);
+      document.getElementById('lm-sessions-wrap').style.display = canParallel ? 'block' : 'none';
+      if (!canParallel) document.getElementById('lm-sessions').value = '1';
+
+      document.getElementById('lm-kv-wrap').style.display = isGpuChat ? 'block' : 'none';
+      if (!isGpuChat) document.getElementById('lm-kv').value = 'fp16';
+
+      document.getElementById('lm-npu-quant-wrap').style.display = (dev === 'npu' && !isSidecar) ? 'block' : 'none';
+      document.getElementById('lm-npu-note').style.display = (dev === 'npu') ? 'block' : 'none';
+
+      // Speculative & Draft Path: auto-select default when supported; hide when unsupported.
+      const compatDrafts = Array.isArray(m.compatible_drafts) ? m.compatible_drafts : [];
+      const supportedSpecs = Array.isArray(m.supported_speculative) ? m.supported_speculative : [];
+      const canSpec = isGpuChat && !!m.supports_speculative && supportedSpecs.length > 0 && compatDrafts.length > 0;
+      const specWrap = document.getElementById('lm-spec-wrap');
+      const draftWrap = document.getElementById('lm-draft-wrap');
+      const specSel = document.getElementById('lm-spec');
+      const draftSel = document.getElementById('lm-draft');
+      if (!canSpec) {
+        specWrap.style.display = 'none';
+        draftWrap.style.display = 'none';
+        specSel.innerHTML = '<option value="off" selected>off (Disabled)</option>';
+        specSel.value = 'off';
+        draftSel.innerHTML = '<option value="">(None)</option>';
+        draftSel.value = '';
+      } else {
+        specWrap.style.display = 'block';
+        if (resetSelections || specSel.options.length <= 1) {
+          specSel.innerHTML = '<option value="off">off (Disabled)</option>';
+          supportedSpecs.forEach(sp => {
+            const opt = document.createElement('option');
+            opt.value = sp;
+            opt.textContent = SPEC_LABELS[sp] || sp;
+            specSel.appendChild(opt);
+          });
+          draftSel.innerHTML = '<option value="">(None)</option>';
+          compatDrafts.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p;
+            opt.textContent = p.replace(/^.*\/mbufo-models\//, '');
+            draftSel.appendChild(opt);
+          });
+          const defSpec = m.suggested_speculative || supportedSpecs[0] || 'off';
+          specSel.value = defSpec;
+          draftSel.value = (defSpec !== 'off') ? (m.suggested_draft || compatDrafts[0] || '') : '';
+        }
+        draftWrap.style.display = (specSel.value !== 'off') ? 'block' : 'none';
+      }
+
+      // Vision mmproj: auto-select default when supported; hide when unsupported.
+      const compatMm = Array.isArray(m.compatible_mmprojs) ? m.compatible_mmprojs : [];
+      const canMm = isGpuChat && !!m.supports_mmproj && compatMm.length > 0;
+      const mmWrap = document.getElementById('lm-mmproj-wrap');
+      const mmSel = document.getElementById('lm-mmproj');
+      if (!canMm) {
+        mmWrap.style.display = 'none';
+        mmSel.innerHTML = '<option value="">(None - Text Only)</option>';
+        mmSel.value = '';
+      } else {
+        mmWrap.style.display = 'block';
+        if (resetSelections || mmSel.options.length <= 1) {
+          mmSel.innerHTML = '<option value="">(None - Text Only)</option>';
+          compatMm.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p;
+            opt.textContent = p.replace(/^.*\/mbufo-models\//, '');
+            mmSel.appendChild(opt);
+          });
+          mmSel.value = m.suggested_mmproj || compatMm[0] || '';
+        }
+      }
+
+      // Checkboxes: Primary Default (GPU Chat only), LRU Eviction (non-sidecar), YaRN (Qwen3.8-Flash-Next GPU only).
+      const canDefault = isGpuChat;
+      const canEvict = !isSidecar;
+      const canYarn = isGpuChat && !!m.supports_yarn;
+      document.getElementById('lm-default-wrap').style.display = canDefault ? 'flex' : 'none';
+      if (!canDefault) document.getElementById('lm-default').checked = false;
+      document.getElementById('lm-evict-wrap').style.display = canEvict ? 'flex' : 'none';
+      document.getElementById('lm-yarn-wrap').style.display = canYarn ? 'flex' : 'none';
+      if (!canYarn) document.getElementById('lm-yarn').checked = false;
+      document.getElementById('lm-checks-wrap').style.display = (canDefault || canEvict || canYarn) ? 'flex' : 'none';
+
+      updateModalEstimate();
+    }
+
+    function onModalDeviceChange() {
+      syncModalVisibility(true);
     }
 
     function openLoadModal(idx) {
@@ -1647,7 +1822,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       document.getElementById('lm-aliases').value = '';
       document.getElementById('lm-path').value = m.path || '';
       const isEnc = (m.task === 'embedding' || m.task === 'reranker');
-      document.getElementById('lm-ctx').value = isEnc ? '8192' : '32768';
+      populateCtxOptions(!!m.supports_yarn, isEnc ? 8192 : 32768);
       document.getElementById('lm-sessions').value = '1';
       document.getElementById('lm-kv').value = isEnc ? 'fp16' : 'q4';
 
@@ -1660,34 +1835,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       devSel.title = (dual || (npuOk && gpuOk))
         ? 'Dual-capable: defaults to NPU, switchable between NPU and GPU'
         : (npuOk ? 'NPU model' : 'GPU model');
-      onModalDeviceChange();
 
-      document.getElementById('lm-spec').value = 'off';
       document.getElementById('lm-default').checked = false;
       document.getElementById('lm-evict').checked = true;
       document.getElementById('lm-yarn').checked = false;
 
-      const draftSel = document.getElementById('lm-draft');
-      draftSel.innerHTML = `<option value="">(None)</option>`;
-      (stateCatalog.draft_files || []).forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p;
-        opt.textContent = p.replace(/^.*\/mbufo-models\//, '');
-        if (m.suggested_draft === p) opt.selected = true;
-        draftSel.appendChild(opt);
-      });
-
-      const mmSel = document.getElementById('lm-mmproj');
-      mmSel.innerHTML = `<option value="">(None - Text Only)</option>`;
-      (stateCatalog.mmproj_files || []).forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p;
-        opt.textContent = p.replace(/^.*\/mbufo-models\//, '');
-        if (m.suggested_mmproj === p) opt.selected = true;
-        mmSel.appendChild(opt);
-      });
-
-      updateModalEstimate();
+      syncModalVisibility(true);
       document.getElementById('load-modal').classList.add('open');
     }
 
@@ -1697,30 +1850,66 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
     function updateModalEstimate() {
       const m = window._modalModel || { size_mib: 4096 };
+      const dev = document.getElementById('lm-device').value;
+      const isSidecar = !!m.sidecar;
+      const isEnc = (m.task === 'embedding' || m.task === 'reranker');
+      const avail = (stateModels.memory && stateModels.memory.host_available_mib) || 0;
+      const el = document.getElementById('lm-estimate');
+      if (isSidecar) {
+        el.innerHTML =
+          `Sidecar Process: <strong>~${fmtGiB(m.size_mib)}</strong> (managed on port :${m.default_port || '?'} · Serialized NPU/sidecar execution · Current Available: ${fmtGiB(avail)})`;
+        return;
+      }
+      if (dev === 'npu') {
+        el.innerHTML =
+          `NPU (XDNA2) Weights: <strong>~${fmtGiB(m.size_mib)}</strong> · Serialized 1-at-a-time queue (Current Available: ${fmtGiB(avail)})`;
+        return;
+      }
+      if (isEnc) {
+        el.innerHTML =
+          `GPU Encoder Weights: <strong>${fmtGiB(m.size_mib)}</strong> + Buffers: <strong>~0.2 GiB</strong> → Total: <strong>~${fmtGiB(m.size_mib + 256)}</strong> (Current Available: ${fmtGiB(avail)})`;
+        return;
+      }
       const ctx = parseInt(document.getElementById('lm-ctx').value, 10) || 32768;
       const sess = parseInt(document.getElementById('lm-sessions').value, 10) || 1;
       const kvMib = Math.round((ctx / 32768) * sess * 768);
       const totalEst = m.size_mib + kvMib + 512;
-      const avail = (stateModels.memory && stateModels.memory.host_available_mib) || 0;
-      document.getElementById('lm-estimate').innerHTML =
-        `Weights: <strong>${fmtGiB(m.size_mib)}</strong> + Est. KV/Buffers (${sess}×${(ctx/1024).toFixed(0)}K): <strong>~${fmtGiB(kvMib + 512)}</strong> → Total: <strong>~${fmtGiB(totalEst)}</strong> (Current Available: ${fmtGiB(avail)})`;
+      const extras = [];
+      const specVal = document.getElementById('lm-spec').value;
+      if (document.getElementById('lm-spec-wrap').style.display !== 'none' && specVal !== 'off' && document.getElementById('lm-draft').value) {
+        extras.push(`+${specVal}`);
+      }
+      if (document.getElementById('lm-mmproj-wrap').style.display !== 'none' && document.getElementById('lm-mmproj').value) {
+        extras.push('+mmproj');
+      }
+      const extraTxt = extras.length ? ` [${extras.join(', ')}]` : '';
+      el.innerHTML =
+        `Weights: <strong>${fmtGiB(m.size_mib)}</strong> + Est. KV/Buffers (${sess}×${(ctx/1024).toFixed(0)}K): <strong>~${fmtGiB(kvMib + 512)}</strong>${extraTxt} → Total: <strong>~${fmtGiB(totalEst)}</strong> (Current Available: ${fmtGiB(avail)})`;
     }
 
     async function quickLoadModel(idx) {
       const m = (window._catalogFiltered && window._catalogFiltered[idx]) || null;
       if (!m) return;
-      const isEnc = (m.task === 'embedding' || m.task === 'reranker');
       const dev = defaultDeviceFor(m);
+      if (m.sidecar) {
+        await doLoadRequest({ id: m.id_suggestion, device: dev });
+        return;
+      }
+      const isEnc = (m.task === 'embedding' || m.task === 'reranker');
+      const isGpuChat = (dev === 'gpu' && !isEnc && (!m.task || m.task === 'chat'));
+      const useSpec = (isGpuChat && m.supports_speculative && m.suggested_speculative && m.suggested_draft);
       const payload = {
         id: m.id_suggestion,
         path: m.path,
-        context_length: isEnc ? 0 : 32768,
+        context_length: (dev === 'npu' || isEnc) ? 0 : 32768,
         sessions: 1,
-        kv_quant: isEnc ? 'fp16' : 'q4',
+        kv_quant: isGpuChat ? 'q4' : 'fp16',
         device: dev,
         npu_quant: dev === 'npu' ? 'q8' : '',
-        speculative: 'off',
-        mmproj_path: (!isEnc && m.suggested_mmproj) ? m.suggested_mmproj : '',
+        speculative: useSpec ? m.suggested_speculative : 'off',
+        draft_model_path: useSpec ? m.suggested_draft : '',
+        mmproj_path: (isGpuChat && m.supports_mmproj && m.suggested_mmproj) ? m.suggested_mmproj : '',
+        enable_yarn: false,
         allow_evict: true,
         set_default: false
       };
@@ -1728,24 +1917,46 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     }
 
     async function submitLoadModal() {
+      const m = window._modalModel || {};
+      const dev = document.getElementById('lm-device').value;
+      if (m.sidecar) {
+        const id = document.getElementById('lm-id').value.trim();
+        closeLoadModal();
+        await doLoadRequest({ id, device: dev });
+        return;
+      }
+      const isEnc = (m.task === 'embedding' || m.task === 'reranker');
+      const isGpuChat = (dev === 'gpu' && !isEnc && (!m.task || m.task === 'chat'));
       const aliasesRaw = document.getElementById('lm-aliases').value.trim();
       const aliases = aliasesRaw ? aliasesRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
-      const dev = document.getElementById('lm-device').value;
+      const specVisible = document.getElementById('lm-spec-wrap').style.display !== 'none';
+      const specVal = (isGpuChat && specVisible) ? document.getElementById('lm-spec').value : 'off';
+      const draftVal = (specVal !== 'off' && document.getElementById('lm-draft-wrap').style.display !== 'none')
+        ? document.getElementById('lm-draft').value
+        : '';
+      const mmVisible = document.getElementById('lm-mmproj-wrap').style.display !== 'none';
+      const yarnVisible = document.getElementById('lm-yarn-wrap').style.display !== 'none';
       const payload = {
         id: document.getElementById('lm-id').value.trim(),
         aliases: aliases,
         path: document.getElementById('lm-path').value.trim(),
-        context_length: parseInt(document.getElementById('lm-ctx').value, 10),
-        sessions: parseInt(document.getElementById('lm-sessions').value, 10),
-        kv_quant: document.getElementById('lm-kv').value,
+        context_length: (dev === 'gpu') ? parseInt(document.getElementById('lm-ctx').value, 10) : 0,
+        sessions: (isGpuChat && document.getElementById('lm-sessions-wrap').style.display !== 'none')
+          ? parseInt(document.getElementById('lm-sessions').value, 10)
+          : 1,
+        kv_quant: (isGpuChat && document.getElementById('lm-kv-wrap').style.display !== 'none')
+          ? document.getElementById('lm-kv').value
+          : 'fp16',
         device: dev,
         npu_quant: dev === 'npu' ? document.getElementById('lm-npu-quant').value : '',
-        speculative: document.getElementById('lm-spec').value,
-        draft_model_path: document.getElementById('lm-draft').value,
-        mmproj_path: document.getElementById('lm-mmproj').value,
-        enable_yarn: document.getElementById('lm-yarn').checked,
+        speculative: specVal,
+        draft_model_path: draftVal,
+        mmproj_path: (isGpuChat && mmVisible) ? document.getElementById('lm-mmproj').value : '',
+        enable_yarn: (isGpuChat && yarnVisible) ? document.getElementById('lm-yarn').checked : false,
         allow_evict: document.getElementById('lm-evict').checked,
-        set_default: document.getElementById('lm-default').checked
+        set_default: (isGpuChat && document.getElementById('lm-default-wrap').style.display !== 'none')
+          ? document.getElementById('lm-default').checked
+          : false
       };
       closeLoadModal();
       await doLoadRequest(payload);

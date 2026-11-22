@@ -606,24 +606,17 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     }
   }
 
-  auto find_sidecar = [&](const std::string& family, GgufRole role) -> std::string {
-    // In mbufo serve llm, --mmproj vision is supported on Qwen3.8-Flash-Next
-    // and Qwen3.8-27B; other families (gemma4, muse-glimmer) reject --mmproj.
-    if (role == GgufRole::kMmproj && family.rfind("qwen3.8-", 0) != 0) {
-      return {};
+  auto is_flash_next_family = [](const std::string& fam) {
+    return fam == "qwen3.8-flash-next" || fam == "qwen3.8-rocmfp4" ||
+           fam == "qwen3.8-mxfp4";
+  };
+  auto role_to_spec = [](GgufRole role) -> std::string {
+    switch (role) {
+      case GgufRole::kDraftMtp: return "mtp";
+      case GgufRole::kDraftDFlash: return "dflash2";
+      case GgufRole::kDraftDSpark: return "dspark";
+      default: return "";
     }
-    for (const auto& f : files) {
-      if (f.role == role && f.family == family) return f.path.string();
-    }
-    // Qwen3.8 Flash-Next quant folders (qwen3.8-rocmfp4, qwen3.8-mxfp4) share
-    // mmproj and MTP with qwen3.8-flash-next.
-    if (family.rfind("qwen3.8-", 0) == 0 && family != "qwen3.8-27b") {
-      for (const auto& f : files) {
-        if (f.role == role && f.family == "qwen3.8-flash-next")
-          return f.path.string();
-      }
-    }
-    return {};
   };
 
   json::Value models = json::Value::array();
@@ -645,12 +638,110 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     }
 
     const std::size_t est_bytes = EstimateResidentBytes(full_path);
-    const std::string sug_mtp = find_sidecar(f.family, GgufRole::kDraftMtp);
-    const std::string sug_dflash = find_sidecar(f.family, GgufRole::kDraftDFlash);
-    const std::string sug_dspark = find_sidecar(f.family, GgufRole::kDraftDSpark);
-    const std::string sug_draft = !sug_mtp.empty() ? sug_mtp
-                                : !sug_dflash.empty() ? sug_dflash
-                                                       : sug_dspark;
+    const std::string id_lower = ToLowerAscii(derived_id);
+    const std::string fam_lower = ToLowerAscii(f.family);
+    const bool is_qwen38_flash_next =
+        is_flash_next_family(fam_lower) ||
+        id_lower.find("flash-next") != std::string::npos;
+    const bool is_qwen38_27b =
+        fam_lower == "qwen3.8-27b" ||
+        id_lower.find("qwen3.8-27b") != std::string::npos;
+    const bool is_qwen35_35b_or_ornith =
+        id_lower.find("qwen3.5-35b") != std::string::npos ||
+        id_lower.find("ornith-1.5-35b") != std::string::npos;
+    const bool is_gemma4_26b =
+        fam_lower == "gemma-4-26b" ||
+        (id_lower.find("gemma-4") != std::string::npos &&
+         id_lower.find("26b") != std::string::npos);
+    const bool is_glimmer =
+        fam_lower.find("glimmer") != std::string::npos ||
+        id_lower.find("glimmer") != std::string::npos;
+    const bool is_deepseek_v4 =
+        fam_lower.find("deepseek") != std::string::npos ||
+        id_lower.find("deepseek") != std::string::npos;
+    const bool is_tiel_coder =
+        fam_lower.find("tiel-coder") != std::string::npos ||
+        id_lower.find("tiel-coder") != std::string::npos;
+
+    // Supported speculative modes matched strictly against inference_backend.cpp.
+    // Note: Qwen3.8-27B (QwenGpuModel) supports DFlash2 only and rejects MTP.
+    std::vector<std::string> supported_spec;
+    if (is_qwen38_flash_next || is_gemma4_26b || is_tiel_coder) {
+      supported_spec.push_back("mtp");
+    } else if (is_qwen38_27b || is_glimmer) {
+      supported_spec.push_back("dflash2");
+    } else if (is_deepseek_v4) {
+      supported_spec.push_back("dspark");
+    }
+
+    auto family_matches = [&](const std::string& cand_family) {
+      const std::string cf = ToLowerAscii(cand_family);
+      if (cf == fam_lower) return true;
+      if (is_qwen38_flash_next && is_flash_next_family(cf)) return true;
+      return false;
+    };
+
+    std::vector<std::pair<bool, std::string>> draft_cands;
+    for (const auto& cf : files) {
+      const std::string mode = role_to_spec(cf.role);
+      if (mode.empty()) continue;
+      if (std::find(supported_spec.begin(), supported_spec.end(), mode) ==
+          supported_spec.end()) {
+        continue;
+      }
+      if (!family_matches(cf.family)) continue;
+      draft_cands.emplace_back(ToLowerAscii(cf.family) != fam_lower,
+                               cf.path.string());
+    }
+    std::stable_sort(draft_cands.begin(), draft_cands.end(),
+                     [](const auto& a, const auto& b) {
+                       return a.first < b.first;
+                     });
+
+    std::vector<std::string> compatible_drafts;
+    std::string sug_mtp;
+    std::string sug_dflash;
+    std::string sug_dspark;
+    std::string sug_draft;
+    std::string sug_spec;
+    for (const auto& [_, dpath] : draft_cands) {
+      compatible_drafts.push_back(dpath);
+      const GgufRole dr = ClassifyGguf(std::filesystem::path(dpath));
+      if (dr == GgufRole::kDraftMtp && sug_mtp.empty()) sug_mtp = dpath;
+      if (dr == GgufRole::kDraftDFlash && sug_dflash.empty()) sug_dflash = dpath;
+      if (dr == GgufRole::kDraftDSpark && sug_dspark.empty()) sug_dspark = dpath;
+    }
+    if (!compatible_drafts.empty()) {
+      sug_draft = compatible_drafts.front();
+      sug_spec = role_to_spec(ClassifyGguf(std::filesystem::path(sug_draft)));
+    }
+
+    // External --mmproj is only accepted on Qwen3.8-Flash-Next, Qwen3.8-27B,
+    // and Qwen3.5/Ornith 35B-A3B. Prefer BF16 (matching mbufo.service).
+    const bool arch_supports_mmproj =
+        is_qwen38_flash_next || is_qwen38_27b || is_qwen35_35b_or_ornith;
+    std::vector<std::pair<int, std::string>> mm_cands;
+    if (arch_supports_mmproj) {
+      for (const auto& cf : files) {
+        if (cf.role != GgufRole::kMmproj) continue;
+        if (!family_matches(cf.family)) continue;
+        const std::string lower_fn = ToLowerAscii(cf.path.filename().string());
+        const int is_not_bf16 = lower_fn.find("bf16") == std::string::npos ? 1 : 0;
+        const int not_exact_fam = ToLowerAscii(cf.family) != fam_lower ? 1 : 0;
+        mm_cands.emplace_back(is_not_bf16 * 2 + not_exact_fam, cf.path.string());
+      }
+      std::stable_sort(mm_cands.begin(), mm_cands.end(),
+                       [](const auto& a, const auto& b) {
+                         return a.first < b.first;
+                       });
+    }
+    std::vector<std::string> compatible_mmprojs;
+    for (const auto& [_, mpath] : mm_cands) compatible_mmprojs.push_back(mpath);
+    const std::string sug_mm =
+        compatible_mmprojs.empty() ? std::string{} : compatible_mmprojs.front();
+    const bool supports_mmproj =
+        arch_supports_mmproj && !compatible_mmprojs.empty();
+
     std::string rel_path = full_path;
     for (const auto& r : roots) {
       std::error_code rel_ec;
@@ -664,18 +755,13 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     item["id"] = derived_id;
     item["id_suggestion"] = derived_id;
     item["name"] = f.path.filename().string();
+    const auto prof = ClassifyModelCapabilities(
+        derived_id, f.family, full_path, supports_mmproj, sug_spec);
+    item["task"] = prof.task;
+    item["has_vision"] = prof.has_vision;
+    item["has_audio"] = prof.has_audio;
+    item["has_tools"] = prof.has_tools;
     {
-      const std::string sug_mm = find_sidecar(f.family, GgufRole::kMmproj);
-      const std::string spec_k = !sug_mtp.empty()      ? "mtp"
-                                 : !sug_dflash.empty() ? "dflash2"
-                                 : !sug_dspark.empty() ? "dspark"
-                                                       : "";
-      const auto prof = ClassifyModelCapabilities(derived_id, f.family, full_path,
-                                            !sug_mm.empty(), spec_k);
-      item["task"] = prof.task;
-      item["has_vision"] = prof.has_vision;
-      item["has_audio"] = prof.has_audio;
-      item["has_tools"] = prof.has_tools;
       json::Value caps = json::Value::array();
       for (const auto& b : prof.badges) caps.push_back(b);
       item["capabilities"] = std::move(caps);
@@ -687,13 +773,10 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     item["backend"] = "gpu";
     item["sidecar"] = false;
     item["actionable"] = true;
-    {
-      const std::string id_lower = ToLowerAscii(derived_id);
-      item["npu_capable"] =
-          id_lower.find("bge-m3") != std::string::npos ||
-          id_lower.find("embeddinggemma") != std::string::npos ||
-          id_lower.find("bge-reranker") != std::string::npos;
-    }
+    item["npu_capable"] =
+        id_lower.find("bge-m3") != std::string::npos ||
+        id_lower.find("embeddinggemma") != std::string::npos ||
+        id_lower.find("bge-reranker") != std::string::npos;
     item["size_mib"] = f.size_bytes >> 20;
     item["file_size_mib"] = f.size_bytes >> 20;
     item["estimated_resident_mib"] = est_bytes >> 20;
@@ -701,11 +784,43 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     item["loaded"] = is_loaded;
     item["loaded_id"] = loaded_id;
     item["is_default"] = is_default;
-    item["suggested_mmproj"] = find_sidecar(f.family, GgufRole::kMmproj);
-    item["suggested_draft"] = sug_draft;
-    item["suggested_mtp"] = sug_mtp;
-    item["suggested_dflash"] = sug_dflash;
-    item["suggested_dspark"] = sug_dspark;
+
+    const bool is_enc_or_special = (prof.task != "chat");
+    const bool supports_spec = !is_enc_or_special && !supported_spec.empty();
+    const bool supports_yarn = !is_enc_or_special && is_qwen38_flash_next;
+    const bool supports_parallel_sessions = (prof.task == "chat");
+
+    item["suggested_mmproj"] = is_enc_or_special ? std::string{} : sug_mm;
+    item["suggested_draft"] = is_enc_or_special ? std::string{} : sug_draft;
+    item["suggested_mtp"] = is_enc_or_special ? std::string{} : sug_mtp;
+    item["suggested_dflash"] = is_enc_or_special ? std::string{} : sug_dflash;
+    item["suggested_dspark"] = is_enc_or_special ? std::string{} : sug_dspark;
+    item["supports_speculative"] = supports_spec;
+    {
+      json::Value spec_arr = json::Value::array();
+      if (!is_enc_or_special) {
+        for (const auto& s : supported_spec) spec_arr.push_back(s);
+      }
+      item["supported_speculative"] = std::move(spec_arr);
+    }
+    item["suggested_speculative"] = is_enc_or_special ? std::string{} : sug_spec;
+    {
+      json::Value cd_arr = json::Value::array();
+      if (!is_enc_or_special) {
+        for (const auto& p : compatible_drafts) cd_arr.push_back(p);
+      }
+      item["compatible_drafts"] = std::move(cd_arr);
+    }
+    item["supports_mmproj"] = (!is_enc_or_special && supports_mmproj);
+    {
+      json::Value mm_arr = json::Value::array();
+      if (!is_enc_or_special) {
+        for (const auto& p : compatible_mmprojs) mm_arr.push_back(p);
+      }
+      item["compatible_mmprojs"] = std::move(mm_arr);
+    }
+    item["supports_yarn"] = supports_yarn;
+    item["supports_parallel_sessions"] = supports_parallel_sessions;
     models.push_back(std::move(item));
   }
 
@@ -783,6 +898,14 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["suggested_mtp"] = "";
       item["suggested_dflash"] = "";
       item["suggested_dspark"] = "";
+      item["supports_speculative"] = false;
+      item["supported_speculative"] = json::Value::array();
+      item["suggested_speculative"] = "";
+      item["compatible_drafts"] = json::Value::array();
+      item["supports_mmproj"] = false;
+      item["compatible_mmprojs"] = json::Value::array();
+      item["supports_yarn"] = false;
+      item["supports_parallel_sessions"] = false;
       models.push_back(std::move(item));
     }
   }
@@ -825,6 +948,14 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["suggested_mtp"] = "";
       item["suggested_dflash"] = "";
       item["suggested_dspark"] = "";
+      item["supports_speculative"] = false;
+      item["supported_speculative"] = json::Value::array();
+      item["suggested_speculative"] = "";
+      item["compatible_drafts"] = json::Value::array();
+      item["supports_mmproj"] = false;
+      item["compatible_mmprojs"] = json::Value::array();
+      item["supports_yarn"] = false;
+      item["supports_parallel_sessions"] = false;
       models.push_back(std::move(item));
     };
     for (const auto& spec : KnownSidecars()) push_sidecar(spec);
