@@ -63,7 +63,7 @@ struct SidecarLaunchSpec {
   std::size_t estimated_resident_mib{0};  // memory bar + UI size
   // argv builders need runtime env (flm path, TTS model dir), so the
   // table stores a kind tag and argv is materialized per Start() call.
-  enum class Kind { kFlmDecision, kFlmAsr, kGufoTts } kind;
+  enum class Kind { kFlmDecision, kFlmAsr, kGufoTts, kGufoAsr } kind;
   std::string flm_model;  // e.g. "llama3.2:1b" (decision chat host) — see below
   std::string flm_flag;   // e.g. "d3:lite" / "whisper-v3:turbo"
 };

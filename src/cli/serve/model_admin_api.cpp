@@ -709,31 +709,25 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     models.push_back(std::move(item));
   }
 
-  // Non-GGUF model/artifact directories the GGUF scan above skips.
-  // Surfaced read-only (actionable=false) so the catalog reflects what's
-  // actually on disk: safetensors weights (served via sidecars or the NPU
-  // runtime, never hot-loaded as GGUF) and prebuilt NPU kernel bundles.
+  // Non-GGUF image-generation safetensors models present on disk (skipping
+  // kernel bundles and duplicate weights already exposed as GGUFs/sidecars).
   {
     struct ExtraDir {
       const char* id;
       const char* subdir;
-      const char* family;
+      const char* task;
+      const char* capability;
       const char* backend;
+      bool npu_capable;
       const char* note;
     };
     const ExtraDir kExtraDirs[] = {
-        {"qwen3-asr-1.7b-weights", "qwen3-asr-1.7b", "weights", "gpu",
-         "safetensors weights (ASR runs via whisper sidecar)"},
-        {"embeddinggemma-2-weights", "embeddinggemma-2", "weights", "npu",
-         "safetensors weights (NPU runtime source; GGUF in catalog runs GPU)"},
-        {"flux2-klein-4b-weights", "flux2-klein-4b", "weights", "gpu",
-         "safetensors weights (no HTTP serving yet)"},
-        {"z-image-turbo-weights", "z-image-turbo", "weights", "gpu",
-         "safetensors weights (no HTTP serving yet)"},
-        {"npu-kernels-bundle", "npu-kernels", "npu-artifacts", "npu",
-         "prebuilt NPU2 xclbin/insts bundles (verified artifacts)"},
-        {"npu-quant-bundle", "npu-quant", "npu-artifacts", "npu",
-         "Q8/Q4 prepacked weights + verify outputs"},
+        {"flux2-klein-4b", "flux2-klein-4b", "image_generation", "IMAGE", "npu", true,
+         "NPU2 Q8/Q4 verified (no HTTP /v1/images server yet)"},
+        {"z-image-turbo", "z-image-turbo", "image_generation", "IMAGE", "npu", true,
+         "NPU2 Q8/Q4 verified (no HTTP /v1/images server yet)"},
+        {"qwen-image-2.1", "qwen-image-2.1", "image_generation", "IMAGE", "gpu", false,
+         "GPU safetensors image model (mbufo serve image)"},
     };
     for (const auto& ed : kExtraDirs) {
       std::filesystem::path dir;
@@ -752,20 +746,23 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
         std::filesystem::recursive_directory_iterator it(dir, wec);
         std::filesystem::recursive_directory_iterator end;
         for (; !wec && it != end; it.increment(wec)) {
-          if (it->is_regular_file()) bytes += it->file_size();
+          std::error_code fec;
+          if (it->is_regular_file(fec)) bytes += it->file_size(fec);
         }
       }
       json::Value item = json::Value::object();
       item["id"] = ed.id;
       item["id_suggestion"] = ed.id;
       item["name"] = std::string(ed.subdir) + "/";
-      item["relative_path"] = dir.string();
-      item["family"] = ed.family;
-      item["task"] = "";
+      item["relative_path"] = std::string(ed.subdir) + "/";
+      item["family"] = "image";
+      item["task"] = ed.task;
       item["has_vision"] = false;
       item["has_audio"] = false;
       item["has_tools"] = false;
-      item["capabilities"] = json::Value::array();
+      json::Value caps = json::Value::array();
+      caps.push_back(ed.capability);
+      item["capabilities"] = std::move(caps);
       item["backend"] = ed.backend;
       item["sidecar"] = false;
       item["actionable"] = false;
@@ -779,7 +776,7 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["loaded_id"] = "";
       item["is_default"] = false;
       item["running"] = false;
-      item["npu_capable"] = false;
+      item["npu_capable"] = ed.npu_capable;
       item["path"] = dir.string();
       item["suggested_mmproj"] = "";
       item["suggested_draft"] = "";

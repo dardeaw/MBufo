@@ -1142,18 +1142,27 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       return `<span class="badge badge-primary" title="Runs on GPU (HIP in-process)">🎮 GPU</span>`;
     }
 
+    function supportsDevice(m, dev) {
+      const entry = m._mapping || findMappingForCatalog(m);
+      if (dev === 'NPU') {
+        if (backendOf(m) === 'NPU' || m.npu_capable) return true;
+        return mappingSupportsNpu(entry);
+      }
+      if (dev === 'GPU') {
+        if (backendOf(m) === 'GPU') return true;
+        return mappingSupportsGpu(entry);
+      }
+      return true;
+    }
+
     function renderDevicePills() {
       const devContainer = document.getElementById('dev-pills');
       if (!devContainer) return;
       const models = stateCatalog.models || [];
       const counts = { ALL: models.length, GPU: 0, NPU: 0 };
       models.forEach(m => {
-        if (isDualCapable(m)) {
-          counts.GPU += 1;
-          counts.NPU += 1;
-        } else {
-          counts[backendOf(m)] = (counts[backendOf(m)] || 0) + 1;
-        }
+        if (supportsDevice(m, 'GPU')) counts.GPU += 1;
+        if (supportsDevice(m, 'NPU')) counts.NPU += 1;
       });
       const defs = [
         { key: 'ALL', label: 'All Devices' },
@@ -1172,7 +1181,6 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           renderDevicePills();
           renderCapPills();
           renderCatalog();
-          renderLoadedModels();
         };
         devContainer.appendChild(el);
       });
@@ -1186,6 +1194,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (c === 'EMBEDDING') return `<span class="cap-pill cap-embed" title="Vector Embeddings (/v1/embeddings)">🧬 EMBEDDING</span>`;
         if (c === 'RERANKER')  return `<span class="cap-pill cap-rerank" title="Cross-Encoder / Relevance Reranker (/v1/reranking)">🎯 RERANKER</span>`;
         if (c === 'VISION')    return `<span class="cap-pill cap-vision" title="Multimodal Vision (Image Input)">👁 VISION</span>`;
+        if (c === 'IMAGE')     return `<span class="cap-pill cap-vision" title="Image Generation">🎨 IMAGE</span>`;
         if (c === 'AUDIO' || c === 'SPEECH') return `<span class="cap-pill cap-audio" title="Multimodal Audio">🎧 AUDIO</span>`;
         if (c === 'TOOLS')     return `<span class="cap-pill cap-tools" title="Function & Tool Calling">🛠 TOOLS</span>`;
         if (c === 'MTP' || c === 'DFLASH2' || c === 'DSPARK')
@@ -1440,8 +1449,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     function renderLoadedModels() {
       const container = document.getElementById('loaded-list');
       const allModels = stateModels.models || [];
-      const models = allModels.filter(m =>
-        selectedDevice === 'ALL' ? true : backendOf(m) === selectedDevice);
+      const models = allModels;
       const nGpu = allModels.filter(m => backendOf(m) === 'GPU').length;
       const nNpu = allModels.filter(m => backendOf(m) === 'NPU').length;
       document.getElementById('loaded-count').textContent =
@@ -1516,6 +1524,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         { key: 'EMBEDDING', label: '🧬 Embedding',     match: m => (m.capabilities || []).includes('EMBEDDING') },
         { key: 'RERANKER',  label: '🎯 Reranker',      match: m => (m.capabilities || []).includes('RERANKER') },
         { key: 'VISION',    label: '👁 Vision',        match: m => (m.capabilities || []).includes('VISION') },
+        { key: 'IMAGE',     label: '🎨 Image',         match: m => (m.capabilities || []).includes('IMAGE') },
         { key: 'AUDIO',     label: '🎧 Audio',         match: m => (m.capabilities || []).includes('AUDIO') },
         { key: 'TOOLS',     label: '🛠 Tools',         match: m => (m.capabilities || []).includes('TOOLS') }
       ];
@@ -1551,10 +1560,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
       const filtered = enriched.filter(m => {
         if (selectedCap !== 'ALL' && !(m.capabilities || []).includes(selectedCap)) return false;
-        if (selectedDevice !== 'ALL') {
-          const dual = isDualCapable(m);
-          if (!dual && backendOf(m) !== selectedDevice) return false;
-        }
+        if (selectedDevice !== 'ALL' && !supportsDevice(m, selectedDevice)) return false;
         if (!q) return true;
         const capsStr = (m.capabilities || []).join(' ').toLowerCase();
         return (m.id_suggestion || '').toLowerCase().includes(q) ||
@@ -1597,7 +1603,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         }
 
         const isActionable = m.actionable !== false;
-        const actionsHtml = !isActionable ? ''
+        const actionsHtml = !isActionable
+          ? `<span class="badge" style="color:var(--muted);" title="Verified on C++ runtime; HTTP serving endpoint not wired yet">🧪 Runtime Only (No HTTP)</span>`
           : m.sidecar
             ? (m.running
               ? `<button class="btn-sm" onclick="openLoadModal(${idx})">⚙ Configure</button>
@@ -1617,7 +1624,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             </div>
             <div class="cat-rel" title="${m.path}">${m.relative_path}</div>
             ${(!m.actionable && m.note) ? `<div class="cat-rel" style="color:var(--muted);font-style:italic;">${m.note}</div>` : ''}
-            ${m.sidecar ? `<div class="cat-rel" style="color:var(--muted);">POST ${m.endpoint} · NPU2 sidecar</div>` : ''}
+            ${m.sidecar ? `<div class="cat-rel" style="color:var(--muted);">POST ${m.endpoint} · ${backendOf(m)} sidecar</div>` : ''}
           </div>
           <div style="display:flex;gap:6px;flex-shrink:0;">
             ${actionsHtml}

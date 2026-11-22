@@ -386,6 +386,14 @@ std::string TtsModelDir() {
   return "/mnt/nvme-data/mbufo-models/qwen3-tts-1.7b-base";
 }
 
+std::string AsrModelDir() {
+  if (const char* e = std::getenv("MBUFO_ASR_MODEL_DIR");
+      e != nullptr && *e != '\0') {
+    return e;
+  }
+  return "/mnt/nvme-data/mbufo-models/qwen3-asr-1.7b";
+}
+
 std::string SidecarLogPath(const std::string& id) {
   const char* d = std::getenv("MBUFO_SIDECAR_LOG_DIR");
   const std::string dir =
@@ -411,6 +419,10 @@ bool BuildArgv(const SidecarLaunchSpec& spec, std::vector<std::string>* out,
       break;
     case SidecarLaunchSpec::Kind::kGufoTts:
       *out = {SelfExePath(), "serve", "tts", "--model", TtsModelDir(),
+              "--port", port};
+      break;
+    case SidecarLaunchSpec::Kind::kGufoAsr:
+      *out = {SelfExePath(), "serve", "asr", "--model", AsrModelDir(),
               "--port", port};
       break;
   }
@@ -446,6 +458,9 @@ const std::vector<SidecarLaunchSpec>& KnownSidecars() noexcept {
       {"qwen3-tts-1.7b", "Qwen3-TTS-12Hz-1.7B-Base (gufo sidecar)", "gpu", "tts", "AUDIO", 8765,
        "http://127.0.0.1:8765", "/v1/audio/voices", "/v1/audio/speech", 4700,
        SidecarLaunchSpec::Kind::kGufoTts, "", ""},
+      {"qwen3-asr-1.7b", "Qwen3-ASR-1.7B (gufo sidecar)", "gpu", "asr", "AUDIO", 8767,
+       "http://127.0.0.1:8767", "/health", "/v1/audio/transcriptions", 4500,
+       SidecarLaunchSpec::Kind::kGufoAsr, "", ""},
   };
   return kSpecs;
 }
@@ -547,6 +562,9 @@ bool SidecarManager::Start(const std::string& id, std::string* error,
         break;
       case SidecarLaunchSpec::Kind::kGufoTts:
         needles = {"serve", "tts", "--port", std::to_string(spec->port)};
+        break;
+      case SidecarLaunchSpec::Kind::kGufoAsr:
+        needles = {"serve", "asr", "--port", std::to_string(spec->port)};
         break;
     }
     const long pid = FindPidByArgv(needles);
