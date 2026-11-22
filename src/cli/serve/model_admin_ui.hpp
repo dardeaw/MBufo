@@ -373,7 +373,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       display: flex;
       align-items: center;
       gap: 6px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
+      white-space: nowrap;
+      overflow: hidden;
       background: rgba(0,0,0,0.25);
       padding: 6px 10px;
       border-radius: 6px;
@@ -383,6 +385,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       font-family: var(--mono);
       font-size: 11px;
       padding: 2px 7px;
+      flex: 0 0 auto;
+      min-width: 96px;
+      text-align: center;
       border-radius: 4px;
       background: #1f2937;
       color: #9ca3af;
@@ -1568,6 +1573,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     }
 
     function supportsDevice(m, dev) {
+      if (m.sidecar) return backendOf(m) === dev;
       const entry = m._mapping || findMappingForCatalog(m);
       if (dev === 'NPU') {
         if (backendOf(m) === 'NPU' || m.npu_capable) return true;
@@ -2019,11 +2025,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
                  <span style="font-size:11px;color:#fbbf24;">⚡ XDNA2 NPU2 · Serialized queue (NpuScheduler)</span>
                  <span style="margin-left:auto;font-size:11px;color:var(--muted);">Idle: ${fmtDuration(m.idle_ms || 0)}</span>
                </div>`
-            : `<div class="slots-bar">
-          <span style="font-size:11px;color:var(--muted);margin-right:4px;">Sessions (${m.active_sessions}/${m.total_sessions} busy):</span>
-          ${slotsHtml}
-          <span style="margin-left:auto;font-size:11px;color:var(--muted);">Idle: ${fmtDuration(m.idle_ms || 0)}</span>
-        </div>`}
+            : `<div class="slots-bar">${slotsHtml}</div>`}
         `;
         container.appendChild(card);
       });
@@ -2102,7 +2104,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         };
 
         const badges = [];
-        if (dual) {
+        if (m.sidecar) {
+          badges.push(renderBackendBadge(m));
+        } else if (dual) {
           badges.push(`<span class="badge badge-amber" title="Default: NPU (switchable to GPU in Configure)">⚡ NPU (Default)</span>`);
           badges.push(`<span class="badge badge-primary" title="Also supports GPU HIP">🎮 GPU</span>`);
         } else {
@@ -2371,9 +2375,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
       const devSel = document.getElementById('lm-device');
       if (m.sidecar) {
-        devSel.value = backendOf(m) === 'NPU' ? 'npu' : 'gpu';
-        devSel.disabled = true;
-        devSel.title = (backendOf(m) === 'NPU') ? 'NPU sidecar' : 'GPU sidecar';
+        const scDual = isDualCapable(m);
+        devSel.value = defaultDeviceFor(m);
+        devSel.disabled = !scDual;
+        devSel.title = scDual
+          ? 'Sidecar launch path runs on GPU (HIP); NPU runtime verified in model mapping but no NPU sidecar launcher is wired yet'
+          : (backendOf(m) === 'NPU' ? 'NPU sidecar' : 'GPU sidecar');
       } else {
         const dual = isDualCapable(m);
         const npuOk = !!(m.npu_capable || (m._mapping && mappingSupportsNpu(m._mapping)) || backendOf(m) === 'NPU');

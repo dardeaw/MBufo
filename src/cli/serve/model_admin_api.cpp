@@ -1101,7 +1101,14 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
       body.member_str("kv_cache_quant", body.member_str("kv_quant", "q4"));
   request.kv_cache_quant_supplied =
       body.find("kv_cache_quant") != nullptr || body.find("kv_quant") != nullptr;
-  request.device = body.member_str("device", "gpu");
+  // Sidecar default device follows its KnownSidecars() backend (e.g.
+  // qwen3-asr/tts are NPU-default); GGUF loads keep the gpu default.
+  const std::string want_dev_id =
+      body.member_str("id", body.member_str("model", ""));
+  const SidecarLaunchSpec* pre_sc =
+      !want_dev_id.empty() ? FindSidecarSpec(want_dev_id) : nullptr;
+  request.device = body.member_str(
+      "device", pre_sc ? std::string(pre_sc->backend) : std::string("gpu"));
   if (request.device != "gpu" && request.device != "npu") {
     return AdminErr(400, "Bad Request",
                     "device must be 'gpu' or 'npu'", "invalid_device");
