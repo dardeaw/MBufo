@@ -13,7 +13,7 @@
 // - backends are descriptors, not live objects: an NPU entry is either an
 //   IRON xclbin set (future in-process) or a sidecar endpoint (flm / gufo
 //   serve). `ready` is declared at Add() time and refreshed by probes.
-// - five lanes, not one: embedding / reranker / decide / asr / tts.
+// - six lanes, not one: embedding / reranker / decide / asr / tts / image.
 // - LRU eviction for sidecars means "stop the sidecar process", never free().
 
 #include <algorithm>
@@ -29,13 +29,15 @@
 
 namespace mbufo::core::npu {
 
-/// Which of the five NPU lanes an entry serves.
+/// Which of the six NPU lanes an entry serves.
+/// kImage covers FLUX.2-klein / Z-Image-Turbo (TE + DiT, in-process NPU).
 enum class NpuModelLane : std::uint8_t {
   kEmbedding = 0,
   kReranker,
   kDecide,
   kAsr,
   kTts,
+  kImage,
 };
 
 /// Where the model actually runs.
@@ -43,6 +45,9 @@ enum class NpuArtifactKind : std::uint8_t {
   kIronXclbin = 0,  ///< in-process IRON graph (embedding/reranker future)
   kFlmSidecar,      ///< flm process (D3 decide, Whisper ASR)
   kGufoSidecar,     ///< gufo serve tts/asr process
+  kNpuInProcess,    ///< in-process NPU-GEMM servable (this branch: thinker /
+                    ///< talker+predictor+frame loop / shared TE / FLUX+ZImage
+                    ///< DiTs). On-demand load only, never boot autoload.
 };
 
 /// Backend descriptor stored per entry (plain data, no live handles).
