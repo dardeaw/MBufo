@@ -754,13 +754,30 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       </div>
     </div>
     <div class="header-actions">
+      <span id="version-pill" class="badge" style="font-family:var(--mono);cursor:pointer;padding:5px 9px;" onclick="checkServerUpdate(true)" title="Click to check GitHub (dardeaw/MBufo) for updates">checking version...</span>
       <span id="conn-pill" class="status-pill"><span class="status-dot"></span> Online (:8741)</span>
-      <button class="btn-primary" onclick="openDownloadModal()">⬇ Download Models</button>
+      <button class="btn-primary" id="btn-download-models" onclick="openDownloadModal()">⬇ Download Models</button>
       <button onclick="refreshAll(true)">↻ Refresh</button>
     </div>
   </header>
 
   <div class="container">
+    <!-- GitHub Self-Update Banner -->
+    <div id="update-banner" style="display:none;background:rgba(59,130,246,0.12);border:1px solid rgba(59,130,246,0.45);border-radius:10px;padding:12px 16px;flex-direction:column;gap:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span id="update-phase-badge" class="badge badge-amber">UPDATE AVAILABLE</span>
+          <strong id="update-title" style="font-size:13px;">New commit available on GitHub (dardeaw/MBufo)</strong>
+          <span id="update-detail" style="font-size:12px;color:var(--muted);font-family:var(--mono);"></span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn-sm" onclick="checkServerUpdate(true)">↻ Re-check</button>
+          <button class="btn-sm btn-primary" id="btn-apply-update" onclick="applyServerUpdate()">🚀 Update & Restart Server</button>
+        </div>
+      </div>
+      <pre id="update-log-tail" style="display:none;margin:0;background:#090c10;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:11px;color:#cbd5e1;max-height:130px;overflow-y:auto;white-space:pre-wrap;"></pre>
+    </div>
+
     <!-- Loading In-Progress Banner -->
     <div id="loading-banner" class="loading-banner">
       <div style="display:flex;align-items:center;gap:10px;">
@@ -938,31 +955,72 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
     </div>
   </div>
 
-    <!-- Download Models Modal (from GitHub model_mapping.json) -->
+  <!-- Download Models Modal (Option B: Local Mapping + Server-Side HF Repo Browser) -->
   <div class="modal-backdrop" id="download-modal">
-    <div class="modal" style="width:min(820px,96vw);max-height:86vh;display:flex;flex-direction:column;">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
+    <div class="modal" style="width:min(940px,96vw);max-height:88vh;display:flex;flex-direction:column;gap:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
         <div>
-          <h3 style="font-size:16px;">Download Supported Models (GitHub model_mapping.json)</h3>
-          <div id="dl-source-note" style="font-size:11px;color:var(--muted);margin-top:2px;">Source: https://raw.githubusercontent.com/dardeaw/MBufo/main/model_mapping.json</div>
+          <h3 style="font-size:16px;">Server-Side HuggingFace Model Downloader</h3>
+          <div id="dl-source-note" style="font-size:11px;color:var(--muted);margin-top:2px;font-family:var(--mono);">Local Cache: /admin/model-mapping</div>
         </div>
-        <button class="btn-sm" onclick="closeDownloadModal()">✕</button>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn-sm" onclick="syncModelMapping()">↻ Sync Mapping from GH</button>
+          <button class="btn-sm" onclick="closeDownloadModal()">✕</button>
+        </div>
       </div>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:#090c10;border:1px solid var(--border);padding:8px 10px;border-radius:8px;">
+        <span style="font-size:12px;color:var(--muted);">Target Root:</span>
+        <code id="dl-models-root" style="font-size:12px;color:#93c5fd;">/mnt/nvme-data/mbufo-models</code>
+        <span id="dl-disk-free" class="badge badge-green" style="margin-left:auto;">Free: --</span>
+        <input type="password" id="dl-hf-token" placeholder="Optional HF_TOKEN (for gated repos)" style="width:230px;padding:4px 8px;font-size:12px;" />
+      </div>
+
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <input type="text" id="dl-search" placeholder="Search model name, task, arch, quant..." style="flex:1;min-width:200px;" oninput="renderDownloadList()" />
-        <select id="dl-task" onchange="renderDownloadList()">
-          <option value="ALL">All Tasks</option>
-          <option value="chat">Chat LLM</option>
-          <option value="embedding">Embedding</option>
-          <option value="reranking">Reranking</option>
-          <option value="asr">ASR (Speech-to-Text)</option>
-          <option value="tts">TTS (Text-to-Speech)</option>
-          <option value="image_generation">Image Generation</option>
-          <option value="video_generation">Video Generation</option>
-          <option value="decide">Decide (D3)</option>
-        </select>
+        <input type="text" id="dl-custom-repo" placeholder="Custom HF Repo (e.g. unsloth/Qwen3.8-27B-GGUF or org/model)" style="flex:1;min-width:240px;font-family:var(--mono);font-size:12px;" onkeydown="if(event.key==='Enter') browseCustomRepo()" />
+        <button class="btn-primary" onclick="browseCustomRepo()">📂 Browse Repo Files</button>
       </div>
-      <div id="dl-list" style="overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:4px;max-height:58vh;"></div>
+
+      <div id="dl-jobs-box" style="display:none;flex-direction:column;gap:6px;background:#0b1220;border:1px solid rgba(59,130,246,0.35);border-radius:8px;padding:8px 10px;max-height:170px;overflow-y:auto;"></div>
+
+      <!-- Mode 1: Cached Model Mapping List -->
+      <div id="dl-catalog-view" style="display:flex;flex-direction:column;gap:8px;min-height:0;flex:1;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <input type="text" id="dl-search" placeholder="Filter models by name, task, arch, quant..." style="flex:1;min-width:200px;" oninput="renderDownloadList()" />
+          <select id="dl-task" onchange="renderDownloadList()">
+            <option value="ALL">All Tasks</option>
+            <option value="chat">Chat LLM</option>
+            <option value="embedding">Embedding</option>
+            <option value="reranking">Reranking</option>
+            <option value="asr">ASR (Speech-to-Text)</option>
+            <option value="tts">TTS (Text-to-Speech)</option>
+            <option value="image_generation">Image Generation</option>
+            <option value="video_generation">Video Generation</option>
+            <option value="decide">Decide (D3)</option>
+          </select>
+        </div>
+        <div id="dl-list" style="overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:4px;max-height:46vh;"></div>
+      </div>
+
+      <!-- Mode 2: Option B HF Repo File & Quantization Picker -->
+      <div id="dl-browser-view" style="display:none;flex-direction:column;gap:8px;min-height:0;flex:1;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;background:#0d1117;border:1px solid var(--border);padding:8px 10px;border-radius:8px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button class="btn-sm" onclick="backToModelList()">← Back to Models</button>
+            <strong id="dl-browse-repo" style="font-family:var(--mono);font-size:13px;color:#93c5fd;"></strong>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span style="font-size:12px;color:var(--muted);">Subdir:</span>
+            <input type="text" id="dl-browse-subdir" style="width:190px;padding:4px 8px;font-family:var(--mono);font-size:12px;" />
+          </div>
+        </div>
+        <div id="dl-browse-files" style="overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding-right:4px;max-height:40vh;"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:8px;">
+          <span id="dl-browse-selected-info" style="font-size:12px;font-family:var(--mono);color:var(--muted);">Select quantizations / files above</span>
+          <button class="btn-primary" id="btn-start-dl" onclick="startSelectedDownload()">⬇ Download Selected to Server</button>
+        </div>
+      </div>
+
       <div style="display:flex;justify-content:flex-end;">
         <button onclick="closeDownloadModal()">Close</button>
       </div>
@@ -973,10 +1031,15 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
   <script>
     const MODEL_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#06b6d4', '#ec4899', '#eab308'];
-    const GH_MAPPING_URL = 'https://raw.githubusercontent.com/dardeaw/MBufo/main/model_mapping.json';
     let stateModels = { models: [], memory: {}, loading: { active: false } };
     let stateCatalog = { models: [], mmproj_files: [], draft_files: [] };
     let stateMapping = { models: [] };
+    let stateUpdate = null;
+    let dlPollTimer = null;
+    let updPollTimer = null;
+    let lastCompletedDlIds = new Set();
+    window._browseRepo = '';
+    window._browseItems = [];
     let mappingSource = 'none';
     let selectedCap = 'ALL';
     let selectedDevice = 'ALL';
@@ -1032,25 +1095,37 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
     async function fetchModelMapping() {
       try {
-        const ctrl = new AbortController();
-        const tid = setTimeout(() => ctrl.abort(), 3500);
-        const res = await fetch(GH_MAPPING_URL, { cache: 'no-store', signal: ctrl.signal });
-        clearTimeout(tid);
-        if (res.ok) {
-          stateMapping = await res.json();
-          mappingSource = 'GitHub (dardeaw/MBufo)';
-          return true;
-        }
-      } catch (_) {}
-      try {
         const res = await fetch('/admin/model-mapping', { cache: 'no-store' });
         if (res.ok) {
           stateMapping = await res.json();
-          mappingSource = 'Local Fallback (/admin/model-mapping)';
+          mappingSource = 'Local Cache (/admin/model-mapping)';
           return true;
         }
       } catch (_) {}
       return false;
+    }
+
+    async function syncModelMapping() {
+      showToast('Syncing model_mapping.json from GitHub...');
+      try {
+        const res = await fetch('/admin/model-mapping/sync', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          showToast('Sync failed: ' + (data.error ? data.error.message : res.statusText), true);
+          return;
+        }
+        stateMapping = data;
+        mappingSource = 'Synced from GitHub (cached locally)';
+        document.getElementById('dl-source-note').textContent =
+          `Local Cache: /admin/model-mapping (${mappingSource}, ${(stateMapping.models || []).length} models)`;
+        renderDevicePills();
+        renderCapPills();
+        renderCatalog();
+        renderDownloadList();
+        showToast(`Synced ${(stateMapping.models || []).length} models from GitHub!`);
+      } catch (e) {
+        showToast('Sync error: ' + e.message, true);
+      }
     }
 
     const GPU_COLOR = '#3b82f6';
@@ -1233,7 +1308,12 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         }
         return ok;
       });
-      const [okStatus] = await Promise.all([fetchStatus(), fetchCatalog()]);
+      const [okStatus] = await Promise.all([
+        fetchStatus(),
+        fetchCatalog(),
+        fetchDownloads(false),
+        checkServerUpdate(manual)
+      ]);
       if (manual) {
         await mappingPromise;
         if (okStatus) showToast(`Refreshed (mapping: ${mappingSource})`);
@@ -1664,18 +1744,37 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       await doLoadRequest(payload);
     }
 
+    function fmtBytes(bytes) {
+      if (!bytes || bytes <= 0) return '0 B';
+      const gib = bytes / (1024 * 1024 * 1024);
+      if (gib >= 1) return gib.toFixed(2) + ' GiB';
+      const mib = bytes / (1024 * 1024);
+      if (mib >= 1) return mib.toFixed(1) + ' MiB';
+      return (bytes / 1024).toFixed(0) + ' KiB';
+    }
+
+    function escHtml(s) {
+      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
     async function openDownloadModal() {
       document.getElementById('download-modal').classList.add('open');
       if (!stateMapping.models || !stateMapping.models.length) {
         await fetchModelMapping();
       }
       document.getElementById('dl-source-note').textContent =
-        `Source: ${GH_MAPPING_URL} (${mappingSource}, ${(stateMapping.models || []).length} models)`;
+        `Local Cache: /admin/model-mapping (${mappingSource}, ${(stateMapping.models || []).length} models)`;
       renderDownloadList();
+      await fetchDownloads(true);
     }
 
     function closeDownloadModal() {
       document.getElementById('download-modal').classList.remove('open');
+    }
+
+    function backToModelList() {
+      document.getElementById('dl-browser-view').style.display = 'none';
+      document.getElementById('dl-catalog-view').style.display = 'flex';
     }
 
     function renderDownloadList() {
@@ -1693,39 +1792,375 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
                quants.includes(q);
       });
       if (!list.length) {
-        box.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted);">No matching models in model_mapping.json</div>`;
+        box.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted);">No matching models in local model_mapping.json</div>`;
         return;
       }
-      box.innerHTML = list.map(m => {
+      box.innerHTML = list.map((m, i) => {
         const backs = (m.supported_backends || []).map(b => {
           const isNpu = b.startsWith('npu');
-          return `<span class="badge ${isNpu ? 'badge-amber' : 'badge-primary'}">${b}</span>`;
+          return `<span class="badge ${isNpu ? 'badge-amber' : 'badge-primary'}">${escHtml(b)}</span>`;
         }).join('');
         const recQ = (m.quant_formats && m.quant_formats.recommended) ? m.quant_formats.recommended : (m.format || '');
         const hf = m.huggingface || {};
-        const url = hf.url || ('https://huggingface.co/models?search=' + encodeURIComponent(m.name || m.id));
-        const linkLabel = hf.is_search_url ? '🔍 Search on HuggingFace ↗' : '⬇ HuggingFace Repo ↗';
+        const repos = (hf.repos && hf.repos.length) ? hf.repos : (hf.repo ? [hf.repo] : []);
+        const defSubdir = m.default_subdir || m.id || '';
+        const repoBtns = repos.length
+          ? repos.map((rp, ridx) => `<button class="btn-sm ${ridx === 0 ? 'btn-primary' : ''}" onclick="browseHfRepo('${escHtml(rp)}', '${escHtml(defSubdir)}')" title="Browse files & quants on server">📂 ${escHtml(repos.length > 1 ? rp.split('/')[0] : 'Browse & Download')}</button>`).join('')
+          : `<span class="badge" title="FLM sidecar managed automatically or enter custom HF repo above">FLM Sidecar / Custom Repo</span>`;
         return `
-          <div style="background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:12px;">
-            <div style="min-width:0;">
+          <div style="background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div style="min-width:0;flex:1;">
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-weight:600;font-size:13px;">
-                <span>${m.name || m.id}</span>
-                <span class="badge">${m.task || ''}</span>
-                <span class="badge">${m.engine || ''}</span>
-                ${recQ ? `<span class="badge badge-green">${recQ}</span>` : ''}
+                <span>${escHtml(m.name || m.id)}</span>
+                <span class="badge">${escHtml(m.task || '')}</span>
+                <span class="badge">${escHtml(m.engine || '')}</span>
+                ${recQ ? `<span class="badge badge-green">${escHtml(recQ)}</span>` : ''}
                 ${backs}
               </div>
               <div style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px;">
-                id: ${m.id} · format: ${m.format || ''} · default: ${m.recommended_backend || ''}
+                id: ${escHtml(m.id)} · repo: ${escHtml(repos[0] || 'n/a')} · dir: ${escHtml(defSubdir)}
               </div>
             </div>
-            <a href="${url}" target="_blank" rel="noopener noreferrer"
-               style="flex-shrink:0;text-decoration:none;background:rgba(59,130,246,0.16);border:1px solid rgba(59,130,246,0.45);color:#93c5fd;padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;">
-              ${linkLabel}
-            </a>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0;">
+              ${repoBtns}
+            </div>
           </div>
         `;
       }).join('');
+    }
+
+    function browseCustomRepo() {
+      const rp = (document.getElementById('dl-custom-repo').value || '').trim();
+      if (!rp || !rp.includes('/')) {
+        showToast('Enter a valid HuggingFace repo slug (org/model)', true);
+        return;
+      }
+      const sub = rp.split('/')[1].toLowerCase().replace(/-gguf$/i, '');
+      browseHfRepo(rp, sub);
+    }
+
+    async function browseHfRepo(repo, defaultSubdir) {
+      document.getElementById('dl-catalog-view').style.display = 'none';
+      document.getElementById('dl-browser-view').style.display = 'flex';
+      document.getElementById('dl-browse-repo').textContent = repo;
+      document.getElementById('dl-browse-subdir').value = defaultSubdir || repo.split('/')[1].toLowerCase();
+      document.getElementById('dl-browse-files').innerHTML =
+        `<div style="padding:24px;text-align:center;color:var(--muted);">Querying HuggingFace tree API for <code>${escHtml(repo)}</code>...</div>`;
+      document.getElementById('dl-browse-selected-info').textContent = 'Loading files...';
+      window._browseRepo = repo;
+      window._browseItems = [];
+
+      try {
+        const hdrs = {};
+        const tok = (document.getElementById('dl-hf-token').value || '').trim();
+        if (tok) hdrs['X-HF-Token'] = tok;
+        const res = await fetch('/admin/hf/files?repo=' + encodeURIComponent(repo) + '&subdir=' + encodeURIComponent(document.getElementById('dl-browse-subdir').value), {
+          headers: hdrs,
+          cache: 'no-store'
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          document.getElementById('dl-browse-files').innerHTML =
+            `<div style="padding:18px;color:var(--red);background:rgba(239,68,68,0.1);border-radius:8px;">Failed: ${escHtml(data.error ? data.error.message : res.statusText)}</div>`;
+          document.getElementById('dl-browse-selected-info').textContent = 'Error';
+          return;
+        }
+        if (data.models_dir) document.getElementById('dl-models-root').textContent = data.models_dir;
+        if (data.disk_free_bytes) document.getElementById('dl-disk-free').textContent = 'Free: ' + fmtBytes(data.disk_free_bytes);
+
+        const files = data.files || [];
+        window._browseItems = files;
+        if (!files.length) {
+          document.getElementById('dl-browse-files').innerHTML =
+            `<div style="padding:18px;text-align:center;color:var(--muted);">No .gguf or .safetensors weight files found in this repo.</div>`;
+          updateSelectedDownloadSummary();
+          return;
+        }
+
+        document.getElementById('dl-browse-files').innerHTML = files.map((f, idx) => {
+          const roleBadge = f.role === 'mmproj'
+            ? `<span class="badge badge-purple">VISION mmproj</span>`
+            : (f.role === 'draft' ? `<span class="badge badge-amber">DRAFT / MTP</span>`
+            : (f.full_repo ? `<span class="badge badge-green">FULL MODEL</span>` : `<span class="badge">WEIGHTS</span>`));
+          const quantBadge = `<span class="badge badge-primary">${escHtml(f.quant || 'GGUF')}</span>`;
+          const shardInfo = f.shards > 1 ? `<span class="badge">${f.shards} shards</span>` : '';
+          const diskBadge = f.on_disk ? `<span class="badge badge-green">✅ On Disk</span>` : '';
+          return `
+            <label style="display:flex;align-items:center;gap:10px;background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:8px 10px;cursor:pointer;">
+              <input type="checkbox" class="dl-file-cb" data-idx="${idx}" onchange="updateSelectedDownloadSummary()" ${f.full_repo && !f.on_disk ? 'checked' : ''} />
+              <div style="flex:1;min-width:0;">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;">
+                  ${quantBadge}
+                  ${roleBadge}
+                  ${shardInfo}
+                  ${diskBadge}
+                </div>
+                <div style="font-family:var(--mono);font-size:11px;color:#e2e8f0;margin-top:3px;word-break:break-all;">${escHtml(f.name)}</div>
+              </div>
+              <div style="font-family:var(--mono);font-size:12px;font-weight:700;color:#93c5fd;flex-shrink:0;">
+                ${fmtBytes(f.size_bytes)}
+              </div>
+            </label>
+          `;
+        }).join('');
+        updateSelectedDownloadSummary();
+      } catch (e) {
+        document.getElementById('dl-browse-files').innerHTML =
+          `<div style="padding:18px;color:var(--red);">Network error: ${escHtml(e.message)}</div>`;
+      }
+    }
+
+    function updateSelectedDownloadSummary() {
+      const cbs = [...document.querySelectorAll('.dl-file-cb:checked')];
+      let totalBytes = 0;
+      let fileCount = 0;
+      cbs.forEach(cb => {
+        const it = window._browseItems[parseInt(cb.dataset.idx, 10)];
+        if (it) {
+          totalBytes += it.size_bytes || 0;
+          fileCount += (it.files || []).length;
+        }
+      });
+      document.getElementById('dl-browse-selected-info').textContent =
+        cbs.length
+          ? `Selected ${cbs.length} item(s) (${fileCount} file(s)) · Est. Size: ${fmtBytes(totalBytes)}`
+          : 'Select quantizations / files above';
+      document.getElementById('btn-start-dl').disabled = (cbs.length === 0);
+    }
+
+    async function startSelectedDownload() {
+      const cbs = [...document.querySelectorAll('.dl-file-cb:checked')];
+      if (!cbs.length) return;
+      const files = [];
+      let fullRepo = false;
+      let totalBytes = 0;
+      cbs.forEach(cb => {
+        const it = window._browseItems[parseInt(cb.dataset.idx, 10)];
+        if (!it) return;
+        totalBytes += it.size_bytes || 0;
+        if (it.full_repo) fullRepo = true;
+        else (it.files || []).forEach(f => files.push(f));
+      });
+      const payload = {
+        repo: window._browseRepo,
+        target_subdir: document.getElementById('dl-browse-subdir').value.trim(),
+        full_repo: fullRepo,
+        files: files,
+        total_bytes: totalBytes,
+        hf_token: (document.getElementById('dl-hf-token').value || '').trim()
+      };
+      try {
+        const res = await fetch('/admin/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          showToast('Download rejected: ' + (data.error ? data.error.message : res.statusText), true);
+          return;
+        }
+        showToast(`Started server download (${payload.repo} -> ${payload.target_subdir})`);
+        await fetchDownloads(true);
+      } catch (e) {
+        showToast('Failed starting download: ' + e.message, true);
+      }
+    }
+
+    async function fetchDownloads(ensurePoll = false) {
+      try {
+        const res = await fetch('/admin/downloads', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.models_dir) {
+          const rEl = document.getElementById('dl-models-root');
+          if (rEl) rEl.textContent = data.models_dir;
+        }
+        if (data.disk_free_bytes) {
+          const dfEl = document.getElementById('dl-disk-free');
+          if (dfEl) dfEl.textContent = 'Free: ' + fmtBytes(data.disk_free_bytes);
+        }
+        const jobs = data.jobs || [];
+        const runningCount = jobs.filter(j => j.status === 'running').length;
+        const btn = document.getElementById('btn-download-models');
+        if (btn) {
+          btn.textContent = runningCount > 0 ? `⬇ Downloading (${runningCount})` : '⬇ Download Models';
+        }
+        const box = document.getElementById('dl-jobs-box');
+        if (box) {
+          if (!jobs.length) {
+            box.style.display = 'none';
+          } else {
+            box.style.display = 'flex';
+            box.innerHTML = jobs.slice(0, 5).map(j => {
+              const exp = j.expected_bytes || 0;
+              const got = j.downloaded_bytes || 0;
+              const pct = exp > 0 ? Math.min(100, Math.round((got / exp) * 100)) : (j.status === 'completed' ? 100 : 0);
+              const stCls = j.status === 'completed' ? 'badge-green'
+                          : (j.status === 'running' ? 'badge-primary' : 'badge-red');
+              return `
+                <div style="font-size:12px;border-bottom:1px solid rgba(255,255,255,0.06);padding-bottom:6px;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <div>
+                      <strong>${escHtml(j.repo)}</strong> → <code>${escHtml(j.target_subdir)}</code>
+                      <span class="badge ${stCls}">${escHtml(j.status.toUpperCase())}</span>
+                      <span style="font-family:var(--mono);color:var(--muted);">${fmtBytes(got)}${exp > 0 ? ' / ' + fmtBytes(exp) + ' (' + pct + '%)' : ''}</span>
+                    </div>
+                    ${j.status === 'running' ? `<button class="btn-sm btn-danger" onclick="cancelDownloadJob('${escHtml(j.id)}')">✕ Cancel</button>` : ''}
+                  </div>
+                  ${exp > 0 ? `<div style="height:5px;background:#1e293b;border-radius:3px;overflow:hidden;margin-top:4px;"><div style="height:100%;width:${pct}%;background:${j.status === 'completed' ? 'var(--green)' : 'var(--primary)'};"></div></div>` : ''}
+                  ${j.log_tail ? `<div style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(j.log_tail.split('\n').pop())}</div>` : ''}
+                </div>
+              `;
+            }).join('');
+          }
+        }
+        let newlyDone = false;
+        jobs.forEach(j => {
+          if (j.status === 'completed' && !lastCompletedDlIds.has(j.id)) {
+            lastCompletedDlIds.add(j.id);
+            newlyDone = true;
+          }
+        });
+        if (newlyDone) {
+          fetchCatalog();
+          showToast('Server download completed — Catalog refreshed!');
+        }
+        if ((runningCount > 0 || ensurePoll) && runningCount > 0) {
+          if (!dlPollTimer) dlPollTimer = setInterval(() => fetchDownloads(false), 2000);
+        } else if (runningCount === 0 && dlPollTimer) {
+          clearInterval(dlPollTimer);
+          dlPollTimer = null;
+        }
+      } catch (_) {}
+    }
+
+    async function cancelDownloadJob(id) {
+      try {
+        await fetch('/admin/download/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id })
+        });
+        showToast('Cancelled download ' + id);
+        await fetchDownloads(false);
+      } catch (e) {
+        showToast('Cancel failed: ' + e.message, true);
+      }
+    }
+
+    // ---- Real-Time GitHub Version Check & Self-Update ----
+    async function checkServerUpdate(manual = false) {
+      try {
+        const res = await fetch('/admin/update/check' + (manual ? '?force=1' : ''), { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        stateUpdate = data;
+        const pill = document.getElementById('version-pill');
+        if (pill) {
+          const shortSha = data.running_short || 'unknown';
+          const tag = data.running_tag || 'dev';
+          if (data.update_available) {
+            pill.className = 'badge badge-amber';
+            pill.textContent = `${tag} · ${shortSha} (Update Ready!)`;
+          } else {
+            pill.className = 'badge badge-green';
+            pill.textContent = `${tag} · ${shortSha} (Up to date)`;
+          }
+          pill.title = `Built: ${data.build_time_utc || ''} | GitHub main: ${data.remote_short || '?'}`;
+        }
+        renderUpdateBanner(data, data.status || {});
+        if (manual) {
+          if (data.check_error) showToast('Update check warning: ' + data.check_error, true);
+          else if (data.update_available) showToast(`New GitHub commit ${data.remote_short}: ${data.remote_message}`);
+          else showToast(`Server is up to date (${data.running_short})`);
+        }
+      } catch (_) {}
+    }
+
+    function renderUpdateBanner(checkData, st) {
+      const banner = document.getElementById('update-banner');
+      if (!banner) return;
+      const phase = (st && st.phase) ? st.phase : 'idle';
+      const active = !!(st && st.active);
+      const show = active || phase === 'failed' || (checkData && checkData.update_available);
+      banner.style.display = show ? 'flex' : 'none';
+      if (!show) return;
+
+      const badge = document.getElementById('update-phase-badge');
+      const title = document.getElementById('update-title');
+      const detail = document.getElementById('update-detail');
+      const btn = document.getElementById('btn-apply-update');
+      const logEl = document.getElementById('update-log-tail');
+
+      if (active) {
+        badge.className = 'badge badge-primary';
+        badge.textContent = phase.toUpperCase();
+        title.textContent = st.message || ('Updating server: ' + phase);
+        detail.textContent = `target=${(st.target_sha || '').slice(0, 8)}`;
+        btn.disabled = true;
+        btn.textContent = 'Updating...';
+      } else if (phase === 'failed') {
+        badge.className = 'badge badge-red';
+        badge.textContent = 'UPDATE FAILED';
+        title.textContent = st.error || st.message || 'Self-update failed';
+        detail.textContent = 'Running server remained online.';
+        btn.disabled = false;
+        btn.textContent = '🚀 Retry Update & Restart';
+      } else if (checkData && checkData.update_available) {
+        badge.className = 'badge badge-amber';
+        badge.textContent = 'UPDATE AVAILABLE';
+        title.textContent = `New commit on GitHub (${checkData.remote_short}): ${checkData.remote_message || ''}`;
+        detail.textContent = `running ${checkData.running_short} → remote ${checkData.remote_short}`;
+        btn.disabled = false;
+        btn.textContent = '🚀 Update & Restart Server';
+      }
+      if (st && st.log_tail) {
+        logEl.style.display = 'block';
+        logEl.textContent = st.log_tail;
+      } else {
+        logEl.style.display = 'none';
+      }
+    }
+
+    async function applyServerUpdate() {
+      if (!confirm('Pull latest main from GitHub, rebuild mbufo, and restart :8741? Active inference requests will briefly reconnect (~30s).')) {
+        return;
+      }
+      try {
+        const res = await fetch('/admin/update/apply', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          showToast('Update failed to start: ' + (data.error ? data.error.message : res.statusText), true);
+          return;
+        }
+        const beforeSha = data.running_sha;
+        showToast('Self-update started (fetching & building)...');
+        if (updPollTimer) clearInterval(updPollTimer);
+        updPollTimer = setInterval(async () => {
+          try {
+            const sr = await fetch('/admin/update/status', { cache: 'no-store' });
+            if (sr.ok) {
+              const st = await sr.json();
+              renderUpdateBanner(stateUpdate, st);
+              if (st.phase === 'completed' || (st.running_sha && beforeSha && st.running_sha !== beforeSha)) {
+                clearInterval(updPollTimer);
+                updPollTimer = null;
+                showToast('Server updated & restarted! Reloading dashboard...');
+                setTimeout(() => window.location.reload(), 1000);
+              } else if (st.phase === 'failed') {
+                clearInterval(updPollTimer);
+                updPollTimer = null;
+                showToast('Self-update failed (previous binary preserved)', true);
+              }
+            }
+          } catch (_) {
+            // Server is restarting; keep polling until :8741 is back
+          }
+        }, 2000);
+      } catch (e) {
+        showToast('Error starting update: ' + e.message, true);
+      }
     }
 
     async function doLoadRequest(payload) {

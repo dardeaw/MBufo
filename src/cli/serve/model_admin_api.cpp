@@ -1,6 +1,7 @@
 #include "src/cli/serve/model_admin_api.hpp"
 
 #include "src/cli/serve/npu_sidecar_proxy.hpp"
+#include "src/cli/serve/admin_ops.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -286,25 +287,24 @@ HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
     return HandleList(req);
   if (req.path == "/admin/catalog" && req.method == "GET")
     return HandleCatalog(req);
-  if (req.path == "/admin/model-mapping" && req.method == "GET") {
-    for (const char* cand : {"model_mapping.json",
-                             "/home/dardeaw/git/gufo-final2/model_mapping.json"}) {
-      std::ifstream ifs(cand, std::ios::binary);
-      if (ifs) {
-        std::string body((std::istreambuf_iterator<char>(ifs)),
-                         std::istreambuf_iterator<char>());
-        HttpResponse resp;
-        resp.status = 200;
-        resp.reason = "OK";
-        resp.headers.emplace_back("Content-Type", "application/json; charset=utf-8");
-        resp.headers.emplace_back("Cache-Control", "no-store");
-        resp.body = std::move(body);
-        return resp;
-      }
-    }
-    return AdminErr(404, "Not Found", "model_mapping.json not found locally",
-                    "not_found");
-  }
+  if (req.path == "/admin/model-mapping" && req.method == "GET")
+    return admin_ops::HandleGetModelMapping(req);
+  if (req.path == "/admin/model-mapping/sync" && req.method == "POST")
+    return admin_ops::HandleSyncModelMapping(req);
+  if (req.path == "/admin/hf/files" && req.method == "GET")
+    return admin_ops::HandleHfListFiles(req);
+  if (req.path == "/admin/download" && req.method == "POST")
+    return admin_ops::HandleStartDownload(req);
+  if (req.path == "/admin/downloads" && req.method == "GET")
+    return admin_ops::HandleListDownloads(req);
+  if (req.path == "/admin/download/cancel" && req.method == "POST")
+    return admin_ops::HandleCancelDownload(req);
+  if (req.path == "/admin/update/check" && req.method == "GET")
+    return admin_ops::HandleUpdateCheck(req);
+  if (req.path == "/admin/update/apply" && req.method == "POST")
+    return admin_ops::HandleUpdateApply(req);
+  if (req.path == "/admin/update/status" && req.method == "GET")
+    return admin_ops::HandleUpdateStatus(req);
   if (req.path == "/admin/load" && req.method == "POST")
     return HandleLoad(req);
   if (req.path == "/admin/eject" && req.method == "POST")

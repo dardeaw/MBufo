@@ -420,10 +420,20 @@ add_library(mbufo_http STATIC
   src/cli/serve/asr_websocket.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
+  src/cli/serve/admin_ops.cpp
   # The DeepSeek tool-call scanner lives with its model; its renderer stays in
   # the engine library, so no translation unit is linked twice.
   src/models/deepseek_v4_flash/tool_calls.cpp
 )
+add_custom_target(mbufo_build_version ALL
+  COMMAND ${CMAKE_COMMAND}
+    -DSRC_DIR=${CMAKE_SOURCE_DIR}
+    -DOUT_FILE=${CMAKE_BINARY_DIR}/generated/mbufo_build_version.hpp
+    -P ${CMAKE_SOURCE_DIR}/cmake/gen_version_header.cmake
+  BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/mbufo_build_version.hpp
+)
+add_dependencies(mbufo_http mbufo_build_version)
+target_include_directories(mbufo_http PUBLIC ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(mbufo_http PUBLIC mbufo_logging mbufo_core mbufo_qwen3_tts mbufo_qwen3_asr mbufo_qwen_image_21 CURL::libcurl)
 
 add_executable(mbufo
