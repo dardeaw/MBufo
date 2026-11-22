@@ -493,24 +493,51 @@ bool BuildArgv(const SidecarLaunchSpec& spec, std::vector<std::string>* out,
           *error = "missing image model directory: " + model_dir.string();
         return false;
       }
-      *out = {ResolveImagePython(),
-              script.string(),
-              "--model-id",
-              spec.id,
-              "--model-dir",
-              model_dir.string(),
-              "--host",
-              "127.0.0.1",
-              "--port",
-              port,
-              "--dtype",
-              opts.dtype,
-              "--steps",
-              std::to_string(opts.steps),
-              "--default-size",
-              opts.default_size,
-              "--cpu-offload",
-              opts.cpu_offload};
+      // Preload system ROCm 7.2+ libhsa-runtime64.so.1 when available because
+      // PyTorch 2.13+rocm7.1's bundled libhsa segfaults on Linux 7.1+ kernels.
+      const char* kSysHsa = "/opt/rocm/lib/libhsa-runtime64.so.1";
+      const char* disable_preload = std::getenv("MBUFO_IMAGE_DISABLE_HSA_PRELOAD");
+      const bool use_hsa_preload =
+          !(disable_preload != nullptr &&
+            std::string_view(disable_preload) == "1") &&
+          std::filesystem::exists(kSysHsa, ec) &&
+          std::filesystem::exists("/usr/bin/env", ec);
+      if (use_hsa_preload) {
+        const char* prev = std::getenv("LD_PRELOAD");
+        std::string preload_val;
+        if (prev != nullptr && *prev != '\0') {
+          if (std::string_view(prev).find("libhsa-runtime64") !=
+              std::string_view::npos) {
+            preload_val = prev;
+          } else {
+            preload_val = std::string(kSysHsa) + ":" + prev;
+          }
+        } else {
+          preload_val = kSysHsa;
+        }
+        out->push_back("/usr/bin/env");
+        out->push_back("LD_PRELOAD=" + preload_val);
+      }
+      const std::vector<std::string> py_args = {
+          ResolveImagePython(),
+          script.string(),
+          "--model-id",
+          spec.id,
+          "--model-dir",
+          model_dir.string(),
+          "--host",
+          "127.0.0.1",
+          "--port",
+          port,
+          "--dtype",
+          opts.dtype,
+          "--steps",
+          std::to_string(opts.steps),
+          "--default-size",
+          opts.default_size,
+          "--cpu-offload",
+          opts.cpu_offload};
+      out->insert(out->end(), py_args.begin(), py_args.end());
       break;
     }
   }
