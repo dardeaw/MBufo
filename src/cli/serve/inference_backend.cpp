@@ -5719,7 +5719,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     SetError(error,
              "NPU device is only supported for bge-m3, bge-reranker-v2-m3, "
              "and embeddinggemma-2 GGUFs (got architecture '" +
-                 architecture + "')");
+                 std::string(architecture) + "')");
     return false;
   }
   if (enable_yarn && architecture != "qwen4exp") {
