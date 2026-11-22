@@ -598,9 +598,13 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Tiel-Coder+%2F+Cyber-Tiel-Coder-35B-A3B",
-        "is_search_url": true
+        "repo": "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP",
+        "repos": [
+          "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP",
+          "peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP"
+        ],
+        "url": "https://huggingface.co/peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -939,11 +943,12 @@
         ]
       },
       "huggingface": {
-        "repo": "poolside/Laguna-XS-2.1",
+        "repo": "poolside/Laguna-XS-2.1-GGUF",
         "repos": [
-          "poolside/Laguna-XS-2.1"
+          "poolside/Laguna-XS-2.1-GGUF",
+          "bartowski/Laguna-XS-2.1-GGUF"
         ],
-        "url": "https://huggingface.co/poolside/Laguna-XS-2.1",
+        "url": "https://huggingface.co/poolside/Laguna-XS-2.1-GGUF",
         "is_search_url": false
       },
       "quant_formats": {
@@ -999,11 +1004,11 @@
         ]
       },
       "huggingface": {
-        "repo": "poolside/Laguna-S-2.1",
+        "repo": "poolside/Laguna-S-2.1-GGUF",
         "repos": [
-          "poolside/Laguna-S-2.1"
+          "poolside/Laguna-S-2.1-GGUF"
         ],
-        "url": "https://huggingface.co/poolside/Laguna-S-2.1",
+        "url": "https://huggingface.co/poolside/Laguna-S-2.1-GGUF",
         "is_search_url": false
       },
       "quant_formats": {
@@ -1059,9 +1064,13 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Qwen3-Embedding-0.6B",
-        "is_search_url": true
+        "repo": "Qwen/Qwen3-Embedding-0.6B-GGUF",
+        "repos": [
+          "Qwen/Qwen3-Embedding-0.6B-GGUF",
+          "mradermacher/Qwen3-Embedding-0.6B-GGUF"
+        ],
+        "url": "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -1101,11 +1110,12 @@
         ]
       },
       "huggingface": {
-        "repo": "BAAI/bge-m3",
+        "repo": "gpustack/bge-m3-GGUF",
         "repos": [
-          "BAAI/bge-m3"
+          "gpustack/bge-m3-GGUF",
+          "lm-kit/bge-m3-gguf"
         ],
-        "url": "https://huggingface.co/BAAI/bge-m3",
+        "url": "https://huggingface.co/gpustack/bge-m3-GGUF",
         "is_search_url": false
       },
       "quant_formats": {
@@ -1120,8 +1130,7 @@
       },
       "supported_backends": [
         "gpu_hip",
-        "npu_q8_bfp16",
-        "npu_q4_q4nx"
+        "npu_bf16"
       ],
       "recommended_backend": "gpu_hip",
       "npu_spec": {
@@ -1132,7 +1141,8 @@
         "/v1/embeddings"
       ],
       "status": "production_gpu_plus_npu_verified",
-      "default_subdir": "bge-m3"
+      "default_subdir": "bge-m3",
+      "note": "GGUF (Q4_K_M / Q8_0 / FP16) for GPU & NPU; NPU2 runs BF16 IRON kernels (auto-upcasts Q4/Q8 GGUF at load)."
     },
     {
       "id": "embeddinggemma-2",
@@ -1189,7 +1199,8 @@
         "/v1/embeddings"
       ],
       "status": "production_gpu_plus_npu_verified",
-      "default_subdir": "embeddinggemma-2"
+      "default_subdir": "embeddinggemma-2",
+      "note": "Download BF16 safetensors & convert via tools/convert/embeddinggemma2_to_gguf.py; NPU quantizes to Q8 (bfp16ebs8) / Q4 (q4nx) at load time."
     },
     {
       "id": "bge-reranker-v2-m3",
@@ -1208,11 +1219,12 @@
         ]
       },
       "huggingface": {
-        "repo": "BAAI/bge-reranker-v2-m3",
+        "repo": "gpustack/bge-reranker-v2-m3-GGUF",
         "repos": [
-          "BAAI/bge-reranker-v2-m3"
+          "gpustack/bge-reranker-v2-m3-GGUF",
+          "smarttasks/bge-reranker-v2-m3-GGUF"
         ],
-        "url": "https://huggingface.co/BAAI/bge-reranker-v2-m3",
+        "url": "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF",
         "is_search_url": false
       },
       "quant_formats": {
@@ -1226,8 +1238,7 @@
       },
       "supported_backends": [
         "gpu_hip",
-        "npu_q8_bfp16",
-        "npu_q4_q4nx"
+        "npu_bf16"
       ],
       "recommended_backend": "gpu_hip",
       "npu_spec": {
@@ -1238,7 +1249,8 @@
         "/v1/reranking"
       ],
       "status": "production_gpu_plus_npu_verified",
-      "default_subdir": "bge-reranker-v2-m3"
+      "default_subdir": "bge-reranker-v2-m3",
+      "note": "GGUF (Q4_K_M / Q8_0 / FP16) for GPU & NPU; NPU2 runs BF16 IRON kernels (auto-upcasts Q4/Q8 GGUF at load)."
     },
     {
       "id": "qwen3-reranker-0.6b",
@@ -1257,9 +1269,13 @@
         ]
       },
       "huggingface": {
-        "repo": null,
-        "url": "https://huggingface.co/models?search=Qwen3-Reranker-0.6B",
-        "is_search_url": true
+        "repo": "mradermacher/Qwen3-Reranker-0.6B-GGUF",
+        "repos": [
+          "mradermacher/Qwen3-Reranker-0.6B-GGUF",
+          "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF"
+        ],
+        "url": "https://huggingface.co/mradermacher/Qwen3-Reranker-0.6B-GGUF",
+        "is_search_url": false
       },
       "quant_formats": {
         "dense_attention": [
@@ -1328,7 +1344,8 @@
         "/v1/audio/transcriptions"
       ],
       "status": "production_gpu_plus_npu_verified",
-      "default_subdir": "qwen3-asr-1.7b"
+      "default_subdir": "qwen3-asr-1.7b",
+      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) / Q4 (q4nx) at load time (no pre-quantized Q4/Q8 HF files needed)."
     },
     {
       "id": "qwen3-tts-12hz-1.7b",
@@ -1378,7 +1395,8 @@
         "/v1/audio/speech"
       ],
       "status": "production_gpu_plus_npu_verified",
-      "default_subdir": "qwen3-tts-1.7b-base"
+      "default_subdir": "qwen3-tts-1.7b-base",
+      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) / Q4 (q4nx) at load time (no pre-quantized Q4/Q8 HF files needed)."
     },
     {
       "id": "qwen-image-2.1",
@@ -1573,7 +1591,8 @@
       },
       "http_routes": [],
       "status": "npu_runtime_verified_no_http",
-      "default_subdir": "flux2-klein-4b"
+      "default_subdir": "flux2-klein-4b",
+      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) / Q4 (q4nx) at load time (no pre-quantized Q4/Q8 HF files needed)."
     },
     {
       "id": "z-image-turbo",
@@ -1618,7 +1637,8 @@
       },
       "http_routes": [],
       "status": "npu_runtime_verified_no_http",
-      "default_subdir": "z-image-turbo"
+      "default_subdir": "z-image-turbo",
+      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) / Q4 (q4nx) at load time (no pre-quantized Q4/Q8 HF files needed)."
     }
   ]
 }

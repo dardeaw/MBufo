@@ -2054,6 +2054,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               <div style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px;">
                 id: ${escHtml(m.id)} · repo: ${escHtml(repos[0] || 'n/a')} · dir: ${escHtml(defSubdir)}
               </div>
+              ${m.note ? `<div style="font-size:11px;color:#93c5fd;margin-top:2px;">${escHtml(m.note)}</div>` : ''}
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0;">
               ${repoBtns}
