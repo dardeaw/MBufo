@@ -5,7 +5,7 @@
 namespace mbufo::server {
 
 inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -1173,7 +1173,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
             <input type="checkbox" id="lm-disk-cache" checked /> Enable Prompt KV Disk Cache
           </label>
           <label class="checkbox-row" id="lm-autoload-wrap">
-            <input type="checkbox" id="lm-autoload" /> Auto-Load on Startup (設為開機預設載入)
+            <input type="checkbox" id="lm-autoload" /> Auto-Load on Startup (persist across reboot)
           </label>
         </div>
       </div>
@@ -1279,8 +1279,8 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         <div class="settings-section">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
             <div>
-              <strong id="set-startup-count" style="font-size:13px;">預設載入模型 (0)</strong>
-              <div style="font-size:11px;color:var(--muted);margin-top:2px;">開機或重啟服務時自動載入以下模型。可在主頁模型卡片按「📌 Auto-Load」或在載入設定視窗勾選。</div>
+              <strong id="set-startup-count" style="font-size:13px;">Startup Auto-Load Models (0)</strong>
+              <div style="font-size:11px;color:var(--muted);margin-top:2px;">Models configured to load automatically on server boot or restart. Pin models using "📌 Auto-Load" on loaded cards or check the option during load.</div>
             </div>
             <button class="btn-sm" onclick="confirmAndRestartServer()">↻ Restart Server</button>
           </div>
@@ -1936,7 +1936,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         });
         const data = await res.json();
         if (!res.ok || data.error) {
-          showToast('更新預設載入失敗: ' + (data.error ? data.error.message : res.statusText), true);
+          showToast('Failed to update startup auto-load: ' + (data.error ? data.error.message : res.statusText), true);
           return;
         }
         stateSettings = Object.assign({}, stateSettings || {}, data);
@@ -1944,7 +1944,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (document.getElementById('settings-modal').classList.contains('open')) {
           renderStartupModelCards();
         }
-        showToast(add ? `已將 "${id}" 加入開機預設載入` : `已從開機預設載入移除 "${id}"`);
+        showToast(add ? `Added "${id}" to startup auto-load list` : `Removed "${id}" from startup auto-load list`);
       } catch (e) {
         showToast('Error: ' + e.message, true);
       }
@@ -1977,7 +1977,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         if (m.sidecar) badges.push(`<span class="badge badge-green">RUNNING</span>`);
         if (m.is_default) badges.push(`<span class="badge badge-primary">★ PRIMARY DEFAULT</span>`);
         else if (m.lru_rank > 0 && !m.sidecar) badges.push(`<span class="badge">LRU #${m.lru_rank}</span>`);
-        if (isPinned) badges.push(`<span class="badge badge-amber" title="開機或重啟服務時自動載入">📌 AUTO-LOAD</span>`);
+        if (isPinned) badges.push(`<span class="badge badge-amber" title="Loads automatically on server boot or restart">📌 AUTO-LOAD</span>`);
         if (m.ready && !m.sidecar) badges.push(`<span class="badge badge-green">READY</span>`);
         badges.push(renderCapabilityBadges(m.capabilities || []));
         if (!m.sidecar) badges.push(`<span class="badge">CTX: ${(m.context_length / 1024).toFixed(0)}K</span>`);
@@ -2000,7 +2000,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
               <div class="model-path">${m.model_path}</div>
             </div>
           <div class="model-actions">
-            <button class="btn-sm ${isPinned ? 'badge-amber' : ''}" onclick="toggleLoadedAutoLoad(decodeURIComponent('${encodeURIComponent(m.id)}'), ${isPinned ? 'false' : 'true'})" title="${isPinned ? '從開機預設載入清單移除' : '加入開機預設載入清單'}">${isPinned ? '📌 Unpin' : '📌 Auto-Load'}</button>
+            <button class="btn-sm ${isPinned ? 'badge-amber' : ''}" onclick="toggleLoadedAutoLoad(decodeURIComponent('${encodeURIComponent(m.id)}'), ${isPinned ? 'false' : 'true'})" title="${isPinned ? 'Remove from startup auto-load list' : 'Add to startup auto-load list'}">${isPinned ? '📌 Unpin' : '📌 Auto-Load'}</button>
             <button class="btn-sm" onclick="openReloadModal(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="Reconfigure parameters & reload this model">⚙ Configure</button>
             ${m.sidecar
               ? `<button class="btn-sm btn-danger" onclick="ejectModel(decodeURIComponent('${encodeURIComponent(m.id)}'), false)">⏏ Eject</button>`
@@ -2740,7 +2740,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
           scRecord.target_id = window._reloadTargetId;
           closeLoadModal();
           await syncModalAutoLoad(scRecord, true, window._reloadTargetId);
-          showToast(`已更新開機預設載入 "${id}"`);
+          showToast(`Updated startup auto-load configuration for "${id}"`);
         } else if (isReload) {
           if (!confirm(`Confirm reload of sidecar "${window._reloadTargetId}" with updated settings?`)) return;
           scPayload.target_id = window._reloadTargetId;
@@ -2817,7 +2817,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         startupRec.target_id = window._reloadTargetId;
         closeLoadModal();
         await syncModalAutoLoad(startupRec, true, window._reloadTargetId);
-        showToast(`已更新開機預設載入 "${payload.id}"`);
+        showToast(`Updated startup auto-load configuration for "${payload.id}"`);
       } else if (isReload) {
         if (!confirm(`Confirm reload of "${window._reloadTargetId}" with new settings? Previous Primary status is preserved.`)) return;
         payload.target_id = window._reloadTargetId;
@@ -3426,9 +3426,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       const countEl = document.getElementById('set-startup-count');
       if (!box) return;
       const items = (stateSettings && Array.isArray(stateSettings.startup_models)) ? stateSettings.startup_models : [];
-      if (countEl) countEl.textContent = `預設載入模型 (${items.length})`;
+      if (countEl) countEl.textContent = `Startup Auto-Load Models (${items.length})`;
       if (!items.length) {
-        box.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted);border:1px dashed var(--border);border-radius:8px;font-size:12px;">尚未設定任何開機預設載入模型。可於主頁模型卡片按「📌 Auto-Load」加入。</div>`;
+        box.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted);border:1px dashed var(--border);border-radius:8px;font-size:12px;">No startup auto-load models configured. Use "📌 Auto-Load" on any loaded model card to add it here.</div>`;
         return;
       }
       const loadedList = (stateModels && stateModels.models) || [];
@@ -3472,9 +3472,9 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
                 <div class="model-path">${escHtml(subText)}</div>
               </div>
               <div class="model-actions">
-                ${canPrimary ? `<button class="btn-sm" onclick="setStartupPrimary(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="設為預設主模型">★ Primary</button>` : ''}
-                <button class="btn-sm" onclick="openStartupEditModal(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="編輯此模型的開機預設載入參數">⚙ Configure</button>
-                <button class="btn-sm btn-danger" onclick="removeStartupModel(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="從開機預設清單移除">✕ Remove</button>
+                ${canPrimary ? `<button class="btn-sm" onclick="setStartupPrimary(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="Set as primary default model">★ Primary</button>` : ''}
+                <button class="btn-sm" onclick="openStartupEditModal(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="Configure startup auto-load parameters">⚙ Configure</button>
+                <button class="btn-sm btn-danger" onclick="removeStartupModel(decodeURIComponent('${encodeURIComponent(m.id)}'))" title="Remove from startup auto-load list">✕ Remove</button>
               </div>
             </div>
           </div>
@@ -3491,19 +3491,19 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         });
         const data = await res.json();
         if (!res.ok || data.error) {
-          showToast('設定主模型失敗: ' + (data.error ? data.error.message : res.statusText), true);
+          showToast('Failed to set primary default model: ' + (data.error ? data.error.message : res.statusText), true);
           return;
         }
         stateSettings = Object.assign({}, stateSettings || {}, data);
         renderStartupModelCards();
-        showToast(`已將 "${id}" 設為開機預設主模型`);
+        showToast(`Set "${id}" as startup primary default model`);
       } catch (e) {
         showToast('Error: ' + e.message, true);
       }
     }
 
     async function removeStartupModel(id) {
-      if (!confirm(`從開機預設載入清單移除 "${id}"？`)) return;
+      if (!confirm(`Remove "${id}" from startup auto-load list?`)) return;
       try {
         const res = await fetch('/admin/settings', {
           method: 'POST',
@@ -3512,13 +3512,13 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         });
         const data = await res.json();
         if (!res.ok || data.error) {
-          showToast('移除失敗: ' + (data.error ? data.error.message : res.statusText), true);
+          showToast('Failed to remove model: ' + (data.error ? data.error.message : res.statusText), true);
           return;
         }
         stateSettings = Object.assign({}, stateSettings || {}, data);
         renderStartupModelCards();
         renderLoadedModels();
-        showToast(`已從開機預設載入清單移除 "${id}"`);
+        showToast(`Removed "${id}" from startup auto-load list`);
       } catch (e) {
         showToast('Error: ' + e.message, true);
       }
@@ -3526,7 +3526,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
 
     async function confirmAndRestartServer() {
       const targetPort = (stateSettings && stateSettings.configured_port) || livePort();
-      if (!confirm(`立即重啟 MBufo 伺服器（:${targetPort}）以套用預設載入模型設定？連線將短暫中斷。`)) return;
+      if (!confirm(`Restart MBufo server (:${targetPort}) now to apply startup model changes? Active connections will briefly disconnect.`)) return;
       await triggerServerRestart(targetPort);
     }
 

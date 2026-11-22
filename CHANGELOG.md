@@ -3,6 +3,43 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.38.1 (2026-11-22)
+
+### Changed (Full English Localization & UI Polish)
+- Fully translated all remaining Chinese UI strings, form placeholders, badges, modal descriptions, toast notifications, and confirmation prompts in `src/cli/serve/model_admin_ui.hpp` into clean, professional English.
+- Updated HTML document root element language attribute to `<html lang="en">`.
+- Added comprehensive release documentation in `CHANGELOG.md` covering `v0.37.0`, `v0.37.1`, `v0.38.0`, and `v0.38.1`.
+
+## v0.38.0 (2026-11-22)
+
+### Added (Multi-Model Startup Auto-Load & UI Streamlining)
+- Replaced single `default_model` with `startup_models` array in `ServerConfig` (`src/cli/serve/admin_ops.{hpp,cpp}`, `src/cli/serve/serve.cpp`), enabling automatic boot-time loading of multiple GGUF/NPU models and sidecars across system reboots.
+- Added `📌 Auto-Load` / `📌 Unpin` toggle button directly on loaded model cards to easily pin/unpin live models for startup.
+- Added `Auto-Load on Startup (persist across reboot)` checkbox in the model load configuration modal (`#load-modal`).
+- Streamlined Settings modal Tab 1: replaced redundant configuration form with a clean `Startup Auto-Load Models` card group showing currently configured boot models, primary status, and quick configure/remove controls.
+- Normalized `fp16` to `f16` in `serve.cpp` CLI validation to guarantee persistent config arguments pass option verification.
+- Removed redundant Web UI `🔒 Lock` button (`btn-logout`) and implemented a pre-load auth gate (`body.auth-pending`) that completely hides control plane DOM elements until `/admin/auth/status` authentication succeeds.
+
+## v0.37.1 (2026-11-22)
+
+### Fixed (ROCm HSA Queue Stability on Linux 6.13+ / 7.1+ Kernels)
+- Resolved `rocr::AMD::GpuAgent::CreateInterceptibleQueue` segfault when launching PyTorch ROCm diffusers image sidecars on modern Linux kernels by injecting `/opt/rocm/lib/libhsa-runtime64.so.1` via `LD_PRELOAD` in `npu_sidecar_proxy.cpp`.
+
+## v0.37.0 (2026-11-22)
+
+### Added (Control Plane & Persistent Server Config)
+- Added persistent configuration file `/home/dardeaw/.config/mbufo/server_config.json` managed via `ServerConfig` in `src/cli/serve/admin_ops.{hpp,cpp}` and loaded by `serve.cpp`.
+- Added Settings Modal (`#settings-modal`) in Web UI with 4 dedicated management tabs:
+  1. Startup & Default Models configuration
+  2. Security & Web UI Password configuration (SHA-256 password hashing with salt, `POST /admin/auth/password`)
+  3. Network & Router Port configuration (`POST /admin/config/port`)
+  4. Disk Cache Inspector & Safe Deletion (`GET /admin/cache/summary`, `POST /admin/cache/delete`)
+- Added Hot-Reload API endpoint `POST /admin/reload` and UI button on loaded model cards to seamlessly reconfigure context length, parallel sessions, KV quantization, and speculative/MTP sidecars without server downtime.
+- Added dual-layer authentication: session cookie authentication for Web UI and Bearer token support for `/v1/*` inference endpoints.
+- Added Disk Cache Manager: displays exact file-by-file breakdown of live KV caches and weights with per-file and batch deletion APIs.
+- Added Local `model_mapping.json` cache support and tag-based GitHub version update checker (comparing semver release tags rather than commit hashes).
+- Added ROCm diffusers image sidecars for `flux2-klein-4b` and `z-image-turbo` with dedicated route handlers and UI badges.
+
 ## v0.36.0 (2026-11-21)
 
 ### Added (NPU/XDNA2 backend: scheduler, device, kernels, proxy, admin)
