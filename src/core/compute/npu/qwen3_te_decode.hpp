@@ -60,6 +60,11 @@ class TeNpuDecoder {
 
   // Prefill/DecodeStep exposed for the decode-consistency gate (same
   // prefill-vs-incremental math check as P1/P2a on TE weights).
+  // Raw full-sequence prefill (Z-Image caption path needs pre-norm rows).
+  [[nodiscard]] bool PrefillFull(std::span<const float> prompt_hidden,
+                                 std::size_t T, std::vector<float>* all_raw,
+                                 double* npu_ms = nullptr,
+                                 std::string* error = nullptr);
   [[nodiscard]] bool Prefill(std::span<const float> prompt_hidden,
                              std::size_t T, std::vector<float>* last_hidden,
                              double* npu_ms = nullptr,

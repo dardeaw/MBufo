@@ -60,6 +60,12 @@ bool TeNpuDecoder::EncodeTaps(std::span<const float> prompt_hidden,
                               npu_ms, error);
 }
 
+bool TeNpuDecoder::PrefillFull(std::span<const float> prompt_hidden,
+                                std::size_t T, std::vector<float>* all_raw,
+                                double* npu_ms, std::string* error) {
+  return dec_.PrefillFull(prompt_hidden, T, all_raw, npu_ms, error);
+}
+
 bool TeNpuDecoder::Prefill(std::span<const float> prompt_hidden, std::size_t T,
                             std::vector<float>* last_hidden, double* npu_ms,
                             std::string* error) {

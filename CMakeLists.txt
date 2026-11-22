@@ -388,6 +388,7 @@ if (MBUFO_ENABLE_NPU)
     src/core/compute/npu/qwen3_predictor_decode.cpp
     src/core/compute/npu/qwen3_te_decode.cpp
     src/core/compute/npu/flux_dit_npu.cpp
+    src/core/compute/npu/zimage_dit_npu.cpp
     src/core/compute/npu/npu_embgemma2_runtime.cpp
     src/core/compute/npu/npu_bge_runtime.cpp)
 endif()
@@ -673,6 +674,13 @@ if (BUILD_TESTING)
 
     add_executable(npu_te_decode_test tests/core/npu_te_decode_test.cpp)
     add_executable(npu_flux_dit_test tests/core/npu_flux_dit_test.cpp)
+    add_executable(npu_zimage_dit_test tests/core/npu_zimage_dit_test.cpp)
+    target_link_libraries(npu_zimage_dit_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_zimage_dit_test COMMAND npu_zimage_dit_test)
+    set_tests_properties(npu_zimage_dit_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
     target_link_libraries(npu_flux_dit_test PRIVATE mbufo_core mbufo_npu)
     add_test(NAME npu_flux_dit_test COMMAND npu_flux_dit_test)
     set_tests_properties(npu_flux_dit_test PROPERTIES
