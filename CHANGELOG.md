@@ -12,7 +12,6 @@ Format: `version.txt` is the version; pushes go to the fork only, never upstream
 - **Admin UI Discovery & Load (`model_admin_api.cpp`, `model_mapping.json`)**: Registered `inkling-2-mini` with `dspark` speculative decoding, `mmproj` vision sidecar detection, `VISION`/`TOOLS` badges, and `/admin/models/load` support.
 - **Verified Benchmarks (gfx1151, `--speculative dspark -d 3`, Vision enabled)**:
   - `tools/bench/tool_ladder.py`: **12/12 pass (100%)** across `0` / `500` / `2000` / `8000` context lengths.
-  - Cold-KV Prefill + Decode Ladder up to 128K (`ctx=126609`): Prefill **1188.7 tok/s** (2.6K) → **826.8 tok/s** (44.7K) → **462.2 tok/s** (126.6K); Decode **16.44 tok/s** (2.6K) → **4.59 tok/s** (126.6K), DSpark acceptance up to **30.0%** (126.6K) / **31.3%** (coding).
 
 ## v0.38.1 (2026-11-22)
 
