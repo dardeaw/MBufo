@@ -16,7 +16,6 @@
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/model_registry.hpp"
 #include "src/core/compute/npu/npu_model_registry.hpp"
-#include "src/cli/serve/npu_servable_host.hpp"
 
 namespace mbufo::server {
 
@@ -86,7 +85,6 @@ private:
 
   std::shared_ptr<ModelRegistry> registry_;
   std::shared_ptr<mbufo::core::npu::NpuModelRegistry> npu_registry_;
-  npu_wire::NpuServableHost npu_holder_;
   ModelLoader loader_;
   MemoryProbe probe_;
   std::mutex load_mutex_;  // one load/eject at a time

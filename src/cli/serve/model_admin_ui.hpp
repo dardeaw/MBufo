@@ -2230,13 +2230,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       const isGpuChat = (!isSidecar && dev === 'gpu' && isChatTask);
 
       const imgWrap = document.getElementById('lm-image-wrap');
-      // Sidecar (ROCm HIP diffusers) params only: in-process NPU models
-      // use the NPU quant selector below, not the sidecar torch dtype.
-      const isNpuInProcess =
-        !isSidecar && typeof backendOf === 'function' &&
-        backendOf(m) === 'NPU';
-      if (imgWrap)
-        imgWrap.style.display = isImage && !isNpuInProcess ? 'block' : 'none';
+      if (imgWrap) imgWrap.style.display = isImage ? 'block' : 'none';
 
       document.getElementById('lm-id').readOnly = isSidecar;
       document.getElementById('lm-aliases-wrap').style.display = isSidecar ? 'none' : 'block';
@@ -2260,11 +2254,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       if (!isGpuChat) document.getElementById('lm-kv').value = 'fp16';
 
       const isEmbGemma = (m.id_suggestion || '').toLowerCase().includes('embeddinggemma');
-      const npuInProcess =
-        !isSidecar && typeof backendOf === 'function' &&
-        backendOf(m) === 'NPU';
-      document.getElementById('lm-npu-quant-wrap').style.display =
-        (dev === 'npu' && !isSidecar && (isEmbGemma || npuInProcess)) ? 'block' : 'none';
+      document.getElementById('lm-npu-quant-wrap').style.display = (dev === 'npu' && !isSidecar && isEmbGemma) ? 'block' : 'none';
       document.getElementById('lm-npu-note').style.display = (dev === 'npu') ? 'block' : 'none';
 
       // Speculative & Draft Path: auto-select default when supported; hide when unsupported.
