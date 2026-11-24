@@ -1,6 +1,7 @@
 #include "src/cli/serve/model_admin_api.hpp"
 
 #include "src/cli/serve/npu_sidecar_proxy.hpp"
+#include "src/cli/serve/npu_serve_wire.hpp"
 #include "src/cli/serve/admin_ops.hpp"
 
 #include <algorithm>
@@ -293,6 +294,8 @@ HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
     return HandleList(req);
   if (req.path == "/admin/catalog" && req.method == "GET")
     return HandleCatalog(req);
+  if (req.path == "/admin/npu/status" && req.method == "GET")
+    return HandleNpuStatus(req);
   if (req.path == "/admin/model-mapping" && req.method == "GET")
     return admin_ops::HandleGetModelMapping(req);
   if (req.path == "/admin/model-mapping/sync" && req.method == "POST")
@@ -345,6 +348,31 @@ HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
     return HandleSetDefault(req);
   return AdminErr(404, "Not Found", "no admin route for this path",
                   "not_found");
+}
+
+HttpResponse ModelAdminService::HandleNpuStatus(const HttpRequest&) {
+  json::Value resp = json::Value::object();
+  json::Value arr = json::Value::array();
+  if (npu_registry_) {
+    for (const auto& info : npu_registry_->List()) {
+      json::Value row = json::Value::object();
+      row["id"] = info.id;
+      json::Value names = json::Value::array();
+      for (const auto& n : info.names) names.push_back(n);
+      row["names"] = std::move(names);
+      row["lane"] = npu_wire::NpuLaneName(info.lane);
+      row["kind"] = npu_wire::NpuKindName(info.kind);
+      row["artifact"] = info.artifact;
+      row["ready"] = info.ready;
+      row["is_default"] = info.is_default;
+      row["estimated_resident_mib"] =
+          static_cast<std::size_t>(info.estimated_resident_mib);
+      row["last_used_ms"] = static_cast<std::size_t>(info.last_used_ms);
+      arr.push_back(std::move(row));
+    }
+  }
+  resp["npu_models"] = std::move(arr);
+  return AdminOk(std::move(resp));
 }
 
 HttpResponse ModelAdminService::HandleUi(const HttpRequest&) {

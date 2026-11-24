@@ -1695,6 +1695,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
         }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         stateModels = await res.json();
+        await fetchNpuStatus();
         if (stateModels.build_sha) {
           if (uiBootSha === null) {
             uiBootSha = stateModels.build_sha;
@@ -2064,6 +2065,38 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       }
     }
 
+    async function fetchNpuStatus() {
+      try {
+        const res = await fetch('/admin/npu/status', { cache: 'no-store' });
+        window.stateNpu = res.ok ? await res.json() : null;
+      } catch (e) { window.stateNpu = null; }
+    }
+
+    function renderNpuCards(list) {
+      const models = (window.stateNpu && window.stateNpu.npu_models) || [];
+      if (!models.length) return;
+      const cards = models.map(m => {
+        const dot = m.ready
+          ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-right:6px;"></span>READY'
+          : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#6b7280;margin-right:6px;"></span>NOT READY';
+        const names = (m.names || []).join(', ');
+        return `<div style="background:#0d1117;border:1px solid rgba(245,158,11,0.45);border-radius:8px;padding:10px 12px;margin-bottom:8px;">`
+          + `<div style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;">`
+          + `<span>&#x26A1; ${m.id}</span>`
+          + `<span class="badge badge-amber">${m.lane}</span>`
+          + `<span class="badge">${m.kind}</span>`
+          + `<span style="font-size:12px;color:var(--muted);">${dot}</span></div>`
+          + `<div style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px;">`
+          + `names: ${names} &middot; resident: ${m.estimated_resident_mib} MiB &middot; ${m.artifact}</div></div>`;
+      }).join('');
+      const sec = document.createElement('div');
+      sec.id = 'npu-lane-section';
+      sec.innerHTML = `<div style="font-size:13px;font-weight:700;margin:6px 0 8px;color:#fde68a;">NPU Lane (XDNA2) &mdash; in-process servables</div>` + cards;
+      const old = document.getElementById('npu-lane-section');
+      if (old) old.remove();
+      list.prepend(sec);
+    }
+
     function renderCatalog() {
       const list = document.getElementById('catalog-list');
       const q = (document.getElementById('cat-search').value || '').toLowerCase().trim();
@@ -2088,6 +2121,7 @@ inline constexpr std::string_view kModelAdminUiHtml = R"MBUFO_UI(<!DOCTYPE html>
       window._catalogFiltered = filtered;
       document.getElementById('catalog-count').textContent = filtered.length + ' models';
       list.innerHTML = '';
+      renderNpuCards(list);
 
       filtered.forEach((m, idx) => {
         const isLoaded = loadedPaths.has(m.path) || loadedIds.has(m.id_suggestion);
