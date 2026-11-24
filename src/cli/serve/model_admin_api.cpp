@@ -1514,9 +1514,12 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
             mbufo::core::npu::NpuArtifactKind::kNpuInProcess) {
       std::lock_guard serialize(load_mutex_);
       if (!npu_holder_.IsLoaded(id)) {
-        return AdminErr(404, "Not Found",
-                        "npu model '" + id + "' is not loaded",
-                        "not_loaded");
+        npu_registry_->SetReady(id, false);
+        json::Value resp = json::Value::object();
+        resp["id"] = id;
+        resp["status"] = "ejected";
+        resp["note"] = "npu model was already unloaded";
+        return AdminOk(std::move(resp));
       }
       std::string npu_err;
       if (!npu_holder_.Unload(id, &npu_err)) {
@@ -1536,15 +1539,19 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
   if (FindSidecarSpec(id) != nullptr) {
     std::lock_guard serialize(load_mutex_);
     const auto st = GlobalSidecarManager().GetStatus(id);
-    if (!st.running) {
-      return AdminErr(404, "Not Found",
-                      "sidecar '" + id + "' is not running", "not_loaded");
-    }
+    const bool was_live = st.running;
     std::string sc_err;
     if (!GlobalSidecarManager().Stop(id, &sc_err)) {
       return AdminErr(502, "Bad Gateway",
                       sc_err.empty() ? "failed to stop sidecar" : sc_err,
                       "sidecar_stop_failed");
+    }
+    if (!was_live) {
+      json::Value already = json::Value::object();
+      already["id"] = id;
+      already["status"] = "ejected";
+      already["note"] = "sidecar was already stopped";
+      return AdminOk(std::move(already));
     }
     json::Value resp = json::Value::object();
     resp["id"] = id;

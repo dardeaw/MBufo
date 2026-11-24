@@ -302,8 +302,23 @@ bool ProbeUrl(const std::string& base_url, const std::string& path,
 
 bool PidAlive(long pid) {
   if (pid <= 0) return false;
-  if (::kill(static_cast<pid_t>(pid), 0) == 0) return true;
-  return errno != ESRCH;
+  if (::kill(static_cast<pid_t>(pid), 0) != 0) return errno != ESRCH;
+  // kill(pid, 0) succeeds on zombies; an unreaped <defunct> child must
+  // not count as a running sidecar (it holds no port and serves nothing).
+  char path[64];
+  std::snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+  FILE* f = std::fopen(path, "r");
+  if (f == nullptr) return true;
+  int ppid_unused = 0;
+  char comm[256] = {0};
+  char state = 0;
+  const int n = std::fscanf(f, "%*d (%255[^)]) %c %d", comm,
+                         &state, &ppid_unused);
+  (void)comm;
+  (void)ppid_unused;
+  std::fclose(f);
+  if (n != 3) return true;
+  return state != 'Z' && state != 'X' && state != 'x';
 }
 
 // Best-effort lookup of a sidecar pid by matching its argv tokens
@@ -805,8 +820,9 @@ bool SidecarManager::Stop(const std::string& id, std::string* error) {
         }
         table_.erase(it);
       }
-      if (error != nullptr) *error = "sidecar '" + id + "' is not running";
-      return false;
+      // Idempotent: desired state is stopped; already-stopped satisfies
+      // it (covers stale zombie records and double-eject races).
+      return true;
     }
     pid = it->second.pid;
   }
