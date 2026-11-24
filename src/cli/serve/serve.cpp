@@ -1896,11 +1896,11 @@ int RunServe(std::span<const char* const> args) {
           std::make_shared<server::ModelAdminService>(registry, loader, probe);
       {
         // M6 status plane: NPU descriptors only, no weights loaded.
-        auto npu_reg =
+        auto npu_reg_llm =
             std::make_shared<mbufo::core::npu::NpuModelRegistry>();
-        server::npu_wire::PopulateNpuRegistry(npu_reg.get(), nullptr);
-        server::npu_wire::RefreshNpuReady(npu_reg.get());
-        admin->SetNpuRegistry(std::move(npu_reg));
+        server::npu_wire::PopulateNpuRegistry(npu_reg_llm.get(), nullptr);
+        server::npu_wire::RefreshNpuReady(npu_reg_llm.get());
+        admin->SetNpuRegistry(std::move(npu_reg_llm));
       }
       for (const auto& extra : extra_startup_models) {
         if (extra.sidecar || server::FindSidecarSpec(extra.id) != nullptr) {
@@ -1981,6 +1981,13 @@ int RunServe(std::span<const char* const> args) {
       std::make_shared<mbufo::core::npu::NpuModelRegistry>();
   server::npu_wire::PopulateNpuRegistry(npu_reg.get(), nullptr);
   server::npu_wire::RefreshNpuReady(npu_reg.get());
+  if (admin == nullptr) {
+    // asr/tts/image/video: read-only admin (catalog + mapping +
+    // NPU status). No GPU registry/loader here by design.
+    admin = std::make_shared<server::ModelAdminService>(
+        nullptr, nullptr, nullptr);
+  }
+  admin->SetNpuRegistry(npu_reg);
   // run() joins every request thread, so no hook call outlives it.
   std::atomic<bool> device_lost{false};
   server::HttpServer server(

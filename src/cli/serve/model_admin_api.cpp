@@ -290,6 +290,24 @@ HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
        req.path == "/admin/ui")) {
     return HandleUi(req);
   }
+  // Single-modality servers (asr/tts/image): no GPU registry here.
+  // Only static/read-only routes stay reachable; the rest 404s
+  // instead of dereferencing a null registry.
+  if (registry_ == nullptr) {
+    const bool safe =
+        (req.method == "GET" &&
+         (req.path == "/" || req.path == "/admin" ||
+          req.path == "/admin/" || req.path == "/admin/ui" ||
+          req.path == "/admin/models" ||
+          req.path == "/admin/catalog" ||
+          req.path == "/admin/model-mapping" ||
+          req.path == "/admin/npu/status"));
+    if (!safe) {
+      return AdminErr(404, "Not Found",
+                      "admin registry not mounted on this server",
+                      "not_found");
+    }
+  }
   if (req.path == "/admin/models" && req.method == "GET")
     return HandleList(req);
   if (req.path == "/admin/catalog" && req.method == "GET")
@@ -387,6 +405,13 @@ HttpResponse ModelAdminService::HandleUi(const HttpRequest&) {
 }
 
 HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
+  if (registry_ == nullptr) {
+    json::Value resp = json::Value::object();
+    resp["object"] = "list";
+    resp["models"] = json::Value::array();
+    resp["build_sha"] = mbufo::build::kGitCommit;
+    return AdminOk(std::move(resp));
+  }
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   const auto lru_order = registry_->LruCandidates();
@@ -585,7 +610,8 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
   if (std::getenv("MBUFO_MODELS_DIR") == nullptr) {
     add_root_unique("/mnt/nvme-data/mbufo-models");
   }
-  const auto loaded_list = registry_->List();
+  const auto loaded_list =
+      registry_ ? registry_->List() : decltype(registry_->List()){};
   for (const auto& info : loaded_list) {
     if (info.path.empty()) continue;
     std::filesystem::path p(info.path);
@@ -919,15 +945,33 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     struct ExtraDir {
       const char* id;
       const char* subdir;
+      const char* family;
       const char* task;
       const char* capability;
       const char* backend;
       bool npu_capable;
+      bool has_audio;
+      bool has_vision;
+      std::size_t resident_mib;
       const char* note;
     };
     const ExtraDir kExtraDirs[] = {
-        {"qwen-image-2.1", "qwen-image-2.1", "image_generation", "IMAGE", "gpu", false,
+        {"qwen-image-2.1", "qwen-image-2.1", "image", "image_generation",
+         "IMAGE", "gpu", false, false, false, 0,
          "GPU safetensors image model (mbufo serve image)"},
+        // M6: NPU in-process servables (verified 2026-11-24; M3 MiB).
+        {"qwen3-asr-1.7b", "qwen3-asr-1.7b", "qwen3-asr-1.7b", "audio",
+         "AUDIO", "npu", true, true, false, 520,
+         "NPU in-process thinker (decode cos=1.0, top1 match)"},
+        {"qwen3-tts-12hz-1.7b", "qwen3-tts-1.7b-base", "qwen3-tts-1.7b-base",
+         "tts", "SPEECH", "npu", true, true, false, 2200,
+         "NPU in-process talker+predictor+frame (decode cos=1.0)"},
+        {"flux2-klein-4b", "flux2-klein-4b", "flux2-klein-4b",
+         "image_generation", "IMAGE", "npu", true, false, false, 930,
+         "NPU in-process DiT 4-step (E2E cos(pipe)=0.9485)"},
+        {"z-image-turbo", "z-image-turbo", "z-image-turbo",
+         "image_generation", "IMAGE", "npu", true, false, false, 750,
+         "NPU in-process DiT 8-step (E2E cos(pipe)=0.9918)"},
     };
     for (const auto& ed : kExtraDirs) {
       std::filesystem::path dir;
@@ -955,10 +999,10 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["id_suggestion"] = ed.id;
       item["name"] = std::string(ed.subdir) + "/";
       item["relative_path"] = std::string(ed.subdir) + "/";
-      item["family"] = "image";
+      item["family"] = ed.family;
       item["task"] = ed.task;
-      item["has_vision"] = false;
-      item["has_audio"] = false;
+      item["has_vision"] = ed.has_vision;
+      item["has_audio"] = ed.has_audio;
       item["has_tools"] = false;
       json::Value caps = json::Value::array();
       caps.push_back(ed.capability);
@@ -970,7 +1014,8 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       const std::uint64_t mib = static_cast<std::uint64_t>(bytes >> 20);
       item["size_mib"] = mib;
       item["file_size_mib"] = mib;
-      item["estimated_resident_mib"] = std::uint64_t{0};
+      item["estimated_resident_mib"] =
+          static_cast<std::uint64_t>(ed.resident_mib);
       item["shards"] = 0;
       item["loaded"] = false;
       item["loaded_id"] = "";
