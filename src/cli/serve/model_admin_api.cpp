@@ -255,8 +255,9 @@ ModelCapabilityProfile ClassifyModelCapabilities(std::string_view id_or_name,
   const bool is_glimmer = hay.find("muse-glimmer") != std::string::npos ||
                           hay.find("glimmer") != std::string::npos;
   const bool is_qwen38 = hay.find("qwen3.8") != std::string::npos;
+  const bool is_inkling = hay.find("inkling") != std::string::npos;
 
-  if (has_mmproj || is_gemma4 || is_glimmer || is_qwen38 ||
+  if (has_mmproj || is_gemma4 || is_glimmer || is_qwen38 || is_inkling ||
       hay.find("-vl") != std::string::npos ||
       hay.find("vision") != std::string::npos) {
     prof.has_vision = true;
@@ -723,6 +724,9 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     const bool is_tiel_coder =
         fam_lower.find("tiel-coder") != std::string::npos ||
         id_lower.find("tiel-coder") != std::string::npos;
+    const bool is_inkling =
+        fam_lower.find("inkling") != std::string::npos ||
+        id_lower.find("inkling") != std::string::npos;
 
     // Supported speculative modes matched strictly against inference_backend.cpp.
     // Note: Qwen3.8-27B (QwenGpuModel) supports DFlash2 only and rejects MTP.
@@ -731,7 +735,7 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       supported_spec.push_back("mtp");
     } else if (is_qwen38_27b || is_glimmer) {
       supported_spec.push_back("dflash2");
-    } else if (is_deepseek_v4) {
+    } else if (is_deepseek_v4 || is_inkling) {
       supported_spec.push_back("dspark");
     }
 
@@ -780,7 +784,8 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     // External --mmproj is only accepted on Qwen3.8-Flash-Next, Qwen3.8-27B,
     // and Qwen3.5/Ornith 35B-A3B. Prefer BF16 (matching mbufo.service).
     const bool arch_supports_mmproj =
-        is_qwen38_flash_next || is_qwen38_27b || is_qwen35_35b_or_ornith;
+        is_qwen38_flash_next || is_qwen38_27b || is_qwen35_35b_or_ornith ||
+        is_inkling;
     std::vector<std::pair<int, std::string>> mm_cands;
     if (arch_supports_mmproj) {
       for (const auto& cf : files) {
