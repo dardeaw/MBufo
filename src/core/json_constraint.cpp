@@ -2010,10 +2010,13 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   const bool deepseek = format == ToolFormat::kDeepSeek;
   const bool gemma = format == ToolFormat::kGemma;
   const bool atem = format == ToolFormat::kAtem;
+  const bool inkling = format == ToolFormat::kInkling;
   const std::string_view marker =
-      (gemma || atem) ? (gemma ? "<|tool_call>" : "<atem:function_calls>")
+      inkling ? "<|message_model|>"
+      : (gemma || atem) ? (gemma ? "<|tool_call>" : "<atem:function_calls>")
             : deepseek ? "<｜DSML｜tool_calls>" : "<tool_call>";
   const auto end = literal(format == ToolFormat::kJson ? "}</tool_call>"
+                            : inkling ? "}<|end_message|>"
                             : (gemma || atem) ? (gemma ? "}<tool_call|>" : "</atem:function_calls>")
                             : deepseek ? "</｜DSML｜invoke>"
                                        : "</function>\n</tool_call>");
@@ -2064,7 +2067,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   // echoed framing used to leak into content (#383, #438).
   const bool qwen = format == ToolFormat::kQwen;
   const bool ends_output =
-      deepseek || qwen || gemma || atem || !plain_answer;
+      deepseek || qwen || gemma || atem || inkling || !plain_answer;
   auto after = ends_output ? static_cast<std::uint32_t>(grammar->rules_.size())
                : parallel  ? prose
                            : text(UINT32_MAX);
@@ -2133,10 +2136,15 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
       atem ? text_until("</atem:function_calls>", after) : UINT32_MAX;
   const std::uint32_t atem_args =
       atem ? text_until("</atem:invoke>", atem_tail) : UINT32_MAX;
+  if (inkling && plain_answer && !required) {
+    const auto end_msg = text_until("<|end_message|>", prose);
+  }
   for (const auto& [name, arguments] : tools) {
     const auto begin = literal(
         format == ToolFormat::kJson
             ? "{\"name\":" + json::Value(name).dump() + ",\"arguments\":"
+        : inkling
+            ? name + "<|content_invoke_tool_json|>{\"name\":" + json::Value(name).dump() + ",\"args\":"
         : (gemma || atem)
             ? (gemma ? "call:" + name + "{"
                        : "<atem:invoke name=\"" + name + "\">")
@@ -2153,7 +2161,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     if (const auto found = imported.find(arguments.get());
         found != imported.end()) {
       grammar->rules_[calls].push_back({begin, found->second, end, after});
-      if (format != ToolFormat::kJson) {
+      if (format == ToolFormat::kQwen || format == ToolFormat::kDeepSeek) {
         const auto named = literal(name + (deepseek ? "\">\n" : ">\n"));
         grammar->rules_[grammar->reasoning_tool_root_].push_back(
             {named, found->second, end, after});
@@ -2193,7 +2201,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     const auto root = static_cast<std::uint32_t>(arguments->root_ + rules);
     imported.emplace(arguments.get(), root);
     grammar->rules_[calls].push_back({begin, root, end, after});
-    if (format != ToolFormat::kJson) {
+    if (format == ToolFormat::kQwen || format == ToolFormat::kDeepSeek) {
       const auto named = literal(name + (deepseek ? "\">\n" : ">\n"));
       grammar->rules_[grammar->reasoning_tool_root_].push_back(
           {named, root, end, after});

@@ -101,6 +101,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
   if (runner.InitialOutputState(request) ==
       TextGenerationBackend::InitialOutputState::kReasoning)
     grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  if (!grammar) return std::nullopt;
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }

@@ -132,6 +132,8 @@ ToolMarkerSet ToolMarkers(
       AtemToolSyntax::kCallsOpen};
   static constexpr std::array<std::string_view, 1> llama{
       LlamaToolSyntax::kCallOpen};
+  static constexpr std::array<std::string_view, 1> inkling{
+      "<|message_model|>"};
   // The template writes "\n\n" before the call block. As in llama.cpp
   // common/parsers/deepseek.cpp (TC_SEPARATOR + FC_START), that separator is
   // framing: returning it as content would double it when history is replayed.
@@ -153,6 +155,8 @@ ToolMarkerSet ToolMarkers(
     return ToolMarkerSet(atem);
   if (*format == Format::kLlama)
     return ToolMarkerSet(llama);
+  if (*format == Format::kInkling)
+    return ToolMarkerSet(inkling);
   return ToolMarkerSet(qwen);
 }
 
@@ -236,6 +240,8 @@ ToolCloserSet ToolClosers(
     return kAtemClosers;
   if (*format == Format::kLlama)
     return kLlamaClosers;
+  if (*format == Format::kInkling)
+    return {};
   return kQwenClosers;
 }
 
@@ -2359,6 +2365,113 @@ void ParseGemmaCalls(
     }
   }
 }
+
+ParsedGeneration ParseInklingGeneration(
+    std::string_view raw, std::span<const tokenization::ChatTool> tools,
+    ChatRequest::ToolChoice choice, bool enforce_required) {
+  constexpr std::string_view kMsgOpen = "<|message_model|>";
+  constexpr std::string_view kMsgClose = "<|end_message|>";
+  constexpr std::string_view kThinkOpen = "<|content_thinking|>";
+  constexpr std::string_view kTextOpen = "<|content_text|>";
+  constexpr std::string_view kToolJsonOpen = "<|content_invoke_tool_json|>";
+  constexpr std::string_view kEndSampling = "<|content_model_end_sampling|>";
+
+  ParsedGeneration parsed;
+  const bool allow_tools =
+      !tools.empty() && choice != ChatRequest::ToolChoice::kNone;
+  std::size_t pos = 0;
+
+  auto strip_end_sampling = [&](std::string_view sv) {
+    if (const auto end = sv.find(kEndSampling); end != std::string_view::npos) {
+      sv = sv.substr(0, end);
+    }
+    while (sv.starts_with(kMsgClose)) sv.remove_prefix(kMsgClose.size());
+    while (sv.ends_with(kMsgClose)) sv.remove_suffix(kMsgClose.size());
+    return sv;
+  };
+
+  while (pos < raw.size()) {
+    const auto msg_pos = raw.find(kMsgOpen, pos);
+    if (msg_pos == std::string_view::npos) {
+      const auto tail = strip_end_sampling(raw.substr(pos));
+      if (!tail.empty()) {
+        if (!parsed.text.empty() && !tail.empty()) parsed.text += "";
+        parsed.text += tail;
+      }
+      break;
+    }
+    if (msg_pos > pos) {
+      const auto prefix = strip_end_sampling(raw.substr(pos, msg_pos - pos));
+      if (!prefix.empty()) parsed.text += prefix;
+    }
+    const auto body_start = msg_pos + kMsgOpen.size();
+    const auto msg_end = raw.find(kMsgClose, body_start);
+    const std::string_view body =
+        msg_end == std::string_view::npos
+            ? strip_end_sampling(raw.substr(body_start))
+            : raw.substr(body_start, msg_end - body_start);
+    pos = msg_end == std::string_view::npos ? raw.size()
+                                            : msg_end + kMsgClose.size();
+
+    if (body.starts_with(kThinkOpen)) {
+      const auto think = Trim(body.substr(kThinkOpen.size()));
+      if (!think.empty()) {
+        if (!parsed.reasoning_content.empty()) parsed.reasoning_content += "\n";
+        parsed.reasoning_content += think;
+      }
+    } else if (body.starts_with(kTextOpen)) {
+      parsed.text += body.substr(kTextOpen.size());
+    } else if (const auto json_tag = body.find(kToolJsonOpen);
+               json_tag != std::string_view::npos && allow_tools) {
+      const auto json_str = Trim(body.substr(json_tag + kToolJsonOpen.size()));
+      if (msg_end != std::string_view::npos || !json_str.empty()) {
+        try {
+          const auto obj = json::parse(std::string(json_str));
+          const auto* name_val = obj.find("name");
+          const auto* args_val = obj.find("args");
+          if (name_val && name_val->is_string()) {
+            const std::string name = name_val->get_str();
+            const bool known =
+                tools.empty() ||
+                std::ranges::any_of(tools, [&](const auto& tool) {
+                  return tool.name == name;
+                });
+            if (known) {
+              ParsedToolCall call;
+              call.id = RandomId("call_");
+              call.name = name;
+              if (args_val && args_val->is_object()) {
+                for (const auto& [k, v] : args_val->members()) {
+                  tokenization::ChatMessage::ToolArgument arg;
+                  arg.name = k;
+                  arg.is_string = v.is_string();
+                  arg.value = v.is_string() ? v.get_str() : v.dump();
+                  call.arguments.push_back(std::move(arg));
+                }
+              }
+              parsed.tool_calls.push_back(std::move(call));
+              parsed.hide_tool_markup = true;
+            }
+          }
+        } catch (const std::exception&) {
+          // Incomplete or malformed JSON during streaming; wait for </end_message>.
+        }
+      }
+    } else if (body.starts_with(kEndSampling)) {
+      break;
+    } else if (!body.empty() && body.find(kToolJsonOpen) == std::string_view::npos) {
+      parsed.text += body;
+    }
+  }
+  parsed.text = std::string(Trim(parsed.text));
+  if (enforce_required && choice == ChatRequest::ToolChoice::kRequired &&
+      parsed.tool_calls.empty()) {
+    throw TextGenerationError(TextGenerationErrorCode::kToolChoiceUnsatisfied,
+                              "model did not produce a declared tool call");
+  }
+  return parsed;
+}
+
 ParsedGeneration ParseGeneration(
     std::string_view raw,
     TextGenerationBackend::InitialOutputState initial_output_state,
@@ -2366,6 +2479,9 @@ ParsedGeneration ParseGeneration(
     ChatRequest::ToolChoice choice, bool enforce_required,
     ToolMarkerSet markers, ToolCloserSet closers, QuoteTracker& quotes,
     bool partial = false) {
+  if (markers.size() == 1 && markers.front() == "<|message_model|>") {
+    return ParseInklingGeneration(raw, tools, choice, enforce_required);
+  }
   quotes.Reset(raw);
   ParsedGeneration parsed;
   std::string_view content = raw;
@@ -2556,6 +2672,9 @@ ParsedGeneration ParseStructuredGeneration(
     ChatRequest::ToolChoice choice, bool enforce_required, bool tool_only,
     ToolMarkerSet markers, ToolCloserSet closers, QuoteTracker& quotes,
     bool partial = false) {
+  if (markers.size() == 1 && markers.front() == "<|message_model|>") {
+    return ParseInklingGeneration(raw, tools, choice, enforce_required);
+  }
   ParsedGeneration parsed;
   if (initial == TextGenerationBackend::InitialOutputState::kAuto) {
     const auto leading = raw.find_first_not_of(" \t\r\n");

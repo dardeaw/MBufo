@@ -3,6 +3,17 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.39.1 (2026-11-25)
+
+### Added & Fixed (Inkling-2-Mini Loop-MoE + Vision + DSpark MTP + Tool Calling)
+- **Inkling-2-Mini Engine (`src/models/inkling/`)**: Full HIP inference support for `inkling2` Loop-MoE architecture (`UD-Q4_K_XL` / `Q8_0` / `NVFP4`), including `mmproj-BF16.gguf` Vision encoder integration and multimodal chat completions.
+- **DSpark MTP Speculative Decoding (`dspark.hpp`, `dspark.hip`)**: Implemented RNN/GRU Markov head (`joint_proj` + `markov_w1`/`w2`), Interleaved RoPE in `HeadRmsNormRopeF16StoreKernel` and `StoreCtxKvF16Kernel`, and zero-rerun `sconv` prefix snapshots (`SaveSconvPrefixesKernel` / `RestoreSconvPrefix`) eliminating redundant 48-layer rollback passes. Fixed `n > 1` multi-token `GemvDecode`/`LaunchNarrowQ80*` verify path by restricting narrow decode kernels to `n == 1`.
+- **Native Tool Calling & Reasoning (`ToolFormat::kInkling`)**: Added `JsonConstraint::WithTools` grammar and `ParseInklingGeneration` parser for `<|message_model|>`, `<|content_thinking|>`, `<|content_text|>`, `<|content_invoke_tool_json|>`, `<|end_message|>`, and `<|content_model_end_sampling|>`, plus `Thinking effort level: 0` when `--think off`.
+- **Admin UI Discovery & Load (`model_admin_api.cpp`, `model_mapping.json`)**: Registered `inkling-2-mini` with `dspark` speculative decoding, `mmproj` vision sidecar detection, `VISION`/`TOOLS` badges, and `/admin/models/load` support.
+- **Verified Benchmarks (gfx1151, `--speculative dspark -d 3`, Vision enabled)**:
+  - `tools/bench/tool_ladder.py`: **12/12 pass (100%)** across `0` / `500` / `2000` / `8000` context lengths.
+  - Cold-KV Prefill + Decode Ladder up to 128K (`ctx=126609`): Prefill **1188.7 tok/s** (2.6K) → **826.8 tok/s** (44.7K) → **462.2 tok/s** (126.6K); Decode **16.44 tok/s** (2.6K) → **4.59 tok/s** (126.6K), DSpark acceptance up to **30.0%** (126.6K) / **31.3%** (coding).
+
 ## v0.38.1 (2026-11-22)
 
 ### Changed (Full English Localization & UI Polish)

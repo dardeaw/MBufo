@@ -56,6 +56,7 @@
 #include "src/models/gptoss/engine.hpp"
 #include "src/models/llama/engine.hpp"
 #include "src/models/laguna/engine.hpp"
+#include "src/models/inkling/engine.hpp"
 #include "src/models/qwen/continuation_adapter.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
@@ -3597,6 +3598,9 @@ using LlamaSession = models::llama::Session;
 using LagunaModel = models::laguna::Model;
 using LagunaSession = models::laguna::Session;
 constexpr std::string_view kLagunaStateAbi = "mbufo.laguna.state.v1";
+using InklingModel = models::inkling::Model;
+using InklingSession = models::inkling::Session;
+constexpr std::string_view kInklingStateAbi = "mbufo.inkling.state.v1";
 
 std::vector<std::int32_t> LlamaEngineTokens(
     std::span<const TextRunnerToken> tokens) {
@@ -3910,6 +3914,525 @@ class LagunaTextRunner final : public HipTextModelRunner {
  private:
   std::shared_ptr<LagunaModel> model_;
   std::uint32_t max_context_{0};
+  std::vector<std::int32_t> turn_stops_;
+};
+
+// ---------------------------------------------------------------------------
+// Inkling-2 chat template (compiled port).
+//
+// The model ships its reference Jinja template as chat_template.jinja next to
+// the weights (also embedded as GGUF `tokenizer.chat_template` metadata). The
+// repo has no Jinja runtime - qwen/deepseek ports compile their templates the
+// same way - so this is a faithful C++ port of that file:
+//   * optional tool block first:
+//     `<|message_system|>tool_declare<|content_xml|>{specs}<|end_message|>`
+//   * `Thinking effort level: <n>` system block before the first non-system
+//     message (level from request.reasoning.effort, default 0.9 = high),
+//   * per-message `<|message_*|><|content_*|>...<|end_message|>` blocks with
+//     the template's tool/assistant name-suffix and tool-call rules,
+//   * `<|content_model_end_sampling|>` after each assistant message,
+//   * no trailing generation prompt: the model emits `<|message_model|>`
+//     itself as its first generated token.
+// Thinking is always on for inkling (the template has no enable_thinking
+// switch), so InitialOutputState stays kContent and thinking=off is not
+// forced off here.
+// ---------------------------------------------------------------------------
+std::string InklingEffortLevelText(const ReasoningOptions& reasoning) {
+  // Template effort_map: none 0.0, minimal 0.1, low 0.2, medium 0.7,
+  // high 0.9, xhigh 0.99, max 0.99; undefined reasoning_effort means 0.9.
+  // mbufo has no kNone effort ("none"/"off" only flips enabled, which this
+  // template cannot express), so unset renders the 0.9 default.
+  if (reasoning.enabled.has_value() && !*reasoning.enabled) return "0";
+  if (!reasoning.effort.has_value()) return "0.9";
+  switch (*reasoning.effort) {
+    case ReasoningEffort::kMinimal:
+      return "0.1";
+    case ReasoningEffort::kLow:
+      return "0.2";
+    case ReasoningEffort::kMedium:
+      return "0.7";
+    case ReasoningEffort::kHigh:
+      return "0.9";
+    case ReasoningEffort::kXHigh:
+    case ReasoningEffort::kMax:
+      return "0.99";
+  }
+  return "0.9";
+}
+
+json::Value InklingSortedJson(const json::Value& value) {
+  // Jinja tojson(sort_keys=True) spelling at every level; arrays keep order.
+  if (value.is_object()) {
+    auto members = value.members();
+    std::sort(members.begin(), members.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    json::Value out = json::Value::object();
+    for (auto& kv : members) {
+      out.append_member(kv.first, InklingSortedJson(kv.second));
+    }
+    return out;
+  }
+  if (value.is_array()) {
+    json::Value out = json::Value::array();
+    for (const auto& item : value.items()) {
+      out.push_back(InklingSortedJson(item));
+    }
+    return out;
+  }
+  return value;
+}
+
+json::Value InklingToolSpec(const tokenization::ChatTool& tool) {
+  // fn = tool.function ?? tool; type defaults to "function". Keys are emitted
+  // in sorted order with compact separators, matching tojson(sort_keys=True).
+  json::Value params = json::Value::object();
+  if (!tool.parameters_json.empty()) {
+    try {
+      params = InklingSortedJson(json::parse(tool.parameters_json));
+      if (!params.is_object()) params = json::Value::object();
+    } catch (const std::exception&) {
+      params = json::Value::object();
+    }
+  }
+  json::Value spec = json::Value::object();
+  spec.append_member("description", json::Value(tool.description));
+  spec.append_member("name", json::Value(tool.name));
+  spec.append_member("parameters", std::move(params));
+  spec.append_member("type", json::Value("function"));
+  return spec;
+}
+
+std::string InklingToolCallJson(
+    const tokenization::ChatMessage::ToolCall& call) {
+  // `{"name":<name>,"args":{<keys sorted>}}`, values as canonical JSON.
+  std::vector<tokenization::ChatMessage::ToolArgument> args(
+      call.arguments.begin(), call.arguments.end());
+  std::sort(args.begin(), args.end(),
+            [](const auto& a, const auto& b) { return a.name < b.name; });
+  json::Value args_json = json::Value::object();
+  for (const auto& arg : args) {
+    if (arg.is_string) {
+      args_json.append_member(arg.name, json::Value(arg.value));
+    } else {
+      try {
+        args_json.append_member(arg.name, json::parse(arg.value));
+      } catch (const std::exception&) {
+        args_json.append_member(arg.name, json::Value(arg.value));
+      }
+    }
+  }
+  json::Value call_json = json::Value::object();
+  call_json.append_member("name", json::Value(call.name));
+  call_json.append_member("args", std::move(args_json));
+  return call_json.dump();
+}
+
+std::optional<std::string> InklingRenderPrompt(const ChatRequest& request) {
+  const auto tools =
+      request.tool_choice == ChatRequest::ToolChoice::kNone
+          ? std::span<const tokenization::ChatTool>{}
+          : std::span<const tokenization::ChatTool>{request.tools};
+  std::string out;
+  if (!tools.empty()) {
+    json::Value specs = json::Value::array();
+    for (const auto& tool : tools) {
+      specs.push_back(InklingToolSpec(tool));
+    }
+    out += "<|message_system|>tool_declare<|content_xml|>";
+    out += specs.dump();
+    out += "<|end_message|>";
+  }
+  const auto& messages = request.messages;
+  const std::string effort_block =
+      std::string("<|message_system|><|content_text|>Thinking effort level: ") +
+      InklingEffortLevelText(request.reasoning) + "<|end_message|>";
+  bool effort_emitted = false;
+  for (const auto& message : messages) {
+    const bool is_system = message.role == tokenization::ChatRole::kSystem ||
+                           message.role == tokenization::ChatRole::kDeveloper;
+    if (!effort_emitted && !is_system) {
+      out += effort_block;
+      effort_emitted = true;
+    }
+    std::string header;
+    switch (message.role) {
+      case tokenization::ChatRole::kSystem:
+      case tokenization::ChatRole::kDeveloper:
+        header = "<|message_system|>";
+        break;
+      case tokenization::ChatRole::kUser:
+        header = "<|message_user|>";
+        break;
+      case tokenization::ChatRole::kAssistant:
+        header = "<|message_model|>";
+        break;
+      case tokenization::ChatRole::kTool:
+        header = "<|message_tool|>";
+        break;
+    }
+    if (message.role == tokenization::ChatRole::kTool) {
+      if (!message.name.empty()) {
+        header += message.name;
+      } else if (!message.tool_call_id.empty()) {
+        for (const auto& prev : messages) {
+          if (prev.role != tokenization::ChatRole::kAssistant) continue;
+          for (const auto& prev_call : prev.tool_calls) {
+            if (prev_call.id == message.tool_call_id &&
+                !prev_call.name.empty()) {
+              header += prev_call.name;
+            }
+          }
+        }
+      }
+    } else if (message.role == tokenization::ChatRole::kAssistant &&
+               !message.name.empty()) {
+      header += message.name;
+    }
+    const bool is_assistant =
+        message.role == tokenization::ChatRole::kAssistant;
+    if (is_assistant && !message.thought.empty()) {
+      out +=
+          header + "<|content_thinking|>" + message.thought + "<|end_message|>";
+    }
+    for (std::size_t img_i = 0; img_i < message.images.size(); ++img_i) {
+      out += header + "<|content_image|>";
+      for (std::uint32_t k = 0;
+           k < models::inkling::VisionEncoder::kMergedTokens; ++k) {
+        out += "<|unused_200054|>";
+      }
+      out += "<|end_message|>";
+    }
+    const std::string content =
+        is_system ? message.content + message.framing_suffix : message.content;
+    if (!content.empty() ||
+        (message.images.empty() &&
+         !(is_assistant &&
+           (!message.tool_calls.empty() || !message.thought.empty())))) {
+      out += header + "<|content_text|>" + content + "<|end_message|>";
+    }
+    if (is_assistant) {
+      for (const auto& call : message.tool_calls) {
+        if (!message.name.empty() && message.name != call.name) {
+          return std::nullopt;
+        }
+        out += std::string("<|message_model|>") + call.name +
+               "<|content_invoke_tool_json|>" + InklingToolCallJson(call) +
+               "<|end_message|>";
+      }
+      out += "<|content_model_end_sampling|>";
+    }
+  }
+  if (!effort_emitted) {
+    out += effort_block;
+  }
+  return out;
+}
+
+void LogInklingTemplateSource(const InklingModel& model) {
+  // The renderer above is a compiled port of the model's chat_template.jinja
+  // (sibling of the weights, also in GGUF `tokenizer.chat_template`); there
+  // is no Jinja runtime to interpret the file, so this only records which
+  // reference copy was found for operators comparing template revisions.
+  std::string source = "compiled-port";
+  if (!model.ModelPath().empty()) {
+    std::error_code ec;
+    const auto sibling = std::filesystem::path(model.ModelPath()).parent_path() /
+                         "chat_template.jinja";
+    if (std::filesystem::exists(sibling, ec)) {
+      source += " file=" + sibling.string();
+    } else {
+      source += " file-missing";
+    }
+  }
+  if (const auto gguf_template = model.GgufChatTemplate()) {
+    source += " gguf_template_bytes=" + std::to_string(gguf_template->size());
+  } else {
+    source += " gguf-template-missing";
+  }
+  Logger::Info("loader", "event=inkling_template source=" + source);
+}
+
+class InklingTextRunnerState final : public TextRunnerState {
+ public:
+  explicit InklingTextRunnerState(const std::shared_ptr<InklingModel>& model) {
+    std::string error;
+    session_ = model->CreateSession(&error);
+    if (session_ == nullptr) {
+      throw std::runtime_error("Failed to create Inkling session: " + error);
+    }
+  }
+  void SetCancellationCheck(const CancellationCheck&) override {}
+  void Invalidate() noexcept override { position_ = 0; }
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources() const noexcept override { return {}; }
+  [[nodiscard]] InklingSession& session() const { return *session_; }
+  [[nodiscard]] std::size_t position() const noexcept { return position_; }
+  void set_position(std::size_t position) noexcept { position_ = position; }
+ private:
+  std::unique_ptr<InklingSession> session_;
+  std::size_t position_{0};
+};
+
+class InklingTextRunner final : public HipTextModelRunner {
+ public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kInkling;
+  }
+  InklingTextRunner(std::shared_ptr<InklingModel> model, std::uint32_t max_context,
+                    std::string dspark_model_path = {},
+                    std::uint32_t max_draft_tokens = 0)
+      : model_(std::move(model)),
+        max_context_(max_context),
+        dspark_model_path_(std::move(dspark_model_path)),
+        max_draft_tokens_(max_draft_tokens) {
+    LogInklingTemplateSource(*model_);
+    for (const char* marker : {"</assistant>", "\u3008|EOS|\u3009"}) {
+      if (const auto id = model_->tokenizer().FindSpecialToken(marker)) {
+        turn_stops_.push_back(static_cast<std::int32_t>(*id));
+      }
+    }
+  }
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    return {
+        .model_id = model_->ModelName(),
+        .state_abi = std::string(kInklingStateAbi),
+        .max_context = max_context_,
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = false,
+                .fork = false,
+                .final_token_advance_required = false,
+                .incremental_text_is_exact = true,
+                .multi_token_decode = use_dspark(),
+                .batched_multi_token_decode = false,
+                .batched_multi_token_decode_max_width = 0,
+                .prefix_reuse = false,
+            },
+        .persistence = std::nullopt,
+    };
+  }
+  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    std::size_t free_bytes = 0, total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) capacity = free_bytes;
+    return {
+        .resident_weights_bytes = model_->ResidentBytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = std::nullopt,
+        .temporary_scratch_bytes = std::nullopt,
+        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .requires_device_runtime_lock = true,
+    };
+  }
+  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+    return {{.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+  }
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary> BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          const std::int32_t token = static_cast<std::int32_t>(id);
+          const std::int32_t unit[1] = {token};
+          return sampling::ConstraintVocabulary::Piece{
+              model_->Decode(std::span<const std::int32_t>(unit, 1)),
+              model_->IsStopToken(token)};
+        });
+  }
+  [[nodiscard]] std::uint32_t VocabularySize() const override { return model_->VocabSize(); }
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override { return {"<|content_thinking|>", "<|end_message|>", {}}; }
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(std::string_view text) const override {
+    std::vector<TextRunnerToken> tokens;
+    for (const std::int32_t id : model_->Tokenize(text, true)) {
+      tokens.push_back(static_cast<TextRunnerToken>(id));
+    }
+    return tokens;
+  }
+  struct InklingImageContext final : TextPromptContext {
+    std::vector<InklingSession::ImageInjection> images;
+  };
+  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(const ChatRequest& request) const override {
+    const auto prompt = InklingRenderPrompt(request);
+    if (!prompt.has_value() || prompt->empty()) return std::nullopt;
+    return Tokenize(*prompt);
+  }
+  [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
+      const ChatRequest& request) const override {
+    const bool has_images = std::ranges::any_of(
+        request.messages, [](const auto& m) { return !m.images.empty(); });
+    const auto tokens = RenderAndTokenize(request);
+    if (!tokens.has_value()) return std::nullopt;
+    if (!has_images) return TextPreparedPrompt{*tokens, {}, 0};
+    if (!model_->HasVision()) {
+      throw std::invalid_argument(
+          "image input requires a matching --mmproj BF16 sidecar");
+    }
+    auto ctx = std::make_shared<InklingImageContext>();
+    const auto img_tok = model_->tokenizer().FindSpecialToken("<|unused_200054|>");
+    if (!img_tok.has_value()) {
+      throw std::runtime_error("missing <|unused_200054|> token in tokenizer");
+    }
+    const TextRunnerToken placeholder = static_cast<TextRunnerToken>(*img_tok);
+    const std::uint32_t kVisTokens =
+        models::inkling::VisionEncoder::kMergedTokens;
+    std::size_t scan = 0;
+    for (const auto& msg : request.messages) {
+      for (const auto& img_bytes : msg.images) {
+        while (scan < tokens->size() && (*tokens)[scan] != placeholder) ++scan;
+        if (scan + kVisTokens > tokens->size()) {
+          throw std::runtime_error("inkling vision placeholder mismatch");
+        }
+        const core::Image decoded = core::DecodeImage(*img_bytes.bytes);
+        InklingSession::ImageInjection inj;
+        inj.offset = static_cast<std::uint32_t>(scan);
+        std::string err;
+        if (!model_->EncodeImage(decoded, &inj.embeds, &err)) {
+          throw std::runtime_error("inkling vision encode failed: " + err);
+        }
+        ctx->images.push_back(std::move(inj));
+        scan += kVisTokens;
+      }
+    }
+    return TextPreparedPrompt{*tokens, std::move(ctx), 0};
+  }
+  void SetPromptContext(
+      TextRunnerState& state,
+      std::shared_ptr<const TextPromptContext> context) const override {
+    auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    if (!context) {
+      st.session().SetImageInjections({});
+      return;
+    }
+    const auto* ic = dynamic_cast<const InklingImageContext*>(context.get());
+    if (ic == nullptr) {
+      throw std::invalid_argument("invalid Inkling prompt context");
+    }
+    st.session().SetImageInjections(ic->images);
+  }
+  [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(const ChatRequest&) const override {
+    return TextGenerationBackend::InitialOutputState::kContent;
+  }
+  [[nodiscard]] std::string Decode(std::span<const TextRunnerToken> tokens) const override {
+    std::vector<std::int32_t> ids;
+    ids.reserve(tokens.size());
+    for (const auto t : tokens) ids.push_back(static_cast<std::int32_t>(t));
+    return model_->Decode(ids);
+  }
+  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+    return std::make_unique<InklingTextRunnerState>(model_);
+  }
+  [[nodiscard]] bool IsTurnStopToken(std::int32_t token) const noexcept {
+    if (model_->IsStopToken(token)) return true;
+    return std::ranges::find(turn_stops_, token) != turn_stops_.end();
+  }
+  [[nodiscard]] TextPrefillStep Prefill(TextRunnerState& state,
+                                        std::span<const TextRunnerToken> prompt,
+                                        std::size_t offset,
+                                        std::size_t max_input_tokens) const override {
+    auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    if (offset != st.position()) {
+      throw std::logic_error("Inkling prefill offset does not match retained state");
+    }
+    if (offset >= prompt.size()) {
+      throw std::logic_error("Inkling prefill has no remaining input");
+    }
+    const std::size_t consumed = std::min(max_input_tokens, prompt.size() - offset);
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_) {
+      throw std::runtime_error("Inkling prompt exceeds the served context");
+    }
+    std::vector<std::int32_t> prefix;
+    prefix.reserve(next_position);
+    for (std::size_t i = 0; i < next_position; ++i) {
+      prefix.push_back(static_cast<std::int32_t>(prompt[i]));
+    }
+    std::string err;
+    if (!st.session().Sync(prefix, &err)) {
+      st.set_position(0);
+      throw std::runtime_error("Inkling prefill failed: " + err);
+    }
+    st.set_position(next_position);
+    return {.consumed_tokens = consumed, .decode_ready = next_position == prompt.size()};
+  }
+  [[nodiscard]] TextDecodeSelection SelectNext(TextRunnerState& state,
+                                               sampling::SamplerState& sampler) const override {
+    auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    if (st.position() >= max_context_) return {.stop = true, .piece = {}};
+    const auto logits = st.session().Logits();
+    if (logits.empty()) throw std::runtime_error("Inkling token selection has no logits");
+    const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
+    if (st.stop_at_eos() && IsTurnStopToken(token)) {
+      return {.stop = true, .token = 0, .piece = {}};
+    }
+    return {
+        .stop = false,
+        .token = static_cast<TextRunnerToken>(token),
+        .piece = model_->Decode(std::span<const std::int32_t>(&token, 1)),
+    };
+  }
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    std::string err;
+    if (!st.session().Evaluate(static_cast<std::int32_t>(token), &err)) {
+      throw std::runtime_error("Inkling decode failed: " + err);
+    }
+    st.set_position(st.position() + 1);
+  }
+  [[nodiscard]] TextDecodeStep DecodeStep(
+      TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const override {
+    if (!use_dspark() || max_tokens <= 1 ||
+        sampler.ForcedToken().has_value() ||
+        !sampler.config().can_use_unmodified_argmax() ||
+        sampler.NeedsConstraintMask()) {
+      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    }
+    auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    if (st.position() >= max_context_) return {.stop = true};
+    const std::uint32_t n_draft = static_cast<std::uint32_t>(
+        std::min<std::size_t>(max_draft_tokens_, max_tokens - 1));
+    std::vector<std::int32_t> block;
+    std::string error;
+    if (!st.session().SpeculativeRound(n_draft, &block, &error) ||
+        block.empty()) {
+      throw std::runtime_error("Inkling speculative decode failed: " + error);
+    }
+    TextDecodeStep step;
+    step.draft_rounds = 1;
+    step.draft_tokens = n_draft;
+    step.draft_accepted_tokens = block.size() - 1;
+    bool stop = false;
+    step.selections.reserve(block.size());
+    for (const std::int32_t tok : block) {
+      if (st.stop_at_eos() && IsTurnStopToken(tok)) {
+        stop = true;
+        break;
+      }
+      step.selections.push_back(TextDecodeSelection{
+          .stop = false,
+          .token = static_cast<TextRunnerToken>(tok),
+          .piece = model_->Decode(std::span<const std::int32_t>(&tok, 1)),
+      });
+    }
+    st.set_position(st.position() + block.size());
+    step.stop = stop;
+    return step;
+  }
+  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    return SelectNext(state, sampler);
+  }
+  [[nodiscard]] std::size_t CheckpointPosition(const TextRunnerState& state) const override {
+    return dynamic_cast<const InklingTextRunnerState&>(state).position();
+  }
+ private:
+  [[nodiscard]] bool use_dspark() const noexcept {
+    return !dspark_model_path_.empty() && max_draft_tokens_ > 0 &&
+           model_->HasDspark();
+  }
+  std::shared_ptr<InklingModel> model_;
+  std::uint32_t max_context_{0};
+  std::string dspark_model_path_;
+  std::uint32_t max_draft_tokens_{0};
   std::vector<std::int32_t> turn_stops_;
 };
 
@@ -6217,6 +6740,47 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
 
+
+  if (reader->GetMetadataString("general.architecture") == "inkling2") {
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+        speculative_config.backend != TextSpeculativeBackend::kDSpark &&
+        speculative_config.backend != TextSpeculativeBackend::kMtp) {
+      SetError(error,
+               "Inkling HTTP models support only DSpark speculative decoding "
+               "(--speculative dspark --dspark-model PATH) or --speculative off");
+      return false;
+    }
+    const bool want_dspark =
+        speculative_config.backend == TextSpeculativeBackend::kDSpark ||
+        speculative_config.backend == TextSpeculativeBackend::kMtp;
+    if (want_dspark && speculative_config.draft_model_path.empty()) {
+      SetError(error, "Inkling DSpark HTTP decoding requires --dspark-model (or --mtp-model)");
+      return false;
+    }
+    auto model = models::inkling::Model::Load(
+        model_path,
+        models::inkling::ModelOptions{
+            .max_context = max_context,
+            .kv_cache_quant = kv_cache_quant,
+            .vision_model_path = vision_model_path,
+            .dspark_model_path =
+                want_dspark ? speculative_config.draft_model_path
+                            : std::string{},
+        },
+        &load_error);
+    if (model == nullptr) {
+      SetError(error, "Failed to create Inkling model: " + load_error);
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config)) {
+      SetError(error, "Inkling HTTP models do not support the persistent disk cache");
+      return false;
+    }
+    return load(std::move(model), error, max_context, session_count,
+                prefill_policy, scheduler_policy, speculative_config,
+                std::move(resolved_disk_cache_config), ram_cache_config);
+  }
+
   if (reader->GetMetadataString("general.architecture") == "llama") {
     if (!vision_model_path.empty()) {
       SetError(error, "Llama HTTP models do not support --mmproj");
@@ -6820,6 +7384,72 @@ bool InferenceBackend::load(
     new_state->supports_images = false;
     auto runner =
         std::make_shared<GptOssTextRunner>(std::move(model), max_context);
+    new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
+    auto runner_pool = std::make_shared<TextRunnerPool>(
+        std::move(runner), session_count, std::nullopt, ram_cache_config);
+    new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+        std::move(runner_pool), prefill_policy, scheduler_policy);
+    {
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
+}
+
+bool InferenceBackend::load(
+    std::shared_ptr<models::inkling::Model> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config) {
+  if (model == nullptr) {
+    SetError(error, "Inkling model must not be null");
+    return false;
+  }
+  if (max_context == 0) max_context = model->MaxContext();
+  if (session_count == 0) {
+    SetError(error, "HTTP session count must be at least one");
+    return false;
+  }
+  if (max_context == 0 || max_context > model->MaxContext()) {
+    SetError(error, "HTTP context exceeds the loaded Inkling model context");
+    return false;
+  }
+  if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+      speculative_config.backend != TextSpeculativeBackend::kDSpark &&
+      speculative_config.backend != TextSpeculativeBackend::kMtp) {
+    SetError(error, "Inkling HTTP models support only DSpark speculative decoding");
+    return false;
+  }
+  if (DiskCacheEnabled(disk_cache_config)) {
+    SetError(error, "Inkling HTTP models do not support the persistent disk cache");
+    return false;
+  }
+  try {
+    auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model = sampling::TextModelPreset::kUnspecified;
+    new_state->sampling_defaults.supplied = {};
+    new_state->supports_images = model->HasVision();
+    const bool want_dspark =
+        (speculative_config.backend == TextSpeculativeBackend::kDSpark ||
+         speculative_config.backend == TextSpeculativeBackend::kMtp) &&
+        model->HasDspark();
+    const std::uint32_t max_draft = want_dspark
+        ? (speculative_config.max_draft_tokens > 0
+               ? std::min(speculative_config.max_draft_tokens,
+                          model->MaxDraftTokens())
+               : model->MaxDraftTokens())
+        : 0;
+    auto runner = std::make_shared<InklingTextRunner>(
+        std::move(model), max_context,
+        want_dspark ? speculative_config.draft_model_path : std::string{},
+        max_draft);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     auto runner_pool = std::make_shared<TextRunnerPool>(

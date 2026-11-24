@@ -22,7 +22,7 @@ namespace mbufo::sampling {
 // verification.
 class JsonConstraint {
 public:
-  enum class ToolFormat { kJson, kQwen, kDeepSeek, kGemma, kAtem, kLlama };
+  enum class ToolFormat { kJson, kQwen, kDeepSeek, kGemma, kAtem, kLlama, kInkling };
   struct Stack {
     std::vector<std::uint32_t> symbols;
     std::string lexeme;
