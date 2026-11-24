@@ -407,18 +407,15 @@ HttpResponse ModelAdminService::HandleUi(const HttpRequest&) {
 }
 
 HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
-  if (registry_ == nullptr) {
-    json::Value resp = json::Value::object();
-    resp["object"] = "list";
-    resp["models"] = json::Value::array();
-    resp["build_sha"] = mbufo::build::kGitCommit;
-    return AdminOk(std::move(resp));
-  }
+  const bool has_gpu = (registry_ != nullptr);
   json::Value resp = json::Value::object();
   resp["object"] = "list";
-  const auto lru_order = registry_->LruCandidates();
+  const auto lru_order = has_gpu ? registry_->LruCandidates()
+                                 : std::vector<std::string>{};
   json::Value data = json::Value::array();
-  for (const auto& info : registry_->List()) {
+  const auto gpu_list =
+      has_gpu ? registry_->List() : decltype(registry_->List()){};
+  for (const auto& info : gpu_list) {
     json::Value row = json::Value::object();
     row["id"] = info.id;
     row["path"] = info.path;
@@ -559,6 +556,60 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     json::Value sessions = json::Value::array();
     row["sessions"] = std::move(sessions);
     data.push_back(std::move(row));
+  }
+  // Loaded NPU in-process servables appear as loaded models so the UI
+  // renders the same cards (amber border, NPU slots bar, Eject) as GPU
+  // models. Task/capability mirror the catalog ExtraDir rows.
+  if (npu_registry_ != nullptr) {
+    for (const auto& info : npu_registry_->List()) {
+      if (!npu_holder_.IsLoaded(info.id)) continue;
+      std::string task = "chat";
+      std::string cap = "NPU";
+      if (info.lane ==
+          mbufo::core::npu::NpuModelLane::kAsr) {
+        task = "audio";
+        cap = "AUDIO";
+      } else if (info.lane ==
+                 mbufo::core::npu::NpuModelLane::kTts) {
+        task = "tts";
+        cap = "SPEECH";
+      } else if (info.lane ==
+                 mbufo::core::npu::NpuModelLane::kImage) {
+        task = "image_generation";
+        cap = "IMAGE";
+      }
+      json::Value row = json::Value::object();
+      row["id"] = info.id;
+      row["path"] = info.artifact;
+      row["model_path"] = info.artifact;
+      json::Value names = json::Value::array();
+      for (const auto& n : info.names) names.push_back(n);
+      row["names"] = std::move(names);
+      row["context_length"] = 0;
+      row["ready"] = true;
+      row["is_default"] = info.is_default;
+      row["task"] = task;
+      row["has_vision"] = false;
+      row["has_audio"] =
+          task == "audio" || task == "tts";
+      row["has_tools"] = false;
+      json::Value caps = json::Value::array();
+      caps.push_back(cap);
+      row["capabilities"] = std::move(caps);
+      row["total_sessions"] = 0;
+      row["active_sessions"] = 0;
+      row["busy"] = false;
+      row["file_size_mib"] = 0;
+      row["estimated_resident_mib"] =
+          static_cast<std::uint64_t>(info.estimated_resident_mib);
+      row["id_suggestion"] = info.id;
+      row["backend"] = "npu";
+      row["sidecar"] = false;
+      row["lru_rank"] = -1;
+      json::Value sessions = json::Value::array();
+      row["sessions"] = std::move(sessions);
+      data.push_back(std::move(row));
+    }
   }
   resp["build_sha"] = mbufo::build::kGitCommit;
   resp["models"] = data;
@@ -1151,6 +1202,9 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
   // M6b L2: in-process NPU servables load weights via the servable host
   // (no GGUF path needed). Mirrors the sidecar branch response shape.
   // NOTE: body is parsed lazily here; the shared parse below reuses it.
+  // NOTE: the loader_ gate lives BELOW the sidecar branch: sidecar
+  // spawn/stop needs no GPU loader, so neutered single-modality
+  // servers can manage sidecars too.
   {
     json::Value pre;
     try {
@@ -1211,9 +1265,6 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
       }
     }
   }
-  if (!loader_)
-    return AdminErr(503, "Service Unavailable",
-                    "dynamic model loading is not enabled", "loader_disabled");
   json::Value body;
   try {
     body = json::parse(req.body);
@@ -1338,6 +1389,9 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
     }
   }
 
+  if (!loader_)
+    return AdminErr(503, "Service Unavailable",
+                    "dynamic model loading is not enabled", "loader_disabled");
   if (request.path.empty())
     return AdminErr(400, "Bad Request", "'path' is required", "missing_path");
   if (request.session_count == 0) request.session_count = 1;
