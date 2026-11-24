@@ -295,13 +295,15 @@ HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
   // instead of dereferencing a null registry.
   if (registry_ == nullptr) {
     const bool safe =
-        (req.method == "GET" &&
-         (req.path == "/" || req.path == "/admin" ||
-          req.path == "/admin/" || req.path == "/admin/ui" ||
-          req.path == "/admin/models" ||
-          req.path == "/admin/catalog" ||
-          req.path == "/admin/model-mapping" ||
-          req.path == "/admin/npu/status"));
+        ((req.method == "GET" &&
+          (req.path == "/" || req.path == "/admin" ||
+           req.path == "/admin/" || req.path == "/admin/ui" ||
+           req.path == "/admin/models" ||
+           req.path == "/admin/catalog" ||
+           req.path == "/admin/model-mapping" ||
+           req.path == "/admin/npu/status")) ||
+         (req.method == "POST" &&
+          (req.path == "/admin/load" || req.path == "/admin/eject")));
     if (!safe) {
       return AdminErr(404, "Not Found",
                       "admin registry not mounted on this server",
@@ -1009,7 +1011,9 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["capabilities"] = std::move(caps);
       item["backend"] = ed.backend;
       item["sidecar"] = false;
-      item["actionable"] = false;
+      item["actionable"] = true;
+      const bool npu_loaded =
+          std::string(ed.backend) == "npu" && npu_holder_.IsLoaded(ed.id);
       item["note"] = ed.note;
       const std::uint64_t mib = static_cast<std::uint64_t>(bytes >> 20);
       item["size_mib"] = mib;
@@ -1017,10 +1021,10 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["estimated_resident_mib"] =
           static_cast<std::uint64_t>(ed.resident_mib);
       item["shards"] = 0;
-      item["loaded"] = false;
+      item["loaded"] = npu_loaded;
       item["loaded_id"] = "";
       item["is_default"] = false;
-      item["running"] = false;
+      item["running"] = npu_loaded;
       item["npu_capable"] = ed.npu_capable;
       item["path"] = dir.string();
       item["suggested_mmproj"] = "";
@@ -1144,6 +1148,69 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
 }
 
 HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
+  // M6b L2: in-process NPU servables load weights via the servable host
+  // (no GGUF path needed). Mirrors the sidecar branch response shape.
+  // NOTE: body is parsed lazily here; the shared parse below reuses it.
+  {
+    json::Value pre;
+    try {
+      pre = json::parse(req.body);
+    } catch (const std::exception&) {
+    }
+    const std::string npu_id =
+        pre.is_object()
+            ? pre.member_str("id", pre.member_str("model", ""))
+            : "";
+    if (!npu_id.empty() && npu_registry_ != nullptr) {
+      auto npu_spec = npu_registry_->Resolve(npu_id);
+      if (npu_spec != nullptr &&
+          npu_spec->kind ==
+              mbufo::core::npu::NpuArtifactKind::kNpuInProcess) {
+        const std::string quant =
+            pre.is_object() ? pre.member_str("npu_quant", "q8") : "q8";
+        {
+          std::lock_guard lock(loading_state_mutex_);
+          loading_id_ = npu_id;
+          loading_path_ = npu_spec->artifact;
+          loading_started_ms_ = NowSteadyMs();
+        }
+        const auto t_load_start = NowSteadyMs();
+        std::string npu_err;
+        bool ok = false;
+        {
+          std::lock_guard serialize(load_mutex_);
+          ok = npu_holder_.Load(npu_id, npu_spec->artifact, quant,
+                              &npu_err);
+        }
+        {
+          std::lock_guard lock(loading_state_mutex_);
+          loading_id_.clear();
+          loading_path_.clear();
+          loading_started_ms_ = 0;
+        }
+        if (!ok) {
+          return AdminErr(502, "Bad Gateway",
+                          npu_err.empty() ? "npu load failed" : npu_err,
+                          "npu_load_failed");
+        }
+        npu_registry_->SetReady(npu_id, true);
+        json::Value resp = json::Value::object();
+        resp["id"] = npu_id;
+        resp["path"] = npu_spec->artifact;
+        resp["model_path"] = npu_spec->artifact;
+        resp["status"] = "running";
+        resp["backend"] = "npu";
+        resp["sidecar"] = false;
+        resp["estimated_resident_mib"] =
+            static_cast<std::uint64_t>(
+                npu_spec->estimated_resident_mib);
+        resp["load_ms"] = NowSteadyMs() >= t_load_start
+                              ? NowSteadyMs() - t_load_start
+                              : std::uint64_t{0};
+        return AdminOk(std::move(resp));
+      }
+    }
+  }
   if (!loader_)
     return AdminErr(503, "Service Unavailable",
                     "dynamic model loading is not enabled", "loader_disabled");
@@ -1384,6 +1451,33 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
   const std::string id = body.member_str("id");
   if (id.empty())
     return AdminErr(400, "Bad Request", "'id' is required", "missing_id");
+  // M6b L2: in-process NPU servables unload weights via the host.
+  // NPU registry wins ties (same id can exist as a sidecar spec).
+  if (npu_registry_ != nullptr) {
+    auto npu_spec = npu_registry_->Resolve(id);
+    if (npu_spec != nullptr &&
+        npu_spec->kind ==
+            mbufo::core::npu::NpuArtifactKind::kNpuInProcess) {
+      std::lock_guard serialize(load_mutex_);
+      if (!npu_holder_.IsLoaded(id)) {
+        return AdminErr(404, "Not Found",
+                        "npu model '" + id + "' is not loaded",
+                        "not_loaded");
+      }
+      std::string npu_err;
+      if (!npu_holder_.Unload(id, &npu_err)) {
+        return AdminErr(502, "Bad Gateway",
+                        npu_err.empty() ? "npu eject failed" : npu_err,
+                        "npu_eject_failed");
+      }
+      npu_registry_->SetReady(id, false);
+      json::Value resp = json::Value::object();
+      resp["id"] = id;
+      resp["status"] = "ejected";
+      resp["note"] = "npu weights unloaded";
+      return AdminOk(std::move(resp));
+    }
+  }
   // Sidecars stop their OS process; mirrors the GPU eject flow above.
   if (FindSidecarSpec(id) != nullptr) {
     std::lock_guard serialize(load_mutex_);
@@ -1406,6 +1500,9 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
                        : "sidecar process stopped; port released";
     return AdminOk(std::move(resp));
   }
+  if (registry_ == nullptr)
+    return AdminErr(404, "Not Found", "model '" + id + "' is not loaded",
+                    "not_loaded");
   std::lock_guard serialize(load_mutex_);
   if (!registry_->HasId(id))
     return AdminErr(404, "Not Found", "model '" + id + "' is not loaded",

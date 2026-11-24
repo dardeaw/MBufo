@@ -1983,10 +1983,12 @@ int RunServe(std::span<const char* const> args) {
   server::npu_wire::RefreshNpuReady(npu_reg.get());
   if (admin == nullptr) {
     // asr/tts/image/video: read-only admin (catalog + mapping +
-    // NPU status). No GPU registry/loader here by design.
+    // NPU status + NPU load/eject). No GPU registry/loader here.
     admin = std::make_shared<server::ModelAdminService>(
         nullptr, nullptr, nullptr);
   }
+  // NOTE: overwrites the llm-block registry with an identical fresh
+  // copy; both are populated + probed, no loads yet at this point.
   admin->SetNpuRegistry(npu_reg);
   // run() joins every request thread, so no hook call outlives it.
   std::atomic<bool> device_lost{false};

@@ -65,9 +65,9 @@ struct NpuEntryDef {
       {"qwen3-tts-12hz-1.7b", "tts-stack", NpuModelLane::kTts,
        "/mnt/nvme-data/mbufo-models/qwen3-tts-1.7b-base", 2200},
       {"flux2-klein-4b", "flux", NpuModelLane::kImage,
-       "/mnt/nvme-data/mbufo-models/flux2-klein-4b", 930},
+       "/mnt/nvme-data/mbufo-models/flux2-klein-4b/transformer", 930},
       {"z-image-turbo", "zimage", NpuModelLane::kImage,
-       "/mnt/nvme-data/mbufo-models/z-image-turbo", 750},
+       "/mnt/nvme-data/mbufo-models/z-image-turbo/transformer", 750},
   };
 }
 

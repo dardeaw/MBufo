@@ -450,6 +450,32 @@ cmake --build --preset release --parallel 4
 
 ---
 
+## NPU 通道：註冊機制白話版
+
+`/admin` 上的四張 NPU 卡（ASR thinker、TTS 三件套、FLUX.2-klein、Z-Image-Turbo）
+要出現而且變綠，四個條件缺一不可：
+
+1. `model_mapping.json` 有宣告這台且後端含 `npu_*`（先比 gguf 架構／safetensors
+   config 再比檔名）。
+2. 權重目錄在磁碟上（safetensors／diffusers 跟 GGUF 一樣會被掃進 catalog，
+   以前 catalog 只認 `.gguf`）。
+3. NPU 裝置在（`/dev/accel/accel0`）。
+4. serve 行程有註冊且探針過（`GET /admin/npu/status` 顯示 `ready:true`；
+   `POST /admin/load` 把權重搬上 NPU，`POST /admin/eject` 卸載）。
+
+新模型上架永遠是同樣三步誰做都一樣：
+
+1. **Curator** 加一條 mapping（id、task、backends、match 規則）。
+2. **Engine 作者**實作 engine 宣告的能力（範本看
+   `src/core/engine/moe_contract.hpp` 的 MoE 形狀：宣告、註冊表雙向執法、
+   不用硬體的結構驗證、實測 parity 當門禁）。
+3. **整合者** populate registry（`PopulateNpuRegistry` 那套）並記下 parity
+   標準線；M7 suite 把關。
+
+GPU 模型全部沿用舊路（grandfathered）。Sidecar（d3/whisper）走自己的
+拉起協議（`SidecarManager`）。
+
+---
 ## 授權與致謝
 
 上游 gufo 採用 MIT 授權條款；第三方函式庫授權聲明詳見 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 與 `licenses/`。模型權重檔案依其各原始發布者之許可協議規範。

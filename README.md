@@ -453,6 +453,35 @@ For container configurations and system tuning, refer to the [upstream build gui
 
 ---
 
+## NPU Lanes: Registration in Plain Words
+
+Four NPU servables show up as cards in `/admin` (ASR thinker, TTS stack,
+FLUX.2-klein, Z-Image-Turbo). A card appears and turns green only when four
+things line up:
+
+1. `model_mapping.json` declares the model with an `npu_*` backend (match by
+   gguf arch / safetensors config first, then filename patterns).
+2. The weights directory exists on disk (safetensors / diffusers layouts are
+   discovered like GGUFs; the catalog used to be GGUF-only).
+3. The NPU device is present (`/dev/accel/accel0`).
+4. The serve process registered the entry and its probe passed
+   (`GET /admin/npu/status` shows `ready:true`; `POST /admin/load`
+   opens weights on the NPU, `POST /admin/eject` drops them).
+
+Onboarding a new model is always the same three steps, whoever does it:
+
+1. **Curator** adds one mapping row (id, task, backends, match rules).
+2. **Engine author** implements the capability the engine declares (see
+   `src/core/engine/moe_contract.hpp` for the MoE-shaped pattern: declare,
+   registry enforces both ways, structural validate without hardware,
+   empirical parity test as the gate).
+3. **Integrator** populates the registry (`PopulateNpuRegistry`-style) and
+   records a parity bar; the M7 suite gates it.
+
+GPU models never touch any of this (grandfathered). Sidecars (d3/whisper)
+keep their own spawn protocol (`SidecarManager`).
+
+---
 ## License & Credits
 
 Upstream gufo is licensed under the MIT License. Notices for adapted code and dependencies are maintained in [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and `licenses/`.
