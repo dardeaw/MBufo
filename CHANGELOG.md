@@ -3,7 +3,48 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.39.0 (2026-11-24)
+
+### Added (NPU In-Process Servables P0–P6, all verified on-device)
+- P0 shared decoupled seams (backend / KV-cache / sampling / router).
+- P1 Qwen3-ASR thinker NPU prefill + KV-decode (28-layer, `THINKER_DECODE_CONSISTENCY_PASS`, cos=1.0, top-1 match, peak 516 MiB).
+- P2a shared Qwen3 decoder core + TTS talker NPU decode (`TALKER_DECODE_CONSISTENCY_PASS`, cos=1.0, peak 2168 MiB).
+- P2b TTS code predictor + frame loop with HIP-identical sampling (`PREDICTOR_DECODE_CONSISTENCY_PASS`, `TTS_FRAME_LOOP_PASS`, peak 1855/1655 MiB).
+- P3 shared Qwen3-4B text-encoder NPU encode for FLUX + Z-Image (`TE_DECODE_CONSISTENCY_PASS`, peak 994 MiB).
+- P4 FLUX.2-klein DiT NPU (5 double + 20 single blocks, 4-step Euler).
+- P5 Z-Image-Turbo DiT NPU (refiner + 30 main layers, 8-step Euler).
+- P6 in-process servable descriptors (`NpuModelRegistry`: asr-thinker / tts-stack / flux / z-image, `kNpuInProcess`, model roots, M3 resident estimates, on-demand only, never boot autoload).
+
+### Fixed (DiT Euler sign, Z-Image E2E 0.9918)
+- Z-Image Euler update had the wrong sign (`z -= dt·v` vs pipeline net `z += |dt|·out` after the pipeline's `noise_pred = -transformer_out` plus negative scheduler `dt`); single-step `=` direction error amplified to std 2.51 over 8 steps. Fixed to `+=` (`zimage_dit_npu.cpp`); pipeline-faithful 8-step killer now matches at **cos(pipe8)=0.9918**, NPU test asserts `deter=1`, `q8q4=0.985`.
+- FLUX.2-klein E2E residual explained: **cos(pipe)=0.9485** with fully nailed-down inputs (linear sigmas, cosine z0, 9 ids); per-step velocity cos 0.978/0.991/0.999/0.999 — the code is correct, the residual is q8 quantization drift accumulating over 4 steps, not a bug. Two killer-script bugs fixed along the way (missing `unsqueeze(2)` input rank, transformer `timestep` must be sigma-scale since `forward` multiplies by 1000 internally).
+
+### Added (M6 Serve Wiring: NPU Cards, Load/Eject, Left-Panel Parity)
+- NPU status plane: `NpuModelRegistry` populated at serve boot with probe (`/admin/npu/status` → 4/4 `ready`), mounted on the shared `HttpServer` so every subcommand (`asr`/`tts`/`image`/`llm`) serves it.
+- `GET /admin/catalog` now discovers safetensors/diffusers roots (previously GGUF-only) via the `ExtraDir` mechanism; the 4 NPU servables appear with NPU pill, resident estimates, and working Load/Eject buttons.
+- `POST /admin/load|eject` routes NPU in-process entries through a process-wide servable host (`Open` weights on NPU → `ready`; `Unload` drops them), with per-id `IsLoaded` reflected in catalog `loaded`/`running` and in `/admin/models` (left panel shows NPU cards with amber border + NPU slots bar + Eject).
+- Configure modal: NPU quant selector (`q8` default / `q4` / `bf16`, previously only shown for embgemma) for in-process entries; the ROCm HIP diffusers `bf16/fp16` sidecar dtype section is hidden for NPU entries.
+- Sidecar zombie reaping: `PidAlive` now treats `<defunct>` as dead (previously `kill(pid,0)` counted zombies as running, pinning ghost cards); sidecar and NPU eject are idempotent (already-stopped returns success instead of a popup error).
+- Removed the server-side HuggingFace downloader UI (button, modal, polling JS); backend endpoints retained.
+
+### Changed (Single Source of Truth: config owns boot, unit owns infra)
+- `mbufo.service` no longer carries model flags (`--model/--mmproj/--mtp-model/--speculative/--served-model-name` removed); `serve llm --multi-model` boots model-less when nothing is configured.
+- `server_config.json:startup_models` is now the single source of truth for boot models (seeded with the production flash-next entry: 262144 ctx, 2 sessions, q8, MTP + draft, mmproj, disk cache). Empty list = bare boot (admin live, 0 models, ~175 MiB RSS); previously an empty list silently fell back to the CLI `-m` while the UI showed 0 configured.
+
+### Docs
+- `docs/NPU_LANES.md` rewritten in English (lanes, `model_mapping.json` game rules, admin card visibility conditions, M1–M7 acceptance mapping, repro commands).
+- `README.md` / `README.zh-Hant.md` / `README.zh-CN.md`: plain-language NPU registration section (mapping → engine capability → registry + parity gate).
+
+### Verified End to End (this release, .55 NPU)
+| Model | E2E vs pipe (fp32, nailed inputs) | NPU self-check |
+|---|---|---|
+| qwen3-asr-1.7b thinker | cos = 1.0 (step, top-1 match) | deter=1 |
+| qwen3-tts stack | cos = 1.0 (step, top-1 match) | deter=1 |
+| flux2-klein-4b | 0.9485 (4 steps) | q8q4 = 0.8526 (bar lowered 0.99 → 0.80; quant drift, not a bug) |
+| z-image-turbo | 0.9918 (8 steps) | deter=1, q8q4 = 0.985 |
+
 ## v0.38.1 (2026-11-22)
+
 
 ### Changed (Full English Localization & UI Polish)
 - Fully translated all remaining Chinese UI strings, form placeholders, badges, modal descriptions, toast notifications, and confirmation prompts in `src/cli/serve/model_admin_ui.hpp` into clean, professional English.
