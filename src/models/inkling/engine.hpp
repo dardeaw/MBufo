@@ -224,7 +224,8 @@ class Session final {
   float* d_rel_{nullptr};        // [chunk, heads*16]
   float* d_sink_{nullptr};       // [chunk, heads]
   float* d_gate_{nullptr};       // [chunk, qdim] (o-gate logits)
-  float* d_attn_out_{nullptr};   // [chunk, qdim]
+  float* d_attn_out_{nullptr};
+  float* d_attn_splitk_{nullptr};   // [chunk, qdim]
   float* d_proj_out_{nullptr};   // [chunk, h]
   float* d_conv_delta_{nullptr}; // [chunk, 32] (dynamic sconv weight proj)
   float* d_tau_{nullptr};        // [chunk] host-filled LogScale taus
@@ -285,8 +286,10 @@ class Session final {
   std::vector<ImageInjection> image_injections_;
   // DSpark speculative decoding state.
   std::unique_ptr<DsparkSession> dspark_;
+  float* d_dspark_h5_{nullptr};
   float* d_dspark_h23_{nullptr};
   float* d_dspark_h41_{nullptr};
+  float* d_dspark_h48_{nullptr};
   std::vector<void*> sconv_bk_k_;
   std::vector<void*> sconv_bk_v_;
   std::vector<void*> sconv_bk_pa_;

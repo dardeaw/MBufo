@@ -89,7 +89,7 @@ void AttentionDecode(const float* q, const __half* k_cache,
                      std::uint32_t window, std::uint32_t n_heads,
                      std::uint32_t n_kv_heads, std::uint32_t head_dim,
                      std::uint32_t rel_extent, float scale,
-                     hipStream_t stream);
+                     hipStream_t stream, float* splitk_scratch = nullptr);
 void AttentionPrefill(const float* q, const __half* k_cache,
                       const __half* v_cache, const float* sinks,
                       const float* rel, const float* rel_bank, float* out,
@@ -97,7 +97,8 @@ void AttentionPrefill(const float* q, const __half* k_cache,
                       std::uint32_t kv_len, std::uint32_t window,
                       std::uint32_t n_heads, std::uint32_t n_kv_heads,
                       std::uint32_t head_dim, std::uint32_t rel_extent,
-                      float scale, hipStream_t stream);
+                      float scale, hipStream_t stream,
+                      float* splitk_scratch = nullptr);
 
 // out *= sigmoid(gate[t, h]) broadcast over the head dim.
 void SigmoidGateMul(float* attn_out, const float* gate, std::uint32_t n_tokens,
@@ -209,7 +210,8 @@ void AttentionDecodeByPos(const float* q, const __half* k_cache,
                           const std::uint32_t* d_pos, std::uint32_t window,
                           std::uint32_t n_heads, std::uint32_t n_kv_heads,
                           std::uint32_t head_dim, std::uint32_t rel_extent,
-                          float scale, hipStream_t stream);
+                          float scale, hipStream_t stream,
+                      float* splitk_scratch = nullptr);
 
 void CopyKvSlotByPos(__half* cache, __half* backup, const std::uint32_t* d_pos,
                      std::uint32_t kv_dim, bool to_backup, hipStream_t stream);

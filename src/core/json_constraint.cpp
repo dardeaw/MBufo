@@ -1781,6 +1781,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
   // Gemma and ATEM constrain only the call envelope (see WithTools);
   // per-tool argument grammars are unused, so any valid grammar object
   // suffices.
+  if (format == ToolFormat::kInkling) format = ToolFormat::kJson;
   if (format == ToolFormat::kGemma || format == ToolFormat::kAtem) {
     auto object = Object();
     const std::lock_guard lock(mutex);
@@ -1873,8 +1874,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
     ToolFormat format) {
-  if (format == ToolFormat::kJson || format == ToolFormat::kGemma ||
-      format == ToolFormat::kAtem)
+  if (format == ToolFormat::kJson || format == ToolFormat::kInkling ||
+      format == ToolFormat::kGemma || format == ToolFormat::kAtem)
     return Object();
   static const auto qwen = [] {
     const auto schema = json::Value::object();
@@ -2100,7 +2101,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
       grammar->rules_[after] = {{space}};
       if (parallel)
         grammar->rules_[after].push_back({space, literal(marker), calls});
-    } else if (parallel && !deepseek && !gemma && !atem) {
+    } else if (parallel && !deepseek && !gemma && !atem && !inkling) {
       // Gemma's template interleaves a tool_response between calls, so
       // consecutive parallel calls are off-distribution; the envelope
       // always ends the turn after one call.
@@ -2136,8 +2137,16 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
       atem ? text_until("</atem:function_calls>", after) : UINT32_MAX;
   const std::uint32_t atem_args =
       atem ? text_until("</atem:invoke>", atem_tail) : UINT32_MAX;
-  if (inkling && plain_answer && !required) {
-    const auto end_msg = text_until("<|end_message|>", prose);
+  if (inkling) {
+    const auto think_open = literal("<|content_thinking|>");
+    const auto next_msg = text_until("<|message_model|>", calls);
+    const auto think_end = text_until("<|end_message|>", next_msg);
+    grammar->rules_[calls].push_back({think_open, think_end});
+    if (plain_answer && !required) {
+      const auto text_open = literal("<|content_text|>");
+      const auto end_msg = text_until("<|end_message|>", prose);
+      grammar->rules_[calls].push_back({text_open, end_msg});
+    }
   }
   for (const auto& [name, arguments] : tools) {
     const auto begin = literal(

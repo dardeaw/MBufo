@@ -58,8 +58,8 @@ __global__ void HeadRmsNormRopeF16StoreKernel(
         q + (static_cast<std::size_t>(tok) * q_heads + h) * head_dim;
     float* dst =
         q_out + (static_cast<std::size_t>(tok) * q_heads + h) * head_dim;
-    const std::uint32_t i0 = tid * 2U;
-    const std::uint32_t i1 = i0 + 1U;
+    const std::uint32_t i0 = tid;
+    const std::uint32_t i1 = tid + (head_dim >> 1);
     const float x0 = src[i0];
     const float x1 = src[i1];
     float ss = x0 * x0 + x1 * x1;
@@ -86,8 +86,8 @@ __global__ void HeadRmsNormRopeF16StoreKernel(
         v + (static_cast<std::size_t>(tok) * kv_heads + h) * head_dim;
     const std::size_t kv_off =
         (static_cast<std::size_t>(tok) * kv_heads + h) * head_dim;
-    const std::uint32_t i0 = tid * 2U;
-    const std::uint32_t i1 = i0 + 1U;
+    const std::uint32_t i0 = tid;
+    const std::uint32_t i1 = tid + (head_dim >> 1);
     const float x0 = ksrc[i0];
     const float x1 = ksrc[i1];
     float ss = x0 * x0 + x1 * x1;
@@ -130,8 +130,8 @@ __global__ void StoreCtxKvF16Kernel(
       (static_cast<std::size_t>(pos) * kv_heads + h) * head_dim;
 
   // K norm + RoPE (interleaved)
-  const std::uint32_t i0 = tid * 2U;
-  const std::uint32_t i1 = i0 + 1U;
+  const std::uint32_t i0 = tid;
+  const std::uint32_t i1 = tid + (head_dim >> 1);
   const float k0 = ksrc[i0];
   const float k1 = ksrc[i1];
   float sk = k0 * k0 + k1 * k1;
@@ -820,9 +820,6 @@ bool DsparkSession::DraftBlock(
     return false;
   }
   if (mi.has_markov) {
-    core::compute::gemm::SoftCap(
-        im.d_logits, mi.softcap,
-        static_cast<std::size_t>(n_draft) * im.vocab_rows, im.stream);
     if (!CheckHip(hipMemsetAsync(im.d_mk_state, 0,
                                  mi.markov_rank * sizeof(float), im.stream),
                   error_msg, "zero mk_state")) {
@@ -854,6 +851,7 @@ bool DsparkSession::DraftBlock(
                          dim3((mi.markov_vocab + 31U) / 32U), dim3(256), 0,
                          im.stream, mi.markov_w2, mi.markov_w2_b, im.d_mk_out,
                          lg_k, mi.markov_vocab, mi.markov_rank);
+      core::compute::gemm::SoftCap(lg_k, mi.softcap, mi.markov_vocab, im.stream);
       core::compute::gemm::Argmax(lg_k, scratch, im.d_arg + k, 1,
                                   mi.markov_vocab, im.stream);
     }

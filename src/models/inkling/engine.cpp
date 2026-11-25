@@ -1426,8 +1426,10 @@ bool Session::Init(std::string* error_msg) {
       return true;
     };
     const std::size_t h_bytes = kChunk * h * sizeof(float);
-    if (!alloc_arena(d_dspark_h23_, h_bytes, "d_dspark_h23") ||
+    if (!alloc_arena(d_dspark_h5_, h_bytes, "d_dspark_h5") ||
+        !alloc_arena(d_dspark_h23_, h_bytes, "d_dspark_h23") ||
         !alloc_arena(d_dspark_h41_, h_bytes, "d_dspark_h41") ||
+        !alloc_arena(d_dspark_h48_, h_bytes, "d_dspark_h48") ||
         !alloc_arena(d_all_logits_,
                      static_cast<std::size_t>(DsparkModel::kBlockSize) *
                          vocab_rows_ * sizeof(float),
@@ -2164,7 +2166,7 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
         static_cast<const __half*>(v_cache_[layer]), d_sink_, d_rel_,
         static_cast<const float*>(lw.attn_rel_bias.device), d_attn_out_,
         d_pos_, window, lw.q_heads, cfg.num_kv_heads, cfg.head_dim,
-        cfg.rel_extent, kAttnScale, stream_);
+        cfg.rel_extent, kAttnScale, stream_, d_attn_splitk_);
   } else {
     kernels::StoreKvF16(d_k_, d_v_, static_cast<__half*>(k_cache_[layer]),
                         static_cast<__half*>(v_cache_[layer]), n, start_pos,
@@ -2176,14 +2178,14 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
         static_cast<const __half*>(v_cache_[layer]), d_sink_, d_rel_,
         static_cast<const float*>(lw.attn_rel_bias.device), d_attn_out_,
         start_pos, start_pos + n, window, lw.q_heads, cfg.num_kv_heads,
-        cfg.head_dim, cfg.rel_extent, kAttnScale, stream_);
+        cfg.head_dim, cfg.rel_extent, kAttnScale, stream_, d_attn_splitk_);
   } else {
     kernels::AttentionPrefill(
         d_q_, static_cast<const __half*>(k_cache_[layer]),
         static_cast<const __half*>(v_cache_[layer]), d_sink_, d_rel_,
         static_cast<const float*>(lw.attn_rel_bias.device), d_attn_out_, n,
         start_pos, start_pos + n, window, lw.q_heads, cfg.num_kv_heads,
-        cfg.head_dim, cfg.rel_extent, kAttnScale, stream_);
+        cfg.head_dim, cfg.rel_extent, kAttnScale, stream_, d_attn_splitk_);
   }
   }
 
@@ -2368,6 +2370,14 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
                       snap_stride, &snap_count, error_msg)) {
       return false;
     }
+    if (d_dspark_h5_ != nullptr && l == 4) {
+      if (!Check(hipMemcpyAsync(d_dspark_h5_, d_hidden_,
+                                static_cast<std::size_t>(n) * h * sizeof(float),
+                                hipMemcpyDeviceToDevice, stream_),
+                 error_msg, "save dspark h5")) {
+        return false;
+      }
+    }
     if (l == 5) {
       if (!Check(hipMemcpyAsync(d_h5_, d_hidden_,
                                 static_cast<std::size_t>(n) * h * sizeof(float),
@@ -2501,7 +2511,7 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
                         error_msg)) {
         return false;
       }
-      if (d_dspark_h23_ != nullptr && pass == 2 && l == 11) {
+      if (d_dspark_h23_ != nullptr && pass == 2 && l == 10) {
         if (!Check(hipMemcpyAsync(d_dspark_h23_, d_hidden_,
                                   static_cast<std::size_t>(n) * h * sizeof(float),
                                   hipMemcpyDeviceToDevice, stream_),
@@ -2509,7 +2519,7 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
           return false;
         }
       }
-      if (d_dspark_h41_ != nullptr && pass == 3 && l == 17) {
+      if (d_dspark_h41_ != nullptr && pass == 3 && l == 16) {
         if (!Check(hipMemcpyAsync(d_dspark_h41_, d_hidden_,
                                   static_cast<std::size_t>(n) * h * sizeof(float),
                                   hipMemcpyDeviceToDevice, stream_),
@@ -2564,6 +2574,14 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
                         nullptr, d_snaps_,
                       snap_stride, &snap_count, error_msg)) {
       return false;
+    }
+    if (d_dspark_h48_ != nullptr && l == 23) {
+      if (!Check(hipMemcpyAsync(d_dspark_h48_, d_hidden_,
+                                static_cast<std::size_t>(n) * h * sizeof(float),
+                                hipMemcpyDeviceToDevice, stream_),
+                 error_msg, "save dspark h48")) {
+        return false;
+      }
     }
     { if (l == 23) { char nm[64]; snprintf(nm, sizeof(nm), "chunk-layer%u-exit-hidden", l);
     if (l == 23) ParityDump("parity-layer23", d_hidden_, n, h, stream_);
@@ -2658,7 +2676,7 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
 
   if (dspark_ != nullptr) {
     const std::array<const float*, DsparkModel::kNumTargetLayers> th = {
-        d_h5_, d_dspark_h23_, d_dspark_h41_, d_hidden_};
+        d_dspark_h5_, d_dspark_h23_, d_dspark_h41_, d_hidden_};
     if (!dspark_->CaptureContext(th, start_pos, n, error_msg)) {
       return false;
     }
@@ -2873,7 +2891,20 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
   while (accepted < n_draft && target_next[accepted] == drafts[accepted]) {
     ++accepted;
   }
-
+  if (const char* env = std::getenv("MBUFO_DSPARK_STATS"); env && env[0] == '1') {
+    static uint64_t dbg_rounds = 0, dbg_drafted = 0, dbg_accepted = 0;
+    ++dbg_rounds;
+    dbg_drafted += n_draft;
+    dbg_accepted += accepted;
+    if (dbg_rounds % 25 == 0 || model_->IsStopToken(t0)) {
+      std::fprintf(stderr,
+          "[dspark-stats] r=%llu acc=%llu/%llu (%.1f%%, %.2f tok/step)\n",
+          (unsigned long long)dbg_rounds, (unsigned long long)dbg_accepted,
+          (unsigned long long)dbg_drafted,
+          100.0 * dbg_accepted / (dbg_drafted ? dbg_drafted : 1),
+          1.0 + static_cast<double>(dbg_accepted) / dbg_rounds);
+    }
+  }
   out_tokens->clear();
   out_tokens->reserve(1 + accepted);
   out_tokens->push_back(t0);
