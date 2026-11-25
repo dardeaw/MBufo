@@ -369,15 +369,19 @@ struct DsparkModel::Impl {
     const float* attn_k_norm{nullptr};
     const float* attn_k_ctx_norm{nullptr};
     const float* attn_v_ctx_norm{nullptr};
-    const void* attn_q{nullptr};
-    const void* attn_k{nullptr};
-    const void* attn_v{nullptr};
-    const void* attn_k_ctx{nullptr};
-    const void* attn_v_ctx{nullptr};
-    const void* attn_output{nullptr};
-    const void* ffn_gate{nullptr};
-    const void* ffn_up{nullptr};
-    const void* ffn_down{nullptr};
+    struct Mat {
+      const void* ptr{nullptr};
+      core::GgmlType type{core::GgmlType::kQ8_0};
+    };
+    Mat attn_q{};
+    Mat attn_k{};
+    Mat attn_v{};
+    Mat attn_k_ctx{};
+    Mat attn_v_ctx{};
+    Mat attn_output{};
+    Mat ffn_gate{};
+    Mat ffn_up{};
+    Mat ffn_down{};
     bool sliding{true};
   };
 
@@ -450,24 +454,11 @@ std::unique_ptr<DsparkModel> DsparkModel::Load(const std::string& dspark_path,
   im.rms_eps = im.reader->GetMetadataFloat32("dflash.attention.layer_norm_rms_epsilon").value_or(1e-6F);
   im.softcap = im.reader->GetMetadataFloat32("dflash.final_logit_softcapping").value_or(30.0F);
 
-  auto upload = [&](const std::string& name, const void** out_ptr,
-                    core::GgmlType expect_type) -> bool {
-    const auto* t = im.reader->FindTensor(name);
-    if (t == nullptr || t->type != expect_type) {
-      if (error_msg != nullptr) {
-        *error_msg = "dspark: missing/bad tensor " + name;
-      }
-      return false;
-    }
-    const std::size_t bytes =
-        expect_type == core::GgmlType::kF32
-            ? t->ElementCount() * sizeof(float)
-            : (expect_type == core::GgmlType::kBF16
-                   ? t->ElementCount() * sizeof(std::uint16_t)
-                   : (t->ElementCount() / 32ULL) * 34ULL);
+  auto alloc_upload = [&](const std::string& name, const void* host_ptr,
+                          std::size_t bytes, const void** out_ptr) -> bool {
     void* dev = nullptr;
     if (!CheckHip(hipMalloc(&dev, bytes), error_msg, name.c_str()) ||
-        !CheckHip(hipMemcpy(dev, t->data, bytes, hipMemcpyHostToDevice),
+        !CheckHip(hipMemcpy(dev, host_ptr, bytes, hipMemcpyHostToDevice),
                   error_msg, name.c_str())) {
       if (dev != nullptr) (void)hipFree(dev);
       return false;
@@ -477,14 +468,88 @@ std::unique_ptr<DsparkModel> DsparkModel::Load(const std::string& dspark_path,
     *out_ptr = dev;
     return true;
   };
-  auto up_f32 = [&](const std::string& n, const float** p) {
-    return upload(n, reinterpret_cast<const void**>(p), core::GgmlType::kF32);
+  auto up_f32 = [&](const std::string& n, const float** p) -> bool {
+    const auto* t = im.reader->FindTensor(n);
+    if (t == nullptr) {
+      if (error_msg != nullptr) *error_msg = "dspark: missing tensor " + n;
+      return false;
+    }
+    const std::size_t cnt = t->ElementCount();
+    if (t->type == core::GgmlType::kF32) {
+      return alloc_upload(n, t->data, cnt * sizeof(float),
+                          reinterpret_cast<const void**>(p));
+    }
+    if (t->type == core::GgmlType::kBF16) {
+      std::vector<float> tmp(cnt);
+      const auto* src = static_cast<const std::uint16_t*>(t->data);
+      for (std::size_t i = 0; i < cnt; ++i) {
+        const std::uint32_t bits = static_cast<std::uint32_t>(src[i]) << 16;
+        std::memcpy(&tmp[i], &bits, sizeof(float));
+      }
+      return alloc_upload(n, tmp.data(), cnt * sizeof(float),
+                          reinterpret_cast<const void**>(p));
+    }
+    if (error_msg != nullptr) *error_msg = "dspark: bad f32/bf16 tensor " + n;
+    return false;
   };
-  auto up_q8 = [&](const std::string& n, const void** p) {
-    return upload(n, p, core::GgmlType::kQ8_0);
+  auto up_mat = [&](const std::string& n, Impl::Layer::Mat* out) -> bool {
+    const auto* t = im.reader->FindTensor(n);
+    if (t == nullptr) {
+      if (error_msg != nullptr) *error_msg = "dspark: missing tensor " + n;
+      return false;
+    }
+    if (t->type == core::GgmlType::kQ8_0) {
+      out->type = core::GgmlType::kQ8_0;
+      return alloc_upload(n, t->data, (t->ElementCount() / 32ULL) * 34ULL,
+                          &out->ptr);
+    }
+    if (t->type == core::GgmlType::kF16) {
+      out->type = core::GgmlType::kF16;
+      return alloc_upload(n, t->data, t->ElementCount() * sizeof(__half),
+                          &out->ptr);
+    }
+    if (t->type == core::GgmlType::kBF16) {
+      const std::size_t cnt = t->ElementCount();
+      std::vector<std::uint16_t> tmp(cnt);
+      const auto* src = static_cast<const std::uint16_t*>(t->data);
+      for (std::size_t i = 0; i < cnt; ++i) {
+        const std::uint32_t bits = static_cast<std::uint32_t>(src[i]) << 16;
+        float fv = 0.0F;
+        std::memcpy(&fv, &bits, sizeof(float));
+        const __half hv = __float2half(fv);
+        std::memcpy(&tmp[i], &hv, sizeof(std::uint16_t));
+      }
+      out->type = core::GgmlType::kF16;
+      return alloc_upload(n, tmp.data(), cnt * sizeof(std::uint16_t),
+                          &out->ptr);
+    }
+    if (error_msg != nullptr) *error_msg = "dspark: bad mat tensor " + n;
+    return false;
   };
-  auto up_bf16 = [&](const std::string& n, const std::uint16_t** p) {
-    return upload(n, reinterpret_cast<const void**>(p), core::GgmlType::kBF16);
+  auto up_bf16 = [&](const std::string& n, const std::uint16_t** p) -> bool {
+    const auto* t = im.reader->FindTensor(n);
+    if (t == nullptr) {
+      if (error_msg != nullptr) *error_msg = "dspark: missing tensor " + n;
+      return false;
+    }
+    const std::size_t cnt = t->ElementCount();
+    if (t->type == core::GgmlType::kBF16) {
+      return alloc_upload(n, t->data, cnt * sizeof(std::uint16_t),
+                          reinterpret_cast<const void**>(p));
+    }
+    if (t->type == core::GgmlType::kF32) {
+      std::vector<std::uint16_t> tmp(cnt);
+      const auto* src = static_cast<const float*>(t->data);
+      for (std::size_t i = 0; i < cnt; ++i) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &src[i], sizeof(float));
+        tmp[i] = static_cast<std::uint16_t>(bits >> 16);
+      }
+      return alloc_upload(n, tmp.data(), cnt * sizeof(std::uint16_t),
+                          reinterpret_cast<const void**>(p));
+    }
+    if (error_msg != nullptr) *error_msg = "dspark: bad bf16 tensor " + n;
+    return false;
   };
 
   if (!up_f32("mask_embd.weight", &im.mask_embd) ||
@@ -504,15 +569,15 @@ std::unique_ptr<DsparkModel> DsparkModel::Load(const std::string& dspark_path,
         !up_f32(p + "attn_q_norm.weight", &l.attn_q_norm) ||
         !up_f32(p + "attn_k_norm.weight", &l.attn_k_norm) ||
         !up_f32(p + "attn_k_ctx_norm.weight", &l.attn_k_ctx_norm) ||
-        !up_q8(p + "attn_q.weight", &l.attn_q) ||
-        !up_q8(p + "attn_k.weight", &l.attn_k) ||
-        !up_q8(p + "attn_v.weight", &l.attn_v) ||
-        !up_q8(p + "attn_k_ctx.weight", &l.attn_k_ctx) ||
-        !up_q8(p + "attn_v_ctx.weight", &l.attn_v_ctx) ||
-        !up_q8(p + "attn_output.weight", &l.attn_output) ||
-        !up_q8(p + "ffn_gate.weight", &l.ffn_gate) ||
-        !up_q8(p + "ffn_up.weight", &l.ffn_up) ||
-        !up_q8(p + "ffn_down.weight", &l.ffn_down)) {
+        !up_mat(p + "attn_q.weight", &l.attn_q) ||
+        !up_mat(p + "attn_k.weight", &l.attn_k) ||
+        !up_mat(p + "attn_v.weight", &l.attn_v) ||
+        !up_mat(p + "attn_k_ctx.weight", &l.attn_k_ctx) ||
+        !up_mat(p + "attn_v_ctx.weight", &l.attn_v_ctx) ||
+        !up_mat(p + "attn_output.weight", &l.attn_output) ||
+        !up_mat(p + "ffn_gate.weight", &l.ffn_gate) ||
+        !up_mat(p + "ffn_up.weight", &l.ffn_up) ||
+        !up_mat(p + "ffn_down.weight", &l.ffn_down)) {
       return nullptr;
     }
     if (im.reader->FindTensor(p + "attn_v_ctx_norm.weight") != nullptr &&
@@ -658,22 +723,28 @@ std::unique_ptr<DsparkSession> DsparkSession::Create(
 }
 
 namespace {
-void DsparkGemm(const void* w, const float* x, __half* x16, __half* wdq,
+template <typename MatT>
+void DsparkGemm(const MatT& w, const float* x, __half* x16, __half* wdq,
                 std::size_t wdq_bytes, void* preq, std::size_t preq_bytes,
                 float* y, std::uint32_t n, std::uint32_t m, std::uint32_t k,
                 hipStream_t stream) {
   namespace gemm = core::compute::gemm;
-  if (n >= 1U && n <= 8U && (k % 32U) == 0U &&
-      preq_bytes >= gemm::NarrowQ80PrequantBytes(n, k) &&
+  if (w.type == core::GgmlType::kQ8_0 && n >= 1U && n <= 8U &&
+      (k % 32U) == 0U && preq_bytes >= gemm::NarrowQ80PrequantBytes(n, k) &&
       gemm::PrequantizeQ8_1(x, preq, n, k, stream) == 0 &&
-      gemm::LaunchNarrowQ80Decode(w, preq, y, k, m, n,
+      gemm::LaunchNarrowQ80Decode(w.ptr, preq, y, k, m, n,
                                   gemm::NarrowQ80PrequantStrideBlocks(k),
                                   stream)) {
     return;
   }
+  if (n == 1 &&
+      gemm::GemvDecode(w.ptr, static_cast<int>(w.type), x, y, n, m, k, preq,
+                       preq_bytes, stream) == ::mbufo::core::quant::Status::kOk) {
+    return;
+  }
   gemm::ConvertF32ToF16(x, x16, static_cast<std::size_t>(n) * k, stream);
-  (void)gemm::QuantGemmPrefill(w, static_cast<int>(core::GgmlType::kQ8_0), x16,
-                               y, n, m, k, wdq, wdq_bytes, stream);
+  (void)gemm::QuantGemmPrefill(w.ptr, static_cast<int>(w.type), x16, y, n, m, k,
+                               wdq, wdq_bytes, stream);
 }
 }  // namespace
 
