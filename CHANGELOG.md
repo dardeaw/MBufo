@@ -6,12 +6,13 @@ Format: `version.txt` is the version; pushes go to the fork only, never upstream
 ## v0.39.1 (2026-11-25)
 
 ### Added & Fixed (Inkling-2-Mini Loop-MoE + Vision + DSpark MTP + Tool Calling)
-- **Inkling-2-Mini Engine (`src/models/inkling/`)**: Full HIP inference support for `inkling2` Loop-MoE architecture (`UD-Q4_K_XL` / `Q8_0` / `NVFP4`), including `mmproj-BF16.gguf` Vision encoder integration and multimodal chat completions.
+- **Inkling-2-Mini Engine (`src/models/inkling/`)**: Full HIP inference support for `inkling2` Loop-MoE architecture (`UD-Q4_K_XL` / `h6-lbf16-UD-Q4_K_M` / `Q8_0` / `NVFP4`), including `Q4_K`/`Q5_K`/`Q6_K` load conversion (`Q8_0` MoE experts, `F16` output head, K-quant `GemvDecode` fallback), `mmproj-BF16.gguf` Vision encoder integration, and multimodal chat completions.
 - **DSpark MTP Speculative Decoding (`dspark.hpp`, `dspark.hip`)**: Implemented RNN/GRU Markov head (`joint_proj` + `markov_w1`/`w2`), Interleaved RoPE in `HeadRmsNormRopeF16StoreKernel` and `StoreCtxKvF16Kernel`, and zero-rerun `sconv` prefix snapshots (`SaveSconvPrefixesKernel` / `RestoreSconvPrefix`) eliminating redundant 48-layer rollback passes. Fixed `n > 1` multi-token `GemvDecode`/`LaunchNarrowQ80*` verify path by restricting narrow decode kernels to `n == 1`.
 - **Native Tool Calling & Reasoning (`ToolFormat::kInkling`)**: Added `JsonConstraint::WithTools` grammar and `ParseInklingGeneration` parser for `<|message_model|>`, `<|content_thinking|>`, `<|content_text|>`, `<|content_invoke_tool_json|>`, `<|end_message|>`, and `<|content_model_end_sampling|>`, plus `Thinking effort level: 0` when `--think off`.
 - **Admin UI Discovery & Load (`model_admin_api.cpp`, `model_mapping.json`)**: Registered `inkling-2-mini` with `dspark` speculative decoding, `mmproj` vision sidecar detection, `VISION`/`TOOLS` badges, and `/admin/models/load` support.
-- **Verified Benchmarks (gfx1151, `--speculative dspark -d 3`, Vision enabled)**:
-  - `tools/bench/tool_ladder.py`: **12/12 pass (100%)** across `0` / `500` / `2000` / `8000` context lengths.
+- **Verified Benchmarks (gfx1151, `--think off`)**:
+  - `Inkling-2-Mini-h6-lbf16-UD-Q4_K_M` + `dspark-Inkling-2-Mini-BF16` (`-d 5`, `c=8192`): coding **43.90 tok/s** (vs `31.25` off, **+40.5%**), prose **51.32 tok/s** (vs `30.78` off, **+66.7%**), 2.7K **24.98 tok/s** (vs `23.14` off, **+8.0%**).
+  - `tools/bench/tool_ladder.py` (`--speculative dspark -d 3`, Vision enabled): **12/12 pass (100%)** across `0` / `500` / `2000` / `8000` context lengths.
 
 ## v0.38.1 (2026-11-22)
 

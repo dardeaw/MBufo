@@ -490,6 +490,34 @@ bool ConvertTensorToF16(TensorRef& t, const TensorRef* scale_or_null,
       done += n;
     }
     for (; done < elems; ++done) buf[done] = F32ToF16Bits(0.0F);
+  } else if (t.type == core::GgmlType::kQ4_K ||
+             t.type == core::GgmlType::kQ5_K ||
+             t.type == core::GgmlType::kQ6_K) {
+    const std::size_t blk_bytes =
+        t.type == core::GgmlType::kQ4_K
+            ? sizeof(::mbufo::quant::block_q4_K)
+            : (t.type == core::GgmlType::kQ5_K
+                   ? sizeof(::mbufo::quant::block_q5_K)
+                   : sizeof(::mbufo::quant::block_q6_K));
+    constexpr std::size_t kDeqChunkElems = 1ULL << 20;
+    std::vector<float> tmp(std::min(kDeqChunkElems, elems));
+    std::size_t done = 0;
+    const std::size_t full = (elems / 256ULL) * 256ULL;
+    while (done < full) {
+      const std::size_t n = std::min(kDeqChunkElems, full - done);
+      const auto* blk =
+          static_cast<const std::uint8_t*>(t.data) + (done / 256ULL) * blk_bytes;
+      if (t.type == core::GgmlType::kQ4_K) {
+        ::mbufo::quant::DequantizeQ4_K(blk, tmp.data(), n);
+      } else if (t.type == core::GgmlType::kQ5_K) {
+        ::mbufo::quant::DequantizeQ5_K(blk, tmp.data(), n);
+      } else {
+        ::mbufo::quant::DequantizeQ6_K(blk, tmp.data(), n);
+      }
+      for (std::size_t i = 0; i < n; ++i) buf[done + i] = F32ToF16Bits(tmp[i]);
+      done += n;
+    }
+    for (; done < elems; ++done) buf[done] = F32ToF16Bits(0.0F);
   } else {
     if (error_msg != nullptr) {
       *error_msg = "inkling: unexpected type in load conversion";
@@ -669,6 +697,43 @@ bool ConvertNvfp4ToQ80(TensorRef& t, const TensorRef* scale_or_null,
 // reads reference [16,1024] layout, so transpose once at load into an owned
 // heap buffer and repoint the TensorRef (mirrored to device by the standard
 // heap-region path, like converted_f16_).
+bool ConvertKQuantToQ80(TensorRef& t,
+                        std::vector<std::vector<std::uint8_t>>* owned_q80,
+                        std::string* error_msg) {
+  if (t.empty()) return true;
+  if (t.cols == 0 || (t.cols % 32) != 0) {
+    if (error_msg != nullptr) *error_msg = "inkling: K-quant cols not /32";
+    return false;
+  }
+  const std::size_t total_rows = static_cast<std::size_t>(t.rows) * t.depth;
+  const std::size_t kQ8BlockBytes = sizeof(::mbufo::quant::block_q8_0);
+  const std::size_t dst_row_bytes = (t.cols / 32) * kQ8BlockBytes;
+  const std::size_t src_row_bytes = t.RowBytes();
+  std::vector<std::uint8_t> buf(total_rows * dst_row_bytes);
+  std::vector<float> tmp(t.cols);
+  const auto* src = static_cast<const std::uint8_t*>(t.data);
+  auto* dst = buf.data();
+  for (std::size_t r = 0; r < total_rows; ++r) {
+    const void* srow = src + r * src_row_bytes;
+    if (t.type == core::GgmlType::kQ4_K) {
+      ::mbufo::quant::DequantizeQ4_K(srow, tmp.data(), t.cols);
+    } else if (t.type == core::GgmlType::kQ5_K) {
+      ::mbufo::quant::DequantizeQ5_K(srow, tmp.data(), t.cols);
+    } else if (t.type == core::GgmlType::kQ6_K) {
+      ::mbufo::quant::DequantizeQ6_K(srow, tmp.data(), t.cols);
+    } else {
+      if (error_msg != nullptr) *error_msg = "inkling: bad K-quant type";
+      return false;
+    }
+    ::mbufo::quant::QuantizeQ8_0(tmp.data(), dst + r * dst_row_bytes, t.cols);
+  }
+  owned_q80->push_back(std::move(buf));
+  t.data = owned_q80->back().data();
+  t.type = core::GgmlType::kQ8_0;
+  t.size_bytes = owned_q80->back().size();
+  return true;
+}
+
 bool TransposeRelBias(ModelWeights& w,
                       std::vector<std::vector<float>>* owned,
                       std::string* error_msg) {
@@ -702,15 +767,24 @@ bool ConvertLoadTimeFormats(ModelWeights& w,
     if (IsNvfp4(t.type)) {
       return ConvertNvfp4ToQ40(t, scale, owned_q80, error_msg);
     }
-    if (t.type == core::GgmlType::kQ8_0) return true;
+    if (t.type == core::GgmlType::kQ8_0 || t.type == core::GgmlType::kQ4_0) {
+      return true;
+    }
+    if (t.type == core::GgmlType::kQ4_K || t.type == core::GgmlType::kQ5_K ||
+        t.type == core::GgmlType::kQ6_K) {
+      return ConvertKQuantToQ80(t, owned_q80, error_msg);
+    }
     return ConvertTensorToF16(t, scale, owned, error_msg);
   };
   auto keep_q8_or_f16 = [&](TensorRef& t) -> bool {
-    if (t.type == core::GgmlType::kQ8_0) return true;
+    if (t.type == core::GgmlType::kQ8_0 || t.type == core::GgmlType::kQ6_K ||
+        t.type == core::GgmlType::kQ5_K || t.type == core::GgmlType::kQ4_K) {
+      return true;
+    }
     return ConvertTensorToF16(t, nullptr, owned, error_msg);
   };
   if (!ConvertTensorToF16(w.token_embd, nullptr, owned, error_msg) ||
-      !keep_q8_or_f16(w.output)) {
+      !ConvertTensorToF16(w.output, nullptr, owned, error_msg)) {
     return false;
   }
   for (auto& l : w.layers) {
@@ -947,6 +1021,16 @@ void InklingGemm(const TensorRef& w, const float* x, __half* x16,
                              m, k, wdq_scratch, wdq_bytes,
                              stream);
   if (pst == ::mbufo::core::quant::Status::kOk) {
+    return;
+  }
+  if (w.type == core::GgmlType::kQ4_K || w.type == core::GgmlType::kQ5_K ||
+      w.type == core::GgmlType::kQ6_K) {
+    for (std::uint32_t off = 0; off < n_tokens; ++off) {
+      (void)gemm::GemvDecode(dev, static_cast<int>(w.type),
+                       x + static_cast<std::size_t>(off) * k,
+                       y + static_cast<std::size_t>(off) * m, 1, m, k,
+                       preq_scratch, preq_bytes, stream);
+    }
     return;
   }
   for (std::uint32_t off = 0; off < n_tokens; off += 8) {

@@ -2042,7 +2042,7 @@ void AttentionPrefill(const float* q, const __half* k_cache,
   if (n_tokens == 0) return;
   (void)kv_len;
   if (head_dim == 128U && splitk_scratch != nullptr && n_tokens <= 8U &&
-      n_heads <= 32U && start_pos >= 512U) {
+      n_heads <= 32U && start_pos >= 16384U) {
     const std::uint32_t n_splits = (window > 0U && window <= 2048U) ? 8U : 32U;
     hipLaunchKernelGGL(InklingAttnSplitKKernel, dim3(n_tokens, n_heads, n_splits),
                        dim3(256), 0, stream, q, k_cache, v_cache, sinks, rel,
