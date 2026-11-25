@@ -663,10 +663,12 @@ void DsparkGemm(const void* w, const float* x, __half* x16, __half* wdq,
                 float* y, std::uint32_t n, std::uint32_t m, std::uint32_t k,
                 hipStream_t stream) {
   namespace gemm = core::compute::gemm;
-  if (n == 1 &&
-      gemm::GemvDecode(w, static_cast<int>(core::GgmlType::kQ8_0), x, y, n, m,
-                       k, preq, preq_bytes, stream) ==
-          ::mbufo::core::quant::Status::kOk) {
+  if (n >= 1U && n <= 8U && (k % 32U) == 0U &&
+      preq_bytes >= gemm::NarrowQ80PrequantBytes(n, k) &&
+      gemm::PrequantizeQ8_1(x, preq, n, k, stream) == 0 &&
+      gemm::LaunchNarrowQ80Decode(w, preq, y, k, m, n,
+                                  gemm::NarrowQ80PrequantStrideBlocks(k),
+                                  stream)) {
     return;
   }
   gemm::ConvertF32ToF16(x, x16, static_cast<std::size_t>(n) * k, stream);

@@ -923,6 +923,14 @@ void InklingGemm(const TensorRef& w, const float* x, __half* x16,
                  hipStream_t stream) {
   namespace gemm = core::compute::gemm;
   const void* dev = w.device != nullptr ? w.device : w.data;
+  if (n_tokens >= 1U && n_tokens <= 8U && w.type == core::GgmlType::kQ8_0 &&
+      (k % 32U) == 0U && preq_bytes >= gemm::NarrowQ80PrequantBytes(n_tokens, k) &&
+      gemm::PrequantizeQ8_1(x, preq_scratch, n_tokens, k, stream) == 0 &&
+      gemm::LaunchNarrowQ80Decode(dev, preq_scratch, y, k, m, n_tokens,
+                                  gemm::NarrowQ80PrequantStrideBlocks(k),
+                                  stream)) {
+    return;
+  }
   if (n_tokens == 1 &&
       gemm::GemvDecode(dev, static_cast<int>(w.type), x, y, n_tokens, m, k,
                        preq_scratch, preq_bytes, stream) ==
@@ -2003,7 +2011,8 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
   bool qin_prequantized = false;
   bool qin_f16_ready = false; qin_prequantized = false;
   auto inkling_gemm_qin = [&](const TensorRef& w, float* y, std::uint32_t m) {
-    if (n == 1) {
+    if (n >= 1 && n <= 8 &&
+        preq_bytes_ >= core::compute::gemm::NarrowQ80PrequantBytes(n, h)) {
       if (!qin_prequantized && w.type == core::GgmlType::kQ8_0 &&
           core::compute::gemm::PrequantizeQ8_1(q_in, d_preq_, n, h, stream_) ==
               0) {
@@ -2011,7 +2020,8 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
       }
       if (qin_prequantized && w.type == core::GgmlType::kQ8_0 &&
           core::compute::gemm::LaunchNarrowQ80Decode(
-              dev_ptr(w), d_preq_, y, h, m, n, h / 32, stream_)) {
+              dev_ptr(w), d_preq_, y, h, m, n,
+              core::compute::gemm::NarrowQ80PrequantStrideBlocks(h), stream_)) {
         return;
       }
       InklingGemm(w, q_in, d_x16_, d_wdq_, wdq_elems_ * 2, d_preq_, preq_bytes_,
@@ -2036,14 +2046,16 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
     }
   };
   if (!is_global) {
-    if (n == 1 && q_in == k && q_in == v &&
+    if (n >= 1 && n <= 8 && q_in == k && q_in == v &&
+        preq_bytes_ >= core::compute::gemm::NarrowQ80PrequantBytes(n, h) &&
         lw.wq.type == core::GgmlType::kQ8_0 &&
         lw.wk.type == core::GgmlType::kQ8_0 &&
         lw.wv.type == core::GgmlType::kQ8_0 &&
         core::compute::gemm::PrequantizeQ8_1(q_in, d_preq_, n, h, stream_) == 0 &&
         core::compute::gemm::LaunchNarrowQ80QkvDecode(
             dev_ptr(lw.wq), dev_ptr(lw.wk), dev_ptr(lw.wv), d_preq_, d_q_,
-            d_k_, d_v_, h, q_dim, kv_dim, n, h / 32, stream_)) {
+            d_k_, d_v_, h, q_dim, kv_dim, n,
+            core::compute::gemm::NarrowQ80PrequantStrideBlocks(h), stream_)) {
       qin_prequantized = true;
     } else {
       inkling_gemm_qin(lw.wq, d_q_, q_dim);
@@ -2915,7 +2927,7 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
   dspark_adapt_ema_ =
       0.85F * dspark_adapt_ema_ +
       0.15F * (static_cast<float>(accepted) / static_cast<float>(n_draft));
-  if (dspark_adapt_ema_ < 0.36F) {
+  if (anchor_pos < 16384U && dspark_adapt_ema_ < 0.40F) {
     dspark_adapt_cooldown_ = 16U;
   }
   if (const char* env = std::getenv("MBUFO_DSPARK_STATS"); env && env[0] == '1') {

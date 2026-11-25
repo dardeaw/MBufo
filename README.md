@@ -114,7 +114,7 @@ Coordinated through a unified Draft Registry across model families:
 - **27B DFlash2**: Fully compatible with Blocked-Q8 KV cache, writing directly to blocked sidecars with bit-exact continuity.
 - **Gemma 4 MTP**: Async-GPU drafting with single-forward verification delivers **74–86 tok/s** decode at long contexts (`d=3` yields 1.74–1.78 accepted tokens/round).
 - **Muse Glimmer DFlash**: Sustained end-to-end acceptance rate of **~89%**.
-- **Inkling-2-Mini DSpark**: Loop-MoE + Vision (`mmproj-BF16`) with NeoX-RoPE RNN/GRU Markov head, F16 Split-K decode/verify & zero-rerun `sconv` snapshots; **35.5 / 46.8 tok/s** (`-d 5`, up to **58.0 tok/s** prose at `-d 7`), **471–1236 tok/s** Cold-KV prefill & **8.8 tok/s** 123K decode (**55.6%** acceptance, **3.76 tok/step**).
+- **Inkling-2-Mini DSpark**: Loop-MoE + Vision (`mmproj-BF16`) with NeoX-RoPE RNN/GRU Markov head, F16 Split-K decode/verify & zero-rerun `sconv` snapshots; **33.9 / 54.8 tok/s** (`-d 5` coding/prose vs `33.1 / 32.7` off, up to **58.0 tok/s** at `-d 7`), **471–1236 tok/s** Cold-KV prefill & **8.8 tok/s** 123K decode (**55.6%** acceptance, **3.76 tok/step**).
 
 ### Prefix RAM Cache & Production Session Profiles
 
