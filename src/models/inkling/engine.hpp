@@ -286,6 +286,8 @@ class Session final {
   std::vector<ImageInjection> image_injections_;
   // DSpark speculative decoding state.
   std::unique_ptr<DsparkSession> dspark_;
+  float dspark_adapt_ema_{0.50F};
+  std::uint32_t dspark_adapt_cooldown_{0U};
   float* d_dspark_h5_{nullptr};
   float* d_dspark_h23_{nullptr};
   float* d_dspark_h41_{nullptr};

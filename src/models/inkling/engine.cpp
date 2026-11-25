@@ -929,6 +929,11 @@ void InklingGemm(const TensorRef& w, const float* x, __half* x16,
           ::mbufo::core::quant::Status::kOk) {
     return;
   }
+  if (n_tokens > 1 && n_tokens <= gemm::kQuantGemvMultiMaxTokens &&
+      gemm::QuantGemvMulti(dev, static_cast<int>(w.type), x, y, n_tokens, m, k,
+                           stream)) {
+    return;
+  }
   gemm::ConvertF32ToF16(x, x16, static_cast<std::size_t>(n_tokens) * k, stream);
   const auto pst = gemm::QuantGemmPrefill(dev, static_cast<int>(w.type), x16, y, n_tokens,
                              m, k, wdq_scratch, wdq_bytes,
@@ -2013,6 +2018,11 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
                   y, n, m, static_cast<std::uint32_t>(h), stream_);
       return;
     }
+    if (n <= core::compute::gemm::kQuantGemvMultiMaxTokens &&
+        core::compute::gemm::QuantGemvMulti(
+            dev_ptr(w), static_cast<int>(w.type), q_in, y, n, m, h, stream_)) {
+      return;
+    }
     if (!qin_f16_ready) {
       core::compute::gemm::ConvertF32ToF16(
           q_in, d_x16_, static_cast<std::size_t>(n) * h, stream_);
@@ -2863,6 +2873,17 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
   n_draft = std::min({n_draft, DsparkModel::kMaxDraft, max_avail});
 
   const std::int32_t t0 = SampleGreedy();
+  if (anchor_pos < 64U) {
+    dspark_adapt_ema_ = 0.50F;
+    dspark_adapt_cooldown_ = 0U;
+  }
+  if (dspark_adapt_cooldown_ > 0U && n_draft > 0U && !model_->IsStopToken(t0)) {
+    --dspark_adapt_cooldown_;
+    if (dspark_adapt_cooldown_ == 0U) dspark_adapt_ema_ = 0.42F;
+    if (!Evaluate(t0, error_msg)) return false;
+    out_tokens->assign(1, t0);
+    return true;
+  }
   if (n_draft == 0 || model_->IsStopToken(t0)) {
     if (!Evaluate(t0, error_msg)) return false;
     out_tokens->assign(1, t0);
@@ -2890,6 +2911,12 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
   std::uint32_t accepted = 0;
   while (accepted < n_draft && target_next[accepted] == drafts[accepted]) {
     ++accepted;
+  }
+  dspark_adapt_ema_ =
+      0.85F * dspark_adapt_ema_ +
+      0.15F * (static_cast<float>(accepted) / static_cast<float>(n_draft));
+  if (dspark_adapt_ema_ < 0.36F) {
+    dspark_adapt_cooldown_ = 16U;
   }
   if (const char* env = std::getenv("MBUFO_DSPARK_STATS"); env && env[0] == '1') {
     static uint64_t dbg_rounds = 0, dbg_drafted = 0, dbg_accepted = 0;

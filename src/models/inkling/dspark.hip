@@ -565,6 +565,9 @@ struct DsparkSession::Impl {
   void* d_arg_scratch{nullptr};
   void* d_preq{nullptr};
   __half* d_x16{nullptr};
+  __half* d_x16_ctx{nullptr};
+  float* d_k_ctx_tmp{nullptr};
+  float* d_v_ctx_tmp{nullptr};
   __half* d_wdq{nullptr};
   float* d_markov_ctx{nullptr};
   float* d_mk_state{nullptr};
@@ -632,6 +635,9 @@ std::unique_ptr<DsparkSession> DsparkSession::Create(
              8ULL * 64ULL * sizeof(core::compute::gemm::ArgmaxCandidate), "arg_s") ||
       !alloc(&im.d_preq, 256ULL * 1024ULL, "preq") ||
       !alloc(&im.d_x16, 8ULL * mi.ff * sizeof(__half), "x16") ||
+      !alloc(&im.d_x16_ctx, 512ULL * mi.hidden * sizeof(__half), "x16_ctx") ||
+      !alloc(&im.d_k_ctx_tmp, 512ULL * kv_dim * sizeof(float), "k_ctx_tmp") ||
+      !alloc(&im.d_v_ctx_tmp, 512ULL * kv_dim * sizeof(float), "v_ctx_tmp") ||
       !alloc(&im.d_wdq, static_cast<std::size_t>(mi.ff) * mi.hidden * sizeof(__half), "wdq")) {
     return nullptr;
   }
@@ -687,18 +693,18 @@ bool DsparkSession::CaptureContext(
                        elems);
     kernels::RmsNormGamma(im.d_ctx_buf, l.ctx_norm, im.d_ctx_buf, n_tokens,
                           mi.hidden, mi.rms_eps, im.stream);
-    // Process in chunks of 8 -> k_ctx, v_ctx (d_k/d_v are sized for 8 tokens)
-    for (std::uint32_t off = 0; off < n_tokens; off += 8U) {
-      const std::uint32_t cnt = std::min(8U, n_tokens - off);
+    // Process in chunks of 512 -> k_ctx, v_ctx (avoids 256x per-8-token Q8_0 dequant!)
+    for (std::uint32_t off = 0; off < n_tokens; off += 512U) {
+      const std::uint32_t cnt = std::min(512U, n_tokens - off);
       DsparkGemm(l.attn_k_ctx, im.d_ctx_buf + static_cast<std::size_t>(off) * mi.hidden,
-                 im.d_x16, im.d_wdq, wdq_bytes, im.d_preq, 256ULL * 1024ULL,
-                 im.d_k, cnt, kv_dim, mi.hidden, im.stream);
+                 im.d_x16_ctx, im.d_wdq, wdq_bytes, im.d_preq, 256ULL * 1024ULL,
+                 im.d_k_ctx_tmp, cnt, kv_dim, mi.hidden, im.stream);
       DsparkGemm(l.attn_v_ctx, im.d_ctx_buf + static_cast<std::size_t>(off) * mi.hidden,
-                 im.d_x16, im.d_wdq, wdq_bytes, im.d_preq, 256ULL * 1024ULL,
-                 im.d_v, cnt, kv_dim, mi.hidden, im.stream);
+                 im.d_x16_ctx, im.d_wdq, wdq_bytes, im.d_preq, 256ULL * 1024ULL,
+                 im.d_v_ctx_tmp, cnt, kv_dim, mi.hidden, im.stream);
       hipLaunchKernelGGL(StoreCtxKvF16Kernel, dim3(cnt, mi.kv_heads),
-                         dim3(mi.head_dim >> 1), 0, im.stream, im.d_k, im.d_v,
-                         l.attn_k_ctx_norm, l.attn_v_ctx_norm,
+                         dim3(mi.head_dim >> 1), 0, im.stream, im.d_k_ctx_tmp,
+                 im.d_v_ctx_tmp, l.attn_k_ctx_norm, l.attn_v_ctx_norm,
                          im.k_ctx_cache[b], im.v_ctx_cache[b], start_pos + off,
                          mi.kv_heads, mi.head_dim, mi.rms_eps, mi.rope_theta);
     }
