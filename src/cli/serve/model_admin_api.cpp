@@ -727,6 +727,9 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     const bool is_inkling =
         fam_lower.find("inkling") != std::string::npos ||
         id_lower.find("inkling") != std::string::npos;
+    if (is_inkling && id_lower.find("q4_k_xl") != std::string::npos) {
+      continue;
+    }
 
     // Supported speculative modes matched strictly against inference_backend.cpp.
     // Note: Qwen3.8-27B (QwenGpuModel) supports DFlash2 only and rejects MTP.
