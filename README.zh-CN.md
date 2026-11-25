@@ -36,7 +36,7 @@
 | --- | --- | --- |
 | **极速响应** | **短请求 TTFT 0.7 秒** | 具备防饥饿公平调度机制，短请求即便遭遇 25 万 token 超长 Prefill 并发，首字延迟仍稳定压在 0.7 秒内，保证输出位元精确无失真。 |
 | **极致省容** | **KV 缓存显存减半** | Blocked-Q8 缓存架构让单一 262,144 (256K) token 请求的 KV 占用从 6.44 GB 骤降至 3.42 GB（4-bit 模式更可低至 1.81 GB）。 |
-| **全能托管** | **22 个 GGUF 模型家族** | 单一 HTTP 端口统筹服务，涵盖 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 与 Reranker，支持动态热加载与无重启卸载。 |
+| **全能托管** | **23 个 GGUF 模型家族** | 单一 HTTP 端口统筹服务，涵盖 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 与 Reranker，支持动态热加载与无重启卸载。 |
 
 > §1 与 §2 中除 llama.cpp 对比以外的数据（混合批次、公平性、并发引擎对比、int8 WMMA）来自早期版本，记录于 `docs/MIXED_BATCH.md` 与 `docs/KV-V4.md`。llama.cpp 对比与「基准测试」一节已在本版本重新测量。
 
@@ -112,6 +112,7 @@ MBufo 在多路负载下展现出最优秀的线性扩展能力（总吞吐平�
 - **Flash-Next MTP**：并发宽度 2 / 3 / 4 下接受率维持在 **88.7% / 91.6% / 89.5%**，打破随批次衰减的瓶颈，总吞吐达到 97 / 111 / 133 tok/s。
 - **27B DFlash2**：原生整合 Blocked-Q8 KV 缓存，验证流程直接写入 Blocked Sidecar，保持精准一致。
 - **Gemma 4 MTP**：采用异步 GPU 草稿与单 Forward 验证，长上下文解码速度达 **74–86 tok/s**（`d=3` 深度下每轮平均接受 1.74–1.78 tokens）。
+- **Inkling-2-Mini DSpark**：Loop-MoE（`UD-Q4_K_XL` / `h6-lbf16-UD-Q4_K_M`）+ Vision（`mmproj-BF16`），NeoX-RoPE RNN/GRU Markov 草稿头、WMMA Split-K 验证与零重算 `sconv` 快照；`h6-lbf16` + `dspark-BF16`（`-d 5`）在 4K/16K/30K/60K 达 **50.9 / 47.3 / 43.5 / 34.9 tok/s**（接受率 65.8%–75.4%）。
 - **Muse Glimmer DFlash**：端到端投机接受率达 **~89%**。
 
 ### Prefix RAM 缓存与生产级 Session 配置
@@ -220,6 +221,8 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 | **Muse Glimmer 30B** | 30B | DFlash (~89%) | ATEM 工具调用、W8A8 / Q8_0 支持 |
 | **Llama-3.1-8B** | 8B Dense | — | 标准 Dense GQA 支持 |
 | **DeepSeek V4 Flash** | MoE（IQ2/Q2/Q8 混合 GGUF） | DSpark | MLA decode、ds4 一致 kernel、約 81 GiB 常駐 |
+| **Inkling-2-Mini** | Q8_0、F16 / BF16 / F32、Q6_K→F16 output | NVFP4→Q4_0、Q5_K→Q8_0、Q8_0 |
+| **Inkling-2-Mini** | 26B-A5.4B Loop-MoE | DSpark (BF16 / Q8_0) | 3x 循环核心 + `mmproj-BF16` 视觉、WMMA Split-K 验证、原生 Tool Calling |
 | **Laguna 2.1 (XS / S)** | 33B-A3B / 118B-A8B MoE | — | 1:3 全局（YaRN）/ SWA-512 双 RoPE、per-head softplus gate、sigmoid+bias top-8/10 MoE + 共享专家 |
 | **Qwen3-Embedding-0.6B** | 0.6B | — | 缓存池化 Single-Prefill 执行器 |
 | **bge-m3** | 0.6B XLM-R | — | CLS 池化、Q4_K_M 加载器、hipBLASLt 调优 |

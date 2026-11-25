@@ -36,7 +36,7 @@
 | --- | --- | --- |
 | **極速響應** | **短請求 TTFT 0.7 秒** | 具備防飢餓公平調度機制，短請求即便遭遇 25 萬 token 超長 Prefill 併發，首字延遲仍穩定壓在 0.7 秒內，保證輸出位元精確無失真。 |
 | **極限省容** | **KV 快取記憶體減半** | Blocked-Q8 快取架構讓單一 262,144 (256K) token 請求的 KV 佔用從 6.44 GB 驟降至 3.42 GB（4-bit 模式更可低至 1.81 GB）。 |
-| **全能託管** | **22 個 GGUF 模型家族** | 單一 HTTP 端口統一服務，涵蓋 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 與 Reranker，支援動態熱載入與無重啟卸載。 |
+| **全能託管** | **23 個 GGUF 模型家族** | 單一 HTTP 端口統一服務，涵蓋 Flash-Next、27B、Gemma 4、MoE 模型、Embedding 與 Reranker，支援動態熱載入與無重啟卸載。 |
 
 > §1 與 §2 中除 llama.cpp 對比以外的數據（混合批次、公平性、並發引擎對比、int8 WMMA）來自早期版本，記錄於 `docs/MIXED_BATCH.md` 與 `docs/KV-V4.md`。llama.cpp 對比與「基準測試」一節已在本版本重新測量。
 
@@ -112,6 +112,7 @@ MBufo 在多路負載下展現出最優異的線性擴展能力（總吞吐平�
 - **Flash-Next MTP**：併發寬度 2 / 3 / 4 下接受率維持在 **88.7% / 91.6% / 89.5%**，打破隨批次衰減的瓶頸，總吞吐達到 97 / 111 / 133 tok/s。
 - **27B DFlash2**：原生整合 Blocked-Q8 KV 快取，驗證流程直接寫入 Blocked Sidecar，保持精準一致。
 - **Gemma 4 MTP**：採用異步 GPU 草稿與單 Forward 驗證，長上下文解碼速度達 **74–86 tok/s**（`d=3` 深度下每輪平均接受 1.74–1.78 tokens）。
+- **Inkling-2-Mini DSpark**：Loop-MoE（`UD-Q4_K_XL` / `h6-lbf16-UD-Q4_K_M`）+ Vision（`mmproj-BF16`），NeoX-RoPE RNN/GRU Markov 草稿頭、WMMA Split-K 驗證與零重算 `sconv` 快照；`h6-lbf16` + `dspark-BF16`（`-d 5`）於 4K/16K/30K/60K 達 **50.9 / 47.3 / 43.5 / 34.9 tok/s**（接受率 65.8%–75.4%）。
 - **Muse Glimmer DFlash**：端到端投機接受率達 **~89%**。
 
 ### Prefix RAM 快取與生產級 Session 配置
@@ -220,6 +221,7 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 | **Muse Glimmer 30B** | 30B | DFlash (~89%) | ATEM 工具呼叫、W8A8 / Q8_0 支援 |
 | **Llama-3.1-8B** | 8B Dense | — | 標準 Dense GQA 支援 |
 | **DeepSeek V4 Flash** | MoE（IQ2/Q2/Q8 混合 GGUF） | DSpark | MLA decode、ds4 一致 kernel、約 81 GiB 常駐 |
+| **Inkling-2-Mini** | 26B-A5.4B Loop-MoE | DSpark (BF16 / Q8_0) | 3x 循環核心 + `mmproj-BF16` 視覺、WMMA Split-K 驗證、原生 Tool Calling |
 | **Laguna 2.1 (XS / S)** | 33B-A3B / 118B-A8B MoE | — | 1:3 全域（YaRN）/ SWA-512 雙 RoPE、per-head softplus gate、sigmoid+bias top-8/10 MoE + 共享專家 |
 | **Qwen3-Embedding-0.6B** | 0.6B | — | 快取池化 Single-Prefill 執行器 |
 | **bge-m3** | 0.6B XLM-R | — | CLS 池化、Q4_K_M 載入器、hipBLASLt 調優 |
@@ -259,6 +261,7 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 | **GPT-OSS 20B / 120B** | Q8_0、Q5_0、Q4_K 及 F16 / BF16 / F32 注意力 | MXFP4（原生）、Q4_0、Q8_0、Q5_1（K 系列無法編碼其 2880 寬的專家） |
 | **Muse Glimmer、Llama-3.1** | Q4_0、Q8_0、Q4_K、Q5_K、Q6_K、F16 / BF16 / F32 | - |
 | **DeepSeek V4 Flash** | 已發佈的 IQ2_XXS / Q2_K / Q8_0 混合配方 | 同左 |
+| **Inkling-2-Mini** | Q8_0、F16 / BF16 / F32、Q6_K→F16 output | NVFP4→Q4_0、Q5_K→Q8_0、Q8_0 |
 | **bge-m3、重排序、Qwen3-Embedding** | Q4_K_M 與 F16 載入器 | - |
 | **EmbeddingGemma 2** | BF16（由 `tools/convert/embeddinggemma2_to_gguf.py` 產生 GGUF） | - |
 

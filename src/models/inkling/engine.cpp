@@ -1358,6 +1358,7 @@ bool Session::Init(std::string* error_msg) {
       !alloc(&d_sink_, kChunk * cfg.num_q_heads, "d_sink") ||
       !alloc(&d_gate_, kChunk * q_dim, "d_gate") ||
       !alloc(&d_attn_out_, kChunk * q_dim, "d_attn_out") ||
+      !alloc(&d_attn_splitk_, 16ULL * cfg.num_q_heads * 32ULL * 130ULL, "d_attn_splitk") ||
       !alloc(&d_proj_out_, kChunk * h, "d_proj_out") ||
       !alloc(&d_conv_delta_, kChunk * 32, "d_conv_delta") ||
       !alloc(&d_tau_, kChunk, "d_tau") ||
@@ -1673,19 +1674,45 @@ bool Session::ForwardMoe(const LayerWeights& lw, const float* ffn_in,
       map_moe_wt(lw.ffn_down_exps.type, &down_wt);
 
   if (n <= 8 && !InklingDebugEnabled() && moe_wt_ok) {
-    if (gemm::LaunchMoeWaveGateUp(
+    const bool q8_gu_ok =
+        preq_bytes_ >= gemm::NarrowQ80PrequantBytes(n, h) &&
+        gemm::PrequantizeQ8_1(ffn_in, d_preq_, n, h, stream_) == 0 &&
+        gemm::LaunchMoeWaveGateUpQ8(
+            lw.ffn_gate_up_exps.device, gu_wt,
+            lw.ffn_gate_up_exps.RowBytes(),
+            lw.ffn_gate_up_exps.ExpertStrideBytes(), d_preq_,
+            gemm::NarrowQ80PrequantStrideBlocks(h), d_exp_ids_, d_expert_act_,
+            static_cast<std::uint32_t>(slots), kTopK,
+            static_cast<std::uint32_t>(ff), static_cast<std::uint32_t>(h),
+            gemm::MoeGateAct::kSituSoftcap, stream_);
+    const bool gu_ok =
+        q8_gu_ok ||
+        gemm::LaunchMoeWaveGateUp(
             lw.ffn_gate_up_exps.device, gu_wt,
             lw.ffn_gate_up_exps.RowBytes(),
             lw.ffn_gate_up_exps.ExpertStrideBytes(), ffn_in, d_exp_ids_,
             d_expert_act_, static_cast<std::uint32_t>(slots), kTopK,
             static_cast<std::uint32_t>(ff), static_cast<std::uint32_t>(h),
-            gemm::MoeGateAct::kSituSoftcap, stream_) &&
-        gemm::LaunchMoeWaveDown(
+            gemm::MoeGateAct::kSituSoftcap, stream_);
+    const bool q8_dn_ok =
+        gu_ok &&
+        preq_bytes_ >= gemm::NarrowQ80PrequantBytes(slots, ff) &&
+        gemm::PrequantizeQ8_1(d_expert_act_, d_preq_, slots, ff, stream_) == 0 &&
+        gemm::LaunchMoeWaveDownQ8(
             lw.ffn_down_exps.device, down_wt,
             lw.ffn_down_exps.RowBytes(), lw.ffn_down_exps.ExpertStrideBytes(),
-            d_expert_act_, d_exp_ids_, d_expert_down_,
-            static_cast<std::uint32_t>(slots), static_cast<std::uint32_t>(h),
-            static_cast<std::uint32_t>(ff), stream_)) {
+            d_preq_, gemm::NarrowQ80PrequantStrideBlocks(ff), d_exp_ids_,
+            d_expert_down_, static_cast<std::uint32_t>(slots),
+            static_cast<std::uint32_t>(h), static_cast<std::uint32_t>(ff),
+            stream_);
+    if (gu_ok &&
+        (q8_dn_ok ||
+         gemm::LaunchMoeWaveDown(
+             lw.ffn_down_exps.device, down_wt,
+             lw.ffn_down_exps.RowBytes(), lw.ffn_down_exps.ExpertStrideBytes(),
+             d_expert_act_, d_exp_ids_, d_expert_down_,
+             static_cast<std::uint32_t>(slots), static_cast<std::uint32_t>(h),
+             static_cast<std::uint32_t>(ff), stream_))) {
       gemm::MoeEpilogue(d_expert_down_, d_exp_weights_, moe_out, n, kTopK,
                         static_cast<std::uint32_t>(h), stream_);
       g_prof.moe_exps_ms += ProfTick(stream_, &prof_t);
@@ -2129,8 +2156,32 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
                   y, n, m, static_cast<std::uint32_t>(h), stream_);
     }
   };
+  bool multi_gate_rel_done = false;
   if (!is_global) {
     if (n >= 1 && n <= 8 && q_in == k && q_in == v &&
+        preq_bytes_ >= core::compute::gemm::NarrowQ80PrequantBytes(n, h) &&
+        lw.wq.type == core::GgmlType::kQ8_0 &&
+        lw.wk.type == core::GgmlType::kQ8_0 &&
+        lw.wv.type == core::GgmlType::kQ8_0 &&
+        lw.attn_gate.type == core::GgmlType::kQ8_0 &&
+        lw.attn_rel.type == core::GgmlType::kQ8_0 &&
+        core::compute::gemm::PrequantizeQ8_1(q_in, d_preq_, n, h, stream_) == 0) {
+      const core::compute::gemm::NarrowQ80Target targets[5] = {
+          {dev_ptr(lw.wq), d_q_, q_dim},
+          {dev_ptr(lw.wk), d_k_, kv_dim},
+          {dev_ptr(lw.wv), d_v_, kv_dim},
+          {dev_ptr(lw.attn_gate), d_gate_, q_dim},
+          {dev_ptr(lw.attn_rel), d_rel_,
+           static_cast<std::uint32_t>(cfg.num_q_heads * cfg.rel_dim)},
+      };
+      if (core::compute::gemm::LaunchNarrowQ80MultiDecode(
+              targets, 5, d_preq_, h, n,
+              core::compute::gemm::NarrowQ80PrequantStrideBlocks(h), stream_)) {
+        qin_prequantized = true;
+        multi_gate_rel_done = true;
+      }
+    }
+    if (!multi_gate_rel_done && n >= 1 && n <= 8 && q_in == k && q_in == v &&
         preq_bytes_ >= core::compute::gemm::NarrowQ80PrequantBytes(n, h) &&
         lw.wq.type == core::GgmlType::kQ8_0 &&
         lw.wk.type == core::GgmlType::kQ8_0 &&
@@ -2141,7 +2192,7 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
             d_k_, d_v_, h, q_dim, kv_dim, n,
             core::compute::gemm::NarrowQ80PrequantStrideBlocks(h), stream_)) {
       qin_prequantized = true;
-    } else {
+    } else if (!multi_gate_rel_done) {
       inkling_gemm_qin(lw.wq, d_q_, q_dim);
       if (q_in == k && q_in == v) {
         inkling_gemm_qin(lw.wk, d_k_, kv_dim);
@@ -2221,8 +2272,9 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
 
   // StaticSconvForward/DynamicSconvForward above used d_x16_ as scratch.
   qin_f16_ready = false; qin_prequantized = false;
-  bool gate_done = false;
-  if (n == 1 && lw.attn_rel.type == core::GgmlType::kQ8_0 &&
+  bool gate_done = multi_gate_rel_done;
+  bool sink_done = false;
+  if (!gate_done && n == 1 && lw.attn_rel.type == core::GgmlType::kQ8_0 &&
       lw.attn_sink_proj.type == core::GgmlType::kQ8_0 &&
       lw.attn_gate.type == core::GgmlType::kQ8_0) {
     if (!qin_prequantized &&
@@ -2236,6 +2288,27 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
             dev_ptr(lw.attn_gate), d_preq_, d_rel_, d_sink_, d_gate_, h,
             cfg.num_q_heads * cfg.rel_dim, lw.q_heads, q_dim, n, h / 32,
             stream_)) {
+      gate_done = true;
+      sink_done = true;
+    }
+  }
+  if (!gate_done && n >= 1 && n <= 8 &&
+      preq_bytes_ >= core::compute::gemm::NarrowQ80PrequantBytes(n, h) &&
+      lw.attn_rel.type == core::GgmlType::kQ8_0 &&
+      lw.attn_gate.type == core::GgmlType::kQ8_0) {
+    if (!qin_prequantized &&
+        core::compute::gemm::PrequantizeQ8_1(q_in, d_preq_, n, h, stream_) == 0) {
+      qin_prequantized = true;
+    }
+    const core::compute::gemm::NarrowQ80Target targets[2] = {
+        {dev_ptr(lw.attn_rel), d_rel_,
+         static_cast<std::uint32_t>(cfg.num_q_heads * cfg.rel_dim)},
+        {dev_ptr(lw.attn_gate), d_gate_, q_dim},
+    };
+    if (qin_prequantized &&
+        core::compute::gemm::LaunchNarrowQ80MultiDecode(
+            targets, 2, d_preq_, h, n,
+            core::compute::gemm::NarrowQ80PrequantStrideBlocks(h), stream_)) {
       gate_done = true;
     }
   }
@@ -2259,7 +2332,7 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
     kernels::ScaleRows(d_q_, d_tau_, n, q_dim, stream_);
   }
 
-  if (!gate_done) inkling_gemm_qin(lw.attn_sink_proj, d_sink_, lw.q_heads);
+  if (!sink_done) inkling_gemm_qin(lw.attn_sink_proj, d_sink_, lw.q_heads);
   if (layer == 0) ParityDump("dbg-L0-sink", d_sink_, n, lw.q_heads, stream_);
   DbgDump(layer, "sink", d_sink_, n, lw.q_heads, stream_);
 
@@ -2969,17 +3042,7 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
   n_draft = std::min({n_draft, DsparkModel::kMaxDraft, max_avail});
 
   const std::int32_t t0 = SampleGreedy();
-  if (anchor_pos < 64U) {
-    dspark_adapt_ema_ = 0.50F;
-    dspark_adapt_cooldown_ = 0U;
-  }
-  if (dspark_adapt_cooldown_ > 0U && n_draft > 0U && !model_->IsStopToken(t0)) {
-    --dspark_adapt_cooldown_;
-    if (dspark_adapt_cooldown_ == 0U) dspark_adapt_ema_ = 0.42F;
-    if (!Evaluate(t0, error_msg)) return false;
-    out_tokens->assign(1, t0);
-    return true;
-  }
+
   if (n_draft == 0 || model_->IsStopToken(t0)) {
     if (!Evaluate(t0, error_msg)) return false;
     out_tokens->assign(1, t0);
@@ -3011,9 +3074,7 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
   dspark_adapt_ema_ =
       0.85F * dspark_adapt_ema_ +
       0.15F * (static_cast<float>(accepted) / static_cast<float>(n_draft));
-  if (anchor_pos < 16384U && dspark_adapt_ema_ < 0.40F) {
-    dspark_adapt_cooldown_ = 16U;
-  }
+
   if (const char* env = std::getenv("MBUFO_DSPARK_STATS"); env && env[0] == '1') {
     static uint64_t dbg_rounds = 0, dbg_drafted = 0, dbg_accepted = 0;
     ++dbg_rounds;

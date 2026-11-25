@@ -3,6 +3,17 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.39.2 (2026-11-25)
+
+### Performance & Speculative Decoding Fixes (Shared Core GEMM + Inkling-2-Mini)
+- **Shared Core GEMM (`src/core/compute/gemm/`)**:
+  - Added `LaunchNarrowQ80MultiDecode` (`gemv_narrow_q8.hip`) to fuse up to 6 shared-input `Q8_0` projections into a single kernel launch.
+  - Added `LaunchMoeWaveGateUpQ8` and `LaunchMoeWaveDownQ8` (`moe_decode_wave.hip`) using prequantized `Q8_1` + coalesced `__builtin_amdgcn_sdot4` for `n <= 8` MoE decode/verify.
+- **Inkling-2-Mini Attention & DSpark Fixes (`src/models/inkling/`)**:
+  - Allocated missing `d_attn_splitk_` scratch buffer and added `InklingAttnWmmaSplitKKernel` (`16x16x16` WMMA Split-K for `n=2..16` verify) + `InklingAttnSplitKGqaKernel` (GQA=3 shared KV reads with 4x unrolled prefetch).
+  - Removed `<16K` `dspark_adapt_cooldown_` desync that skipped `CaptureContext` and degraded draft acceptance.
+  - Verified (`Inkling-2-Mini-h6-lbf16-UD-Q4_K_M` + `dspark-Inkling-2-Mini-BF16`, `-d 5`, `--think off`, gfx1151): **50.90 tok/s** (`4K`, 65.8% acc), **47.27 tok/s** (`16K`, 72.3% acc), **43.52 tok/s** (`30K`, 75.4% acc), **34.91 tok/s** (`60K`, 74.8% acc).
+
 ## v0.39.1 (2026-11-25)
 
 ### Added & Fixed (Inkling-2-Mini Loop-MoE + Vision + DSpark MTP + Tool Calling)
@@ -39,7 +50,7 @@ Format: `version.txt` is the version; pushes go to the fork only, never upstream
 ## v0.37.0 (2026-11-22)
 
 ### Added (Control Plane & Persistent Server Config)
-- Added persistent configuration file `/home/dardeaw/.config/mbufo/server_config.json` managed via `ServerConfig` in `src/cli/serve/admin_ops.{hpp,cpp}` and loaded by `serve.cpp`.
+- Added persistent configuration file `~/.config/mbufo/server_config.json` managed via `ServerConfig` in `src/cli/serve/admin_ops.{hpp,cpp}` and loaded by `serve.cpp`.
 - Added Settings Modal (`#settings-modal`) in Web UI with 4 dedicated management tabs:
   1. Startup & Default Models configuration
   2. Security & Web UI Password configuration (SHA-256 password hashing with salt, `POST /admin/auth/password`)
@@ -59,13 +70,13 @@ Format: `version.txt` is the version; pushes go to the fork only, never upstream
 - NPU lanes wired end to end (default kNone, HIP behavior unchanged): bge-m3 `EngineSession::Sync` (`SetNpuScheduler`/`SetNpuLaneConfig`), bge-reranker `Score()`, embeddinggemma2 CPU + HIP `Embed()`, D3 decide (`RunDecideSync`). Router sidecar proxy (`src/cli/serve/npu_sidecar_proxy.{hpp,cpp}`): `/v1/systemone` → `:8766`, `/v1/audio/transcriptions` → `:8764`, `/v1/audio/speech` + `/v1/audio/voices` → `:8765`, with `MBUFO_SIDECAR_PROXY` / `MBUFO_*_UPSTREAM` overrides and 502 on disconnect. Admin catalog gains 5 NPU sidecar entries (D3-Lite/Nano/Mini/Turbo/Ultra); `/v1/audio/*` and `/v1/systemone` work with no model loaded.
 - HrxBind is real behind `MBUFO_ENABLE_NPU` (`npu_device_hrx.{hpp,cpp}` + CMake `mbufo_npu` lib): open → register xclbin → sync, verified on silicon (`HRX_PROBE_PASS dev=amdxdna`).
 - NPU op registry up to 11 ops with guards (`mha_softmax`, `softmax`, `rope`, `q4nx_dequant` incl. m_tile=64 + 64 KiB L1 check; `RefRmsNormRows` / `RefSoftmaxRows` / `RefRopeTwoHalves`CPU goldens); `npu_kernels_attn.hpp` (GQA/SWA/B-slot/BRnd DMA checks, `RefBidirectionalGqaAttention`, `ValidatePrefillFv`); `aie_linalg_aie2p_conv_even.patch` so non-emulated bf16 MMUL uses round-to-nearest-even (fixes a -0.158 systematic floor-bias).
-- IRON assets on NPU2 silicon: `e06_ffn.py` (EmbGemma2 24-layer FFN chain 3.02 ms, cos 0.9999754), `e07_attn.py` (4 standalone sub-kernels + 24-layer mixed chain S=128 17.387 ms / S=512 119.578 ms), `e08_transformer_e2e.py` (+P4 real-weights 768-d cos 0.9998656), `e09_bge_gemm.py` (64x1024x1024 bf16, cos 0.9999882), `e10_quant_gemm.py` (Q8 bfp16ebs8 EBS8-block + Q4 q4nx on-core dequant, 4 prebuilt xclbins under `/mnt/nvme-data/mbufo-models/npu-kernels/quant_gemm/`); `npu_safetensors_bridge` (1.49 GB model.safetensors → 146.82 MiB packed shards, HF parity bit-exact).
+- IRON assets on NPU2 silicon: `e06_ffn.py` (EmbGemma2 24-layer FFN chain 3.02 ms, cos 0.9999754), `e07_attn.py` (4 standalone sub-kernels + 24-layer mixed chain S=128 17.387 ms / S=512 119.578 ms), `e08_transformer_e2e.py` (+P4 real-weights 768-d cos 0.9998656), `e09_bge_gemm.py` (64x1024x1024 bf16, cos 0.9999882), `e10_quant_gemm.py` (Q8 bfp16ebs8 EBS8-block + Q4 q4nx on-core dequant, 4 prebuilt xclbins under `npu-kernels/quant_gemm/`); `npu_safetensors_bridge` (1.49 GB model.safetensors → 146.82 MiB packed shards, HF parity bit-exact).
 - Unified model list: README §3 in all three languages now shows the 22 GPU families first, a separator line, then 9 NPU entries (device / format / route / ✅ served vs 🧪 runtime-verified status).
 
 ### Added (NPU Q8/Q4 shared engine across 5 models, all NPU2-silicon verified)
 - New `e10` AIE2P 16-core quantized GEMM core (`q8_256x256` / `q8_1024x1024` / `q4_256x256` / `q4_1024x1024` prebuilt xclbins): Q8 bfp16ebs8 W8A16 (56.25% size) and Q4 q4nx W4A16 per-group-32 with on-core L1 dequant fusion (31.25% size), `NpuQuantGemmEngine` with reusable DMA stage BO pool.
 - `npu_quant_models_test` (`ALL_5_MODELS_NPU_Q8_Q4_TESTS_PASS`): EmbGemma2 24L (Q8 88.05 ms cos 0.999601 / Q4 93.12 ms cos 0.993148), Qwen3-TTS (Q8 65.77 ms / Q4 64.16 ms, wav artifacts), Qwen3-ASR (Q8 42.32 ms top-1 match), FLUX.2-klein-4B (Q8 280.09 ms / Q4 304.52 ms, PNG artifacts), Z-Image-Turbo (Q8 2028.57 ms / Q4 2127.15 ms, PNG artifacts); `MBUFO_NPU_QUANT=q8|q4` selects the path in `NpuEmbGemma2Runtime`.
-- Weights/models staged under `/mnt/nvme-data/mbufo-models/` (embeddinggemma-2-gguf, qwen3-tts-1.7b-base→`qwen3-tts-1.7b`, qwen3-asr-1.7b, flux2-klein-4b, z-image-turbo) plus NPU artifacts under `npu-kernels/` and `npu-quant/`.
+- Weights/models staged under `<models-dir>/` (embeddinggemma-2-gguf, qwen3-tts-1.7b-base→`qwen3-tts-1.7b`, qwen3-asr-1.7b, flux2-klein-4b, z-image-turbo) plus NPU artifacts under `npu-kernels/` and `npu-quant/`.
 
 ## v0.35.0 (2026-11-21)
 

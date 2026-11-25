@@ -109,6 +109,12 @@ void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
 // blocks), ungated, 1..8 tokens, K % 32 == 0, stride_blocks >= K / 32,
 // excluding N == 1 && M <= 64 && K % 5120 == 0 (model-local accumulation).
 // Returns false for out-of-contract shapes; the caller keeps its legacy path.
+int PrequantizeQ8_1(const float* x, void* out, std::size_t tokens,
+                    std::size_t k, hipStream_t stream);
+bool LaunchNarrowQ80Decode4Wave(const void* weights, const void* input,
+                                float* output, std::size_t k, std::size_t rows,
+                                std::size_t input_stride_blocks,
+                                hipStream_t stream);
 bool LaunchNarrowQ80Decode(const void* weights, const void* input,
                            float* output, std::size_t k, std::size_t rows,
                            std::size_t tokens, std::size_t input_stride_blocks,
@@ -153,13 +159,28 @@ bool LaunchNarrowQ80GatedPrequant(const void* up_w, const void* gate_w,
 // Same per-row arithmetic as the narrow decode kernel; the three projections
 // share one activation row, so one launch covers qrows + kvrows + kvrows
 // rows. Returns false out of contract (caller keeps three narrow launches).
+struct NarrowQ80Target {
+  const void* weights = nullptr;
+  float* out = nullptr;
+  std::uint32_t rows = 0;
+};
+bool LaunchNarrowQ80MultiDecode(const NarrowQ80Target* targets, std::size_t n_targets,
+                                const void* input, std::size_t k, std::size_t tokens,
+                                std::size_t input_stride_blocks, hipStream_t stream);
 bool LaunchNarrowQ80QkvDecode(const void* wq, const void* wk, const void* wv,
                              const void* input, float* out_q, float* out_k,
                              float* out_v, std::size_t k, std::size_t qrows,
                              std::size_t kvrows, std::size_t tokens,
                              std::size_t input_stride_blocks,
                              hipStream_t stream);
-// ---- Narrow decode with fused row-bias + residual add (Q8_0, ungated) ----
+
+bool LaunchNarrowQ80TripleDecode(const void* w0, const void* w1, const void* w2,
+                                 const void* input, float* out0, float* out1,
+                                 float* out2, std::size_t k, std::size_t r0,
+                                 std::size_t r1, std::size_t r2,
+                                 std::size_t tokens,
+                                 std::size_t input_stride_blocks,
+                                 hipStream_t stream);// ---- Narrow decode with fused row-bias + residual add (Q8_0, ungated) ----
 // Bitwise-identical epilogue to AddRowBias + ResidualAdd after the plain
 // narrow kernel (inout[t*M+row] += dot + bias[row]). One launch replaces
 // three. Returns false out of contract (caller keeps its sequence).
@@ -390,7 +411,8 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    std::uint32_t tile_rows, const std::int32_t* pad_bounds,
                    const std::int32_t* rows_in, const std::int32_t* rows_out,
                    const float* swiglu_gate, float* out, __half* out_half,
-                   std::size_t m, std::size_t k, hipStream_t stream);
+                   std::size_t m, std::size_t k, hipStream_t stream,
+                   const std::uint32_t* d_n_tiles = nullptr);
 /// Softmax + top-k routing.
 void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
                 float* weights, std::uint32_t n_tokens, std::uint32_t n_experts,
@@ -421,8 +443,17 @@ bool LaunchDecodeMoeKQuant(const void* gate_w, WeightType gate_type,
 // does not match the format, returns false and launches nothing so the caller keeps its existing path.
 // Gate/up rows of expert e are [e * expert_stride_bytes, +ff * row_bytes) gate, then ff up rows; act_out is
 // F32 [slots x ff]; down output is F32 [slots x hidden]. Bit-identical to MoeVecGateUpSwiglu / GemvQSlot.
-enum class MoeGateAct : std::uint32_t { kSiluMul = 0, kGeluTanhMul = 1, kSwigluOaiBias = 2 };
+enum class MoeGateAct : std::uint32_t { kSiluMul = 0, kGeluTanhMul = 1, kSwigluOaiBias = 2, kSituSoftcap = 3 };
 // kSwigluOaiBias (gpt-oss) adds gate_b / up_b ([experts x ff] F32, both required) to the dots before the activation.
+bool LaunchMoeWaveGateUpQ8(const void* gate_up, WeightType type, std::uint64_t row_bytes,
+                           std::uint64_t expert_stride_bytes, const void* x_q8, std::size_t q8_stride_blocks,
+                           const std::int32_t* ids, float* act_out, std::uint32_t slots, std::uint32_t used,
+                           std::uint32_t ff, std::uint32_t hidden, MoeGateAct act, hipStream_t stream,
+                           const float* gate_b = nullptr, const float* up_b = nullptr);
+bool LaunchMoeWaveDownQ8(const void* down, WeightType type, std::uint64_t row_bytes,
+                         std::uint64_t expert_stride_bytes, const void* act_q8, std::size_t q8_stride_blocks,
+                         const std::int32_t* ids, float* out, std::uint32_t slots, std::uint32_t hidden,
+                         std::uint32_t ff, hipStream_t stream);
 bool LaunchMoeWaveGateUp(const void* gate_up, WeightType type, std::uint64_t row_bytes,
                          std::uint64_t expert_stride_bytes, const float* x, const std::int32_t* ids, float* act_out,
                          std::uint32_t slots, std::uint32_t used, std::uint32_t ff, std::uint32_t hidden,

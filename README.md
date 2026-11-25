@@ -37,7 +37,7 @@ Originally derived from [gufo](https://github.com/gufo-org/gufo), since heavily 
 | --- | --- | --- |
 | **Instant Response** | **Short-request TTFT 0.7 s** | An anti-starvation fairness scheduler guarantees that short queries arriving during massive 250K-token prefill batches begin generating in 0.7 seconds with bit-exact greedy outputs. |
 | **Memory Efficiency** | **KV memory cut by ~50%** | The Blocked-Q8 cache holds a 262,144-token session in just 3.42 GB (compared to 6.44 GB for F16), with 4-bit value/key options reaching down to 1.81 GB. |
-| **Unified Serving** | **22 GGUF model families** | A single HTTP port dynamically hosts and routes chat models, MoE, embeddings, and cross-encoders with zero-downtime hot swapping. |
+| **Unified Serving** | **23 GGUF model families** | A single HTTP port dynamically hosts and routes chat models, MoE, embeddings, and cross-encoders with zero-downtime hot swapping. |
 
 > Figures in §1 and §2 other than the llama.cpp comparison (mixed batch, fairness, the engine comparison under load, int8 WMMA) come from earlier releases and are documented in `docs/MIXED_BATCH.md` and `docs/KV-V4.md`. The llama.cpp comparison and the Benchmarks section were measured again for this release.
 
@@ -114,7 +114,7 @@ Coordinated through a unified Draft Registry across model families:
 - **27B DFlash2**: Fully compatible with Blocked-Q8 KV cache, writing directly to blocked sidecars with bit-exact continuity.
 - **Gemma 4 MTP**: Async-GPU drafting with single-forward verification delivers **74–86 tok/s** decode at long contexts (`d=3` yields 1.74–1.78 accepted tokens/round).
 - **Muse Glimmer DFlash**: Sustained end-to-end acceptance rate of **~89%**.
-- **Inkling-2-Mini DSpark**: Loop-MoE (`UD-Q4_K_XL` & `h6-lbf16-UD-Q4_K_M`) + Vision (`mmproj-BF16`) with NeoX-RoPE RNN/GRU Markov head, F16 Split-K decode/verify & zero-rerun `sconv` snapshots; `h6-lbf16` + `dspark-BF16` (`-d 5`): **43.9 / 51.3 tok/s** coding/prose (vs `31.3 / 30.8` off), `UD-Q4_K_XL`: **33.9 / 54.8 tok/s** (up to **58.0 tok/s** at `-d 7`).
+- **Inkling-2-Mini DSpark**: Loop-MoE (`UD-Q4_K_XL` & `h6-lbf16-UD-Q4_K_M`) + Vision (`mmproj-BF16`) with NeoX-RoPE RNN/GRU Markov head, WMMA Split-K verify & zero-rerun `sconv` snapshots; `h6-lbf16` + `dspark-BF16` (`-d 5`): **50.9 / 47.3 / 43.5 / 34.9 tok/s** at 4K/16K/30K/60K (65.8%–75.4% acc), `UD-Q4_K_XL`: **33.9 / 54.8 tok/s** coding/prose.
 
 ### Prefix RAM Cache & Production Session Profiles
 
@@ -224,6 +224,7 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 | **Muse Glimmer 30B** | 30B | DFlash (~89%) | ATEM tool calling, W8A8 / Q8_0 execution |
 | **Llama-3.1-8B** | 8B Dense | — | Standard dense GQA support |
 | **DeepSeek V4 Flash** | MoE (IQ2/Q2/Q8 mixed GGUF) | DSpark | MLA decode, ds4-parity kernels, ~81 GiB resident |
+| **Inkling-2-Mini** | 26B-A5.4B Loop-MoE | DSpark (BF16 / Q8_0) | 3x looped core + `mmproj-BF16` Vision, WMMA Split-K verify, native tool calling |
 | **Laguna 2.1 (XS / S)** | 33B-A3B / 118B-A8B MoE | — | Hybrid 1:3 Global (YaRN) / SWA-512 RoPE, softplus per-head gate, sigmoid+bias top-8/10 MoE + shared expert |
 | **Qwen3-Embedding-0.6B** | 0.6B | — | Single-prefill pooled executor |
 | **bge-m3** | 0.6B XLM-R | — | CLS pooling, Q4_K_M loader, hipBLASLt autotune |
@@ -263,6 +264,7 @@ Every engine reads GGUF directly; the formats below are what each one accepts (a
 | **GPT-OSS 20B / 120B** | Q8_0, Q5_0, Q4_K and F16 / BF16 / F32 attention | MXFP4 (native), Q4_0, Q8_0, Q5_1 (K-quants cannot encode its 2880-wide experts) |
 | **Muse Glimmer, Llama-3.1** | Q4_0, Q8_0, Q4_K, Q5_K, Q6_K, F16 / BF16 / F32 | - |
 | **DeepSeek V4 Flash** | the published mixed IQ2_XXS / Q2_K / Q8_0 recipe | same |
+| **Inkling-2-Mini** | Q8_0, F16 / BF16 / F32, Q6_K→F16 output | NVFP4→Q4_0, Q5_K→Q8_0, Q8_0 |
 | **bge-m3, rerankers, Qwen3-Embedding** | Q4_K_M and F16 loaders | - |
 | **EmbeddingGemma 2** | BF16 (GGUF from `tools/convert/embeddinggemma2_to_gguf.py`) | - |
 
