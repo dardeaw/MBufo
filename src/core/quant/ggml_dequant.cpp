@@ -228,6 +228,10 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kMXFP4:
       block_bytes = sizeof(block_mxfp4);
       break;
+    case core::GgmlType::kNVFP4:
+      // 4 UE4M3 scales + 32 packed E2M1 nibbles per 64-element block.
+      block_bytes = 36;
+      break;
     default:
       return 0;
   }
@@ -963,6 +967,266 @@ bool ValidateQ3_0_ROCMFPX(const void* data, std::size_t nbytes) {
   for (std::size_t i = 0; i < nb; ++i) {
     if (blocks[i].e[0] > 0x7EU || blocks[i].e[1] > 0x7EU)
       return false;
+  }
+  return true;
+}
+
+
+namespace {
+constexpr std::size_t kNvfp4BlockElems = 64;
+constexpr std::size_t kNvfp4SubElems = 16;
+constexpr std::size_t kNvfp4BlockBytes = 4 + kNvfp4BlockElems / 2;
+
+constexpr float kNvfp4E2M1Doubled[16] = {
+    0.0F,   1.0F,  2.0F,  3.0F,  4.0F,   6.0F,   8.0F,   12.0F,
+    0.0F,  -1.0F, -2.0F, -3.0F, -4.0F,  -6.0F,  -8.0F,  -12.0F,
+};
+
+// NVFP4 UE4M3: unsigned, 4 exponent bits (bias 7), 3 mantissa bits.
+// Returns value * 0.5 to match the doubled E2M1 codebook above.
+float Nvfp4Ue4m3ToFp32(std::uint8_t x) noexcept {
+  if (x == 0 || x == 0x7F) {
+    return 0.0F;
+  }
+  const int exp = (x >> 3) & 0xF;
+  const int man = x & 0x7;
+  const float raw =
+      (exp == 0) ? std::ldexp(static_cast<float>(man), -9)
+                 : std::ldexp(1.0F + static_cast<float>(man) / 8.0F, exp - 7);
+  return raw * 0.5F;
+}
+}  // namespace
+
+void QuantizeQ4_0(const float* src, void* dst, std::size_t k) {
+  auto* out = static_cast<std::uint8_t*>(dst);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float* x = src + b * 32;
+    float amax = 0.0F;
+    float vmax = 0.0F;
+    for (int i = 0; i < 32; ++i) {
+      const float v = x[i];
+      const float av = std::fabs(v);
+      if (av > amax) {
+        amax = av;
+        vmax = v;
+      }
+    }
+    const float d = vmax / -8.0F;
+    const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
+    std::uint8_t* blk = out + b * 18;
+    const std::uint16_t d16 = FloatToFp16Bits(d);
+    std::memcpy(blk, &d16, 2);
+    for (int j = 0; j < 16; ++j) {
+      int q0 = static_cast<int>(std::lround(x[j] * id)) + 8;
+      int q1 = static_cast<int>(std::lround(x[j + 16] * id)) + 8;
+      if (q0 < 0) q0 = 0;
+      if (q0 > 15) q0 = 15;
+      if (q1 < 0) q1 = 0;
+      if (q1 > 15) q1 = 15;
+      blk[2 + j] = static_cast<std::uint8_t>((q0 & 0xF) | ((q1 & 0xF) << 4));
+    }
+  }
+}
+
+bool DequantizeNvfp4ToF16(const void* nvfp4, const float* expert_scales_or_null,
+                          std::uint16_t* f16_out, std::size_t n_elems,
+                          std::uint32_t n_experts) {
+  if (nvfp4 == nullptr || f16_out == nullptr || n_experts == 0) return false;
+  if (n_elems == 0 ||
+      n_elems % (static_cast<std::size_t>(n_experts) * kNvfp4BlockElems) != 0) {
+    return false;
+  }
+  const auto* src = static_cast<const std::uint8_t*>(nvfp4);
+  const std::size_t expert_elems = n_elems / n_experts;
+  const std::size_t expert_blocks = expert_elems / kNvfp4BlockElems;
+  const std::size_t expert_bytes = expert_blocks * kNvfp4BlockBytes;
+
+  for (std::uint32_t expert = 0; expert < n_experts; ++expert) {
+    const std::uint8_t* e_src = src + expert * expert_bytes;
+    std::uint16_t* e_dst = f16_out + expert * expert_elems;
+    const float outer =
+        (expert_scales_or_null != nullptr) ? expert_scales_or_null[expert] : 1.0F;
+    for (std::size_t b = 0; b < expert_blocks; ++b) {
+      const std::uint8_t* blk = e_src + b * kNvfp4BlockBytes;
+      const std::uint8_t* scales = blk;
+      const std::uint8_t* quants = blk + 4;
+      std::uint16_t* dst = e_dst + b * kNvfp4BlockElems;
+      for (std::size_t s = 0; s < 4; ++s) {
+        const float d = Nvfp4Ue4m3ToFp32(scales[s]) * outer;
+        const std::uint8_t* q = quants + s * (kNvfp4SubElems / 2);
+        for (std::size_t j = 0; j < kNvfp4SubElems / 2; ++j) {
+          const std::uint8_t byte = q[j];
+          dst[s * kNvfp4SubElems + j] =
+              FloatToFp16Bits(d * kNvfp4E2M1Doubled[byte & 0xFU]);
+          dst[s * kNvfp4SubElems + j + kNvfp4SubElems / 2] =
+              FloatToFp16Bits(d * kNvfp4E2M1Doubled[byte >> 4U]);
+        }
+      }
+    }
+  }
+  return true;
+}
+
+bool DequantizeNvfp4ToF32(const void* nvfp4, const float* expert_scales_or_null,
+                          float* f32_out, std::size_t n_elems,
+                          std::uint32_t n_experts) {
+  if (nvfp4 == nullptr || f32_out == nullptr || n_experts == 0) return false;
+  if (n_elems == 0 ||
+      n_elems % (static_cast<std::size_t>(n_experts) * kNvfp4BlockElems) != 0) {
+    return false;
+  }
+  const auto* src = static_cast<const std::uint8_t*>(nvfp4);
+  const std::size_t expert_elems = n_elems / n_experts;
+  const std::size_t expert_blocks = expert_elems / kNvfp4BlockElems;
+  const std::size_t expert_bytes = expert_blocks * kNvfp4BlockBytes;
+
+  for (std::uint32_t expert = 0; expert < n_experts; ++expert) {
+    const std::uint8_t* e_src = src + expert * expert_bytes;
+    float* e_dst = f32_out + expert * expert_elems;
+    const float outer =
+        (expert_scales_or_null != nullptr) ? expert_scales_or_null[expert] : 1.0F;
+    for (std::size_t b = 0; b < expert_blocks; ++b) {
+      const std::uint8_t* blk = e_src + b * kNvfp4BlockBytes;
+      const std::uint8_t* scales = blk;
+      const std::uint8_t* quants = blk + 4;
+      float* dst = e_dst + b * kNvfp4BlockElems;
+      for (std::size_t s = 0; s < 4; ++s) {
+        const float d = Nvfp4Ue4m3ToFp32(scales[s]) * outer;
+        const std::uint8_t* q = quants + s * (kNvfp4SubElems / 2);
+        for (std::size_t j = 0; j < kNvfp4SubElems / 2; ++j) {
+          const std::uint8_t byte = q[j];
+          dst[s * kNvfp4SubElems + j] = d * kNvfp4E2M1Doubled[byte & 0xFU];
+          dst[s * kNvfp4SubElems + j + kNvfp4SubElems / 2] =
+              d * kNvfp4E2M1Doubled[byte >> 4U];
+        }
+      }
+    }
+  }
+  return true;
+}
+
+bool ConvertNvfp4ToQ4_0(const void* nvfp4, const float* expert_scales_or_null,
+                        std::uint8_t* dst_q40, std::size_t n_elems,
+                        std::uint32_t n_experts) {
+  if (nvfp4 == nullptr || dst_q40 == nullptr || n_experts == 0) return false;
+  const std::size_t expert_elems = n_elems / n_experts;
+  if (n_elems == 0 || n_elems % n_experts != 0 || (expert_elems % 32) != 0 ||
+      (expert_elems % kNvfp4BlockElems) != 0) {
+    return false;
+  }
+  const auto* src = static_cast<const std::uint8_t*>(nvfp4);
+  const std::size_t expert_src_bytes =
+      (expert_elems / kNvfp4BlockElems) * kNvfp4BlockBytes;
+  const std::size_t expert_dst_bytes = (expert_elems / 32) * 18ULL;
+  std::vector<float> tmp(expert_elems);
+  for (std::uint32_t e = 0; e < n_experts; ++e) {
+    const float* escale =
+        (expert_scales_or_null != nullptr) ? expert_scales_or_null + e : nullptr;
+    if (!DequantizeNvfp4ToF32(src + e * expert_src_bytes, escale, tmp.data(),
+                              expert_elems, 1)) {
+      return false;
+    }
+    QuantizeQ4_0(tmp.data(), dst_q40 + e * expert_dst_bytes, expert_elems);
+  }
+  return true;
+}
+
+bool ConvertNvfp4ToQ8_0(const void* nvfp4, const float* expert_scales_or_null,
+                        std::uint8_t* dst_q80, std::size_t n_elems,
+                        std::uint32_t n_experts) {
+  if (nvfp4 == nullptr || dst_q80 == nullptr || n_experts == 0) return false;
+  const std::size_t expert_elems = n_elems / n_experts;
+  if (n_elems == 0 || n_elems % n_experts != 0 || (expert_elems % 32) != 0 ||
+      (expert_elems % kNvfp4BlockElems) != 0) {
+    return false;
+  }
+  const auto* src = static_cast<const std::uint8_t*>(nvfp4);
+  const std::size_t expert_src_bytes =
+      (expert_elems / kNvfp4BlockElems) * kNvfp4BlockBytes;
+  const std::size_t expert_dst_bytes =
+      (expert_elems / 32) * sizeof(block_q8_0);
+  std::vector<float> tmp(expert_elems);
+  for (std::uint32_t e = 0; e < n_experts; ++e) {
+    const float* escale =
+        (expert_scales_or_null != nullptr) ? expert_scales_or_null + e : nullptr;
+    if (!DequantizeNvfp4ToF32(src + e * expert_src_bytes, escale, tmp.data(),
+                              expert_elems, 1)) {
+      return false;
+    }
+    QuantizeQ8_0(tmp.data(), dst_q80 + e * expert_dst_bytes, expert_elems);
+  }
+  return true;
+}
+
+bool ConvertKQuantToQ8_0(KQuantKind kind, const void* src,
+                         std::size_t src_row_bytes, std::uint8_t* dst_q80,
+                         std::size_t rows, std::size_t cols) {
+  if (src == nullptr || dst_q80 == nullptr || cols == 0 || (cols % 32) != 0) {
+    return false;
+  }
+  const std::size_t dst_row_bytes = (cols / 32) * sizeof(block_q8_0);
+  std::vector<float> tmp(cols);
+  const auto* sbytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t r = 0; r < rows; ++r) {
+    const void* srow = sbytes + r * src_row_bytes;
+    switch (kind) {
+      case KQuantKind::kQ4_K:
+        DequantizeQ4_K(srow, tmp.data(), cols);
+        break;
+      case KQuantKind::kQ5_K:
+        DequantizeQ5_K(srow, tmp.data(), cols);
+        break;
+      case KQuantKind::kQ6_K:
+        DequantizeQ6_K(srow, tmp.data(), cols);
+        break;
+    }
+    QuantizeQ8_0(tmp.data(), dst_q80 + r * dst_row_bytes, cols);
+  }
+  return true;
+}
+
+bool ConvertKQuantToF16(KQuantKind kind, const void* src,
+                        std::uint16_t* dst_f16, std::size_t n_elems) {
+  if (src == nullptr || dst_f16 == nullptr) return false;
+  std::size_t blk_bytes = 0;
+  switch (kind) {
+    case KQuantKind::kQ4_K:
+      blk_bytes = sizeof(block_q4_K);
+      break;
+    case KQuantKind::kQ5_K:
+      blk_bytes = sizeof(block_q5_K);
+      break;
+    case KQuantKind::kQ6_K:
+      blk_bytes = sizeof(block_q6_K);
+      break;
+  }
+  constexpr std::size_t kDeqChunkElems = 1ULL << 20;
+  std::vector<float> tmp(std::min(kDeqChunkElems, n_elems));
+  std::size_t done = 0;
+  const std::size_t full = (n_elems / 256ULL) * 256ULL;
+  while (done < full) {
+    const std::size_t n = std::min(kDeqChunkElems, full - done);
+    const auto* blk =
+        static_cast<const std::uint8_t*>(src) + (done / 256ULL) * blk_bytes;
+    switch (kind) {
+      case KQuantKind::kQ4_K:
+        DequantizeQ4_K(blk, tmp.data(), n);
+        break;
+      case KQuantKind::kQ5_K:
+        DequantizeQ5_K(blk, tmp.data(), n);
+        break;
+      case KQuantKind::kQ6_K:
+        DequantizeQ6_K(blk, tmp.data(), n);
+        break;
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      dst_f16[done + i] = FloatToFp16Bits(tmp[i]);
+    }
+    done += n;
+  }
+  for (; done < n_elems; ++done) {
+    dst_f16[done] = FloatToFp16Bits(0.0F);
   }
   return true;
 }

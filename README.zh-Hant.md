@@ -112,7 +112,7 @@ MBufo 在多路負載下展現出最優異的線性擴展能力（總吞吐平�
 - **Flash-Next MTP**：併發寬度 2 / 3 / 4 下接受率維持在 **88.7% / 91.6% / 89.5%**，打破隨批次衰減的瓶頸，總吞吐達到 97 / 111 / 133 tok/s。
 - **27B DFlash2**：原生整合 Blocked-Q8 KV 快取，驗證流程直接寫入 Blocked Sidecar，保持精準一致。
 - **Gemma 4 MTP**：採用異步 GPU 草稿與單 Forward 驗證，長上下文解碼速度達 **74–86 tok/s**（`d=3` 深度下每輪平均接受 1.74–1.78 tokens）。
-- **Inkling-2-Mini DSpark**：Loop-MoE（`UD-Q4_K_XL` / `h6-lbf16-UD-Q4_K_M`）+ Vision（`mmproj-BF16`），NeoX-RoPE RNN/GRU Markov 草稿頭、WMMA Split-K 驗證與零重算 `sconv` 快照；`h6-lbf16` + `dspark-BF16`（`-d 5`）於 4K/16K/30K/60K 達 **50.9 / 47.3 / 43.5 / 34.9 tok/s**（接受率 65.8%–75.4%）。
+- **Inkling-2-Mini DSpark**：Loop-MoE（`h6-lbf16-UD-Q4_K_M`）+ Vision（`mmproj-BF16`），NeoX-RoPE RNN/GRU Markov 草稿頭、WMMA Split-K 驗證與零重算 `sconv` 快照；`h6-lbf16` + `dspark-BF16`（`-d 5`）於 4K/16K/30K/60K 達 **50.9 / 47.3 / 43.5 / 34.9 tok/s**（接受率 65.8%–75.4%）。
 - **Muse Glimmer DFlash**：端到端投機接受率達 **~89%**。
 
 ### Prefix RAM 快取與生產級 Session 配置

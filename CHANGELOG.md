@@ -3,6 +3,18 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.39.3 (2026-11-25)
+
+### Shared Core Quantization + Inkling-2-Mini 48-Layer Small-Op Fusion
+- **Shared Core Quantization (`src/core/quant/ggml_dequant.*`)**:
+  - Moved host-side NVFP4 dequant/re-quantization (`DequantizeNvfp4ToF16`, `DequantizeNvfp4ToF32`, `ConvertNvfp4ToQ4_0`, `ConvertNvfp4ToQ8_0`, `QuantizeQ4_0`) and K-quant conversion helpers (`ConvertKQuantToQ8_0`, `ConvertKQuantToF16`) into shared `mbufo::quant`.
+- **Inkling-2-Mini 48-Layer Small-Op Fusion (`src/models/inkling/`)**:
+  - Added `StaticSconvSmallNKernel` / `DynamicSconvSmallNKernel` (`n <= 8`) collapsing `sconv` + prefix snapshot + state update into one launch.
+  - Added `MultiQueryResAttnDirectKernel` eliminating redundant `SnapPush` writes across `depth_mix` layers and fusing 3-query global attention mix into one launch.
+  - Generalized `FusedPairNormDownKernel` to `n <= 8` for DSpark verification.
+  - Promoted `h6-lbf16-UD-Q4_K_M` as the primary supported Inkling-2-Mini build and dropped `UD-Q4_K_XL` from supported model metadata/docs.
+  - Verified (`Inkling-2-Mini-h6-lbf16-UD-Q4_K_M`, `--think off`, gfx1151): bare decode **33.19 / 32.78 tok/s** (coding/prose, vs `29.42 / 29.53`, **+12.8% / +11.0%**); DSpark (`-d 5`) **60.52 tok/s** coding (63.4% acc), **35.67 tok/s** prose (30.9% acc), **50.62 tok/s** at 16K (74.6% acc).
+
 ## v0.39.2 (2026-11-25)
 
 ### Performance & Speculative Decoding Fixes (Shared Core GEMM + Inkling-2-Mini)
@@ -17,7 +29,7 @@ Format: `version.txt` is the version; pushes go to the fork only, never upstream
 ## v0.39.1 (2026-11-25)
 
 ### Added & Fixed (Inkling-2-Mini Loop-MoE + Vision + DSpark MTP + Tool Calling)
-- **Inkling-2-Mini Engine (`src/models/inkling/`)**: Full HIP inference support for `inkling2` Loop-MoE architecture (`UD-Q4_K_XL` / `h6-lbf16-UD-Q4_K_M` / `Q8_0` / `NVFP4`), including `Q4_K`/`Q5_K`/`Q6_K` load conversion (`Q8_0` MoE experts, `F16` output head, K-quant `GemvDecode` fallback), `mmproj-BF16.gguf` Vision encoder integration, and multimodal chat completions.
+- **Inkling-2-Mini Engine (`src/models/inkling/`)**: Full HIP inference support for `inkling2` Loop-MoE architecture (`h6-lbf16-UD-Q4_K_M`, primary), including `Q4_K`/`Q5_K`/`Q6_K` load conversion (`Q8_0` MoE experts, `F16` output head, K-quant `GemvDecode` fallback), `mmproj-BF16.gguf` Vision encoder integration, and multimodal chat completions.
 - **DSpark MTP Speculative Decoding (`dspark.hpp`, `dspark.hip`)**: Implemented RNN/GRU Markov head (`joint_proj` + `markov_w1`/`w2`), Interleaved RoPE in `HeadRmsNormRopeF16StoreKernel` and `StoreCtxKvF16Kernel`, and zero-rerun `sconv` prefix snapshots (`SaveSconvPrefixesKernel` / `RestoreSconvPrefix`) eliminating redundant 48-layer rollback passes. Fixed `n > 1` multi-token `GemvDecode`/`LaunchNarrowQ80*` verify path by restricting narrow decode kernels to `n == 1`.
 - **Native Tool Calling & Reasoning (`ToolFormat::kInkling`)**: Added `JsonConstraint::WithTools` grammar and `ParseInklingGeneration` parser for `<|message_model|>`, `<|content_thinking|>`, `<|content_text|>`, `<|content_invoke_tool_json|>`, `<|end_message|>`, and `<|content_model_end_sampling|>`, plus `Thinking effort level: 0` when `--think off`.
 - **Admin UI Discovery & Load (`model_admin_api.cpp`, `model_mapping.json`)**: Registered `inkling-2-mini` with `dspark` speculative decoding, `mmproj` vision sidecar detection, `VISION`/`TOOLS` badges, and `/admin/models/load` support.

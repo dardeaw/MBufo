@@ -7,57 +7,6 @@
 namespace mbufo::models::inkling::kernels {
 namespace {
 
-// ---------------------------------------------------------------------------
-// Host-side NVFP4 conversion (unchanged skeleton helper).
-// ---------------------------------------------------------------------------
-
-// Doubled E2M1 codebook (matches the kvalues_mxfp4 convention: the UE4M3
-// scale helper folds the compensating 0.5, so no extra halving here).
-// ref: OCP microscaling formats (E2M1: {0,0.5,1,1.5,2,3,4,6} x sign).
-constexpr float kE2M1Doubled[16] = {
-    0.0F,   1.0F,  2.0F,  3.0F,  4.0F,   6.0F,   8.0F,   12.0F,
-    0.0F,  -1.0F, -2.0F, -3.0F, -4.0F,  -6.0F,  -8.0F,  -12.0F,
-};
-
-// UE4M3: unsigned, 4 exponent bits (bias 7), 3 mantissa bits.
-// Returns value * 0.5 to match the doubled E2M1 codebook above.
-float Ue4M3ToFp32(std::uint8_t x) {
-  if (x == 0 || x == 0x7F) {
-    return 0.0F;
-  }
-  const int exp = (x >> 3) & 0xF;
-  const int man = x & 0x7;
-  float raw = 0.0F;
-  if (exp == 0) {
-    raw = ldexpf(static_cast<float>(man), -9);
-  } else {
-    raw = ldexpf(1.0F + static_cast<float>(man) / 8.0F, exp - 7);
-  }
-  return raw * 0.5F;
-}
-
-std::uint16_t F32ToF16Bits(float value) noexcept {
-  std::uint32_t bits = 0;
-  std::memcpy(&bits, &value, sizeof(bits));
-  const std::uint32_t sign = (bits >> 16U) & 0x8000U;
-  const std::int32_t exp = static_cast<std::int32_t>((bits >> 23U) & 0xFFU) - 112;
-  const std::uint32_t mantissa = bits & 0x7FFFFFU;
-  if ((bits & 0x7FFFFFFFU) == 0) return static_cast<std::uint16_t>(sign);
-  if (exp >= 31) return static_cast<std::uint16_t>(sign | 0x7BFFU);
-  if (exp <= 0) return static_cast<std::uint16_t>(sign);
-  const std::uint32_t half =
-      sign | (static_cast<std::uint32_t>(exp) << 10U) | (mantissa >> 13U);
-  const std::uint32_t round_bit = (mantissa >> 12U) & 1U;
-  const std::uint32_t sticky = mantissa & 0xFFFU;
-  if (round_bit != 0 && (sticky != 0 || (half & 1U) != 0)) {
-    return static_cast<std::uint16_t>(half + 1U);
-  }
-  return static_cast<std::uint16_t>(half);
-}
-
-constexpr std::size_t kNvfp4BlockElems = 64;
-constexpr std::size_t kNvfp4SubElems = 16;
-constexpr std::size_t kNvfp4BlockBytes = 4 + kNvfp4BlockElems / 2;
 
 // ---------------------------------------------------------------------------
 // Device kernels.
@@ -255,6 +204,88 @@ __global__ void UpdateSconvStateKernel(const float* __restrict__ src,
   const float s1 = (n_tokens >= 2U) ? src[static_cast<std::size_t>(n_tokens - 2U) * dim + i] : old0;
   const float s2 = (n_tokens >= 3U) ? src[static_cast<std::size_t>(n_tokens - 3U) * dim + i]
                                     : (n_tokens == 2U ? old0 : old1);
+  state[i * 3] = s0;
+  state[i * 3 + 1] = s1;
+  state[i * 3 + 2] = s2;
+}
+
+__global__ void StaticSconvSmallNKernel(const float* __restrict__ x,
+                                        float* __restrict__ state,
+                                        const float* __restrict__ taps,
+                                        float* __restrict__ out,
+                                        float* __restrict__ pfx_out,
+                                        std::size_t pfx_stride,
+                                        std::uint32_t n_tokens,
+                                        std::uint32_t dim, float norm) {
+  const std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= dim) return;
+  const float t0 = taps[i * 4 + 3];
+  const float t1 = taps[i * 4 + 2];
+  const float t2 = taps[i * 4 + 1];
+  const float t3 = taps[i * 4];
+  float s0 = state[i * 3];
+  float s1 = state[i * 3 + 1];
+  float s2 = state[i * 3 + 2];
+  for (std::uint32_t t = 0; t < n_tokens; ++t) {
+    const std::size_t off = static_cast<std::size_t>(t) * dim + i;
+    const float cur = x[off];
+    const float conv = t0 * cur + t1 * s0 + t2 * s1 + t3 * s2;
+    out[off] = (conv + cur) * norm;
+    s2 = s1;
+    s1 = s0;
+    s0 = cur;
+    if (pfx_out != nullptr) {
+      float* dst = pfx_out + static_cast<std::size_t>(t) * pfx_stride;
+      dst[i * 3] = s0;
+      dst[i * 3 + 1] = s1;
+      dst[i * 3 + 2] = s2;
+    }
+  }
+  state[i * 3] = s0;
+  state[i * 3 + 1] = s1;
+  state[i * 3 + 2] = s2;
+}
+
+__global__ void DynamicSconvSmallNKernel(const float* __restrict__ x,
+                                         float* __restrict__ state,
+                                         const float* __restrict__ taps,
+                                         const float* __restrict__ delta,
+                                         float* __restrict__ out,
+                                         float* __restrict__ pfx_out,
+                                         std::size_t pfx_stride,
+                                         std::uint32_t n_tokens,
+                                         std::uint32_t dim,
+                                         std::uint32_t head_dim, float norm) {
+  const std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= dim) return;
+  const std::uint32_t n_heads = dim / head_dim;
+  const std::uint32_t head = i / head_dim;
+  const float* tp = taps + static_cast<std::size_t>(i) * 4;
+  const float tp0 = tp[0];
+  const float tp1 = tp[1];
+  const float tp2 = tp[2];
+  const float tp3 = tp[3];
+  float s0 = state[i * 3];
+  float s1 = state[i * 3 + 1];
+  float s2 = state[i * 3 + 2];
+  for (std::uint32_t t = 0; t < n_tokens; ++t) {
+    const std::size_t off = static_cast<std::size_t>(t) * dim + i;
+    const float cur = x[off];
+    const float* dl =
+        delta + (static_cast<std::size_t>(t) * n_heads + head) * 4;
+    const float conv = (tp3 + dl[0]) * cur + (tp2 + dl[1]) * s0 +
+                       (tp1 + dl[2]) * s1 + (tp0 + dl[3]) * s2;
+    out[off] = (conv + cur) * norm;
+    s2 = s1;
+    s1 = s0;
+    s0 = cur;
+    if (pfx_out != nullptr) {
+      float* dst = pfx_out + static_cast<std::size_t>(t) * pfx_stride;
+      dst[i * 3] = s0;
+      dst[i * 3 + 1] = s1;
+      dst[i * 3 + 2] = s2;
+    }
+  }
   state[i * 3] = s0;
   state[i * 3 + 1] = s1;
   state[i * 3 + 2] = s2;
@@ -1854,38 +1885,50 @@ __global__ void ScatterAddWeightedKernel(const float* x, const float* weights,
 // Multi-query attention over a small state bank (message / residual paths).
 // Keys and values are RMS-normalized in passing (matching the reference,
 // which attends over normalized states for both).
-__global__ void MultiQueryResAttnKernel(const float* states,
-                                        std::uint32_t n_states,
-                                        std::uint32_t state_stride,
-                                        const float* queries,
-                                        std::uint32_t n_queries, float* out,
-                                        std::uint32_t hidden, float scale,
-                                        float eps) {
+__global__ void MultiQueryResAttnDirectKernel(
+    float* bank, std::uint32_t n_bank, std::uint32_t bank_stride,
+    const float* extra_state, bool push_extra_to_bank, const float* queries,
+    std::uint32_t n_queries, float* out0, float* out1, float* out2,
+    std::uint32_t hidden, float scale, float eps) {
   const std::uint32_t tok = blockIdx.x;
-  const float* tok_states =
-      states + static_cast<std::size_t>(tok) * state_stride;
-  float* tok_out = out + static_cast<std::size_t>(tok) * hidden;
+  float* tok_bank =
+      (bank != nullptr) ? (bank + static_cast<std::size_t>(tok) * bank_stride)
+                        : nullptr;
+  const float* tok_extra =
+      (extra_state != nullptr)
+          ? (extra_state + static_cast<std::size_t>(tok) * hidden)
+          : nullptr;
+  std::uint32_t n_states = n_bank + ((tok_extra != nullptr) ? 1U : 0U);
   __shared__ float s_tmp[16];
   __shared__ float s_w[24 * 16];
   if (n_states > 16) n_states = 16;
   if (n_queries > 24) n_queries = 24;
 
-  // Step 1: per-state RMS norms.
+  auto state_ptr = [&](std::uint32_t s) -> const float* {
+    if (s < n_bank) return tok_bank + static_cast<std::size_t>(s) * hidden;
+    return tok_extra;
+  };
+
   for (std::uint32_t s = 0; s < n_states; ++s) {
-    const float* st = tok_states + static_cast<std::size_t>(s) * hidden;
+    const float* st = state_ptr(s);
+    const bool do_push = (push_extra_to_bank && s == n_bank && tok_bank != nullptr);
+    float* dst_bank =
+        do_push ? (tok_bank + static_cast<std::size_t>(n_bank) * hidden)
+                : nullptr;
     float sum = 0.0F;
     for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
-      sum += st[i] * st[i];
+      const float v = st[i];
+      if (do_push) dst_bank[i] = v;
+      sum += v * v;
     }
     s_tmp[s] = rsqrtf(BlockHiddenSum(sum) / static_cast<float>(hidden) + eps);
   }
   __syncthreads();
 
-  // Step 2: scores[q][s] = <query_q, norm(state_s)> * scale.
   for (std::uint32_t q = 0; q < n_queries; ++q) {
     const float* qq = queries + static_cast<std::size_t>(q) * hidden;
     for (std::uint32_t s = 0; s < n_states; ++s) {
-      const float* st = tok_states + static_cast<std::size_t>(s) * hidden;
+      const float* st = state_ptr(s);
       const float inv = s_tmp[s];
       float dot = 0.0F;
       for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
@@ -1896,7 +1939,6 @@ __global__ void MultiQueryResAttnKernel(const float* states,
   }
   __syncthreads();
 
-  // Step 3: softmax over states per query (tiny; one thread is enough).
   if (threadIdx.x == 0) {
     for (std::uint32_t q = 0; q < n_queries; ++q) {
       float m = -1e30F;
@@ -1916,23 +1958,37 @@ __global__ void MultiQueryResAttnKernel(const float* states,
   }
   __syncthreads();
 
-  // Step 4: mean over queries of the weighted *normalized* states
-  // (reference BlockAttentionResidual/MessageAttentionResidual attend over
-  // RMS-normalized states for both keys and values; s_tmp holds per-state
-  // inverse RMS norms from Step 1).
-  const float qinv =
-      (n_queries > 0) ? (1.0F / static_cast<float>(n_queries)) : 0.0F;
-  for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
-    float acc = 0.0F;
-    for (std::uint32_t q = 0; q < n_queries; ++q) {
-      float wsum = 0.0F;
+  if (out1 != nullptr && out2 != nullptr && n_queries == 3U) {
+    float* o0 = out0 + static_cast<std::size_t>(tok) * hidden;
+    float* o1 = out1 + static_cast<std::size_t>(tok) * hidden;
+    float* o2 = out2 + static_cast<std::size_t>(tok) * hidden;
+    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
+      float a0 = 0.0F, a1 = 0.0F, a2 = 0.0F;
       for (std::uint32_t s = 0; s < n_states; ++s) {
-        const float* st = tok_states + static_cast<std::size_t>(s) * hidden;
-        wsum += s_w[q * 16 + s] * st[i] * s_tmp[s];
+        const float nv = state_ptr(s)[i] * s_tmp[s];
+        a0 += s_w[0 * 16 + s] * nv;
+        a1 += s_w[1 * 16 + s] * nv;
+        a2 += s_w[2 * 16 + s] * nv;
       }
-      acc += wsum;
+      o0[i] = a0;
+      o1[i] = a1;
+      o2[i] = a2;
     }
-    tok_out[i] = acc * qinv;
+  } else {
+    float* tok_out = out0 + static_cast<std::size_t>(tok) * hidden;
+    const float qinv =
+        (n_queries > 0) ? (1.0F / static_cast<float>(n_queries)) : 0.0F;
+    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
+      float acc = 0.0F;
+      for (std::uint32_t s = 0; s < n_states; ++s) {
+        float wsum_q = 0.0F;
+        for (std::uint32_t q = 0; q < n_queries; ++q) {
+          wsum_q += s_w[q * 16 + s];
+        }
+        acc += wsum_q * state_ptr(s)[i] * s_tmp[s];
+      }
+      tok_out[i] = acc * qinv;
+    }
   }
 }
 
@@ -2177,9 +2233,13 @@ __global__ void __launch_bounds__(256) FusedPairNormDownKernel(
     const __half* __restrict__ down_w, float* __restrict__ out,
     std::uint32_t hs, float eps) {
   const std::uint32_t row = blockIdx.x;
+  const std::uint32_t tok = blockIdx.y;
   const std::uint32_t tid = threadIdx.x;
   const std::uint32_t wave = tid >> 5;
   const std::uint32_t lane = tid & 31U;
+  h += static_cast<std::size_t>(tok) * hs;
+  msg += static_cast<std::size_t>(tok) * hs;
+  out += static_cast<std::size_t>(tok) * gridDim.x;
 
   float ss_h = 0.0F;
   float ss_m = 0.0F;
@@ -2322,88 +2382,6 @@ __global__ void SnapPushKernel(const float* h, float* bank,
 
 }  // namespace
 
-bool ConvertNvfp4TensorToF16Host(const void* nvfp4,
-                                 const float* expert_scales_or_null,
-                                 std::uint16_t* f16_out, std::size_t n_elems,
-                                 std::uint32_t n_experts) {
-  if (nvfp4 == nullptr || f16_out == nullptr || n_experts == 0) return false;
-  if (n_elems == 0 || n_elems % (static_cast<std::size_t>(n_experts) *
-                                 kNvfp4BlockElems) != 0) {
-    return false;
-  }
-  const auto* src = static_cast<const std::uint8_t*>(nvfp4);
-  const std::size_t expert_elems = n_elems / n_experts;
-  const std::size_t expert_blocks = expert_elems / kNvfp4BlockElems;
-  const std::size_t expert_bytes = expert_blocks * kNvfp4BlockBytes;
-
-  for (std::uint32_t expert = 0; expert < n_experts; ++expert) {
-    const std::uint8_t* e_src = src + expert * expert_bytes;
-    std::uint16_t* e_dst = f16_out + expert * expert_elems;
-    const float outer = (expert_scales_or_null != nullptr)
-                            ? expert_scales_or_null[expert]
-                            : 1.0F;
-    for (std::size_t b = 0; b < expert_blocks; ++b) {
-      const std::uint8_t* blk = e_src + b * kNvfp4BlockBytes;
-      const std::uint8_t* scales = blk;                 // 4 UE4M3 bytes
-      const std::uint8_t* quants = blk + 4;             // 32 packed bytes
-      std::uint16_t* dst = e_dst + b * kNvfp4BlockElems;
-      for (std::size_t s = 0; s < 4; ++s) {
-        const float d = Ue4M3ToFp32(scales[s]) * outer;
-        const std::uint8_t* q = quants + s * (kNvfp4SubElems / 2);
-        float tmp[kNvfp4SubElems];
-        for (std::size_t j = 0; j < kNvfp4SubElems / 2; ++j) {
-          const std::uint8_t byte = q[j];
-          tmp[j] = d * kE2M1Doubled[byte & 0xFU];
-          tmp[j + kNvfp4SubElems / 2] = d * kE2M1Doubled[byte >> 4U];
-        }
-        for (std::size_t j = 0; j < kNvfp4SubElems; ++j) {
-          dst[s * kNvfp4SubElems + j] = F32ToF16Bits(tmp[j]);
-        }
-      }
-    }
-  }
-  return true;
-}
-
-bool ConvertNvfp4TensorToF32Host(const void* nvfp4,
-                                 const float* expert_scales_or_null,
-                                 float* f32_out, std::size_t n_elems,
-                                 std::uint32_t n_experts) {
-  if (nvfp4 == nullptr || f32_out == nullptr || n_experts == 0) return false;
-  if (n_elems == 0 || n_elems % (static_cast<std::size_t>(n_experts) *
-                                 kNvfp4BlockElems) != 0) {
-    return false;
-  }
-  const auto* src = static_cast<const std::uint8_t*>(nvfp4);
-  const std::size_t expert_elems = n_elems / n_experts;
-  const std::size_t expert_blocks = expert_elems / kNvfp4BlockElems;
-  const std::size_t expert_bytes = expert_blocks * kNvfp4BlockBytes;
-
-  for (std::uint32_t expert = 0; expert < n_experts; ++expert) {
-    const std::uint8_t* e_src = src + expert * expert_bytes;
-    float* e_dst = f32_out + expert * expert_elems;
-    const float outer = (expert_scales_or_null != nullptr)
-                            ? expert_scales_or_null[expert]
-                            : 1.0F;
-    for (std::size_t b = 0; b < expert_blocks; ++b) {
-      const std::uint8_t* blk = e_src + b * kNvfp4BlockBytes;
-      const std::uint8_t* scales = blk;                 // 4 UE4M3 bytes
-      const std::uint8_t* quants = blk + 4;             // 32 packed bytes
-      float* dst = e_dst + b * kNvfp4BlockElems;
-      for (std::size_t s = 0; s < 4; ++s) {
-        const float d = Ue4M3ToFp32(scales[s]) * outer;
-        const std::uint8_t* q = quants + s * (kNvfp4SubElems / 2);
-        for (std::size_t j = 0; j < kNvfp4SubElems / 2; ++j) {
-          const std::uint8_t byte = q[j];
-          dst[s * kNvfp4SubElems + j] = d * kE2M1Doubled[byte & 0xFU];
-          dst[s * kNvfp4SubElems + j + kNvfp4SubElems / 2] =
-              d * kE2M1Doubled[byte >> 4U];
-        }
-      }
-    }
-  }
-  return true;
-}
 
 const char* KernelsVersion() { return "inkling-fwd-v2-sconv1t"; }
 
@@ -2436,13 +2414,10 @@ void StaticSconvForward(const float* x, float* state, const float* taps,
                         float* pfx_out, std::size_t pfx_stride) {
   if (n_tokens == 0 || x == nullptr || out == nullptr) return;
   const std::uint32_t blocks = (dim + 255) / 256;
-  if (n_tokens == 1U) {
-    if (pfx_out != nullptr) {
-      hipLaunchKernelGGL(SaveSconvPrefixesKernel, dim3(blocks, 1U), dim3(256),
-                         0, stream, x, state, pfx_out, pfx_stride, 1U, dim);
-    }
-    hipLaunchKernelGGL(StaticSconv1TokKernel, dim3(blocks), dim3(256), 0,
-                       stream, x, state, taps, out, dim, norm);
+  if (n_tokens <= 8U) {
+    hipLaunchKernelGGL(StaticSconvSmallNKernel, dim3(blocks), dim3(256), 0,
+                       stream, x, state, taps, out, pfx_out, pfx_stride,
+                       n_tokens, dim, norm);
     return;
   }
   const float* src = x;
@@ -2480,13 +2455,10 @@ void DynamicSconvForward(const float* x, float* state, const float* taps,
   if (n_heads == 0 || dim % n_heads != 0) return;
   const std::uint32_t head_dim = dim / n_heads;
   const std::uint32_t blocks = (dim + 255) / 256;
-  if (n_tokens == 1U) {
-    if (pfx_out != nullptr) {
-      hipLaunchKernelGGL(SaveSconvPrefixesKernel, dim3(blocks, 1U), dim3(256),
-                         0, stream, x, state, pfx_out, pfx_stride, 1U, dim);
-    }
-    hipLaunchKernelGGL(DynamicSconv1TokKernel, dim3(blocks), dim3(256), 0,
-                       stream, x, state, taps, delta, out, dim, head_dim, norm);
+  if (n_tokens <= 8U) {
+    hipLaunchKernelGGL(DynamicSconvSmallNKernel, dim3(blocks), dim3(256), 0,
+                       stream, x, state, taps, delta, out, pfx_out, pfx_stride,
+                       n_tokens, dim, head_dim, norm);
     return;
   }
   const float* src = x;
@@ -2843,19 +2815,36 @@ void MultiQueryResAttn4(const float* states, std::uint32_t n_states,
                      out0, out1, out2, out3, hidden, scale);
 }
 
+void MultiQueryResAttnDirect(const float* bank, std::uint32_t n_bank,
+                             std::uint32_t bank_stride,
+                             const float* extra_state,
+                             bool push_extra_to_bank, const float* queries,
+                             std::uint32_t n_queries, float* out0,
+                             float* out1, float* out2, std::uint32_t n_tokens,
+                             std::uint32_t hidden, float scale,
+                             hipStream_t stream) {
+  const std::uint32_t n_states =
+      n_bank + ((extra_state != nullptr) ? 1U : 0U);
+  if (n_tokens == 0 || n_states == 0 || n_queries == 0 || queries == nullptr ||
+      out0 == nullptr || (n_bank > 0 && bank == nullptr)) {
+    return;
+  }
+  if (n_states > 16 || n_queries > 24) return;
+  hipLaunchKernelGGL(
+      MultiQueryResAttnDirectKernel, dim3(n_tokens), dim3(256), 0, stream,
+      const_cast<float*>(bank), n_bank, bank_stride, extra_state,
+      push_extra_to_bank, queries, n_queries, out0, out1, out2, hidden, scale,
+      1e-6F);
+}
+
 void MultiQueryResAttn(const float* states, std::uint32_t n_states,
                        std::uint32_t state_stride, const float* queries,
                        std::uint32_t n_queries, float* out,
                        std::uint32_t n_tokens, std::uint32_t hidden,
                        float scale, hipStream_t stream) {
-  if (n_tokens == 0 || n_states == 0 || n_queries == 0 || states == nullptr ||
-      queries == nullptr || out == nullptr) {
-    return;
-  }
-  if (n_states > 16 || n_queries > 24) return;
-  hipLaunchKernelGGL(MultiQueryResAttnKernel, dim3(n_tokens), dim3(256), 0,
-                     stream, states, n_states, state_stride, queries,
-                     n_queries, out, hidden, scale, 1e-6F);
+  MultiQueryResAttnDirect(states, n_states, state_stride, nullptr, false,
+                          queries, n_queries, out, nullptr, nullptr, n_tokens,
+                          hidden, scale, stream);
 }
 
 void FuseGateProjApply(const float* h, const float* msg, const float* g64,
@@ -2892,11 +2881,11 @@ void GateFuseApply(const float* h, const float* msg, const float* fg_raw,
 }
 
 void FusedPairNormDown(const float* h, const float* msg, const __half* down_w,
-                       float* out, std::uint32_t hs, std::uint32_t rank,
-                       float eps, hipStream_t stream) {
-  if (rank == 0 || hs == 0 || (hs % 8U) != 0) return;
-  hipLaunchKernelGGL(FusedPairNormDownKernel, dim3(rank), dim3(256), 0, stream,
-                     h, msg, down_w, out, hs, eps);
+                       float* out, std::uint32_t n_tokens, std::uint32_t hs,
+                       std::uint32_t rank, float eps, hipStream_t stream) {
+  if (n_tokens == 0 || rank == 0 || hs == 0 || (hs % 8U) != 0) return;
+  hipLaunchKernelGGL(FusedPairNormDownKernel, dim3(rank, n_tokens), dim3(256),
+                     0, stream, h, msg, down_w, out, hs, eps);
 }
 
 void PairNormConcat(const float* h, const float* msg, float* pair,

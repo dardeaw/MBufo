@@ -9,20 +9,6 @@
 
 namespace mbufo::models::inkling::kernels {
 
-// Load-time CPU conversion of NVFP4 expert weights (blk.0-19) to F16.
-// (Unchanged skeleton helper; core GEMM only ever sees F16/Q8_0/F32.)
-[[nodiscard]] bool ConvertNvfp4TensorToF16Host(
-    const void* nvfp4, const float* expert_scales_or_null, std::uint16_t* f16_out,
-    std::size_t n_elems, std::uint32_t n_experts);
-
-// Load-time CPU decode of NVFP4 expert weights (blk.0-19) to F32.
-// Same E2M1+E4M3 decode as ConvertNvfp4TensorToF16Host, but keeps full float
-// precision so the caller can quantize to Q8_0 with core stock helpers
-// (no model-local quantizer).
-[[nodiscard]] bool ConvertNvfp4TensorToF32Host(
-    const void* nvfp4, const float* expert_scales_or_null, float* f32_out,
-    std::size_t n_elems, std::uint32_t n_experts);
-
 [[nodiscard]] const char* KernelsVersion();
 
 // --- Elementwise norms (model-private; core carries no callable HIP RMSNorm
@@ -170,6 +156,20 @@ void MultiQueryResAttn(const float* states, std::uint32_t n_states,
                        std::uint32_t n_tokens, std::uint32_t hidden,
                        float scale, hipStream_t stream);
 
+// Same attention residual mix, reading `n_bank` states from `bank` plus an
+// optional `extra_state` (e.g. current `hidden`) without a separate SnapPush.
+// When `push_extra_to_bank` is true, also stores `extra_state` into
+// `bank[n_bank * hidden]`. When `out1` and `out2` are non-null (and
+// `n_queries == 3`), writes each query's output separately.
+void MultiQueryResAttnDirect(const float* bank, std::uint32_t n_bank,
+                             std::uint32_t bank_stride,
+                             const float* extra_state,
+                             bool push_extra_to_bank, const float* queries,
+                             std::uint32_t n_queries, float* out0,
+                             float* out1, float* out2, std::uint32_t n_tokens,
+                             std::uint32_t hidden, float scale,
+                             hipStream_t stream);
+
 // Gate fusion: fg = tanh(fg_raw), mg = sigmoid(mg_raw),
 // out = (1 - fg) * h + mg * msg. (mg = sigmoid is a documented assumption;
 // the spec pins tanh only for the forget path.)
@@ -184,8 +184,8 @@ void GateFuseApply(const float* h, const float* msg, const float* fg_raw,
 
 // concat [RmsNormNoGamma(h), RmsNormNoGamma(msg)] into pair rows.
 void FusedPairNormDown(const float* h, const float* msg, const __half* down_w,
-                       float* out, std::uint32_t hs, std::uint32_t rank,
-                       float eps, hipStream_t stream);
+                       float* out, std::uint32_t n_tokens, std::uint32_t hs,
+                       std::uint32_t rank, float eps, hipStream_t stream);
 
 void PairNormConcat(const float* h, const float* msg, float* pair,
                     std::uint32_t n_tokens, std::uint32_t hidden, float eps,

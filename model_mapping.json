@@ -1059,8 +1059,8 @@
           "inkling2"
         ],
         "filename_patterns": [
-          "*Inkling-2-Mini*",
-          "*inkling-2-mini*"
+          "*Inkling-2-Mini*h6-lbf16*",
+          "*inkling-2-mini*h6-lbf16*"
         ]
       },
       "huggingface": {
@@ -1079,10 +1079,11 @@
           "F32"
         ],
         "routed_experts": [
-          "NVFP4",
-          "Q8_0"
+          "Q5_K",
+          "Q8_0",
+          "NVFP4"
         ],
-        "recommended": "Q8_0"
+        "recommended": "h6-lbf16-UD-Q4_K_M"
       },
       "supported_backends": [
         "gpu_hip"

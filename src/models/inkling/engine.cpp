@@ -448,9 +448,9 @@ bool ConvertTensorToF16(TensorRef& t, const TensorRef* scale_or_null,
       }
       scales = static_cast<const float*>(scale_or_null->data);
     }
-    if (!kernels::ConvertNvfp4TensorToF16Host(t.data, scales, buf.data(),
-                                              elems,
-                                              static_cast<std::uint32_t>(t.depth))) {
+    if (!::mbufo::quant::DequantizeNvfp4ToF16(
+            t.data, scales, buf.data(), elems,
+            static_cast<std::uint32_t>(t.depth))) {
       if (error_msg != nullptr) *error_msg = "inkling: NVFP4 convert failed";
       return false;
     }
@@ -493,31 +493,16 @@ bool ConvertTensorToF16(TensorRef& t, const TensorRef* scale_or_null,
   } else if (t.type == core::GgmlType::kQ4_K ||
              t.type == core::GgmlType::kQ5_K ||
              t.type == core::GgmlType::kQ6_K) {
-    const std::size_t blk_bytes =
-        t.type == core::GgmlType::kQ4_K
-            ? sizeof(::mbufo::quant::block_q4_K)
-            : (t.type == core::GgmlType::kQ5_K
-                   ? sizeof(::mbufo::quant::block_q5_K)
-                   : sizeof(::mbufo::quant::block_q6_K));
-    constexpr std::size_t kDeqChunkElems = 1ULL << 20;
-    std::vector<float> tmp(std::min(kDeqChunkElems, elems));
-    std::size_t done = 0;
-    const std::size_t full = (elems / 256ULL) * 256ULL;
-    while (done < full) {
-      const std::size_t n = std::min(kDeqChunkElems, full - done);
-      const auto* blk =
-          static_cast<const std::uint8_t*>(t.data) + (done / 256ULL) * blk_bytes;
-      if (t.type == core::GgmlType::kQ4_K) {
-        ::mbufo::quant::DequantizeQ4_K(blk, tmp.data(), n);
-      } else if (t.type == core::GgmlType::kQ5_K) {
-        ::mbufo::quant::DequantizeQ5_K(blk, tmp.data(), n);
-      } else {
-        ::mbufo::quant::DequantizeQ6_K(blk, tmp.data(), n);
-      }
-      for (std::size_t i = 0; i < n; ++i) buf[done + i] = F32ToF16Bits(tmp[i]);
-      done += n;
+    const auto kind =
+        (t.type == core::GgmlType::kQ4_K)
+            ? ::mbufo::quant::KQuantKind::kQ4_K
+            : ((t.type == core::GgmlType::kQ5_K)
+                   ? ::mbufo::quant::KQuantKind::kQ5_K
+                   : ::mbufo::quant::KQuantKind::kQ6_K);
+    if (!::mbufo::quant::ConvertKQuantToF16(kind, t.data, buf.data(), elems)) {
+      if (error_msg != nullptr) *error_msg = "inkling: K-quant F16 convert failed";
+      return false;
     }
-    for (; done < elems; ++done) buf[done] = F32ToF16Bits(0.0F);
   } else {
     if (error_msg != nullptr) {
       *error_msg = "inkling: unexpected type in load conversion";
@@ -544,90 +529,25 @@ bool ConvertTensorToF16(TensorRef& t, const TensorRef* scale_or_null,
 // size_bytes so RowBytes()/ExpertStrideBytes() stay exact and the MoE
 // consume side rides its existing type-driven Q8 path untouched.
 
-inline void QuantizeQ40Slice(const float* src, std::uint8_t* dst,
-                             std::size_t n_elems) {
-  const std::size_t nb = n_elems / 32;
-  for (std::size_t b = 0; b < nb; ++b) {
-    const float* x = src + b * 32;
-    float amax = 0.0F;
-    float vmax = 0.0F;
-    for (int i = 0; i < 32; ++i) {
-      const float v = x[i];
-      const float av = std::fabs(v);
-      if (av > amax) {
-        amax = av;
-        vmax = v;
-      }
-    }
-    const float d = vmax / -8.0F;
-    const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-    std::uint8_t* blk = dst + b * 18;
-    const std::uint16_t d16 = F32ToF16Bits(d);
-    std::memcpy(blk, &d16, 2);
-    for (int j = 0; j < 16; ++j) {
-      int q0 = static_cast<int>(std::lround(x[j] * id)) + 8;
-      int q1 = static_cast<int>(std::lround(x[j + 16] * id)) + 8;
-      if (q0 < 0) q0 = 0;
-      if (q0 > 15) q0 = 15;
-      if (q1 < 0) q1 = 0;
-      if (q1 > 15) q1 = 15;
-      blk[2 + j] = static_cast<std::uint8_t>((q0 & 0xF) | ((q1 & 0xF) << 4));
-    }
-  }
-}
-
 bool ConvertNvfp4ToQ40(TensorRef& t, const TensorRef* scale_or_null,
                        std::vector<std::vector<std::uint8_t>>* owned_q40,
                        std::string* error_msg) {
   if (t.empty()) return true;
   if (!IsNvfp4(t.type)) {
-    if (error_msg != nullptr) {
-      *error_msg = "inkling: ConvertNvfp4ToQ40 got non-NVFP4 tensor";
-    }
+    if (error_msg != nullptr) *error_msg = "inkling: ConvertNvfp4ToQ40 got non-NVFP4 tensor";
     return false;
   }
-  const std::size_t elems =
-      static_cast<std::size_t>(t.cols) * t.rows * t.depth;
-  if (elems == 0 || t.depth == 0 || elems % 32 != 0 ||
-      t.size_bytes % t.depth != 0) {
-    if (error_msg != nullptr) *error_msg = "inkling: bad NVFP4 Q4_0 shape";
+  const std::size_t elems = static_cast<std::size_t>(t.cols) * t.rows * t.depth;
+  const float* scales = (scale_or_null != nullptr && !scale_or_null->empty()) ? static_cast<const float*>(scale_or_null->data) : nullptr;
+  std::vector<std::uint8_t> out((elems / 32) * 18ULL);
+  if (!::mbufo::quant::ConvertNvfp4ToQ4_0(t.data, scales, out.data(), elems, static_cast<std::uint32_t>(t.depth))) {
+    if (error_msg != nullptr) *error_msg = "inkling: NVFP4->Q4_0 decode failed";
     return false;
-  }
-  const float* scales = nullptr;
-  if (scale_or_null != nullptr && !scale_or_null->empty()) {
-    if (scale_or_null->type != core::GgmlType::kF32 ||
-        scale_or_null->rows * scale_or_null->cols != t.depth) {
-      if (error_msg != nullptr) *error_msg = "inkling: bad NVFP4 scale";
-      return false;
-    }
-    scales = static_cast<const float*>(scale_or_null->data);
-  }
-  const std::size_t expert_elems = elems / t.depth;
-  if (expert_elems % 32 != 0) {
-    if (error_msg != nullptr) *error_msg = "inkling: expert_elems % 32 != 0";
-    return false;
-  }
-  const std::size_t out_bytes = (elems / 32) * 18ULL;
-  std::vector<std::uint8_t> out(out_bytes);
-  std::vector<float> tmp(expert_elems);
-  const auto* src = static_cast<const std::uint8_t*>(t.data);
-  const std::size_t expert_src_bytes = t.size_bytes / t.depth;
-  const std::size_t expert_dst_bytes = (expert_elems / 32) * 18ULL;
-  for (std::uint64_t e = 0; e < t.depth; ++e) {
-    const float* escale = (scales != nullptr) ? scales + e : nullptr;
-    if (!kernels::ConvertNvfp4TensorToF32Host(src + e * expert_src_bytes,
-                                              escale, tmp.data(),
-                                              expert_elems, 1)) {
-      if (error_msg != nullptr) *error_msg = "inkling: NVFP4 decode failed";
-      return false;
-    }
-    QuantizeQ40Slice(tmp.data(), out.data() + e * expert_dst_bytes,
-                     expert_elems);
   }
   owned_q40->push_back(std::move(out));
   t.data = owned_q40->back().data();
   t.type = core::GgmlType::kQ4_0;
-  t.size_bytes = out_bytes;
+  t.size_bytes = owned_q40->back().size();
   return true;
 }
 
@@ -636,54 +556,15 @@ bool ConvertNvfp4ToQ80(TensorRef& t, const TensorRef* scale_or_null,
                        std::string* error_msg) {
   if (t.empty()) return true;
   if (!IsNvfp4(t.type)) {
-    if (error_msg != nullptr) {
-      *error_msg = "inkling: ConvertNvfp4ToQ80 got non-NVFP4 tensor";
-    }
+    if (error_msg != nullptr) *error_msg = "inkling: ConvertNvfp4ToQ80 got non-NVFP4 tensor";
     return false;
   }
-  const std::size_t elems =
-      static_cast<std::size_t>(t.cols) * t.rows * t.depth;
-  if (elems == 0 || t.depth == 0) {
-    if (error_msg != nullptr) *error_msg = "inkling: empty tensor convert";
+  const std::size_t elems = static_cast<std::size_t>(t.cols) * t.rows * t.depth;
+  const float* scales = (scale_or_null != nullptr && !scale_or_null->empty()) ? static_cast<const float*>(scale_or_null->data) : nullptr;
+  std::vector<std::uint8_t> buf((elems / 32) * sizeof(::mbufo::quant::block_q8_0));
+  if (!::mbufo::quant::ConvertNvfp4ToQ8_0(t.data, scales, buf.data(), elems, static_cast<std::uint32_t>(t.depth))) {
+    if (error_msg != nullptr) *error_msg = "inkling: NVFP4->Q8_0 decode failed";
     return false;
-  }
-  if (elems % 32 != 0 || t.size_bytes % t.depth != 0) {
-    if (error_msg != nullptr) {
-      *error_msg = "inkling: NVFP4 elems not a multiple of Q8_0 block (32)";
-    }
-    return false;
-  }
-  const float* scales = nullptr;
-  if (scale_or_null != nullptr && !scale_or_null->empty()) {
-    if (scale_or_null->type != core::GgmlType::kF32 ||
-        scale_or_null->rows * scale_or_null->cols != t.depth) {
-      if (error_msg != nullptr) {
-        *error_msg = "inkling: bad NVFP4 per-expert scale";
-      }
-      return false;
-    }
-    scales = static_cast<const float*>(scale_or_null->data);
-  }
-  const std::size_t expert_elems = elems / t.depth;
-  const std::size_t kQ8BlockBytes = sizeof(::mbufo::quant::block_q8_0);
-  std::vector<std::uint8_t> buf((elems / 32) * kQ8BlockBytes);
-  std::vector<float> tmp(expert_elems);
-  const auto* src = static_cast<const std::uint8_t*>(t.data);
-  const std::size_t expert_src_bytes = t.size_bytes / t.depth;
-  auto* dst = buf.data();
-  const std::size_t expert_dst_bytes = (expert_elems / 32) * kQ8BlockBytes;
-  for (std::uint64_t e = 0; e < t.depth; ++e) {
-    const float* escale = (scales != nullptr) ? scales + e : nullptr;
-    // Single-expert slice: the F32 helper splits on expert boundaries, so a
-    // (slice, n_experts=1) call decodes exactly this expert's blocks.
-    if (!kernels::ConvertNvfp4TensorToF32Host(src + e * expert_src_bytes,
-                                              escale, tmp.data(),
-                                              expert_elems, 1)) {
-      if (error_msg != nullptr) *error_msg = "inkling: NVFP4 decode failed";
-      return false;
-    }
-    ::mbufo::quant::QuantizeQ8_0(tmp.data(), dst + e * expert_dst_bytes,
-                                 expert_elems);
   }
   owned_q80->push_back(std::move(buf));
   t.data = owned_q80->back().data();
@@ -701,31 +582,13 @@ bool ConvertKQuantToQ80(TensorRef& t,
                         std::vector<std::vector<std::uint8_t>>* owned_q80,
                         std::string* error_msg) {
   if (t.empty()) return true;
-  if (t.cols == 0 || (t.cols % 32) != 0) {
-    if (error_msg != nullptr) *error_msg = "inkling: K-quant cols not /32";
-    return false;
-  }
+  ::mbufo::quant::KQuantKind kind = (t.type == core::GgmlType::kQ4_K) ? ::mbufo::quant::KQuantKind::kQ4_K
+      : ((t.type == core::GgmlType::kQ5_K) ? ::mbufo::quant::KQuantKind::kQ5_K : ::mbufo::quant::KQuantKind::kQ6_K);
   const std::size_t total_rows = static_cast<std::size_t>(t.rows) * t.depth;
-  const std::size_t kQ8BlockBytes = sizeof(::mbufo::quant::block_q8_0);
-  const std::size_t dst_row_bytes = (t.cols / 32) * kQ8BlockBytes;
-  const std::size_t src_row_bytes = t.RowBytes();
-  std::vector<std::uint8_t> buf(total_rows * dst_row_bytes);
-  std::vector<float> tmp(t.cols);
-  const auto* src = static_cast<const std::uint8_t*>(t.data);
-  auto* dst = buf.data();
-  for (std::size_t r = 0; r < total_rows; ++r) {
-    const void* srow = src + r * src_row_bytes;
-    if (t.type == core::GgmlType::kQ4_K) {
-      ::mbufo::quant::DequantizeQ4_K(srow, tmp.data(), t.cols);
-    } else if (t.type == core::GgmlType::kQ5_K) {
-      ::mbufo::quant::DequantizeQ5_K(srow, tmp.data(), t.cols);
-    } else if (t.type == core::GgmlType::kQ6_K) {
-      ::mbufo::quant::DequantizeQ6_K(srow, tmp.data(), t.cols);
-    } else {
-      if (error_msg != nullptr) *error_msg = "inkling: bad K-quant type";
-      return false;
-    }
-    ::mbufo::quant::QuantizeQ8_0(tmp.data(), dst + r * dst_row_bytes, t.cols);
+  std::vector<std::uint8_t> buf(total_rows * (t.cols / 32) * sizeof(::mbufo::quant::block_q8_0));
+  if (!::mbufo::quant::ConvertKQuantToQ8_0(kind, t.data, t.RowBytes(), buf.data(), total_rows, t.cols)) {
+    if (error_msg != nullptr) *error_msg = "inkling: K-quant->Q8_0 failed";
+    return false;
   }
   owned_q80->push_back(std::move(buf));
   t.data = owned_q80->back().data();
@@ -1597,11 +1460,11 @@ bool Session::FuseHidden(const float* h, const float* msg,
   const auto& cfg = model_->weights_->config;
   const std::size_t hs = cfg.hidden_size;
   const std::uint32_t rank = cfg.loop_gate_rank;
-  if (n == 1U && lt.down.type == core::GgmlType::kF16 &&
+  if (n <= 8U && lt.down.type == core::GgmlType::kF16 &&
       lt.forget.type == core::GgmlType::kF16 &&
       lt.gain.type == core::GgmlType::kF16 && rank <= 64U && (hs % 8U) == 0U) {
     kernels::FusedPairNormDown(
-        h, msg, static_cast<const __half*>(lt.down.device), d_g64_,
+        h, msg, static_cast<const __half*>(lt.down.device), d_g64_, n,
         static_cast<std::uint32_t>(hs), rank, cfg.rms_norm_eps, stream_);
     kernels::FuseGateProjApply(
         h, msg, d_g64_, static_cast<const __half*>(lt.forget.device),
@@ -1914,42 +1777,28 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
   const float* attn_base = hidden;
   if (snap_bank != nullptr && snap_count != nullptr &&
       (!lw.attn_res_query.empty() || is_boundary) && n_bank < kMaxSnaps) {
-    // Stage the layer input contiguously so the mix below sees
-    // bank + partial. Boundary pushes persist; otherwise scratch.
-    kernels::SnapPush(hidden, snap_bank, n, static_cast<std::uint32_t>(h),
-                      snap_stride, n_bank, stream_);
-    const std::uint32_t n_states = n_bank + 1;
     if (!lw.attn_res_query.empty()) {
       const std::uint32_t nq =
           static_cast<std::uint32_t>(lw.attn_res_query.rows);
       const float* qptr =
           static_cast<const float*>(lw.attn_res_query.device);
       if (!is_global || nq <= 1) {
-        // Sliding path (single query): mix into staging; `hidden` keeps the
-        // raw input for the residual. The partial survives as the bank
-        // copy staged above.
-        kernels::MultiQueryResAttn(snap_bank, n_states, snap_stride, qptr, nq,
-                                   d_attn_out_, n, static_cast<std::uint32_t>(h),
-                                   kResAttnScale, stream_);
+        kernels::MultiQueryResAttnDirect(
+            snap_bank, n_bank, snap_stride, hidden, is_boundary, qptr, nq,
+            d_attn_out_, nullptr, nullptr, n, static_cast<std::uint32_t>(h),
+            kResAttnScale, stream_);
         attn_base = d_attn_out_;
       } else {
-        // Full path (3 queries -> q/k/v streams into staging; the shared
-        // downstream path reads the q-stream from attn_base below).
-        kernels::MultiQueryResAttn(snap_bank, n_states, snap_stride, qptr, 1,
-                                   d_attn_out_, n,
-                                   static_cast<std::uint32_t>(h),
-                                   kResAttnScale, stream_);
-        kernels::MultiQueryResAttn(snap_bank, n_states, snap_stride, qptr + h,
-                                   1, d_proj_out_, n,
-                                   static_cast<std::uint32_t>(h),
-                                   kResAttnScale, stream_);
-        kernels::MultiQueryResAttn(snap_bank, n_states, snap_stride,
-                                   qptr + 2 * h, 1, d_moe_out_, n,
-                                   static_cast<std::uint32_t>(h),
-                                   kResAttnScale, stream_);
+        kernels::MultiQueryResAttnDirect(
+            snap_bank, n_bank, snap_stride, hidden, is_boundary, qptr, 3U,
+            d_attn_out_, d_proj_out_, d_moe_out_, n,
+            static_cast<std::uint32_t>(h), kResAttnScale, stream_);
         attn_base = d_attn_out_;
         split_qkv_mix = true;
       }
+    } else if (is_boundary) {
+      kernels::SnapPush(hidden, snap_bank, n, static_cast<std::uint32_t>(h),
+                        snap_stride, n_bank, stream_);
     }
     if (is_boundary) {
       *snap_count = n_bank + 1;
@@ -2417,12 +2266,11 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
   float* mix_out = hidden;
   if (snap_bank != nullptr && snap_count != nullptr &&
       !lw.ffn_res_query.empty() && *snap_count < kMaxSnaps) {
-    kernels::SnapPush(hidden, snap_bank, n, static_cast<std::uint32_t>(h),
-                      snap_stride, *snap_count, stream_);
-    kernels::MultiQueryResAttn(
-        snap_bank, *snap_count + 1, snap_stride,
-        static_cast<const float*>(lw.ffn_res_query.device), 1, d_attn_out_, n,
-        static_cast<std::uint32_t>(h), kResAttnScale, stream_);
+    kernels::MultiQueryResAttnDirect(
+        snap_bank, *snap_count, snap_stride, hidden, false,
+        static_cast<const float*>(lw.ffn_res_query.device), 1, d_attn_out_,
+        nullptr, nullptr, n, static_cast<std::uint32_t>(h), kResAttnScale,
+        stream_);
     mix_out = d_attn_out_;
   }
 
@@ -2774,12 +2622,11 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
   // norm (reference: final_input mix first, norm after), lm head, softcap.
   if (!w.output_res_query.empty() && snap_count > 0 &&
       snap_count < kMaxSnaps) {
-    kernels::SnapPush(d_hidden_, d_snaps_, n, static_cast<std::uint32_t>(h),
-                      snap_stride, snap_count, stream_);
-    kernels::MultiQueryResAttn(
-        d_snaps_, snap_count + 1, snap_stride,
-        static_cast<const float*>(w.output_res_query.device), 1, d_hidden_, n,
-        static_cast<std::uint32_t>(h), kResAttnScale, stream_);
+    kernels::MultiQueryResAttnDirect(
+        d_snaps_, snap_count, snap_stride, d_hidden_, false,
+        static_cast<const float*>(w.output_res_query.device), 1, d_hidden_,
+        nullptr, nullptr, n, static_cast<std::uint32_t>(h), kResAttnScale,
+        stream_);
   }
   kernels::RmsNormGamma(d_hidden_,
                         static_cast<const float*>(w.output_norm.device),

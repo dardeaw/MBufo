@@ -160,6 +160,8 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kQ3_0_ROCMFPX:
     case core::GgmlType::kMXFP4:
       return 32;
+    case core::GgmlType::kNVFP4:
+      return 64;
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:
     case core::GgmlType::kIQ4_XS:
@@ -286,6 +288,43 @@ float DotProductQ3_0_ROCMFPX(const void* row_data, std::span<const float> vec,
 // Compute dot product of Q8_0 quantized row with FP32 vector
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,
                      std::size_t k);
+
+
+// Quantizes an FP32 row (k must be a multiple of 32) to Q4_0 blocks.
+void QuantizeQ4_0(const float* src, void* dst, std::size_t k);
+
+// Host-side NVFP4 (4 UE4M3 sub-block scales + 32 packed E2M1 bytes, QK=64)
+// dequantization and load-time re-quantization helpers.
+[[nodiscard]] bool DequantizeNvfp4ToF16(const void* nvfp4,
+                                        const float* expert_scales_or_null,
+                                        std::uint16_t* f16_out,
+                                        std::size_t n_elems,
+                                        std::uint32_t n_experts);
+[[nodiscard]] bool DequantizeNvfp4ToF32(const void* nvfp4,
+                                        const float* expert_scales_or_null,
+                                        float* f32_out,
+                                        std::size_t n_elems,
+                                        std::uint32_t n_experts);
+[[nodiscard]] bool ConvertNvfp4ToQ4_0(const void* nvfp4,
+                                      const float* expert_scales_or_null,
+                                      std::uint8_t* dst_q40,
+                                      std::size_t n_elems,
+                                      std::uint32_t n_experts);
+[[nodiscard]] bool ConvertNvfp4ToQ8_0(const void* nvfp4,
+                                      const float* expert_scales_or_null,
+                                      std::uint8_t* dst_q80,
+                                      std::size_t n_elems,
+                                      std::uint32_t n_experts);
+
+// Shared K-quant (Q4_K / Q5_K / Q6_K) load-time re-quantization helpers.
+enum class KQuantKind : std::uint8_t { kQ4_K, kQ5_K, kQ6_K };
+[[nodiscard]] bool ConvertKQuantToQ8_0(KQuantKind kind, const void* src,
+                                       std::size_t src_row_bytes,
+                                       std::uint8_t* dst_q80,
+                                       std::size_t rows, std::size_t cols);
+[[nodiscard]] bool ConvertKQuantToF16(KQuantKind kind, const void* src,
+                                      std::uint16_t* dst_f16,
+                                      std::size_t n_elems);
 
 }  // namespace mbufo::quant
 
