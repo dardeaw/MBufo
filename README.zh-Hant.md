@@ -244,8 +244,8 @@ Embedding 與重排序（經由 HTTP 服務端的單次請求，長度單位為 
 | **bge-reranker-v2-m3** | Cross-Encoder | Q8 / Q4 | `/v1/reranking`（NPU lane） | 🧪 執行期已驗證（評分差約 1e-5） |
 | **Qwen3-ASR 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions`（現由 GPU sidecar 提供） | 🧪 NPU 執行期已驗證（cos > 0.967，top-1 吻合） |
 | **Qwen3-TTS 12Hz 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/speech`（現由 GPU sidecar 提供） | 🧪 NPU 執行期已驗證（已產出 wav，cos > 0.98） |
-| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | 測試線束（輸出 PNG） | 🧪 執行期已驗證（cos > 0.997；尚無 HTTP 服務） |
-| **Z-Image-Turbo** | DiT | Q8 / Q4 | 測試線束（輸出 PNG） | 🧪 執行期已驗證（cos > 0.997；尚無 HTTP 服務） |
+| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | 測試線束（輸出 PNG） | 🧪 執行期已驗證（E2E cos(pipe)=0.9485 q8；單步 v 0.978-0.999；尚無 HTTP 服務） |
+| **Z-Image-Turbo** | DiT | Q8 / Q4 | 測試線束（輸出 PNG） | 🧪 執行期已驗證（E2E cos(pipe)=0.9918 q8，q8q4=0.985；尚無 HTTP 服務） |
 
 ### 支援的量化格式
 
