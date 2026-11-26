@@ -206,9 +206,13 @@ of layer it is serving.
 | — | `MBUFO_INKLING_KV_Q4=1` | `kK8V4` (forces blocked on) |
 | `k4v8`, `fp8` | any | `kF16` — the catalog string wins last |
 
-Precedence: catalog string, then env override, then an explicit `k4v8`/`fp8`
-request switches blocked off. Serving maps `--kv-quant q4` onto the catalog
-value `q8` plus `MBUFO_KV_V4=1` so the graph-captured path stays available.
+Precedence, narrowest first: `MBUFO_INKLING_KV_Q4` / `MBUFO_INKLING_KV_V4` /
+`MBUFO_INKLING_KV_Q8` (inkling-only, never touched by the CLI) beat the
+model's own `kv_cache_quant` string, which beats the process-wide
+`MBUFO_KV_V4` that `serve.cpp` derives from `--kv-quant`. That last one is a
+default shared with gemma4 and flash-next, so it must not be able to turn a
+per-model `q4` back into Q8. An explicit `k4v8`/`fp8` request switches
+blocked off.
 
 Blocked modes additionally require `num_q_heads == 3 * num_kv_heads` and
 `head_dim == 128` (the fused kernels assume that geometry). Init fails loudly

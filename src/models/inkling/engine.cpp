@@ -1241,11 +1241,15 @@ bool Session::Init(std::string* error_msg) {
     if (const char* e = std::getenv("MBUFO_INKLING_KV_Q8")) {
       blocked = (e[0] == '1');
     }
-    // An explicit MBUFO_KV_V4 (0 or 1) overrides the catalog choice: serve
-    // maps --kv-quant q4 onto "q8" plus a global MBUFO_KV_V4=1, so a pure Q8
-    // run must be able to force 34B values back on with MBUFO_KV_V4=0.
-    if (const char* e = std::getenv("MBUFO_KV_V4")) {
-      v4 = (e[0] == '1');
+    // serve.cpp setenv()s MBUFO_KV_V4 from --kv-quant: that is a process-wide
+    // default which also drives gemma4 and flash-next, so an explicit
+    // per-model "q4"/"k8v4" (this model's kv_cache_quant) is the narrower
+    // instruction and wins over it. The inkling-only switches below win over
+    // both, which is how a pure Q8 run is forced with MBUFO_INKLING_KV_V4=0.
+    if (!kvq_q4) {
+      if (const char* e = std::getenv("MBUFO_KV_V4")) {
+        v4 = (e[0] == '1');
+      }
     }
     // Inkling-local V4 switch. serve.cpp setenv()s MBUFO_KV_V4 from the
     // catalog before any engine loads, so MBUFO_KV_V4 cannot be used to
