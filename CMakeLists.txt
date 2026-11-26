@@ -746,7 +746,12 @@ if (BUILD_TESTING)
   add_test(NAME trace_test COMMAND trace_test)
   set_tests_properties(trace_test PROPERTIES LABELS "cpu;server;trace")
 
-  add_executable(http_server_test tests/cli/http_server_test.cpp)
+  # HttpServer references ModelRegistry/ModelAdminService, which are compiled into
+  # the mbufo executable rather than mbufo_http, so the test compiles them itself.
+  add_executable(http_server_test
+    tests/cli/http_server_test.cpp
+    src/cli/serve/model_admin_api.cpp
+    src/cli/serve/model_registry.cpp)
   target_link_libraries(http_server_test PRIVATE mbufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
