@@ -772,15 +772,25 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     std::string sug_dspark;
     std::string sug_draft;
     std::string sug_spec;
+    auto is_bf16 = [](const std::string& p) {
+      std::string lo = p;
+      for (char& c : lo)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      return lo.find("bf16") != std::string::npos ||
+             lo.find("f16") != std::string::npos;
+    };
     for (const auto& [_, dpath] : draft_cands) {
       compatible_drafts.push_back(dpath);
       const GgufRole dr = ClassifyGguf(std::filesystem::path(dpath));
       if (dr == GgufRole::kDraftMtp && sug_mtp.empty()) sug_mtp = dpath;
       if (dr == GgufRole::kDraftDFlash && sug_dflash.empty()) sug_dflash = dpath;
-      if (dr == GgufRole::kDraftDSpark && sug_dspark.empty()) sug_dspark = dpath;
+      if (dr == GgufRole::kDraftDSpark &&
+          (sug_dspark.empty() || (is_bf16(dpath) && !is_bf16(sug_dspark)))) {
+        sug_dspark = dpath;
+      }
     }
     if (!compatible_drafts.empty()) {
-      sug_draft = compatible_drafts.front();
+      sug_draft = !sug_dspark.empty() ? sug_dspark : compatible_drafts.front();
       sug_spec = role_to_spec(ClassifyGguf(std::filesystem::path(sug_draft)));
     }
 

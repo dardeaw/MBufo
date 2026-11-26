@@ -2061,7 +2061,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   auto text = [&](std::uint32_t target) {
     return text_until(marker, target);
   };
-  const auto prose = plain_answer ? text(calls) : UINT32_MAX;
+  const auto prose =
+      plain_answer && !inkling ? text(calls) : UINT32_MAX;
   // As in llama.cpp's DeepSeek V4 and Qwen3-Coder parsers, calls end the
   // output: parallel calls share one DeepSeek block, Qwen calls may follow
   // each other, and no text may follow them. Text after a call is where
@@ -2138,13 +2139,18 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   const std::uint32_t atem_args =
       atem ? text_until("</atem:invoke>", atem_tail) : UINT32_MAX;
   if (inkling) {
+    const auto msg_model = literal("<|message_model|>");
     const auto think_open = literal("<|content_thinking|>");
-    const auto next_msg = text_until("<|message_model|>", calls);
+    const auto next_msg = static_cast<std::uint32_t>(grammar->rules_.size());
+    grammar->rules_.push_back({{msg_model, calls}});
     const auto think_end = text_until("<|end_message|>", next_msg);
     grammar->rules_[calls].push_back({think_open, think_end});
     if (plain_answer && !required) {
       const auto text_open = literal("<|content_text|>");
-      const auto end_msg = text_until("<|end_message|>", prose);
+      const auto after_text =
+          static_cast<std::uint32_t>(grammar->rules_.size());
+      grammar->rules_.push_back({{}, {msg_model, calls}});
+      const auto end_msg = text_until("<|end_message|>", after_text);
       grammar->rules_[calls].push_back({text_open, end_msg});
     }
   }
@@ -2216,7 +2222,9 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
           {named, root, end, after});
     }
   }
-  if (plain_answer && !required)
+  if (inkling)
+    alternatives.push_back({literal("<|message_model|>"), calls});
+  else if (plain_answer && !required)
     alternatives.push_back({prose});
   else if (format == ToolFormat::kJson)
     alternatives.push_back({literal(marker), calls});

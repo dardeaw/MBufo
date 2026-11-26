@@ -209,7 +209,7 @@ class Session final {
   std::shared_ptr<Model> model_;
   hipStream_t stream_{nullptr};
 
-  static constexpr std::uint32_t kChunk = 2048;
+  static constexpr std::uint32_t kChunk = 512;
   static constexpr std::uint32_t kMaxSnaps = 12;
   static constexpr std::uint32_t kTopK = 8;
 

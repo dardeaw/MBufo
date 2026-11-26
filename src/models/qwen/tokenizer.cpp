@@ -905,7 +905,8 @@ std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
   std::size_t offset = 0;
   while (offset < text.size()) {
     const std::size_t end = (pre_tokenizer_ == PreTokenizer::kLlama ||
-                               pre_tokenizer_ == PreTokenizer::kLlama4)
+                               pre_tokenizer_ == PreTokenizer::kLlama4 ||
+                               pre_tokenizer_ == PreTokenizer::kInkling)
                                   ? LlamaPieceEnd(text, offset)
                                   : Qwen35PieceEnd(text, offset);
     const auto piece = text.substr(offset, end - offset);

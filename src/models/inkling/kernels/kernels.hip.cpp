@@ -3162,6 +3162,223 @@ __device__ __forceinline__ float4 BlockedDequant4(
   }
 }
 
+template <typename Codec>
+__device__ __forceinline__ uint4 BlockedDequant8Half(
+    const std::uint8_t* __restrict__ row, std::uint32_t c8) {
+  const std::uint32_t l0 = c8 >> 2u;
+  const float4 f0 = BlockedDequant4<Codec>(row, l0);
+  const float4 f1 = BlockedDequant4<Codec>(row, l0 + 1u);
+  const __half2 h0 = __float22half2_rn(make_float2(f0.x, f0.y));
+  const __half2 h1 = __float22half2_rn(make_float2(f0.z, f0.w));
+  const __half2 h2 = __float22half2_rn(make_float2(f1.x, f1.y));
+  const __half2 h3 = __float22half2_rn(make_float2(f1.z, f1.w));
+  uint4 packed;
+  std::memcpy(&packed.x, &h0, 4);
+  std::memcpy(&packed.y, &h1, 4);
+  std::memcpy(&packed.z, &h2, 4);
+  std::memcpy(&packed.w, &h3, 4);
+  return packed;
+}
+
+template <std::uint32_t kHeadDim, std::uint32_t kHeadWaves,
+          std::uint32_t kQBlocks, std::uint32_t kKeys, typename VCodec>
+__global__ __launch_bounds__(32 * kHeadWaves * kQBlocks) void InklingAttnWmmaPrefillBlockedKernel(
+    const float* __restrict__ q, BlockedKvQ8View k_cache,
+    bkv::BlockedKvView<VCodec> v_cache, const float* __restrict__ sinks,
+    const float* __restrict__ rel, const float* __restrict__ rel_bank,
+    float* __restrict__ out, std::uint32_t start_pos, std::uint32_t n_tokens,
+    std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t window,
+    std::uint32_t rel_extent, float scale) {
+  constexpr std::uint32_t kRows = 16;
+  constexpr std::uint32_t kKeyBlocks = kKeys / 16;
+  constexpr std::uint32_t kVtStride = kKeys + 8;
+  constexpr std::uint32_t kWaves = kHeadWaves * kQBlocks;
+  constexpr std::uint32_t kThreads = 32 * kWaves;
+  constexpr std::uint32_t kKSteps = kHeadDim / 16;
+  constexpr std::uint32_t kDimTiles = kHeadDim / 16;
+  constexpr std::uint32_t kKStride = kHeadDim + 8;
+
+  const std::uint32_t tid = threadIdx.x;
+  const std::uint32_t lane = tid & 31u;
+  const std::uint32_t wave = tid >> 5u;
+  const std::uint32_t sub = lane & 15u;
+  const std::uint32_t half_id = lane >> 4u;
+  const std::uint32_t head = blockIdx.y * kHeadWaves + (wave % kHeadWaves);
+  const std::uint32_t qblk = wave / kHeadWaves;
+  const std::uint32_t qpg = heads / kv_heads;
+  const std::uint32_t kv_head = (blockIdx.y * kHeadWaves) / qpg;
+  const std::uint32_t block_q0 = blockIdx.x * kQBlocks * kRows;
+  const std::uint32_t query_start = block_q0 + qblk * kRows;
+
+  __shared__ __half k_lds[kKeys][kKStride];
+  __shared__ __half vt_lds[kHeadDim][kVtStride];
+
+  const std::uint32_t qrel = query_start + sub;
+  const bool row_live = qrel < n_tokens;
+  const std::uint32_t qpos = start_pos + qrel;
+
+  InklingV16h q_frag[kKSteps];
+  {
+    const float* qrow = q + (static_cast<std::size_t>(row_live ? qrel : 0) * heads + head) * kHeadDim;
+#pragma unroll
+    for (std::uint32_t ks = 0; ks < kKSteps; ++ks) {
+#pragma unroll
+      for (std::uint32_t e = 0; e < 16; ++e) {
+        q_frag[ks][e] = static_cast<_Float16>(row_live ? qrow[ks * 16u + e] * scale : 0.0F);
+      }
+    }
+  }
+
+  float rel_reg[16];
+  const bool has_rel = (rel != nullptr && rel_bank != nullptr && row_live);
+  if (has_rel) {
+    const float* rrow = rel + (static_cast<std::size_t>(qrel) * heads + head) * 16u;
+#pragma unroll
+    for (int e = 0; e < 16; ++e) rel_reg[e] = rrow[e];
+  }
+
+  InklingV8f o_acc[kDimTiles] = {};
+  float m_run = (sinks != nullptr && row_live) ? sinks[static_cast<std::size_t>(qrel) * heads + head] : -INFINITY;
+  float l_run = (sinks != nullptr && row_live && half_id == 0) ? 1.0F : 0.0F;
+
+  const std::uint32_t n_keys_all = start_pos + n_tokens;
+  std::uint32_t key_hi = start_pos + block_q0 + kQBlocks * kRows;
+  if (key_hi > n_keys_all) key_hi = n_keys_all;
+  const std::uint32_t first_q_pos = start_pos + block_q0;
+  const std::uint32_t key_lo = (window != 0 && first_q_pos + 1 > window) ? first_q_pos + 1 - window : 0;
+  const std::uint32_t kb_begin = key_lo / kKeys;
+  const std::uint32_t kb_end = (key_hi + kKeys - 1u) / kKeys;
+
+  for (std::uint32_t kb = kb_begin; kb < kb_end; ++kb) {
+    const std::uint32_t key_start = kb * kKeys;
+    __syncthreads();
+    for (std::uint32_t i = tid; i < kKeys * (kHeadDim / 8); i += kThreads) {
+      const std::uint32_t r = i / (kHeadDim / 8);
+      const std::uint32_t c8 = (i % (kHeadDim / 8)) * 8u;
+      const std::uint32_t kr = key_start + r;
+      uint4 kv = make_uint4(0, 0, 0, 0);
+      if (kr < key_hi) {
+        const std::uint8_t* krow = k_cache.data +
+            static_cast<std::size_t>(KvSlot(window, kr)) * k_cache.row_stride +
+            static_cast<std::size_t>(kv_head) * k_cache.head_stride;
+        kv = BlockedDequant8Half<bkv::KvCodecQ8>(krow, c8);
+      }
+      *reinterpret_cast<uint4*>(&k_lds[r][c8]) = kv;
+    }
+    for (std::uint32_t u = tid; u < (kKeys / 8) * (kHeadDim / 8); u += kThreads) {
+      const std::uint32_t kg = u % (kKeys / 8);
+      const std::uint32_t c8 = (u / (kKeys / 8)) * 8u;
+      unsigned w[8][4];
+#pragma unroll
+      for (std::uint32_t j = 0; j < 8; ++j) {
+        const std::uint32_t kr = key_start + kg * 8u + j;
+        uint4 vv = make_uint4(0, 0, 0, 0);
+        if (kr < key_hi) {
+          const std::uint8_t* vrow = v_cache.data +
+              static_cast<std::size_t>(KvSlot(window, kr)) * v_cache.row_stride +
+              static_cast<std::size_t>(kv_head) * v_cache.head_stride;
+          vv = BlockedDequant8Half<VCodec>(vrow, c8);
+        }
+        w[j][0] = vv.x; w[j][1] = vv.y; w[j][2] = vv.z; w[j][3] = vv.w;
+      }
+      const std::uint32_t col = (kg >> 1) * 16u + (kg & 1u) * 4u;
+#pragma unroll
+      for (std::uint32_t e = 0; e < 8; ++e) {
+        const std::uint32_t sh = (e & 1u) * 16u;
+        const std::uint32_t wi = e >> 1;
+        auto H = [&](std::uint32_t j) { return (w[j][wi] >> sh) & 0xffffu; };
+        const uint2 ev = make_uint2(H(0) | (H(2) << 16), H(4) | (H(6) << 16));
+        const uint2 od = make_uint2(H(1) | (H(3) << 16), H(5) | (H(7) << 16));
+        *reinterpret_cast<uint2*>(&vt_lds[c8 + e][col]) = ev;
+        *reinterpret_cast<uint2*>(&vt_lds[c8 + e][col + 8u]) = od;
+      }
+    }
+    __syncthreads();
+
+    InklingV8f s_acc[kKeyBlocks] = {};
+#pragma unroll
+    for (std::uint32_t kbk = 0; kbk < kKeyBlocks; ++kbk) {
+#pragma unroll
+      for (std::uint32_t ks = 0; ks < kKSteps; ++ks) {
+        const InklingV16h kf = InklingLoadFrag(&k_lds[kbk * 16u + sub][ks * 16u]);
+        s_acc[kbk] = InklingWmma(kf, q_frag[ks], s_acc[kbk]);
+      }
+    }
+
+    float part_max = -INFINITY;
+#pragma unroll
+    for (std::uint32_t kbk = 0; kbk < kKeyBlocks; ++kbk) {
+#pragma unroll
+      for (std::uint32_t i = 0; i < 8; ++i) {
+        const std::uint32_t kc = key_start + kbk * 16u + 2u * i + half_id;
+        const bool valid = row_live && kc < key_hi && kc <= qpos && (window == 0 || kc + window > qpos);
+        float sc = s_acc[kbk][i];
+        if (valid && has_rel) {
+          const std::uint32_t dist = qpos - kc;
+          if (dist < rel_extent) {
+            float rb = 0.0F;
+#pragma unroll
+            for (int e = 0; e < 16; ++e) {
+              rb += rel_reg[e] * rel_bank[static_cast<std::size_t>(dist) * 16U + e];
+            }
+            sc += rb;
+          }
+        }
+        sc = valid ? sc : -INFINITY;
+        s_acc[kbk][i] = sc;
+        part_max = fmaxf(part_max, sc);
+      }
+    }
+    part_max = fmaxf(part_max, __shfl_xor(part_max, 16));
+    const float m_new = fmaxf(m_run, part_max);
+    const float alpha = isfinite(m_run) ? __expf(m_run - m_new) : 0.0F;
+    m_run = m_new;
+    float psum = 0.0F;
+    unsigned own[kKeyBlocks][4];
+#pragma unroll
+    for (std::uint32_t kbk = 0; kbk < kKeyBlocks; ++kbk) {
+      float pw[8];
+#pragma unroll
+      for (std::uint32_t i = 0; i < 8; ++i) {
+        pw[i] = isfinite(s_acc[kbk][i]) ? __expf(s_acc[kbk][i] - m_new) : 0.0F;
+        psum += pw[i];
+      }
+#pragma unroll
+      for (std::uint32_t t = 0; t < 4; ++t) own[kbk][t] = InklingPackHalves(pw[2 * t], pw[2 * t + 1]);
+    }
+    l_run = l_run * alpha + psum;
+#pragma unroll
+    for (std::uint32_t dt = 0; dt < kDimTiles; ++dt) o_acc[dt] *= alpha;
+
+#pragma unroll
+    for (std::uint32_t kbk = 0; kbk < kKeyBlocks; ++kbk) {
+      InklingV8u bu;
+#pragma unroll
+      for (std::uint32_t t = 0; t < 4; ++t) {
+        const unsigned other = static_cast<unsigned>(__shfl_xor(static_cast<int>(own[kbk][t]), 16));
+        bu[t] = half_id == 0 ? own[kbk][t] : other;
+        bu[4 + t] = half_id == 0 ? other : own[kbk][t];
+      }
+      const InklingV16h pb = __builtin_bit_cast(InklingV16h, bu);
+#pragma unroll
+      for (std::uint32_t dt = 0; dt < kDimTiles; ++dt) {
+        const InklingV16h vf = InklingLoadFrag(&vt_lds[dt * 16u + sub][kbk * 16u]);
+        o_acc[dt] = InklingWmma(vf, pb, o_acc[dt]);
+      }
+    }
+  }
+
+  const float l_tot = l_run + __shfl_xor(l_run, 16);
+  const float inv = l_tot > 0.0F ? 1.0F / l_tot : 0.0F;
+  if (row_live) {
+    float* orow = out + (static_cast<std::size_t>(qrel) * heads + head) * kHeadDim;
+#pragma unroll
+    for (std::uint32_t dt = 0; dt < kDimTiles; ++dt)
+#pragma unroll
+      for (std::uint32_t i = 0; i < 8; ++i) orow[dt * 16u + 2u * i + half_id] = o_acc[dt][i] * inv;
+  }
+}
+
 // Graph-capture store: single token from *d_pos with ring wrap. The
 // non-captured path instead calls shared blocked_kv::QuantizeKvRows (engine).
 // One block per (kv-head, 32-elem block); 32 threads cooperatively quantize
@@ -3745,6 +3962,14 @@ static void AttentionPrefillQ8Impl(
   // the split-K partials would overflow it, so large prefills ride the
   // scratch-free Wave32 path (same fallback structure as the F16 dispatch).
   if (n_tokens > 32U || splitk_scratch == nullptr) {
+    if (n_heads == 24U && n_kv_heads == 8U && n_tokens >= 16U) {
+      hipLaunchKernelGGL(
+          (InklingAttnWmmaPrefillBlockedKernel<128U, 3U, 4U, 32U, VCodec>),
+          dim3((n_tokens + 63U) / 64U, 8U), dim3(384), 0, stream, q, k_cache,
+          v_cache, sinks, rel, rel_bank, out, start_pos, n_tokens, n_heads,
+          n_kv_heads, window, rel_extent, scale);
+      return;
+    }
     AttentionWave32Q8(q, k_cache, v_cache, sinks, rel, rel_bank, out,
                       start_pos, window, n_tokens, n_heads, n_kv_heads,
                       rel_extent, scale, stream);

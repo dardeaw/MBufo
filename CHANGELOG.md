@@ -3,6 +3,24 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.39.4 (2026-11-27)
+
+### 48-Plane Loop KV Cache, SWA Ring Fix, K8V4 (`Q4`) KV + WMMA Prefill & Streaming Fixes
+- **48-Plane Loop-MoE KV Cache + SWA Ring Fix (`src/models/inkling/engine.cpp`)**:
+  - Allocated 48 independent KV cache planes (`24` base + `12` pass-2 + `12` pass-3) so `L6..L17` loop passes 2 and 3 read their own historical KV during decode instead of pass-1's KV (fixing multi-step decode corruption and repetition loops).
+  - Removed redundant per-chunk `kv_backup_` copies; reduced `kChunk` from `2048` to `512` (`< sliding_window=1024`) with ring-wrapped `KvSlot` so local layers never self-overwrite within a chunk while keeping 256K-context KV compact (~3.56 GB total).
+- **Shared Blocked-KV Codec & `K8V4` (`Q4`) Value Cache (`src/core/compute/attention/`, `src/models/inkling/`)**:
+  - Unified `KvCodecQ8`/`Fp8`/`Q4` in `blocked_kv_codec.hpp` and added `K8V4` (`Q8` keys 34B/block, `Q4` values 18B/block) with per-model `q4` override over global `--kv-quant q8`.
+  - Added `BlockedDequant8Half` and `InklingAttnWmmaPrefillBlockedKernel` (`kernels.hip.cpp`) for `Q8`/`K8V4` prefill: **1269.7 / 1248.7 / 1141.5 / 1048.1 tok/s** (`2K / 9K / 18K / 27K`, up from `228–643 tok/s`).
+- **Tokenizer, Streaming Filter & Default BF16 Draft (`src/models/qwen/tokenizer.cpp`, `src/cli/serve/`)**:
+  - Routed `PreTokenizer::kInkling` through `LlamaPieceEnd` (`\p{N}{1,3}` matching `tokenizer.json`).
+  - Added `StreamingTextFilter::PushInkling` (`openai_chat.cpp`) with `InklingPart` state tracking to strip control tags, route `<|content_thinking|>` / `<|content_text|>` / `<|content_invoke_tool_json|>`, and prevent tool names from leaking into `reasoning_content` or `content`; fixed `ParseInklingGeneration` when the leading `<|message_model|>` tag is omitted.
+  - Fixed constrained Inkling tool calling: `InklingTextRunner::DecodeStep` (`inference_backend.cpp`) bypasses unconstrained `SpeculativeRound` whenever `sampler.config().constraint != nullptr`, and `JsonConstraint::WithTools` (`json_constraint.cpp`) enforces `<|message_model|>` transitions directly at turn start and after `<|end_message|>`.
+  - Included `GgmlType::kNVFP4` (`40`), hid deprecated `Inkling-2-Mini-UD-Q4_K_XL` from catalog, and preferred `BF16` DSpark draft GGUFs (`dspark-Inkling-2-Mini-BF16.gguf`) by default in `model_admin_api.cpp`.
+- **Verified (`Inkling-2-Mini-h6-lbf16-UD-Q4_K_M`, `q4` KV, `dspark-Inkling-2-Mini-BF16`, gfx1151)**:
+  - Arithmetic & reasoning (`1234 + 5678 = 6912`) matches HF BF16 reference at **43.8 tok/s** decode; streaming `"Hi"` emits clean `reasoning_content` with zero leaked control tags.
+  - Tool calling (`tools/bench/tool_ladder.py`, 500–16K tokens, + OpenCode streaming `bash` test): 12/12 valid single `tool_calls` (`finish=tool_calls`, zero `no-call`, zero `text-json`, zero malformed JSON).
+
 ## v0.39.3 (2026-11-25)
 
 ### Shared Core Quantization + Inkling-2-Mini 48-Layer Small-Op Fusion

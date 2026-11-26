@@ -2392,20 +2392,30 @@ ParsedGeneration ParseInklingGeneration(
 
   while (pos < raw.size()) {
     const auto msg_pos = raw.find(kMsgOpen, pos);
-    if (msg_pos == std::string_view::npos) {
+    const auto end_pos = raw.find(kMsgClose, pos);
+    const bool has_implicit_body =
+        (msg_pos == std::string_view::npos || end_pos < msg_pos) &&
+        (raw.substr(pos).find(kThinkOpen) != std::string_view::npos ||
+         raw.substr(pos).find(kTextOpen) != std::string_view::npos ||
+         raw.substr(pos).find(kToolJsonOpen) != std::string_view::npos ||
+         end_pos != std::string_view::npos);
+    std::size_t body_start = 0;
+    std::size_t msg_end = std::string_view::npos;
+    if (has_implicit_body) {
+      body_start = pos;
+      msg_end = end_pos;
+    } else if (msg_pos == std::string_view::npos) {
       const auto tail = strip_end_sampling(raw.substr(pos));
-      if (!tail.empty()) {
-        if (!parsed.text.empty() && !tail.empty()) parsed.text += "";
-        parsed.text += tail;
-      }
+      if (!tail.empty()) parsed.text += tail;
       break;
+    } else {
+      if (msg_pos > pos) {
+        const auto prefix = strip_end_sampling(raw.substr(pos, msg_pos - pos));
+        if (!prefix.empty()) parsed.text += prefix;
+      }
+      body_start = msg_pos + kMsgOpen.size();
+      msg_end = raw.find(kMsgClose, body_start);
     }
-    if (msg_pos > pos) {
-      const auto prefix = strip_end_sampling(raw.substr(pos, msg_pos - pos));
-      if (!prefix.empty()) parsed.text += prefix;
-    }
-    const auto body_start = msg_pos + kMsgOpen.size();
-    const auto msg_end = raw.find(kMsgClose, body_start);
     const std::string_view body =
         msg_end == std::string_view::npos
             ? strip_end_sampling(raw.substr(body_start))
@@ -2972,6 +2982,9 @@ public:
       return true;
     }
     pending_.append(piece);
+    if (is_inkling_stream()) {
+      return PushInkling(final);
+    }
     if (reasoning_start_) {
       // A prompt-opened reasoning phase may still emit its opening tag.
       // Match the buffered parser without exposing a split opener as thought.
@@ -3122,6 +3135,10 @@ public:
 
   bool Finish(bool hide_tool_markup, std::string_view content = {},
               std::string_view reasoning = {}) {
+    if (is_inkling_stream()) {
+      pending_.clear();
+      return true;
+    }
     if (tool_mode_ && state_ == State::kThinking) {
       const auto tail = reasoning.substr(
           std::min(emitted_reasoning_bytes_, reasoning.size()));
@@ -3173,6 +3190,82 @@ public:
   }
 
 private:
+  [[nodiscard]] bool is_inkling_stream() const noexcept {
+    return markers_.size() == 1 && markers_.front() == "<|message_model|>";
+  }
+
+  bool PushInkling(bool final) {
+    static constexpr std::array<std::string_view, 6> kTags = {
+        "<|message_model|>",
+        "<|end_message|>",
+        "<|content_model_end_sampling|>",
+        "<|content_thinking|>",
+        "<|content_text|>",
+        "<|content_invoke_tool_json|>",
+    };
+    while (!pending_.empty()) {
+      std::size_t best_pos = std::string::npos;
+      std::size_t best_idx = 0;
+      for (std::size_t i = 0; i < kTags.size(); ++i) {
+        const std::size_t pos = pending_.find(kTags[i]);
+        if (pos < best_pos) {
+          best_pos = pos;
+          best_idx = i;
+        }
+      }
+      if (best_pos != std::string::npos) {
+        if (best_pos > 0 &&
+            (inkling_part_ != InklingPart::kNone ||
+             best_idx == 1 || best_idx == 2) &&
+            !Emit(std::string_view(pending_).substr(0, best_pos),
+                  inkling_part_ == InklingPart::kThinking)) {
+          return false;
+        }
+        if (best_idx == 5) {
+          hidden_ = pending_.substr(best_pos);
+          pending_.clear();
+          tool_mode_ = true;
+          return true;
+        }
+        if (best_idx == 3) {
+          inkling_part_ = InklingPart::kThinking;
+        } else if (best_idx == 4) {
+          inkling_part_ = InklingPart::kText;
+        } else {
+          inkling_part_ = InklingPart::kNone;
+        }
+        pending_.erase(0, best_pos + kTags[best_idx].size());
+        continue;
+      }
+      if (inkling_part_ == InklingPart::kNone && !final) {
+        break;
+      }
+      std::size_t hold = 0;
+      if (!final) {
+        const std::size_t lt = pending_.rfind('<');
+        if (lt != std::string::npos) {
+          const std::string_view tail =
+              std::string_view(pending_).substr(lt);
+          for (const auto tag : kTags) {
+            if (tag.starts_with(tail)) {
+              hold = tail.size();
+              break;
+            }
+          }
+        }
+      }
+      const std::size_t ready = pending_.size() - hold;
+      if (ready > 0 &&
+          !Emit(std::string_view(pending_).substr(0, ready),
+                inkling_part_ == InklingPart::kThinking)) {
+        return false;
+      }
+      pending_.erase(0, ready);
+      break;
+    }
+    return true;
+  }
+
   bool Emit(std::string_view piece, bool reasoning) {
     if (!emit_piece_(piece, reasoning))
       return false;
@@ -3256,6 +3349,8 @@ private:
   std::size_t emitted_reasoning_bytes_{0};
   bool trim_reasoning_separator_{false};
   bool reasoning_start_{false};
+  enum class InklingPart : std::uint8_t { kNone, kThinking, kText };
+  InklingPart inkling_part_{InklingPart::kNone};
 };
 
 struct ToolDelta {

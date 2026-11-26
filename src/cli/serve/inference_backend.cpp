@@ -4383,6 +4383,7 @@ class InklingTextRunner final : public HipTextModelRunner {
     if (!use_dspark() || max_tokens <= 1 ||
         sampler.ForcedToken().has_value() ||
         !sampler.config().can_use_unmodified_argmax() ||
+        sampler.config().constraint != nullptr ||
         sampler.NeedsConstraintMask()) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
