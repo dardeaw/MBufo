@@ -16,26 +16,22 @@
 // calling, so this kernel always sees dense-causal keys [0, *start_pos].
 //
 // This header is host-safe (includable from plain C++ TUs): it carries only
-// layout tags, tuning constants and the launcher declaration. The device
-// codec traits live in blocked_splitk.hip.cpp.
+// layout tags, tuning constants and the launcher declaration. The unified
+// element codec lives in blocked_kv_codec.hpp.
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+
+#include "src/core/compute/attention/blocked_kv_codec.hpp"
 
 #include <cstddef>
 #include <cstdint>
 
 namespace mbufo::core::compute::blocked_splitk {
 
-// Element codec tag of the shared blocked Q8 KV layout: symmetric INT8 over
-// amax/127 with a per-32-block f16 scale (34 bytes per block).
-// Bit-compatible with blocked_kv::KvCodecQ8 and blocked_wmma::KvCodecQ8;
-// redeclared as a dependency-free tag so this header stays includable from
-// model engines without pulling in the flash-next headers.
-struct KvCodecQ8 {
-  using Elem = std::uint8_t;
-  static constexpr float kRange = 127.0f;
-  static constexpr std::uint32_t kBlockBytes = 34;
-};
+// Single definition lives in blocked_kv_codec.hpp (same layout and codec
+// math as every other consumer); alias kept so existing template arguments
+// (blocked_splitk::KvCodecQ8) keep compiling.
+using KvCodecQ8 = blocked_kv::KvCodecQ8;
 
 /// Upper token bound of the Split-K decode path (mirrors the F16 Split-K
 /// narrow-batch shape: decode and other single-digit forwards). Longer

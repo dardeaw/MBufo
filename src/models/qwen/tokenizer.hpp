@@ -101,6 +101,7 @@ private:
     kLlama,
     kLlama4,
     kLaguna,
+    kInkling,
   };
 
   struct PairHash {

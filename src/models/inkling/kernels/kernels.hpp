@@ -7,7 +7,18 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
+#include "src/core/compute/attention/blocked_kv_codec.hpp"
+
 namespace mbufo::models::inkling::kernels {
+
+// Cache view for the shared blocked-Q8 KV rows (see blocked_kv_codec.hpp:
+// the view pins the byte geometry; the Q8 entry points below only accept
+// views, never raw pointers + ad-hoc strides).
+using BlockedKvQ8View = ::mbufo::core::compute::blocked_kv::BlockedKvView<
+    ::mbufo::core::compute::blocked_kv::KvCodecQ8>;
+// K8V4 value rows (18B packed-nibble blocks); keys stay BlockedKvQ8View.
+using BlockedKvQ4View = ::mbufo::core::compute::blocked_kv::BlockedKvView<
+    ::mbufo::core::compute::blocked_kv::KvCodecQ4>;
 
 [[nodiscard]] const char* KernelsVersion();
 
@@ -103,7 +114,8 @@ void SnapPush(const float* h, float* bank, std::uint32_t n_tokens,
 void StoreKvF16(const float* k_in, const float* v_in, __half* k_cache,
                 __half* v_cache, std::uint32_t n_tokens,
                 std::uint32_t start_pos, std::uint32_t n_kv_heads,
-                std::uint32_t head_dim, hipStream_t stream);
+                std::uint32_t head_dim, hipStream_t stream,
+                std::uint32_t wrap = 0);
 
 // --- Sigmoid top-8 router (inkling-unique selection/renorm) ---
 // p = sigmoid(logit); select top-8 by (p + bias); weights = p / (sum + 1e-20)
@@ -202,7 +214,7 @@ void FillLogScaleTauByPos(float* tau, const std::uint32_t* d_pos,
 void StoreKvF16ByPos(const float* k_in, const float* v_in, __half* k_cache,
                      __half* v_cache, const std::uint32_t* d_pos,
                      std::uint32_t n_kv_heads, std::uint32_t head_dim,
-                     hipStream_t stream);
+                     hipStream_t stream, std::uint32_t wrap = 0);
 
 void AttentionDecodeByPos(const float* q, const __half* k_cache,
                           const __half* v_cache, const float* sinks,
@@ -214,7 +226,105 @@ void AttentionDecodeByPos(const float* q, const __half* k_cache,
                       float* splitk_scratch = nullptr);
 
 void CopyKvSlotByPos(__half* cache, __half* backup, const std::uint32_t* d_pos,
-                     std::uint32_t kv_dim, bool to_backup, hipStream_t stream);
+                     std::uint32_t kv_dim, bool to_backup, hipStream_t stream,
+                     std::uint32_t wrap = 0);
+
+// --- Blocked-Q8 KV (shared 34B layout; codec-identical to
+// core::compute::blocked_kv::KvCodecQ8) ---
+// Store float K/V rows as blocked-Q8 (32x int8 + f16 scale per 32 elems).
+// Strides come from the views (MakeBlockedKvView); `wrap` is the ring
+// window (0 = dense, same KvSlot rule as F16).
+void StoreKvQ8ByPos(const float* k_in, const float* v_in,
+                     const BlockedKvQ8View& k_cache,
+                     const BlockedKvQ8View& v_cache,
+                     const std::uint32_t* d_pos, std::uint32_t n_kv_heads,
+                     std::uint32_t head_dim, hipStream_t stream,
+                     std::uint32_t wrap = 0);
+// Fused-dequant Q8 twins of AttentionDecode/Prefill(/ByPos): identical
+// sinks/rel-bias/window/qpg==3 semantics, K/V read from blocked-Q8 rows
+// (`row_stride` bytes each) and dequantized in registers.
+void AttentionDecodeQ8(const float* q, const BlockedKvQ8View& k_cache,
+                       const BlockedKvQ8View& v_cache, const float* sinks,
+                       const float* rel, const float* rel_bank, float* out,
+                       std::uint32_t start_pos, std::uint32_t window,
+                       std::uint32_t n_heads, std::uint32_t n_kv_heads,
+                       std::uint32_t head_dim, std::uint32_t rel_extent,
+                       float scale, hipStream_t stream,
+                       float* splitk_scratch);
+void AttentionPrefillQ8(const float* q, const BlockedKvQ8View& k_cache,
+                        const BlockedKvQ8View& v_cache, const float* sinks,
+                        const float* rel, const float* rel_bank, float* out,
+                        std::uint32_t n_tokens, std::uint32_t start_pos,
+                        std::uint32_t window, std::uint32_t n_heads,
+                        std::uint32_t n_kv_heads, std::uint32_t head_dim,
+                        std::uint32_t rel_extent, float scale,
+                        hipStream_t stream, float* splitk_scratch);
+void AttentionDecodeQ8ByPos(const float* q, const BlockedKvQ8View& k_cache,
+                            const BlockedKvQ8View& v_cache, const float* sinks,
+                            const float* rel, const float* rel_bank,
+                            float* out, const std::uint32_t* d_pos,
+                            std::uint32_t window, std::uint32_t n_heads,
+                            std::uint32_t n_kv_heads, std::uint32_t head_dim,
+                            std::uint32_t rel_extent, float scale,
+                            hipStream_t stream, float* splitk_scratch);
+void AttentionWave32Q8(const float* q, const BlockedKvQ8View& k_cache,
+                       const BlockedKvQ8View& v_cache, const float* sinks,
+                       const float* rel, const float* rel_bank, float* out,
+                       std::uint32_t start_pos, std::uint32_t window,
+                       std::uint32_t n_tokens, std::uint32_t n_q_heads,
+                       std::uint32_t n_kv_heads, std::uint32_t rel_extent,
+                       float scale, hipStream_t stream);
+void CopyKvSlotQ8ByPos(const BlockedKvQ8View& cache,
+                       const BlockedKvQ8View& backup,
+                       const std::uint32_t* d_pos,
+                       bool to_backup, hipStream_t stream,
+                       std::uint32_t wrap = 0);
+
+// --- K8V4 overloads (keys stay Q8; values use the 18B nibble codec).
+// Same signatures with a Q4 value view; overload resolution picks the
+// kernel instantiation, so call sites stay identical apart from the view.
+void StoreKvQ8ByPos(const float* k_in, const float* v_in,
+                    const BlockedKvQ8View& k_cache,
+                    const BlockedKvQ4View& v_cache,
+                    const std::uint32_t* d_pos, std::uint32_t n_kv_heads,
+                    std::uint32_t head_dim, hipStream_t stream,
+                    std::uint32_t wrap = 0);
+void AttentionDecodeQ8(const float* q, const BlockedKvQ8View& k_cache,
+                       const BlockedKvQ4View& v_cache, const float* sinks,
+                       const float* rel, const float* rel_bank, float* out,
+                       std::uint32_t start_pos, std::uint32_t window,
+                       std::uint32_t n_heads, std::uint32_t n_kv_heads,
+                       std::uint32_t head_dim, std::uint32_t rel_extent,
+                       float scale, hipStream_t stream,
+                       float* splitk_scratch);
+void AttentionPrefillQ8(const float* q, const BlockedKvQ8View& k_cache,
+                        const BlockedKvQ4View& v_cache, const float* sinks,
+                        const float* rel, const float* rel_bank, float* out,
+                        std::uint32_t n_tokens, std::uint32_t start_pos,
+                        std::uint32_t window, std::uint32_t n_heads,
+                        std::uint32_t n_kv_heads, std::uint32_t head_dim,
+                        std::uint32_t rel_extent, float scale,
+                        hipStream_t stream, float* splitk_scratch);
+void AttentionDecodeQ8ByPos(const float* q, const BlockedKvQ8View& k_cache,
+                            const BlockedKvQ4View& v_cache, const float* sinks,
+                            const float* rel, const float* rel_bank,
+                            float* out, const std::uint32_t* d_pos,
+                            std::uint32_t window, std::uint32_t n_heads,
+                            std::uint32_t n_kv_heads, std::uint32_t head_dim,
+                            std::uint32_t rel_extent, float scale,
+                            hipStream_t stream, float* splitk_scratch);
+void AttentionWave32Q8(const float* q, const BlockedKvQ8View& k_cache,
+                       const BlockedKvQ4View& v_cache, const float* sinks,
+                       const float* rel, const float* rel_bank, float* out,
+                       std::uint32_t start_pos, std::uint32_t window,
+                       std::uint32_t n_tokens, std::uint32_t n_q_heads,
+                       std::uint32_t n_kv_heads, std::uint32_t rel_extent,
+                       float scale, hipStream_t stream);
+void CopyKvSlotQ8ByPos(const BlockedKvQ4View& cache,
+                       const BlockedKvQ4View& backup,
+                       const std::uint32_t* d_pos,
+                       bool to_backup, hipStream_t stream,
+                       std::uint32_t wrap = 0);
 
 }  // namespace mbufo::models::inkling::kernels
 

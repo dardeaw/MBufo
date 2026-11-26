@@ -179,9 +179,10 @@ inline AttentionRoute RouteAttention(
     return AttentionRoute::kLegacy;
   if (in.k_codec != in.v_codec)
     return AttentionRoute::kLegacy;
-  // Blocked Fp8 (E4M3) has no WMMA/Split-K kernel (no CodecTraits<Fp8> in
-  // either kernel TU); the scalar path serves it inside the caller's
-  // existing legacy code, so route it there.
+  // Blocked Fp8 (E4M3) has no fused WMMA/Split-K kernel instantiation
+  // (the codec trait exists, but no kernel TU instantiates it); the scalar
+  // path serves it inside the caller's existing legacy code, so route it
+  // there.
   if (in.k_codec == DispatchCodec::kFp8)
     return AttentionRoute::kLegacy;
   // Q8/Q4 from here. Geometry support per kernel TU (see header comment):

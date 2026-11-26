@@ -15,6 +15,9 @@
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/inkling/kernels/kernels.hpp"
+#include "src/core/compute/attention/blocked_kv.hpp"
+
+namespace blocked_kv = ::mbufo::core::compute::blocked_kv;
 
 namespace mbufo::models::inkling {
 namespace {
@@ -981,9 +984,12 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
 
-  std::size_t total_reg_bytes = 0;
-  for (const auto& reg : m->reader_->GetMappedRegions()) total_reg_bytes += reg.size;
-  if (total_reg_bytes <= (32ULL << 30) && std::getenv("MBUFO_INKLING_NO_HOST_MAP") == nullptr)
+  // Default: no anonymous host copy. Weights mirror straight from the
+  // file mapping to device (host file pages stay evictable); every heap
+  // tensor is device-mirrored by UploadWeights, so nothing needs a host
+  // copy afterwards. Opt back into the legacy pinned host copy with
+  // MBUFO_INKLING_KEEP_HOST_MAP=1 (e.g. if a future path needs host reads).
+  if (std::getenv("MBUFO_INKLING_KEEP_HOST_MAP") != nullptr)
   for (const auto& reg : m->reader_->GetMappedRegions()) {
     void* host_copy = mmap(nullptr, reg.size, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1015,6 +1021,27 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   if (!UploadWeights(*m->weights_, m->registered_regions_,
                      m->device_allocations_, error_msg)) {
     return nullptr;
+  }
+  // Host memory trim: every heap-backed converted buffer was device-mirrored
+  // by UploadWeights (MirrorTensor always mirrors heap tensors, never
+  // zero-copies them), so the heap copies are dead weight. Unregister and
+  // release them; the destructor skips nulled entries. Reader-backed tensors
+  // keep their mappings (zero-copy source or evictable file pages).
+  // Opt out with MBUFO_INKLING_KEEP_HOST=1.
+  if (std::getenv("MBUFO_INKLING_KEEP_HOST") == nullptr) {
+    for (auto& reg : m->registered_regions_) {
+      if (reg.heap_backed && reg.host_copy != nullptr) {
+        (void)hipHostUnregister(reg.host_copy);
+        reg.host_copy = nullptr;
+        reg.device_data = nullptr;
+      }
+    }
+    m->converted_f16_.clear();
+    m->converted_f16_.shrink_to_fit();
+    m->converted_q80_.clear();
+    m->converted_q80_.shrink_to_fit();
+    m->converted_f32_.clear();
+    m->converted_f32_.shrink_to_fit();
   }
   if (!options.vision_model_path.empty()) {
     m->vision_ = VisionEncoder::Load(
@@ -1194,6 +1221,78 @@ bool Session::Init(std::string* error_msg) {
   const std::size_t x16_cols =
       std::max(std::max(h, q_dim), static_cast<std::size_t>(2) * h);
   moe_tile_cap_ = (slots + cfg.expert_count * 15) / 16 + cfg.expert_count + 1;
+  // Blocked KV modes (shared blocked_kv layout, see blocked_kv_codec.hpp):
+  //   kF16   all-half planes (baseline)
+  //   kQ8    keys+values 34B blocks (32 int8 codes + f16 scale)
+  //   kK8V4  keys 34B Q8, values 18B packed-nibble blocks
+  // Keys never go below 8-bit: post-RoPE outliers need the range.
+  // Selection: kv_cache_quant q8 -> kQ8, q4/k8v4 -> kK8V4, k4v8/fp8 -> kF16;
+  // env overrides MBUFO_INKLING_KV_Q8 / MBUFO_KV_V4 / MBUFO_INKLING_KV_Q4
+  // win over the catalog string (serve maps --kv-quant q4 onto q8+v4).
+  {
+    const std::string& kvq = model_->KvCacheQuant();
+    const bool kvq_q8 = (kvq == "q8" || kvq == "Q8");
+    const bool kvq_q4 =
+        (kvq == "q4" || kvq == "Q4" || kvq == "k8v4" || kvq == "K8V4");
+    const bool kvq_off =
+        (kvq == "k4v8" || kvq == "K4V8" || kvq == "fp8" || kvq == "FP8");
+    bool blocked = kvq_q8 || kvq_q4;
+    bool v4 = kvq_q4;
+    if (const char* e = std::getenv("MBUFO_INKLING_KV_Q8")) {
+      blocked = (e[0] == '1');
+    }
+    // An explicit MBUFO_KV_V4 (0 or 1) overrides the catalog choice: serve
+    // maps --kv-quant q4 onto "q8" plus a global MBUFO_KV_V4=1, so a pure Q8
+    // run must be able to force 34B values back on with MBUFO_KV_V4=0.
+    if (const char* e = std::getenv("MBUFO_KV_V4")) {
+      v4 = (e[0] == '1');
+    }
+    // Inkling-local V4 switch. serve.cpp setenv()s MBUFO_KV_V4 from the
+    // catalog before any engine loads, so MBUFO_KV_V4 cannot be used to
+    // force 34B values back on; this name is untouched by the CLI.
+    if (const char* e = std::getenv("MBUFO_INKLING_KV_V4")) {
+      v4 = (e[0] == '1');
+    }
+    if (const char* e = std::getenv("MBUFO_INKLING_KV_Q4")) {
+      if (e[0] == '1') {
+        blocked = true;
+        v4 = true;
+      }
+    }
+    if (kvq_off) {
+      blocked = false;
+      v4 = false;
+    }
+    kv_mode_ = !blocked ? KvMode::kF16
+                        : (v4 ? KvMode::kK8V4 : KvMode::kQ8);
+    if (kv_mode_ != KvMode::kF16 &&
+        (cfg.num_q_heads != cfg.num_kv_heads * 3U || cfg.head_dim != 128U)) {
+      if (error_msg != nullptr) {
+        *error_msg =
+            "inkling: blocked KV needs qpg==3, head_dim==128 geometry";
+      }
+      return false;
+    }
+    const std::uint32_t kv_dim_u32 = static_cast<std::uint32_t>(kv_dim);
+    if (kv_mode_ == KvMode::kF16) {
+      kv_row_stride_k_ = kv_row_stride_v_ =
+          static_cast<std::uint32_t>(kv_dim * sizeof(__half));
+    } else {
+      kv_row_stride_k_ = static_cast<std::uint32_t>(
+          blocked_kv::KvBlockedRowBytes(kv_dim_u32,
+                                        blocked_kv::KvCodecQ8::kBlockBytes));
+      kv_row_stride_v_ = static_cast<std::uint32_t>(
+          blocked_kv::KvBlockedRowBytes(
+              kv_dim_u32, kv_mode_ == KvMode::kK8V4
+                              ? blocked_kv::KvCodecQ4::kBlockBytes
+                              : blocked_kv::KvCodecQ8::kBlockBytes));
+    }
+    fprintf(stderr, "[inkling] kv_cache=%s row_stride_k=%u row_stride_v=%u\n",
+            kv_mode_ == KvMode::kF16
+                ? "f16"
+                : (kv_mode_ == KvMode::kK8V4 ? "k8v4-blocked" : "q8-blocked"),
+            kv_row_stride_k_, kv_row_stride_v_);
+  }
   vocab_rows_ = static_cast<std::uint32_t>(model_->weights_->output.rows);
 
   auto alloc = [&](auto** ptr, std::size_t count,
@@ -1209,6 +1308,7 @@ bool Session::Init(std::string* error_msg) {
 
   if (!alloc(&d_tokens_, kChunk, "d_tokens") ||
       !alloc(&d_pos_, 1, "d_pos") ||
+      !alloc(&d_store_pos_, 1, "d_store_pos") ||
       !alloc(&d_hidden_, kChunk * h, "d_hidden") ||
       !alloc(&d_normed_, kChunk * h, "d_normed") ||
       !alloc(&d_fuse_a_, kChunk * h, "d_fuse_a") ||
@@ -1221,7 +1321,7 @@ bool Session::Init(std::string* error_msg) {
       !alloc(&d_sink_, kChunk * cfg.num_q_heads, "d_sink") ||
       !alloc(&d_gate_, kChunk * q_dim, "d_gate") ||
       !alloc(&d_attn_out_, kChunk * q_dim, "d_attn_out") ||
-      !alloc(&d_attn_splitk_, 16ULL * cfg.num_q_heads * 32ULL * 130ULL, "d_attn_splitk") ||
+      !alloc(&d_attn_splitk_, 32ULL * cfg.num_q_heads * 32ULL * 130ULL, "d_attn_splitk") ||
       !alloc(&d_proj_out_, kChunk * h, "d_proj_out") ||
       !alloc(&d_conv_delta_, kChunk * 32, "d_conv_delta") ||
       !alloc(&d_tau_, kChunk, "d_tau") ||
@@ -1297,7 +1397,6 @@ bool Session::Init(std::string* error_msg) {
     arena_.push_back(dev);
   }
 
-  const std::size_t kv_bytes = ctx * kv_dim * sizeof(__half);
   k_cache_.assign(cfg.num_layers, nullptr);
   v_cache_.assign(cfg.num_layers, nullptr);
   sconv_k_.assign(cfg.num_layers, nullptr);
@@ -1310,9 +1409,18 @@ bool Session::Init(std::string* error_msg) {
     const bool is_loop =
         (l >= cfg.loop_core_start && l < cfg.loop_core_end);
     const std::uint32_t pass_slots = is_loop ? 3 : 1;
+    // Ring-windowed KV: SWA layers keep only the last sliding_window rows
+    // (all reads stay within [cur - window + 1, cur]); global layers
+    // (blk.5/11/17/23, is_swa_layer) keep the full context.
+    const bool is_global_layer =
+        l < cfg.is_swa_layer.size() && cfg.is_swa_layer[l];
+    const std::size_t kv_rows =
+        is_global_layer ? ctx : static_cast<std::size_t>(cfg.sliding_window);
+    const std::size_t kv_bytes_k = kv_rows * kv_row_stride_k_;
+    const std::size_t kv_bytes_v = kv_rows * kv_row_stride_v_;
     void *k = nullptr, *v = nullptr;
-    if (!Check(hipMalloc(&k, kv_bytes), error_msg, "k_cache alloc") ||
-        !Check(hipMalloc(&v, kv_bytes), error_msg, "v_cache alloc")) {
+    if (!Check(hipMalloc(&k, kv_bytes_k), error_msg, "k_cache alloc") ||
+        !Check(hipMalloc(&v, kv_bytes_v), error_msg, "v_cache alloc")) {
       if (k != nullptr) (void)hipFree(k);
       return false;
     }
@@ -1337,10 +1445,11 @@ bool Session::Init(std::string* error_msg) {
       return false;
     }
     if (is_loop) {
-      const std::size_t bk_bytes = kChunk * kv_dim * sizeof(__half);
+      const std::size_t bk_bytes = kChunk * kv_row_stride_k_;
+      const std::size_t bv_bytes = kChunk * kv_row_stride_v_;
       void *bk = nullptr, *bv = nullptr;
       if (!Check(hipMalloc(&bk, bk_bytes), error_msg, "kv backup k") ||
-          !Check(hipMalloc(&bv, bk_bytes), error_msg, "kv backup v")) {
+          !Check(hipMalloc(&bv, bv_bytes), error_msg, "kv backup v")) {
         if (bk != nullptr) (void)hipFree(bk);
         return false;
       }
@@ -2186,19 +2295,184 @@ bool Session::ForwardLayer(std::uint32_t layer, float* hidden, std::uint32_t n,
   DbgDump(layer, "sink", d_sink_, n, lw.q_heads, stream_);
 
   if (capture_by_pos_) {
-    kernels::StoreKvF16ByPos(d_k_, d_v_, static_cast<__half*>(k_cache_[layer]),
-                             static_cast<__half*>(v_cache_[layer]), d_pos_,
-                             cfg.num_kv_heads, cfg.head_dim, stream_);
-    kernels::AttentionDecodeByPos(
-        d_q_, static_cast<const __half*>(k_cache_[layer]),
-        static_cast<const __half*>(v_cache_[layer]), d_sink_, d_rel_,
-        static_cast<const float*>(lw.attn_rel_bias.device), d_attn_out_,
-        d_pos_, window, lw.q_heads, cfg.num_kv_heads, cfg.head_dim,
-        cfg.rel_extent, kAttnScale, stream_, d_attn_splitk_);
+    if (kv_mode_ != KvMode::kF16) {
+      const kernels::BlockedKvQ8View kview =
+          blocked_kv::MakeBlockedKvView<blocked_kv::KvCodecQ8>(
+              static_cast<std::uint8_t*>(k_cache_[layer]),
+              static_cast<std::uint32_t>(kv_dim), cfg.head_dim);
+      // Value side is Q8 (34B) or K8V4 (18B); the launcher overload follows
+      // the view type, so one body serves both layouts.
+      auto run_blocked_by_pos = [&](auto vtag) {
+        using VCodec = decltype(vtag);
+        const blocked_kv::BlockedKvView<VCodec> vview =
+            blocked_kv::MakeBlockedKvView<VCodec>(
+                static_cast<std::uint8_t*>(v_cache_[layer]),
+                static_cast<std::uint32_t>(kv_dim), cfg.head_dim);
+        kernels::StoreKvQ8ByPos(d_k_, d_v_, kview, vview, d_pos_,
+                                cfg.num_kv_heads, cfg.head_dim, stream_,
+                                window);
+        kernels::AttentionDecodeQ8ByPos(
+            d_q_, kview, vview, d_sink_, d_rel_,
+            static_cast<const float*>(lw.attn_rel_bias.device), d_attn_out_,
+            d_pos_, window, lw.q_heads, cfg.num_kv_heads, cfg.head_dim,
+            cfg.rel_extent, kAttnScale, stream_, d_attn_splitk_);
+      };
+      if (kv_mode_ == KvMode::kK8V4) {
+        run_blocked_by_pos(blocked_kv::KvCodecQ4{});
+      } else {
+        run_blocked_by_pos(blocked_kv::KvCodecQ8{});
+      }
+    } else {
+      kernels::StoreKvF16ByPos(
+          d_k_, d_v_, static_cast<__half*>(k_cache_[layer]),
+          static_cast<__half*>(v_cache_[layer]), d_pos_, cfg.num_kv_heads,
+          cfg.head_dim, stream_, window);
+      kernels::AttentionDecodeByPos(
+          d_q_, static_cast<const __half*>(k_cache_[layer]),
+          static_cast<const __half*>(v_cache_[layer]), d_sink_, d_rel_,
+          static_cast<const float*>(lw.attn_rel_bias.device), d_attn_out_,
+          d_pos_, window, lw.q_heads, cfg.num_kv_heads, cfg.head_dim,
+          cfg.rel_extent, kAttnScale, stream_, d_attn_splitk_);
+    }
+  } else if (kv_mode_ != KvMode::kF16) {
+    const kernels::BlockedKvQ8View kview =
+        blocked_kv::MakeBlockedKvView<blocked_kv::KvCodecQ8>(
+            static_cast<std::uint8_t*>(k_cache_[layer]),
+            static_cast<std::uint32_t>(kv_dim), cfg.head_dim);
+    // Shared blocked-Q8 store: QuantizeKvRows writes dense [pos, pos+n)
+    // rows, so a ring-straddling chunk goes out as up to two segment
+    // launches against slot scalars in d_store_pos_.
+    {
+      namespace blocked_kv = ::mbufo::core::compute::blocked_kv;
+      const std::uint32_t kv_dim_u32 = static_cast<std::uint32_t>(kv_dim);
+      const std::uint32_t hd = cfg.head_dim;
+      auto store_q8 = [&](const float* src, void* dst) -> bool {
+        if (window == 0U) {
+          if (!Check(hipMemcpyAsync(d_store_pos_, &start_pos,
+                                    sizeof(std::uint32_t),
+                                    hipMemcpyHostToDevice, stream_),
+                     error_msg, "q8 store pos")) {
+            return false;
+          }
+          blocked_kv::QuantizeKvRows(
+              src, kv_dim_u32, hd, static_cast<std::uint8_t*>(dst), kv_dim_u32,
+              cfg.num_kv_heads, hd, n, blocked_kv::KvCodec::kQ8, blocked_kv::KvCodecQ8::kRange, blocked_kv::KvCodecQ8::kBlockBytes,
+              d_store_pos_, stream_);
+          return true;
+        }
+        const std::uint32_t slot0 = start_pos % window;
+        const std::uint32_t first =
+            std::min<std::uint32_t>(n, window - slot0);
+        if (!Check(hipMemcpyAsync(d_store_pos_, &slot0, sizeof(std::uint32_t),
+                                  hipMemcpyHostToDevice, stream_),
+                   error_msg, "q8 store slot")) {
+          return false;
+        }
+        blocked_kv::QuantizeKvRows(src, kv_dim_u32, hd,
+                                   static_cast<std::uint8_t*>(dst), kv_dim_u32,
+                                   cfg.num_kv_heads, hd, first,
+                                   blocked_kv::KvCodec::kQ8, blocked_kv::KvCodecQ8::kRange, blocked_kv::KvCodecQ8::kBlockBytes,
+                                   d_store_pos_, stream_);
+        const std::uint32_t rest = n - first;
+        if (rest > 0U) {
+          const std::uint32_t zero = 0U;
+          if (!Check(hipMemcpyAsync(d_store_pos_, &zero, sizeof(std::uint32_t),
+                                    hipMemcpyHostToDevice, stream_),
+                     error_msg, "q8 store slot wrap")) {
+            return false;
+          }
+          blocked_kv::QuantizeKvRows(
+              src + static_cast<std::size_t>(first) * kv_dim, kv_dim_u32, hd,
+              static_cast<std::uint8_t*>(dst), kv_dim_u32, cfg.num_kv_heads,
+              hd, rest, blocked_kv::KvCodec::kQ8, blocked_kv::KvCodecQ8::kRange, blocked_kv::KvCodecQ8::kBlockBytes, d_store_pos_,
+              stream_);
+        }
+        return true;
+      };
+      // K8V4 value side: same ring-straddle split, but rows are 18B
+      // packed-nibble blocks (shared QuantizeKvRows packs them).
+      auto store_v4 = [&](const float* src, void* dst) -> bool {
+        if (window == 0U) {
+          if (!Check(hipMemcpyAsync(d_store_pos_, &start_pos,
+                                    sizeof(std::uint32_t),
+                                    hipMemcpyHostToDevice, stream_),
+                     error_msg, "v4 store pos")) {
+            return false;
+          }
+          blocked_kv::QuantizeKvRows(
+              src, kv_dim_u32, hd, static_cast<std::uint8_t*>(dst), kv_dim_u32,
+              cfg.num_kv_heads, hd, n, blocked_kv::KvCodec::kQ8,
+              blocked_kv::KvCodecQ4::kRange,
+              blocked_kv::KvCodecQ4::kBlockBytes, d_store_pos_, stream_);
+          return true;
+        }
+        const std::uint32_t slot0 = start_pos % window;
+        const std::uint32_t first =
+            std::min<std::uint32_t>(n, window - slot0);
+        if (!Check(hipMemcpyAsync(d_store_pos_, &slot0, sizeof(std::uint32_t),
+                                  hipMemcpyHostToDevice, stream_),
+                   error_msg, "v4 store slot")) {
+          return false;
+        }
+        blocked_kv::QuantizeKvRows(
+            src, kv_dim_u32, hd, static_cast<std::uint8_t*>(dst), kv_dim_u32,
+            cfg.num_kv_heads, hd, first, blocked_kv::KvCodec::kQ8,
+            blocked_kv::KvCodecQ4::kRange,
+            blocked_kv::KvCodecQ4::kBlockBytes, d_store_pos_, stream_);
+        const std::uint32_t rest = n - first;
+        if (rest > 0U) {
+          const std::uint32_t zero = 0U;
+          if (!Check(hipMemcpyAsync(d_store_pos_, &zero, sizeof(std::uint32_t),
+                                    hipMemcpyHostToDevice, stream_),
+                     error_msg, "v4 store slot wrap")) {
+            return false;
+          }
+          blocked_kv::QuantizeKvRows(
+              src + static_cast<std::size_t>(first) * kv_dim, kv_dim_u32, hd,
+              static_cast<std::uint8_t*>(dst), kv_dim_u32, cfg.num_kv_heads,
+              hd, rest, blocked_kv::KvCodec::kQ8,
+              blocked_kv::KvCodecQ4::kRange,
+              blocked_kv::KvCodecQ4::kBlockBytes, d_store_pos_, stream_);
+        }
+        return true;
+      };
+      if (!store_q8(d_k_, k_cache_[layer])) return false;
+      if (kv_mode_ == KvMode::kK8V4) {
+        if (!store_v4(d_v_, v_cache_[layer])) return false;
+      } else if (!store_q8(d_v_, v_cache_[layer])) {
+        return false;
+      }
+    }
+  g_prof.res_qkv_ms += ProfTick(stream_, &prof_lt);
+  auto run_blocked_attn = [&](auto vtag) {
+    using VCodec = decltype(vtag);
+    const blocked_kv::BlockedKvView<VCodec> vview =
+        blocked_kv::MakeBlockedKvView<VCodec>(
+            static_cast<std::uint8_t*>(v_cache_[layer]),
+            static_cast<std::uint32_t>(kv_dim), cfg.head_dim);
+    if (n == 1) {
+      kernels::AttentionDecodeQ8(
+          d_q_, kview, vview, d_sink_, d_rel_,
+          static_cast<const float*>(lw.attn_rel_bias.device), d_attn_out_,
+          start_pos, window, lw.q_heads, cfg.num_kv_heads, cfg.head_dim,
+          cfg.rel_extent, kAttnScale, stream_, d_attn_splitk_);
+    } else {
+      kernels::AttentionPrefillQ8(
+          d_q_, kview, vview, d_sink_, d_rel_,
+          static_cast<const float*>(lw.attn_rel_bias.device), d_attn_out_, n,
+          start_pos, window, lw.q_heads, cfg.num_kv_heads, cfg.head_dim,
+          cfg.rel_extent, kAttnScale, stream_, d_attn_splitk_);
+    }
+  };
+  if (kv_mode_ == KvMode::kK8V4) {
+    run_blocked_attn(blocked_kv::KvCodecQ4{});
+  } else {
+    run_blocked_attn(blocked_kv::KvCodecQ8{});
+  }
   } else {
     kernels::StoreKvF16(d_k_, d_v_, static_cast<__half*>(k_cache_[layer]),
                         static_cast<__half*>(v_cache_[layer]), n, start_pos,
-                        cfg.num_kv_heads, cfg.head_dim, stream_);
+                        cfg.num_kv_heads, cfg.head_dim, stream_, window);
   g_prof.res_qkv_ms += ProfTick(stream_, &prof_lt);
   if (n == 1) {
     kernels::AttentionDecode(
@@ -2423,7 +2697,12 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
   const std::uint32_t loop_end = cfg.loop_core_end;      // 18
   const std::size_t kv_row = static_cast<std::size_t>(cfg.num_kv_heads) *
                              cfg.head_dim;
-  const std::size_t kv_bytes = static_cast<std::size_t>(n) * kv_row * 2;
+  // Per-row bytes on the cache plane: F16 half rows, or each side's blocked
+  // row stride (keys 34B blocks; values 34B blocks or 18B packed nibbles).
+  const std::size_t kv_row_b_k =
+      kv_mode_ == KvMode::kF16 ? kv_row * 2 : kv_row_stride_k_;
+  const std::size_t kv_row_b_v =
+      kv_mode_ == KvMode::kF16 ? kv_row * 2 : kv_row_stride_v_;
 
   // Pass 1: loop core without fusion; snapshots to slots 1..3.
   for (std::uint32_t l = loop_start; l < loop_end; ++l) {
@@ -2449,26 +2728,89 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
   // Deep-copy loop KV + sconv state (restored after passes 2/3 so the
   // persistent cache always holds pass-1 products).
   for (std::uint32_t l = loop_start; l < loop_end; ++l) {
+    const std::uint32_t bk_wrap =
+        (l < cfg.is_swa_layer.size() && cfg.is_swa_layer[l])
+            ? 0U
+            : cfg.sliding_window;
     if (capture_by_pos_) {
-      kernels::CopyKvSlotByPos(static_cast<__half*>(k_cache_[l]),
-                               static_cast<__half*>(kv_backup_k_[l]), d_pos_,
-                               static_cast<std::uint32_t>(kv_row), true,
-                               stream_);
-      kernels::CopyKvSlotByPos(static_cast<__half*>(v_cache_[l]),
-                               static_cast<__half*>(kv_backup_v_[l]), d_pos_,
-                               static_cast<std::uint32_t>(kv_row), true,
-                               stream_);
-    } else if (!Check(hipMemcpyAsync(kv_backup_k_[l],
-                              static_cast<std::uint8_t*>(k_cache_[l]) +
-                                  static_cast<std::size_t>(start_pos) * kv_row * 2,
-                              kv_bytes, hipMemcpyDeviceToDevice, stream_),
-               error_msg, "backup loop k") ||
-        !Check(hipMemcpyAsync(kv_backup_v_[l],
-                              static_cast<std::uint8_t*>(v_cache_[l]) +
-                                  static_cast<std::size_t>(start_pos) * kv_row * 2,
-                              kv_bytes, hipMemcpyDeviceToDevice, stream_),
-               error_msg, "backup loop v")) {
-      return false;
+      if (kv_mode_ != KvMode::kF16) {
+        const kernels::BlockedKvQ8View kview =
+            blocked_kv::MakeBlockedKvView<blocked_kv::KvCodecQ8>(
+                static_cast<std::uint8_t*>(k_cache_[l]),
+                static_cast<std::uint32_t>(kv_row), cfg.head_dim);
+        const kernels::BlockedKvQ8View kbak =
+            blocked_kv::MakeBlockedKvView<blocked_kv::KvCodecQ8>(
+                static_cast<std::uint8_t*>(kv_backup_k_[l]),
+                static_cast<std::uint32_t>(kv_row), cfg.head_dim);
+        kernels::CopyKvSlotQ8ByPos(kview, kbak, d_pos_, true, stream_, bk_wrap);
+        auto backup_v = [&](auto vtag) {
+          using VCodec = decltype(vtag);
+          const blocked_kv::BlockedKvView<VCodec> vview =
+              blocked_kv::MakeBlockedKvView<VCodec>(
+                  static_cast<std::uint8_t*>(v_cache_[l]),
+                  static_cast<std::uint32_t>(kv_row), cfg.head_dim);
+          const blocked_kv::BlockedKvView<VCodec> vbak =
+              blocked_kv::MakeBlockedKvView<VCodec>(
+                  static_cast<std::uint8_t*>(kv_backup_v_[l]),
+                  static_cast<std::uint32_t>(kv_row), cfg.head_dim);
+          kernels::CopyKvSlotQ8ByPos(vview, vbak, d_pos_, true, stream_,
+                                     bk_wrap);
+        };
+        if (kv_mode_ == KvMode::kK8V4) {
+          backup_v(blocked_kv::KvCodecQ4{});
+        } else {
+          backup_v(blocked_kv::KvCodecQ8{});
+        }
+      } else {
+        kernels::CopyKvSlotByPos(static_cast<__half*>(k_cache_[l]),
+                                 static_cast<__half*>(kv_backup_k_[l]), d_pos_,
+                                 static_cast<std::uint32_t>(kv_row), true,
+                                 stream_, bk_wrap);
+        kernels::CopyKvSlotByPos(static_cast<__half*>(v_cache_[l]),
+                                 static_cast<__half*>(kv_backup_v_[l]), d_pos_,
+                                 static_cast<std::uint32_t>(kv_row), true,
+                                 stream_, bk_wrap);
+      }
+    } else {
+      // Ring straddle: the [start_pos, start_pos + n) chunk may wrap past
+      // the end of a windowed plane; copy it as up to two segments between
+      // the ring plane and the linear staging buffer.
+      const std::size_t bk_slot0 =
+          bk_wrap ? (static_cast<std::size_t>(start_pos) % bk_wrap)
+                  : static_cast<std::size_t>(start_pos);
+      const std::size_t bk_first =
+          bk_wrap ? std::min<std::size_t>(n, bk_wrap - bk_slot0) : n;
+      const std::size_t bk_rest = n - bk_first;
+      auto bk_copy = [&](void* ring_plane, void* staging, bool to_staging,
+                         std::size_t row_b, const char* what) -> bool {
+        std::uint8_t* ring = static_cast<std::uint8_t*>(ring_plane);
+        std::uint8_t* lin = static_cast<std::uint8_t*>(staging);
+        const std::uint8_t* from =
+            to_staging ? ring + bk_slot0 * row_b : lin;
+        std::uint8_t* to = to_staging ? lin : ring + bk_slot0 * row_b;
+        if (!Check(hipMemcpyAsync(to, from, bk_first * row_b,
+                                  hipMemcpyDeviceToDevice, stream_),
+                   error_msg, what)) {
+          return false;
+        }
+        if (bk_rest > 0) {
+          const std::uint8_t* from2 =
+              to_staging ? ring : lin + bk_first * row_b;
+          std::uint8_t* to2 = to_staging ? lin + bk_first * row_b : ring;
+          if (!Check(hipMemcpyAsync(to2, from2, bk_rest * row_b,
+                                    hipMemcpyDeviceToDevice, stream_),
+                     error_msg, what)) {
+            return false;
+          }
+        }
+        return true;
+      };
+      if (!bk_copy(k_cache_[l], kv_backup_k_[l], true, kv_row_b_k,
+                   "backup loop k") ||
+          !bk_copy(v_cache_[l], kv_backup_v_[l], true, kv_row_b_v,
+                   "backup loop v")) {
+        return false;
+      }
     }
   }
   sconv_slot_ = 0;
@@ -2572,26 +2914,82 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
 
   // Restore pass-1 loop KV (sconv slots are per-pass; nothing to restore).
   for (std::uint32_t l = loop_start; l < loop_end; ++l) {
+    const std::uint32_t rs_wrap =
+        (l < cfg.is_swa_layer.size() && cfg.is_swa_layer[l])
+            ? 0U
+            : cfg.sliding_window;
     if (capture_by_pos_) {
-      kernels::CopyKvSlotByPos(static_cast<__half*>(k_cache_[l]),
-                               static_cast<__half*>(kv_backup_k_[l]), d_pos_,
-                               static_cast<std::uint32_t>(kv_row), false,
-                               stream_);
-      kernels::CopyKvSlotByPos(static_cast<__half*>(v_cache_[l]),
-                               static_cast<__half*>(kv_backup_v_[l]), d_pos_,
-                               static_cast<std::uint32_t>(kv_row), false,
-                               stream_);
-    } else if (!Check(hipMemcpyAsync(static_cast<std::uint8_t*>(k_cache_[l]) +
-                                  static_cast<std::size_t>(start_pos) * kv_row * 2,
-                              kv_backup_k_[l], kv_bytes, hipMemcpyDeviceToDevice,
-                              stream_),
-               error_msg, "restore loop k") ||
-        !Check(hipMemcpyAsync(static_cast<std::uint8_t*>(v_cache_[l]) +
-                                  static_cast<std::size_t>(start_pos) * kv_row * 2,
-                              kv_backup_v_[l], kv_bytes, hipMemcpyDeviceToDevice,
-                              stream_),
-               error_msg, "restore loop v")) {
-      return false;
+      if (kv_mode_ != KvMode::kF16) {
+        const kernels::BlockedKvQ8View kview =
+            blocked_kv::MakeBlockedKvView<blocked_kv::KvCodecQ8>(
+                static_cast<std::uint8_t*>(k_cache_[l]),
+                static_cast<std::uint32_t>(kv_row), cfg.head_dim);
+        const kernels::BlockedKvQ8View kbak =
+            blocked_kv::MakeBlockedKvView<blocked_kv::KvCodecQ8>(
+                static_cast<std::uint8_t*>(kv_backup_k_[l]),
+                static_cast<std::uint32_t>(kv_row), cfg.head_dim);
+        kernels::CopyKvSlotQ8ByPos(kview, kbak, d_pos_, false, stream_,
+                                   rs_wrap);
+        auto restore_v = [&](auto vtag) {
+          using VCodec = decltype(vtag);
+          const blocked_kv::BlockedKvView<VCodec> vview =
+              blocked_kv::MakeBlockedKvView<VCodec>(
+                  static_cast<std::uint8_t*>(v_cache_[l]),
+                  static_cast<std::uint32_t>(kv_row), cfg.head_dim);
+          const blocked_kv::BlockedKvView<VCodec> vbak =
+              blocked_kv::MakeBlockedKvView<VCodec>(
+                  static_cast<std::uint8_t*>(kv_backup_v_[l]),
+                  static_cast<std::uint32_t>(kv_row), cfg.head_dim);
+          kernels::CopyKvSlotQ8ByPos(vview, vbak, d_pos_, false, stream_,
+                                     rs_wrap);
+        };
+        if (kv_mode_ == KvMode::kK8V4) {
+          restore_v(blocked_kv::KvCodecQ4{});
+        } else {
+          restore_v(blocked_kv::KvCodecQ8{});
+        }
+      } else {
+        kernels::CopyKvSlotByPos(static_cast<__half*>(k_cache_[l]),
+                                 static_cast<__half*>(kv_backup_k_[l]), d_pos_,
+                                 static_cast<std::uint32_t>(kv_row), false,
+                                 stream_, rs_wrap);
+        kernels::CopyKvSlotByPos(static_cast<__half*>(v_cache_[l]),
+                                 static_cast<__half*>(kv_backup_v_[l]), d_pos_,
+                                 static_cast<std::uint32_t>(kv_row), false,
+                                 stream_, rs_wrap);
+      }
+    } else {
+      const std::size_t rs_slot0 =
+          rs_wrap ? (static_cast<std::size_t>(start_pos) % rs_wrap)
+                  : static_cast<std::size_t>(start_pos);
+      const std::size_t rs_first =
+          rs_wrap ? std::min<std::size_t>(n, rs_wrap - rs_slot0) : n;
+      const std::size_t rs_rest = n - rs_first;
+      auto rs_copy = [&](void* ring_plane, void* staging,
+                         std::size_t row_b, const char* what) -> bool {
+        std::uint8_t* ring = static_cast<std::uint8_t*>(ring_plane);
+        std::uint8_t* lin = static_cast<std::uint8_t*>(staging);
+        if (!Check(hipMemcpyAsync(ring + rs_slot0 * row_b, lin,
+                                  rs_first * row_b,
+                                  hipMemcpyDeviceToDevice, stream_),
+                   error_msg, what)) {
+          return false;
+        }
+        if (rs_rest > 0 &&
+            !Check(hipMemcpyAsync(ring, lin + rs_first * row_b,
+                                  rs_rest * row_b,
+                                  hipMemcpyDeviceToDevice, stream_),
+                   error_msg, what)) {
+          return false;
+        }
+        return true;
+      };
+      if (!rs_copy(k_cache_[l], kv_backup_k_[l], kv_row_b_k,
+                   "restore loop k") ||
+          !rs_copy(v_cache_[l], kv_backup_v_[l], kv_row_b_v,
+                   "restore loop v")) {
+        return false;
+      }
     }
   }
   // Layers 18-23 (once; pass-3 hidden). Non-loop layers use slot 0.
@@ -2822,25 +3220,40 @@ bool Session::RestoreSconvPrefix(std::uint32_t prefix_idx,
     const bool is_loop =
         (l >= cfg.loop_core_start && l < cfg.loop_core_end);
     const std::size_t rep = is_loop ? 3 : 1;
-    const std::size_t kv_elems = rep * kv_dim * 3;
-    const std::size_t h_elems = rep * h * 3;
-    const float* bk_k = static_cast<const float*>(sconv_bk_k_[l]) + prefix_idx * kv_elems;
-    const float* bk_v = static_cast<const float*>(sconv_bk_v_[l]) + prefix_idx * kv_elems;
-    const float* bk_pa = static_cast<const float*>(sconv_bk_pa_[l]) + prefix_idx * h_elems;
-    const float* bk_pm = static_cast<const float*>(sconv_bk_pm_[l]) + prefix_idx * h_elems;
-    if (!Check(hipMemcpyAsync(sconv_k_[l], bk_k, kv_elems * sizeof(float),
-                              hipMemcpyDeviceToDevice, stream_),
-               error_msg, "restore sconv k") ||
-        !Check(hipMemcpyAsync(sconv_v_[l], bk_v, kv_elems * sizeof(float),
-                              hipMemcpyDeviceToDevice, stream_),
-               error_msg, "restore sconv v") ||
-        !Check(hipMemcpyAsync(sconv_pa_[l], bk_pa, h_elems * sizeof(float),
-                              hipMemcpyDeviceToDevice, stream_),
-               error_msg, "restore sconv pa") ||
-        !Check(hipMemcpyAsync(sconv_pm_[l], bk_pm, h_elems * sizeof(float),
-                              hipMemcpyDeviceToDevice, stream_),
-               error_msg, "restore sconv pm")) {
-      return false;
+    // Snapshots are stored per (pass p, token t) at flat index p + t * rep
+    // (one dim*3 block each); the live state keeps one dim*3 block per pass
+    // slot. A partial accept must restore EVERY pass slot: restoring only
+    // slot 0 leaves passes 1/2 running on rejected-token state, permanently
+    // corrupting the stream (every later round then rejects).
+    for (std::size_t p = 0; p < rep; ++p) {
+      const std::size_t bk_base =
+          p + static_cast<std::size_t>(prefix_idx) * rep;
+      const float* bk_k =
+          static_cast<const float*>(sconv_bk_k_[l]) + bk_base * kv_dim * 3;
+      const float* bk_v =
+          static_cast<const float*>(sconv_bk_v_[l]) + bk_base * kv_dim * 3;
+      const float* bk_pa =
+          static_cast<const float*>(sconv_bk_pa_[l]) + bk_base * h * 3;
+      const float* bk_pm =
+          static_cast<const float*>(sconv_bk_pm_[l]) + bk_base * h * 3;
+      float* dst_k = static_cast<float*>(sconv_k_[l]) + p * kv_dim * 3;
+      float* dst_v = static_cast<float*>(sconv_v_[l]) + p * kv_dim * 3;
+      float* dst_pa = static_cast<float*>(sconv_pa_[l]) + p * h * 3;
+      float* dst_pm = static_cast<float*>(sconv_pm_[l]) + p * h * 3;
+      if (!Check(hipMemcpyAsync(dst_k, bk_k, kv_dim * 3 * sizeof(float),
+                                hipMemcpyDeviceToDevice, stream_),
+                 error_msg, "restore sconv k") ||
+          !Check(hipMemcpyAsync(dst_v, bk_v, kv_dim * 3 * sizeof(float),
+                                hipMemcpyDeviceToDevice, stream_),
+                 error_msg, "restore sconv v") ||
+          !Check(hipMemcpyAsync(dst_pa, bk_pa, h * 3 * sizeof(float),
+                                hipMemcpyDeviceToDevice, stream_),
+                 error_msg, "restore sconv pa") ||
+          !Check(hipMemcpyAsync(dst_pm, bk_pm, h * 3 * sizeof(float),
+                                hipMemcpyDeviceToDevice, stream_),
+                 error_msg, "restore sconv pm")) {
+        return false;
+      }
     }
   }
   return true;

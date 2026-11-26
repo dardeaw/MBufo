@@ -1,8 +1,10 @@
 #include "src/models/inkling/kernels/kernels.hpp"
+#include "src/core/compute/attention/blocked_kv_codec.hpp"
 
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <type_traits>
 
 namespace mbufo::models::inkling::kernels {
 namespace {
@@ -80,16 +82,25 @@ __global__ void AddResidualKernel(float* a, const float* b,
   if (idx < count) a[idx] += b[idx];
 }
 
+// Ring-windowed KV addressing: SWA layers keep only the last `window`
+// rows (window == 0 means a global layer with full-context rows). Every read
+// stays within [cur - window + 1, cur], so pos % window is collision-free.
+__device__ __forceinline__ std::uint32_t KvSlot(std::uint32_t window,
+                                                std::uint32_t pos) {
+  return window ? (pos % window) : pos;
+}
+
 __global__ void StoreKvF16Kernel(const float* k_in, const float* v_in,
                                  __half* k_cache, __half* v_cache,
                                  std::uint32_t start_pos,
                                  std::uint32_t n_kv_heads,
-                                 std::uint32_t head_dim) {
+                                 std::uint32_t head_dim,
+                                 std::uint32_t wrap) {
   const std::uint32_t tok = blockIdx.x;
   const std::size_t kv_stride = static_cast<std::size_t>(n_kv_heads) * head_dim;
   const std::size_t src_off = static_cast<std::size_t>(tok) * kv_stride;
   const std::size_t dst_off =
-      static_cast<std::size_t>(start_pos + tok) * kv_stride;
+      static_cast<std::size_t>(KvSlot(wrap, start_pos + tok)) * kv_stride;
   for (std::size_t i = threadIdx.x; i < kv_stride; i += blockDim.x) {
     k_cache[dst_off + i] = __float2half(k_in[src_off + i]);
     v_cache[dst_off + i] = __float2half(v_in[src_off + i]);
@@ -557,7 +568,7 @@ __global__ __launch_bounds__(32 * kHeadWaves * kQBlocks) void InklingAttnWmmaPre
       const std::uint32_t kr = key_start + r;
       uint4 kv = make_uint4(0, 0, 0, 0);
       if (kr < key_hi)
-        kv = *reinterpret_cast<const uint4*>(k_cache + static_cast<std::size_t>(kr) * kv_width +
+        kv = *reinterpret_cast<const uint4*>(k_cache + static_cast<std::size_t>(KvSlot(window, kr)) * kv_width +
                                              static_cast<std::size_t>(kv_head) * kHeadDim + c8);
       *reinterpret_cast<uint4*>(&k_lds[r][c8]) = kv;
     }
@@ -570,7 +581,7 @@ __global__ __launch_bounds__(32 * kHeadWaves * kQBlocks) void InklingAttnWmmaPre
         const std::uint32_t kr = key_start + kg * 8u + j;
         uint4 vv = make_uint4(0, 0, 0, 0);
         if (kr < key_hi)
-          vv = *reinterpret_cast<const uint4*>(v_cache + static_cast<std::size_t>(kr) * kv_width +
+          vv = *reinterpret_cast<const uint4*>(v_cache + static_cast<std::size_t>(KvSlot(window, kr)) * kv_width +
                                                static_cast<std::size_t>(kv_head) * kHeadDim + c8);
         w[j][0] = vv.x; w[j][1] = vv.y; w[j][2] = vv.z; w[j][3] = vv.w;
       }
@@ -750,7 +761,7 @@ __global__ __launch_bounds__(32 * kHeadWaves) void InklingAttnWmmaSplitKKernel(
       const std::uint32_t kr = key_start + r;
       uint4 kv = make_uint4(0, 0, 0, 0);
       if (kr >= key_lo && kr < key_hi) {
-        kv = *reinterpret_cast<const uint4*>(k_cache + static_cast<std::size_t>(kr) * kv_width +
+        kv = *reinterpret_cast<const uint4*>(k_cache + static_cast<std::size_t>(KvSlot(window, kr)) * kv_width +
                                              static_cast<std::size_t>(kv_head) * kHeadDim + c8);
       }
       *reinterpret_cast<uint4*>(&k_lds[r][c8]) = kv;
@@ -764,7 +775,7 @@ __global__ __launch_bounds__(32 * kHeadWaves) void InklingAttnWmmaSplitKKernel(
         const std::uint32_t kr = key_start + kg * 8u + j;
         uint4 vv = make_uint4(0, 0, 0, 0);
         if (kr >= key_lo && kr < key_hi) {
-          vv = *reinterpret_cast<const uint4*>(v_cache + static_cast<std::size_t>(kr) * kv_width +
+          vv = *reinterpret_cast<const uint4*>(v_cache + static_cast<std::size_t>(KvSlot(window, kr)) * kv_width +
                                                static_cast<std::size_t>(kv_head) * kHeadDim + c8);
         }
         w[j][0] = vv.x; w[j][1] = vv.y; w[j][2] = vv.z; w[j][3] = vv.w;
@@ -932,7 +943,7 @@ __global__ void __launch_bounds__(384) InklingAttnPrefillTiledKernel(
       const std::uint32_t j = idx >> 5;
       const std::uint32_t ln = idx & 31U;
       const std::size_t off =
-          static_cast<std::size_t>(p_base + j) * kv_stride + kv_head_off +
+          static_cast<std::size_t>(KvSlot(window, p_base + j)) * kv_stride + kv_head_off +
           ln * 4U;
       s_k[j][ln] = *reinterpret_cast<const uint2*>(k_cache + off);
       s_v[j][ln] = *reinterpret_cast<const uint2*>(v_cache + off);
@@ -1026,7 +1037,7 @@ __global__ void __launch_bounds__(256) InklingAttnWave32Kernel(
 
   for (std::uint32_t p = lo + wave; p <= cur_pos; p += 8U) {
     const std::size_t kv_off =
-        static_cast<std::size_t>(p) * kv_stride + kv_head_off;
+        static_cast<std::size_t>(KvSlot(window, p)) * kv_stride + kv_head_off;
     const uint2 k_raw = *reinterpret_cast<const uint2*>(k_cache + kv_off);
     const __half2* kh = reinterpret_cast<const __half2*>(&k_raw);
     const float2 k01 = __half22float2(kh[0]);
@@ -1145,7 +1156,7 @@ __global__ void __launch_bounds__(256) InklingAttnSplitKKernel(
 
   for (std::uint32_t p = p_beg + wave; p < p_end; p += 8U) {
     const std::size_t kv_off =
-        static_cast<std::size_t>(p) * kv_stride + kv_head_off;
+        static_cast<std::size_t>(KvSlot(window, p)) * kv_stride + kv_head_off;
     const uint2 k_raw = *reinterpret_cast<const uint2*>(k_cache + kv_off);
     const __half2* kh = reinterpret_cast<const __half2*>(&k_raw);
     const float2 k01 = __half22float2(kh[0]);
@@ -1273,7 +1284,7 @@ __global__ void __launch_bounds__(256) InklingAttnSplitKGqaKernel(
 #pragma unroll
     for (int u = 0; u < 4; ++u) {
       const std::size_t kv_off =
-          static_cast<std::size_t>(p + static_cast<std::uint32_t>(u) * 8U) * kv_stride + kv_head_off;
+          static_cast<std::size_t>(KvSlot(window, p + static_cast<std::uint32_t>(u) * 8U)) * kv_stride + kv_head_off;
       k_raw[u] = *reinterpret_cast<const uint2*>(k_cache + kv_off);
       v_raw[u] = *reinterpret_cast<const uint2*>(v_cache + kv_off);
     }
@@ -1322,7 +1333,7 @@ __global__ void __launch_bounds__(256) InklingAttnSplitKGqaKernel(
   }
   for (; p < p_end; p += 8U) {
     const std::size_t kv_off =
-        static_cast<std::size_t>(p) * kv_stride + kv_head_off;
+        static_cast<std::size_t>(KvSlot(window, p)) * kv_stride + kv_head_off;
     const uint2 k_raw = *reinterpret_cast<const uint2*>(k_cache + kv_off);
     const __half2* kh = reinterpret_cast<const __half2*>(&k_raw);
     const float2 k01 = __half22float2(kh[0]);
@@ -1483,7 +1494,7 @@ __global__ void __launch_bounds__(256) InklingAttnSplitKBatchGqaKernel(
 
   for (std::uint32_t p = p_beg + wave; p < p_end; p += 8U) {
     const std::size_t kv_off =
-        static_cast<std::size_t>(p) * kv_stride + kv_head_off;
+        static_cast<std::size_t>(KvSlot(window, p)) * kv_stride + kv_head_off;
     const uint2 k_raw = *reinterpret_cast<const uint2*>(k_cache + kv_off);
     const __half2* kh = reinterpret_cast<const __half2*>(&k_raw);
     const float2 k01 = __half22float2(kh[0]);
@@ -1657,7 +1668,7 @@ __global__ void InklingAttnKernel(
 
   for (std::uint32_t p = lo; p <= cur_pos; ++p) {
     const std::size_t kv_off =
-        static_cast<std::size_t>(p) * kv_stride +
+        static_cast<std::size_t>(KvSlot(window, p)) * kv_stride +
         static_cast<std::size_t>(kvh) * head_dim;
     float dot = q_val * __half2float(k_cache[kv_off + d]);
     __shared__ float s_dot[4];
@@ -2731,11 +2742,12 @@ void SnapPush(const float* h, float* bank, std::uint32_t n_tokens,
 void StoreKvF16(const float* k_in, const float* v_in, __half* k_cache,
                 __half* v_cache, std::uint32_t n_tokens,
                 std::uint32_t start_pos, std::uint32_t n_kv_heads,
-                std::uint32_t head_dim, hipStream_t stream) {
+                std::uint32_t head_dim, hipStream_t stream,
+                std::uint32_t wrap) {
   if (n_tokens == 0 || k_in == nullptr || v_in == nullptr) return;
   hipLaunchKernelGGL(StoreKvF16Kernel, dim3(n_tokens), dim3(256), 0, stream,
                      k_in, v_in, k_cache, v_cache, start_pos, n_kv_heads,
-                     head_dim);
+                     head_dim, wrap);
 }
 
 void SigmoidRouterTop8(const float* logits, const float* bias,
@@ -2925,8 +2937,10 @@ __global__ void StoreKvF16ByPosKernel(const float* __restrict__ k_in,
                                       __half* __restrict__ k_cache,
                                       __half* __restrict__ v_cache,
                                       const std::uint32_t* __restrict__ d_pos,
-                                      std::uint32_t kv_stride) {
-  const std::size_t dst_off = static_cast<std::size_t>(*d_pos) * kv_stride;
+                                      std::uint32_t kv_stride,
+                                      std::uint32_t wrap) {
+  const std::size_t dst_off =
+      static_cast<std::size_t>(KvSlot(wrap, *d_pos)) * kv_stride;
   for (std::size_t i = threadIdx.x; i < kv_stride; i += blockDim.x) {
     k_cache[dst_off + i] = __float2half(k_in[i]);
     v_cache[dst_off + i] = __float2half(v_in[i]);
@@ -2936,8 +2950,10 @@ __global__ void StoreKvF16ByPosKernel(const float* __restrict__ k_in,
 __global__ void CopyKvSlotByPosKernel(__half* __restrict__ cache,
                                       __half* __restrict__ backup,
                                       const std::uint32_t* __restrict__ d_pos,
-                                      std::uint32_t kv_dim, bool to_backup) {
-  const std::size_t off = static_cast<std::size_t>(*d_pos) * kv_dim;
+                                      std::uint32_t kv_dim, bool to_backup,
+                                      std::uint32_t wrap) {
+  const std::size_t off =
+      static_cast<std::size_t>(KvSlot(wrap, *d_pos)) * kv_dim;
   for (std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < kv_dim;
        i += gridDim.x * blockDim.x) {
     if (to_backup) {
@@ -2978,7 +2994,7 @@ __global__ void __launch_bounds__(256) InklingAttnWave32ByPosKernel(
 
   for (std::uint32_t p = lo + wave; p <= cur_pos; p += 8U) {
     const std::size_t kv_off =
-        static_cast<std::size_t>(p) * kv_stride + kv_head_off;
+        static_cast<std::size_t>(KvSlot(window, p)) * kv_stride + kv_head_off;
     const uint2 k_raw = *reinterpret_cast<const uint2*>(k_cache + kv_off);
     const __half2* kh = reinterpret_cast<const __half2*>(&k_raw);
     const float2 k01 = __half22float2(kh[0]);
@@ -3056,10 +3072,10 @@ void FillLogScaleTauByPos(float* tau, const std::uint32_t* d_pos,
 void StoreKvF16ByPos(const float* k_in, const float* v_in, __half* k_cache,
                      __half* v_cache, const std::uint32_t* d_pos,
                      std::uint32_t n_kv_heads, std::uint32_t head_dim,
-                     hipStream_t stream) {
+                     hipStream_t stream, std::uint32_t wrap) {
   const std::uint32_t kv_stride = n_kv_heads * head_dim;
   hipLaunchKernelGGL(StoreKvF16ByPosKernel, dim3(1), dim3(256), 0, stream,
-                     k_in, v_in, k_cache, v_cache, d_pos, kv_stride);
+                     k_in, v_in, k_cache, v_cache, d_pos, kv_stride, wrap);
 }
 
 void AttentionDecodeByPos(const float* q, const __half* k_cache,
@@ -3094,10 +3110,805 @@ void AttentionDecodeByPos(const float* q, const __half* k_cache,
 }
 
 void CopyKvSlotByPos(__half* cache, __half* backup, const std::uint32_t* d_pos,
-                     std::uint32_t kv_dim, bool to_backup, hipStream_t stream) {
+                     std::uint32_t kv_dim, bool to_backup, hipStream_t stream,
+                     std::uint32_t wrap) {
   hipLaunchKernelGGL(CopyKvSlotByPosKernel, dim3((kv_dim + 255U) / 256U),
                      dim3(256), 0, stream, cache, backup, d_pos, kv_dim,
-                     to_backup);
+                     to_backup, wrap);
+}
+
+// ---------------------------------------------------------------------------
+// Blocked-Q8 KV: shared 34-byte layout, inkling-local wrap-aware store and
+// fused-dequant attention.
+// Row layout (must match core::compute::blocked_kv::KvBlockedRowBytes with
+// 34-byte blocks): each 32-element block holds 32 symmetric-INT8 codes
+// (amax/127, rintf, codec-identical to blocked_kv::KvCodecQ8) followed by one
+// f16 block scale. kv_dim == 1024 gives 32 blocks/row, 1088 bytes/row.
+// Store/attention/copy take the ring `wrap` (0 = dense) and apply the same
+// KvSlot rule as the F16 path, so SWA ring behavior is unchanged.
+// NOTE (q4): keys are always Q8 (34B blocks); values may be Q8 (34B) or
+// K8V4 packed nibbles (18B). Every V read/dequant below is templated on the
+// value codec, so both layouts share one kernel body.
+// ---------------------------------------------------------------------------
+
+namespace bkv = ::mbufo::core::compute::blocked_kv;
+
+// Fused-dequant load for one lane's 4 head elements from a blocked row.
+// Codec math (quant grid, nibble packing, scale conversion) comes from the
+// shared trait; only the lane->block addressing lives here. Q8 reads 4 int8
+// codes; Q4 reads 2 payload bytes holding 4 nibbles.
+template <typename Codec>
+__device__ __forceinline__ float4 BlockedDequant4(
+    const std::uint8_t* __restrict__ row, std::uint32_t lane) {
+  constexpr std::uint32_t kBB = Codec::kBlockBytes;
+  const std::uint32_t b = bkv::BlockOfLane(lane);
+  const std::uint32_t off = bkv::OffsetOfLane(lane);
+  const std::uint8_t* __restrict__ blk = row + b * kBB;
+  const float sc = bkv::LoadScaleF16(blk + kBB - 2);
+  if constexpr (std::is_same_v<Codec, bkv::KvCodecQ4>) {
+    const std::uint16_t w =
+        *reinterpret_cast<const std::uint16_t*>(blk + off / 2);
+    float v[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const std::uint32_t nib = (w >> (8 * (i / 2) + 4 * (i & 1))) & 0xFu;
+      v[i] = static_cast<float>(bkv::KvCodecQ4::DecodeNibble(nib)) * sc;
+    }
+    return make_float4(v[0], v[1], v[2], v[3]);
+  } else {
+    const std::int8_t* e = reinterpret_cast<const std::int8_t*>(blk + off);
+    return make_float4(Codec::Decode(e[0]) * sc, Codec::Decode(e[1]) * sc,
+                       Codec::Decode(e[2]) * sc, Codec::Decode(e[3]) * sc);
+  }
+}
+
+// Graph-capture store: single token from *d_pos with ring wrap. The
+// non-captured path instead calls shared blocked_kv::QuantizeKvRows (engine).
+// One block per (kv-head, 32-elem block); 32 threads cooperatively quantize
+// with per-side amax scales.
+template <typename VCodec>
+__global__ void StoreKvQ8ByPosKernel(const float* __restrict__ k_in,
+                                     const float* __restrict__ v_in,
+                                     BlockedKvQ8View k_cache,
+                                     bkv::BlockedKvView<VCodec> v_cache,
+                                     const std::uint32_t* __restrict__ d_pos,
+                                     std::uint32_t head_dim,
+                                     std::uint32_t wrap) {
+  const std::uint32_t head = blockIdx.x;
+  const std::uint32_t blk = blockIdx.y;
+  const std::uint32_t lane = threadIdx.x;  // < 32
+  const std::uint32_t slot = KvSlot(wrap, *d_pos);
+  const float* k_row = k_in + static_cast<std::size_t>(head) * head_dim +
+                       static_cast<std::size_t>(blk) * 32U;
+  const float* v_row = v_in + static_cast<std::size_t>(head) * head_dim +
+                       static_cast<std::size_t>(blk) * 32U;
+  const bool live = (blk * 32U + lane) < head_dim;
+  const float kv = live ? k_row[lane] : 0.0F;
+  const float vv = live ? v_row[lane] : 0.0F;
+  float ak = fabsf(kv);
+  float av = fabsf(vv);
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) {
+    ak = fmaxf(ak, __shfl_xor(ak, off));
+    av = fmaxf(av, __shfl_xor(av, off));
+  }
+  const float sk = bkv::ScaleFromAmax(ak, bkv::KvCodecQ8::kRange);
+  const float sv = bkv::ScaleFromAmax(av, VCodec::kRange);
+  std::uint8_t* kb =
+      k_cache.data + static_cast<std::size_t>(slot) * k_cache.row_stride +
+      static_cast<std::size_t>(head) * k_cache.head_stride +
+      static_cast<std::size_t>(blk) * bkv::KvCodecQ8::kBlockBytes;
+  std::uint8_t* vb =
+      v_cache.data + static_cast<std::size_t>(slot) * v_cache.row_stride +
+      static_cast<std::size_t>(head) * v_cache.head_stride +
+      static_cast<std::size_t>(blk) * VCodec::kBlockBytes;
+  if (lane == 0) {
+    bkv::StoreScaleF16(kb + bkv::KvCodecQ8::kBlockBytes - 2, sk);
+    bkv::StoreScaleF16(vb + VCodec::kBlockBytes - 2, sv);
+  }
+  if (live) {
+    kb[lane] = bkv::KvCodecQ8::Encode(kv / sk);
+  }
+  if constexpr (std::is_same_v<VCodec, bkv::KvCodecQ4>) {
+    // Pack two nibbles per byte. Warp-uniform shuffles: byte j of the
+    // payload takes element 2j in the low nibble and 2j+1 in the high one,
+    // matching BlockedDequant4's bit layout.
+    const std::uint32_t nib = bkv::KvCodecQ4::EncodeNibble(vv / sv);
+    const std::uint32_t s0 = (lane * 2U) & 31U;
+    const std::uint32_t lo = __shfl_sync(0xFFFFFFFFFFFFFFFFull, nib, s0);
+    const std::uint32_t hi = __shfl_sync(0xFFFFFFFFFFFFFFFFull, nib, s0 + 1U);
+    if (live && lane < 16U) {
+      vb[lane] = static_cast<std::uint8_t>(lo | (hi << 4));
+    }
+  } else if (live) {
+    vb[lane] = VCodec::Encode(vv / sv);
+  }
+}
+
+template <std::uint32_t kQpg, typename VCodec>
+__global__ void __launch_bounds__(256) InklingAttnSplitKGqaQ8Kernel(
+    const float* __restrict__ q, BlockedKvQ8View k_cache,
+    bkv::BlockedKvView<VCodec> v_cache, const float* __restrict__ sinks,
+    const float* __restrict__ rel, const float* __restrict__ rel_bank,
+    float* __restrict__ split_buf, std::uint32_t start_pos,
+    const std::uint32_t* __restrict__ d_pos, std::uint32_t window,
+    std::uint32_t n_q_heads, std::uint32_t n_kv_heads,
+    std::uint32_t rel_extent, float scale, std::uint32_t n_splits) {
+  const std::uint32_t tok = blockIdx.x;
+  const std::uint32_t kvh = blockIdx.y;
+  const std::uint32_t sp = blockIdx.z;
+  const std::uint32_t wave = threadIdx.x >> 5;
+  const std::uint32_t lane = threadIdx.x & 31U;
+  const std::uint32_t qh0 = kvh * kQpg;
+  const std::uint32_t cur_pos = (d_pos != nullptr ? *d_pos : start_pos) + tok;
+  const std::uint32_t lo =
+      (window > 0U && cur_pos + 1U > window) ? (cur_pos + 1U - window) : 0U;
+  const std::uint32_t total_kv = (cur_pos >= lo) ? (cur_pos - lo + 1U) : 0U;
+  const std::uint32_t chunk = (total_kv + n_splits - 1U) / n_splits;
+  const std::uint32_t p_beg = lo + sp * chunk;
+  const std::uint32_t p_end =
+      (p_beg < cur_pos + 1U)
+          ? ((p_beg + chunk < cur_pos + 1U) ? (p_beg + chunk) : (cur_pos + 1U))
+          : p_beg;
+
+  float4 q4[kQpg];
+  float rv[kQpg];
+  float m[kQpg];
+  float l[kQpg];
+  float4 acc[kQpg];
+#pragma unroll
+  for (std::uint32_t g = 0; g < kQpg; ++g) {
+    const std::uint32_t qh = qh0 + g;
+    const float* q_vec =
+        q + (static_cast<std::size_t>(tok) * n_q_heads + qh) * 128U;
+    q4[g] = *reinterpret_cast<const float4*>(q_vec + lane * 4U);
+    rv[g] = (rel != nullptr && lane < 16U)
+                ? rel[(static_cast<std::size_t>(tok) * n_q_heads + qh) * 16U + lane]
+                : 0.0F;
+    m[g] = (sp == 0U && wave == 0U && sinks != nullptr)
+               ? sinks[static_cast<std::size_t>(tok) * n_q_heads + qh]
+               : -1e30F;
+    l[g] = (sp == 0U && wave == 0U && sinks != nullptr) ? 1.0F : 0.0F;
+    acc[g] = make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+  }
+
+  const std::size_t k_head_bytes =
+      static_cast<std::size_t>(kvh) * k_cache.head_stride;
+  const std::size_t v_head_bytes =
+      static_cast<std::size_t>(kvh) * v_cache.head_stride;
+  const bool has_rel = (rel != nullptr && rel_bank != nullptr);
+
+  std::uint32_t p = p_beg + wave;
+  for (; p + 24U < p_end; p += 32U) {
+    float4 k4[4];
+    float4 v4[4];
+#pragma unroll
+    for (int u = 0; u < 4; ++u) {
+      const std::uint8_t* k_row =
+          k_cache.data + static_cast<std::size_t>(KvSlot(window, p + static_cast<std::uint32_t>(u) * 8U)) * k_cache.row_stride + k_head_bytes;
+      const std::uint8_t* v_row =
+          v_cache.data + static_cast<std::size_t>(KvSlot(window, p + static_cast<std::uint32_t>(u) * 8U)) * v_cache.row_stride + v_head_bytes;
+      k4[u] = BlockedDequant4<bkv::KvCodecQ8>(k_row, lane);
+      v4[u] = BlockedDequant4<VCodec>(v_row, lane);
+    }
+#pragma unroll
+    for (int u = 0; u < 4; ++u) {
+      const std::uint32_t pu = p + static_cast<std::uint32_t>(u) * 8U;
+      float bank_val = 0.0F;
+      bool use_rel = false;
+      if (has_rel) {
+        const std::uint32_t dist = cur_pos - pu;
+        if (dist < rel_extent) {
+          use_rel = true;
+          if (lane < 16U) {
+            bank_val = rel_bank[static_cast<std::size_t>(dist) * 16U + lane];
+          }
+        }
+      }
+#pragma unroll
+      for (std::uint32_t g = 0; g < kQpg; ++g) {
+        float dot = q4[g].x * k4[u].x + q4[g].y * k4[u].y + q4[g].z * k4[u].z + q4[g].w * k4[u].w;
+        for (int off = 16; off > 0; off /= 2) dot += __shfl_xor(dot, off);
+        float score = dot * scale;
+        if (use_rel) {
+          float rb = rv[g] * bank_val;
+          for (int off = 8; off > 0; off /= 2) rb += __shfl_xor(rb, off);
+          score += __shfl(rb, 0);
+        }
+        const float m_new = fmaxf(m[g], score);
+        const float alpha = __expf(m[g] - m_new);
+        const float w = __expf(score - m_new);
+        acc[g].x = acc[g].x * alpha + w * v4[u].x;
+        acc[g].y = acc[g].y * alpha + w * v4[u].y;
+        acc[g].z = acc[g].z * alpha + w * v4[u].z;
+        acc[g].w = acc[g].w * alpha + w * v4[u].w;
+        l[g] = l[g] * alpha + w;
+        m[g] = m_new;
+      }
+    }
+  }
+  for (; p < p_end; p += 8U) {
+    const std::uint8_t* k_row =
+        k_cache.data + static_cast<std::size_t>(KvSlot(window, p)) * k_cache.row_stride + k_head_bytes;
+    const std::uint8_t* v_row =
+        v_cache.data + static_cast<std::size_t>(KvSlot(window, p)) * v_cache.row_stride + v_head_bytes;
+    const float4 k4 = BlockedDequant4<bkv::KvCodecQ8>(k_row, lane);
+    const float4 v4 = BlockedDequant4<VCodec>(v_row, lane);
+
+    float bank_val = 0.0F;
+    bool use_rel = false;
+    if (has_rel) {
+      const std::uint32_t dist = cur_pos - p;
+      if (dist < rel_extent) {
+        use_rel = true;
+        if (lane < 16U) {
+          bank_val = rel_bank[static_cast<std::size_t>(dist) * 16U + lane];
+        }
+      }
+    }
+
+#pragma unroll
+    for (std::uint32_t g = 0; g < kQpg; ++g) {
+      float dot = q4[g].x * k4.x + q4[g].y * k4.y + q4[g].z * k4.z + q4[g].w * k4.w;
+      for (int off = 16; off > 0; off /= 2) dot += __shfl_xor(dot, off);
+      float score = dot * scale;
+      if (use_rel) {
+        float rb = rv[g] * bank_val;
+        for (int off = 8; off > 0; off /= 2) rb += __shfl_xor(rb, off);
+        score += __shfl(rb, 0);
+      }
+      const float m_new = fmaxf(m[g], score);
+      const float alpha = __expf(m[g] - m_new);
+      const float w = __expf(score - m_new);
+      acc[g].x = acc[g].x * alpha + w * v4.x;
+      acc[g].y = acc[g].y * alpha + w * v4.y;
+      acc[g].z = acc[g].z * alpha + w * v4.z;
+      acc[g].w = acc[g].w * alpha + w * v4.w;
+      l[g] = l[g] * alpha + w;
+      m[g] = m_new;
+    }
+  }
+
+  __shared__ float smem_m[kQpg][8];
+  __shared__ float smem_l[kQpg][8];
+  __shared__ float smem_acc[kQpg][8][128];
+#pragma unroll
+  for (std::uint32_t g = 0; g < kQpg; ++g) {
+    if (lane == 0U) {
+      smem_m[g][wave] = m[g];
+      smem_l[g][wave] = l[g];
+    }
+    *reinterpret_cast<float4*>(&smem_acc[g][wave][lane * 4U]) = acc[g];
+  }
+  __syncthreads();
+
+  if (wave < kQpg) {
+    const std::uint32_t g = wave;
+    const std::uint32_t qh = qh0 + g;
+    float m_all = -1e30F;
+    for (int w = 0; w < 8; ++w) {
+      if (smem_l[g][w] > 0.0F) m_all = fmaxf(m_all, smem_m[g][w]);
+    }
+    float l_tot = 0.0F;
+    float4 acc_tot = make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+    for (int w = 0; w < 8; ++w) {
+      const float lw = smem_l[g][w];
+      if (lw > 0.0F) {
+        const float sw = __expf(smem_m[g][w] - m_all);
+        l_tot += sw * lw;
+        const float4 aw = *reinterpret_cast<const float4*>(&smem_acc[g][w][lane * 4U]);
+        acc_tot.x += sw * aw.x;
+        acc_tot.y += sw * aw.y;
+        acc_tot.z += sw * aw.z;
+        acc_tot.w += sw * aw.w;
+      }
+    }
+    float* dst = split_buf + ((static_cast<std::size_t>(tok) * n_q_heads + qh) * n_splits + sp) * 130U;
+    if (lane == 0U) {
+      dst[0] = m_all;
+      dst[1] = l_tot;
+    }
+    *reinterpret_cast<float4*>(dst + 2U + lane * 4U) = acc_tot;
+  }
+}
+
+// Q8 twin of InklingAttnWave32Kernel (generic tok-grid fallback + debug
+// cross-check against the split-K path).
+template <typename VCodec>
+__global__ void __launch_bounds__(256) InklingAttnWave32Q8Kernel(
+    const float* __restrict__ q, BlockedKvQ8View k_cache,
+    bkv::BlockedKvView<VCodec> v_cache, const float* __restrict__ sinks,
+    const float* __restrict__ rel, const float* __restrict__ rel_bank,
+    float* __restrict__ out, std::uint32_t start_pos,
+    std::uint32_t min_pos_base, std::uint32_t window, std::uint32_t n_q_heads,
+    std::uint32_t n_kv_heads, std::uint32_t rel_extent, float scale) {
+  const std::uint32_t tok = blockIdx.x;
+  const std::uint32_t qh = blockIdx.y;
+  const std::uint32_t wave = threadIdx.x >> 5;
+  const std::uint32_t lane = threadIdx.x & 31U;
+  const std::uint32_t kv_group = n_q_heads / n_kv_heads;
+  const std::uint32_t kvh = qh / kv_group;
+  const std::uint32_t cur_pos = start_pos + tok;
+  const std::uint32_t min_pos =
+      (window > 0 && cur_pos + 1 > window) ? (cur_pos + 1 - window) : 0U;
+  const std::uint32_t lo = min_pos > min_pos_base ? min_pos : min_pos_base;
+
+  const float* q_vec =
+      q + (static_cast<std::size_t>(tok) * n_q_heads + qh) * 128U;
+  const float4 q4 = *reinterpret_cast<const float4*>(q_vec + lane * 4U);
+
+  const float* rel_vec =
+      (rel != nullptr)
+          ? rel + (static_cast<std::size_t>(tok) * n_q_heads + qh) * 16U
+          : nullptr;
+  const float rv = (rel_vec != nullptr && lane < 16U) ? rel_vec[lane] : 0.0F;
+  const std::size_t k_head_bytes =
+      static_cast<std::size_t>(kvh) * k_cache.head_stride;
+  const std::size_t v_head_bytes =
+      static_cast<std::size_t>(kvh) * v_cache.head_stride;
+
+  float m = (wave == 0U && sinks != nullptr)
+                ? sinks[static_cast<std::size_t>(tok) * n_q_heads + qh]
+                : -1e30F;
+  float l = (wave == 0U && sinks != nullptr) ? 1.0F : 0.0F;
+  float4 acc = make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+
+  for (std::uint32_t p = lo + wave; p <= cur_pos; p += 8U) {
+    const std::uint8_t* k_row =
+        k_cache.data + static_cast<std::size_t>(KvSlot(window, p)) * k_cache.row_stride + k_head_bytes;
+    const std::uint8_t* v_row =
+        v_cache.data + static_cast<std::size_t>(KvSlot(window, p)) * v_cache.row_stride + v_head_bytes;
+    const float4 k4 = BlockedDequant4<bkv::KvCodecQ8>(k_row, lane);
+    float dot = q4.x * k4.x + q4.y * k4.y + q4.z * k4.z + q4.w * k4.w;
+    for (int off = 16; off > 0; off /= 2) {
+      dot += __shfl_xor(dot, off);
+    }
+    float score = dot * scale;
+    if (rel_vec != nullptr && rel_bank != nullptr) {
+      const std::uint32_t dist = cur_pos - p;
+      if (dist < rel_extent) {
+        float rb = (lane < 16U) ? (rv * rel_bank[static_cast<std::size_t>(dist) * 16U + lane]) : 0.0F;
+        for (int off = 8; off > 0; off /= 2) {
+          rb += __shfl_xor(rb, off);
+        }
+        score += __shfl(rb, 0);
+      }
+    }
+    const float m_new = fmaxf(m, score);
+    const float alpha = __expf(m - m_new);
+    const float w = __expf(score - m_new);
+    const float4 v4 = BlockedDequant4<VCodec>(v_row, lane);
+    acc.x = acc.x * alpha + w * v4.x;
+    acc.y = acc.y * alpha + w * v4.y;
+    acc.z = acc.z * alpha + w * v4.z;
+    acc.w = acc.w * alpha + w * v4.w;
+    l = l * alpha + w;
+    m = m_new;
+  }
+
+  __shared__ float smem_m[8];
+  __shared__ float smem_l[8];
+  __shared__ float smem_acc[8][128];
+  if (lane == 0U) {
+    smem_m[wave] = m;
+    smem_l[wave] = l;
+  }
+  *reinterpret_cast<float4*>(&smem_acc[wave][lane * 4U]) = acc;
+  __syncthreads();
+
+  if (wave == 0U) {
+    float m_all = -1e30F;
+    for (int w = 0; w < 8; ++w) {
+      if (smem_l[w] > 0.0F) m_all = fmaxf(m_all, smem_m[w]);
+    }
+    float l_tot = 0.0F;
+    float4 acc_tot = make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+    for (int w = 0; w < 8; ++w) {
+      const float lw = smem_l[w];
+      if (lw > 0.0F) {
+        const float sw = __expf(smem_m[w] - m_all);
+        l_tot += sw * lw;
+        const float4 aw = *reinterpret_cast<const float4*>(&smem_acc[w][lane * 4U]);
+        acc_tot.x += sw * aw.x;
+        acc_tot.y += sw * aw.y;
+        acc_tot.z += sw * aw.z;
+        acc_tot.w += sw * aw.w;
+      }
+    }
+    const float inv_l = (l_tot > 0.0F) ? (1.0F / l_tot) : 0.0F;
+    float4 out4 = make_float4(acc_tot.x * inv_l, acc_tot.y * inv_l,
+                              acc_tot.z * inv_l, acc_tot.w * inv_l);
+    *reinterpret_cast<float4*>(
+        out + (static_cast<std::size_t>(tok) * n_q_heads + qh) * 128U + lane * 4U) = out4;
+  }
+}
+
+// Q8 twin of InklingAttnWave32ByPosKernel (graph-capture fallback).
+template <typename VCodec>
+__global__ void __launch_bounds__(256) InklingAttnWave32Q8ByPosKernel(
+    const float* __restrict__ q, BlockedKvQ8View k_cache,
+    bkv::BlockedKvView<VCodec> v_cache, const float* __restrict__ sinks,
+    const float* __restrict__ rel, const float* __restrict__ rel_bank,
+    float* __restrict__ out, const std::uint32_t* __restrict__ d_pos,
+    std::uint32_t window, std::uint32_t n_q_heads, std::uint32_t n_kv_heads,
+    std::uint32_t rel_extent, float scale) {
+  const std::uint32_t qh = blockIdx.y;
+  const std::uint32_t wave = threadIdx.x >> 5;
+  const std::uint32_t lane = threadIdx.x & 31U;
+  const std::uint32_t kv_group = n_q_heads / n_kv_heads;
+  const std::uint32_t kvh = qh / kv_group;
+  const std::uint32_t cur_pos = *d_pos;
+  const std::uint32_t lo =
+      (window > 0 && cur_pos + 1U > window) ? (cur_pos + 1U - window) : 0U;
+
+  const float* q_vec = q + static_cast<std::size_t>(qh) * 128U;
+  const float4 q4 = *reinterpret_cast<const float4*>(q_vec + lane * 4U);
+  const float* rel_vec =
+      (rel != nullptr) ? (rel + static_cast<std::size_t>(qh) * 16U) : nullptr;
+  const float rv = (rel_vec != nullptr && lane < 16U) ? rel_vec[lane] : 0.0F;
+  const std::uint32_t kv_head_stride = k_cache.head_stride;
+  const std::size_t kv_head_bytes =
+      static_cast<std::size_t>(kvh) * kv_head_stride;
+  const std::size_t v_kv_head_bytes =
+      static_cast<std::size_t>(kvh) * v_cache.head_stride;
+
+  float m = (wave == 0U && sinks != nullptr) ? sinks[qh] : -1e30F;
+  float l = (wave == 0U && sinks != nullptr) ? 1.0F : 0.0F;
+  float4 acc = make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+
+  for (std::uint32_t p = lo + wave; p <= cur_pos; p += 8U) {
+    const std::uint8_t* k_row =
+        k_cache.data + static_cast<std::size_t>(KvSlot(window, p)) * k_cache.row_stride + kv_head_bytes;
+    const std::uint8_t* v_row =
+        v_cache.data + static_cast<std::size_t>(KvSlot(window, p)) * v_cache.row_stride + v_kv_head_bytes;
+    const float4 k4 = BlockedDequant4<bkv::KvCodecQ8>(k_row, lane);
+    float dot = q4.x * k4.x + q4.y * k4.y + q4.z * k4.z + q4.w * k4.w;
+    for (int off = 16; off > 0; off /= 2) dot += __shfl_xor(dot, off);
+    float score = dot * scale;
+    if (rel_vec != nullptr && rel_bank != nullptr) {
+      const std::uint32_t dist = cur_pos - p;
+      if (dist < rel_extent) {
+        float rb = (lane < 16U) ? (rv * rel_bank[static_cast<std::size_t>(dist) * 16U + lane]) : 0.0F;
+        for (int off = 8; off > 0; off /= 2) rb += __shfl_xor(rb, off);
+        score += __shfl(rb, 0);
+      }
+    }
+    const float m_new = fmaxf(m, score);
+    const float alpha = __expf(m - m_new);
+    const float w = __expf(score - m_new);
+    const float4 v4 = BlockedDequant4<VCodec>(v_row, lane);
+    acc.x = acc.x * alpha + w * v4.x;
+    acc.y = acc.y * alpha + w * v4.y;
+    acc.z = acc.z * alpha + w * v4.z;
+    acc.w = acc.w * alpha + w * v4.w;
+    l = l * alpha + w;
+    m = m_new;
+  }
+
+  __shared__ float smem_m[8];
+  __shared__ float smem_l[8];
+  __shared__ float smem_acc[8][128];
+  if (lane == 0U) {
+    smem_m[wave] = m;
+    smem_l[wave] = l;
+  }
+  *reinterpret_cast<float4*>(&smem_acc[wave][lane * 4U]) = acc;
+  __syncthreads();
+
+  if (wave == 0U) {
+    float m_all = -1e30F;
+    for (int w = 0; w < 8; ++w) {
+      if (smem_l[w] > 0.0F) m_all = fmaxf(m_all, smem_m[w]);
+    }
+    float l_tot = 0.0F;
+    float4 acc_tot = make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+    for (int w = 0; w < 8; ++w) {
+      const float lw = smem_l[w];
+      if (lw > 0.0F) {
+        const float sw = __expf(smem_m[w] - m_all);
+        l_tot += sw * lw;
+        const float4 aw = *reinterpret_cast<const float4*>(&smem_acc[w][lane * 4U]);
+        acc_tot.x += sw * aw.x;
+        acc_tot.y += sw * aw.y;
+        acc_tot.z += sw * aw.z;
+        acc_tot.w += sw * aw.w;
+      }
+    }
+    const float inv_l = (l_tot > 0.0F) ? (1.0F / l_tot) : 0.0F;
+    float4 out4 = make_float4(acc_tot.x * inv_l, acc_tot.y * inv_l,
+                              acc_tot.z * inv_l, acc_tot.w * inv_l);
+    *reinterpret_cast<float4*>(out + static_cast<std::size_t>(qh) * 128U + lane * 4U) = out4;
+  }
+}
+
+__global__ void CopyKvSlotQ8ByPosKernel(std::uint8_t* __restrict__ cache,
+                                       std::uint8_t* __restrict__ backup,
+                                       const std::uint32_t* __restrict__ d_pos,
+                                       std::uint32_t row_bytes, bool to_backup,
+                                       std::uint32_t wrap) {
+  const std::size_t off =
+      static_cast<std::size_t>(KvSlot(wrap, *d_pos)) * row_bytes;
+  for (std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < row_bytes;
+       i += gridDim.x * blockDim.x) {
+    if (to_backup) {
+      backup[i] = cache[off + i];
+    } else {
+      cache[off + i] = backup[i];
+    }
+  }
+}
+
+template <typename VCodec>
+static void StoreKvQ8ByPosImpl(const float* k_in, const float* v_in,
+                               const BlockedKvQ8View& k_cache,
+                               const bkv::BlockedKvView<VCodec>& v_cache,
+                               const std::uint32_t* d_pos,
+                               std::uint32_t n_kv_heads, std::uint32_t head_dim,
+                               hipStream_t stream, std::uint32_t wrap) {
+  if (k_in == nullptr || v_in == nullptr) return;
+  if (k_cache.data == nullptr || v_cache.data == nullptr) return;
+  const std::uint32_t head_blocks = (head_dim + 31U) / 32U;
+  hipLaunchKernelGGL((StoreKvQ8ByPosKernel<VCodec>),
+                     dim3(n_kv_heads, head_blocks), dim3(32), 0, stream, k_in,
+                     v_in, k_cache, v_cache, d_pos, head_dim, wrap);
+}
+
+void StoreKvQ8ByPos(const float* k_in, const float* v_in,
+                    const BlockedKvQ8View& k_cache,
+                    const BlockedKvQ8View& v_cache,
+                    const std::uint32_t* d_pos, std::uint32_t n_kv_heads,
+                    std::uint32_t head_dim, hipStream_t stream,
+                    std::uint32_t wrap) {
+  StoreKvQ8ByPosImpl<bkv::KvCodecQ8>(k_in, v_in, k_cache, v_cache, d_pos,
+                                     n_kv_heads, head_dim, stream, wrap);
+}
+
+void StoreKvQ8ByPos(const float* k_in, const float* v_in,
+                    const BlockedKvQ8View& k_cache,
+                    const BlockedKvQ4View& v_cache,
+                    const std::uint32_t* d_pos, std::uint32_t n_kv_heads,
+                    std::uint32_t head_dim, hipStream_t stream,
+                    std::uint32_t wrap) {
+  StoreKvQ8ByPosImpl<bkv::KvCodecQ4>(k_in, v_in, k_cache, v_cache, d_pos,
+                                     n_kv_heads, head_dim, stream, wrap);
+}
+
+template <typename VCodec>
+static void AttentionDecodeQ8Impl(
+    const float* q, const BlockedKvQ8View& k_cache,
+    const bkv::BlockedKvView<VCodec>& v_cache, const float* sinks,
+    const float* rel, const float* rel_bank, float* out,
+    std::uint32_t start_pos, std::uint32_t window, std::uint32_t n_heads,
+    std::uint32_t n_kv_heads, std::uint32_t head_dim,
+    std::uint32_t rel_extent, float scale, hipStream_t stream,
+    float* splitk_scratch) {
+  if (head_dim != 128U || splitk_scratch == nullptr) return;
+  if (n_heads != n_kv_heads * 3U) return;
+  const std::uint32_t n_splits = (window > 0U && window <= 2048U) ? 8U : 32U;
+  hipLaunchKernelGGL((InklingAttnSplitKGqaQ8Kernel<3U, VCodec>),
+                     dim3(1U, n_kv_heads, n_splits), dim3(256), 0, stream,
+                     q, k_cache, v_cache, sinks, rel, rel_bank,
+                     splitk_scratch, start_pos, nullptr, window, n_heads,
+                     n_kv_heads, rel_extent, scale, n_splits);
+  hipLaunchKernelGGL(InklingAttnSplitKMergeKernel, dim3(1U, n_heads),
+                     dim3(32), 0, stream, splitk_scratch, out, n_heads,
+                     n_splits);
+}
+
+void AttentionDecodeQ8(const float* q, const BlockedKvQ8View& k_cache,
+                       const BlockedKvQ8View& v_cache, const float* sinks,
+                       const float* rel, const float* rel_bank, float* out,
+                       std::uint32_t start_pos, std::uint32_t window,
+                       std::uint32_t n_heads, std::uint32_t n_kv_heads,
+                       std::uint32_t head_dim, std::uint32_t rel_extent,
+                       float scale, hipStream_t stream,
+                       float* splitk_scratch) {
+  AttentionDecodeQ8Impl<bkv::KvCodecQ8>(
+      q, k_cache, v_cache, sinks, rel, rel_bank, out, start_pos, window,
+      n_heads, n_kv_heads, head_dim, rel_extent, scale, stream, splitk_scratch);
+}
+
+void AttentionDecodeQ8(const float* q, const BlockedKvQ8View& k_cache,
+                       const BlockedKvQ4View& v_cache, const float* sinks,
+                       const float* rel, const float* rel_bank, float* out,
+                       std::uint32_t start_pos, std::uint32_t window,
+                       std::uint32_t n_heads, std::uint32_t n_kv_heads,
+                       std::uint32_t head_dim, std::uint32_t rel_extent,
+                       float scale, hipStream_t stream,
+                       float* splitk_scratch) {
+  AttentionDecodeQ8Impl<bkv::KvCodecQ4>(
+      q, k_cache, v_cache, sinks, rel, rel_bank, out, start_pos, window,
+      n_heads, n_kv_heads, head_dim, rel_extent, scale, stream, splitk_scratch);
+}
+
+// Forward: large-prefill fallback, defined with the other launchers below.
+void AttentionWave32Q8(const float* q, const std::uint8_t* k_cache,
+                       const std::uint8_t* v_cache, const float* sinks,
+                       const float* rel, const float* rel_bank, float* out,
+                       std::uint32_t start_pos, std::uint32_t window,
+                       std::uint32_t n_tokens, std::uint32_t n_q_heads,
+                       std::uint32_t n_kv_heads, std::uint32_t rel_extent,
+                       float scale, hipStream_t stream,
+                       std::uint32_t row_stride);
+template <typename VCodec>
+static void AttentionPrefillQ8Impl(
+    const float* q, const BlockedKvQ8View& k_cache,
+    const bkv::BlockedKvView<VCodec>& v_cache, const float* sinks,
+    const float* rel, const float* rel_bank, float* out,
+    std::uint32_t n_tokens, std::uint32_t start_pos, std::uint32_t window,
+    std::uint32_t n_heads, std::uint32_t n_kv_heads, std::uint32_t head_dim,
+    std::uint32_t rel_extent, float scale, hipStream_t stream,
+    float* splitk_scratch) {
+  if (n_tokens == 0 || head_dim != 128U) return;
+  if (n_heads != n_kv_heads * 3U) return;
+  // d_attn_splitk_ fits 16 rows x n_heads x 32 splits x 130; beyond that
+  // the split-K partials would overflow it, so large prefills ride the
+  // scratch-free Wave32 path (same fallback structure as the F16 dispatch).
+  if (n_tokens > 32U || splitk_scratch == nullptr) {
+    AttentionWave32Q8(q, k_cache, v_cache, sinks, rel, rel_bank, out,
+                      start_pos, window, n_tokens, n_heads, n_kv_heads,
+                      rel_extent, scale, stream);
+    return;
+  }
+  const std::uint32_t n_splits = (window > 0U && window <= 2048U) ? 8U : 32U;
+  hipLaunchKernelGGL((InklingAttnSplitKGqaQ8Kernel<3U, VCodec>),
+                     dim3(n_tokens, n_kv_heads, n_splits), dim3(256), 0,
+                     stream, q, k_cache, v_cache, sinks, rel, rel_bank,
+                     splitk_scratch, start_pos, nullptr, window, n_heads,
+                     n_kv_heads, rel_extent, scale, n_splits);
+  hipLaunchKernelGGL(InklingAttnSplitKMergeKernel, dim3(n_tokens, n_heads),
+                     dim3(32), 0, stream, splitk_scratch, out, n_heads,
+                     n_splits);
+}
+
+void AttentionPrefillQ8(const float* q, const BlockedKvQ8View& k_cache,
+                        const BlockedKvQ8View& v_cache, const float* sinks,
+                        const float* rel, const float* rel_bank, float* out,
+                        std::uint32_t n_tokens, std::uint32_t start_pos,
+                        std::uint32_t window, std::uint32_t n_heads,
+                        std::uint32_t n_kv_heads, std::uint32_t head_dim,
+                        std::uint32_t rel_extent, float scale,
+                        hipStream_t stream, float* splitk_scratch) {
+  AttentionPrefillQ8Impl<bkv::KvCodecQ8>(
+      q, k_cache, v_cache, sinks, rel, rel_bank, out, n_tokens, start_pos,
+      window, n_heads, n_kv_heads, head_dim, rel_extent, scale, stream,
+      splitk_scratch);
+}
+
+void AttentionPrefillQ8(const float* q, const BlockedKvQ8View& k_cache,
+                        const BlockedKvQ4View& v_cache, const float* sinks,
+                        const float* rel, const float* rel_bank, float* out,
+                        std::uint32_t n_tokens, std::uint32_t start_pos,
+                        std::uint32_t window, std::uint32_t n_heads,
+                        std::uint32_t n_kv_heads, std::uint32_t head_dim,
+                        std::uint32_t rel_extent, float scale,
+                        hipStream_t stream, float* splitk_scratch) {
+  AttentionPrefillQ8Impl<bkv::KvCodecQ4>(
+      q, k_cache, v_cache, sinks, rel, rel_bank, out, n_tokens, start_pos,
+      window, n_heads, n_kv_heads, head_dim, rel_extent, scale, stream,
+      splitk_scratch);
+}
+
+template <typename VCodec>
+static void AttentionDecodeQ8ByPosImpl(
+    const float* q, const BlockedKvQ8View& k_cache,
+    const bkv::BlockedKvView<VCodec>& v_cache, const float* sinks,
+    const float* rel, const float* rel_bank, float* out,
+    const std::uint32_t* d_pos, std::uint32_t window, std::uint32_t n_heads,
+    std::uint32_t n_kv_heads, std::uint32_t head_dim,
+    std::uint32_t rel_extent, float scale, hipStream_t stream,
+    float* splitk_scratch) {
+  if (head_dim == 128U && splitk_scratch != nullptr &&
+      n_heads == n_kv_heads * 3U && n_heads <= 32U) {
+    const std::uint32_t n_splits = (window > 0U && window <= 2048U) ? 8U : 32U;
+    hipLaunchKernelGGL((InklingAttnSplitKGqaQ8Kernel<3U, VCodec>),
+                       dim3(1U, n_kv_heads, n_splits), dim3(256), 0, stream,
+                       q, k_cache, v_cache, sinks, rel, rel_bank,
+                       splitk_scratch, 0U, d_pos, window, n_heads, n_kv_heads,
+                       rel_extent, scale, n_splits);
+    hipLaunchKernelGGL(InklingAttnSplitKMergeKernel, dim3(1U, n_heads),
+                       dim3(32), 0, stream, splitk_scratch, out, n_heads,
+                       n_splits);
+    return;
+  }
+  hipLaunchKernelGGL((InklingAttnWave32Q8ByPosKernel<VCodec>),
+                     dim3(1, n_heads), dim3(256), 0, stream, q, k_cache,
+                     v_cache, sinks, rel, rel_bank, out, d_pos, window,
+                     n_heads, n_kv_heads, rel_extent, scale);
+}
+
+void AttentionDecodeQ8ByPos(const float* q, const BlockedKvQ8View& k_cache,
+                            const BlockedKvQ8View& v_cache, const float* sinks,
+                            const float* rel, const float* rel_bank,
+                            float* out, const std::uint32_t* d_pos,
+                            std::uint32_t window, std::uint32_t n_heads,
+                            std::uint32_t n_kv_heads, std::uint32_t head_dim,
+                            std::uint32_t rel_extent, float scale,
+                            hipStream_t stream, float* splitk_scratch) {
+  AttentionDecodeQ8ByPosImpl<bkv::KvCodecQ8>(
+      q, k_cache, v_cache, sinks, rel, rel_bank, out, d_pos, window, n_heads,
+      n_kv_heads, head_dim, rel_extent, scale, stream, splitk_scratch);
+}
+
+void AttentionDecodeQ8ByPos(const float* q, const BlockedKvQ8View& k_cache,
+                            const BlockedKvQ4View& v_cache, const float* sinks,
+                            const float* rel, const float* rel_bank,
+                            float* out, const std::uint32_t* d_pos,
+                            std::uint32_t window, std::uint32_t n_heads,
+                            std::uint32_t n_kv_heads, std::uint32_t head_dim,
+                            std::uint32_t rel_extent, float scale,
+                            hipStream_t stream, float* splitk_scratch) {
+  AttentionDecodeQ8ByPosImpl<bkv::KvCodecQ4>(
+      q, k_cache, v_cache, sinks, rel, rel_bank, out, d_pos, window, n_heads,
+      n_kv_heads, head_dim, rel_extent, scale, stream, splitk_scratch);
+}
+
+template <typename VCodec>
+static void AttentionWave32Q8Impl(
+    const float* q, const BlockedKvQ8View& k_cache,
+    const bkv::BlockedKvView<VCodec>& v_cache, const float* sinks,
+    const float* rel, const float* rel_bank, float* out,
+    std::uint32_t start_pos, std::uint32_t window, std::uint32_t n_tokens,
+    std::uint32_t n_q_heads, std::uint32_t n_kv_heads,
+    std::uint32_t rel_extent, float scale, hipStream_t stream) {
+  if (n_tokens == 0) return;
+  hipLaunchKernelGGL((InklingAttnWave32Q8Kernel<VCodec>),
+                     dim3(n_tokens, n_q_heads), dim3(256), 0, stream, q,
+                     k_cache, v_cache, sinks, rel, rel_bank, out, start_pos,
+                     0, window, n_q_heads, n_kv_heads, rel_extent, scale);
+}
+
+void AttentionWave32Q8(const float* q, const BlockedKvQ8View& k_cache,
+                       const BlockedKvQ8View& v_cache, const float* sinks,
+                       const float* rel, const float* rel_bank, float* out,
+                       std::uint32_t start_pos, std::uint32_t window,
+                       std::uint32_t n_tokens, std::uint32_t n_q_heads,
+                       std::uint32_t n_kv_heads, std::uint32_t rel_extent,
+                       float scale, hipStream_t stream) {
+  AttentionWave32Q8Impl<bkv::KvCodecQ8>(
+      q, k_cache, v_cache, sinks, rel, rel_bank, out, start_pos, window,
+      n_tokens, n_q_heads, n_kv_heads, rel_extent, scale, stream);
+}
+
+void AttentionWave32Q8(const float* q, const BlockedKvQ8View& k_cache,
+                       const BlockedKvQ4View& v_cache, const float* sinks,
+                       const float* rel, const float* rel_bank, float* out,
+                       std::uint32_t start_pos, std::uint32_t window,
+                       std::uint32_t n_tokens, std::uint32_t n_q_heads,
+                       std::uint32_t n_kv_heads, std::uint32_t rel_extent,
+                       float scale, hipStream_t stream) {
+  AttentionWave32Q8Impl<bkv::KvCodecQ4>(
+      q, k_cache, v_cache, sinks, rel, rel_bank, out, start_pos, window,
+      n_tokens, n_q_heads, n_kv_heads, rel_extent, scale, stream);
+}
+
+template <typename Codec>
+static void CopyKvSlotQ8ByPosImpl(const bkv::BlockedKvView<Codec>& cache,
+                                  const bkv::BlockedKvView<Codec>& backup,
+                                  const std::uint32_t* d_pos, bool to_backup,
+                                  hipStream_t stream, std::uint32_t wrap) {
+  hipLaunchKernelGGL(CopyKvSlotQ8ByPosKernel,
+                     dim3((cache.row_stride + 255U) / 256U), dim3(256), 0,
+                     stream, cache.data, backup.data, d_pos,
+                     cache.row_stride, to_backup, wrap);
+}
+
+void CopyKvSlotQ8ByPos(const BlockedKvQ8View& cache,
+                       const BlockedKvQ8View& backup,
+                       const std::uint32_t* d_pos,
+                       bool to_backup, hipStream_t stream,
+                       std::uint32_t wrap) {
+  CopyKvSlotQ8ByPosImpl<bkv::KvCodecQ8>(cache, backup, d_pos, to_backup,
+                                        stream, wrap);
+}
+
+void CopyKvSlotQ8ByPos(const BlockedKvQ4View& cache,
+                       const BlockedKvQ4View& backup,
+                       const std::uint32_t* d_pos,
+                       bool to_backup, hipStream_t stream,
+                       std::uint32_t wrap) {
+  CopyKvSlotQ8ByPosImpl<bkv::KvCodecQ4>(cache, backup, d_pos, to_backup,
+                                        stream, wrap);
 }
 
 }  // namespace mbufo::models::inkling::kernels

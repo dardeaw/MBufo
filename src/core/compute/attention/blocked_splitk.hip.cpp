@@ -70,17 +70,8 @@ __device__ __forceinline__ float WaveSum(float v) {
 
 constexpr unsigned kThreads = 256;
 
-// Device-side decode traits for the blocked KV codecs (the header stays
-// host-safe, so the bodies live here). Q8 is the symmetric INT8 grid over
-// amax/127, bit-compatible with blocked_kv::KvCodecQ8.
-template <typename Codec>
-struct CodecTraits;
-template <>
-struct CodecTraits<KvCodecQ8> {
-  static __device__ __forceinline__ float Decode(std::uint8_t e) {
-    return static_cast<float>(static_cast<std::int8_t>(e));
-  }
-};
+// Element decode comes from the unified codec trait (blocked_kv_codec.hpp)
+// via Codec::Decode; do not reintroduce a TU-local CodecTraits.
 
 // One (head, token, split) partial scan over keys [s*chunk, ...), clamped to
 // the query's own causal extent (*start_pos + t + 1). Thread i owns dim i.
@@ -152,7 +143,7 @@ __global__ void AttentionBlockedSplitKKernel(
               static_cast<std::size_t>(lane_block) * key_block_bytes;
           const float sk = __half2float(
               *reinterpret_cast<const __half*>(kblk + key_block_bytes - 2));
-          kval = CodecTraits<Codec>::Decode(kblk[lane_off]) * sk;
+          kval = Codec::Decode(kblk[lane_off]) * sk;
         } else {
           // 18-byte 4-bit keys: element 2e in the low nibble, 2e+1 in the
           // high; sign-extended exactly like the scalar unpack path.
@@ -172,7 +163,7 @@ __global__ void AttentionBlockedSplitKKernel(
               static_cast<std::size_t>(lane_block) * value_block_bytes;
           const float sv = __half2float(
               *reinterpret_cast<const __half*>(vblk + value_block_bytes - 2));
-          vval = CodecTraits<Codec>::Decode(vblk[lane_off]) * sv;
+          vval = Codec::Decode(vblk[lane_off]) * sv;
         } else {
           const std::uint8_t* vblk =
               reinterpret_cast<const std::uint8_t*>(v_cache) +
@@ -292,7 +283,7 @@ __device__ __forceinline__ void DecodeKeyBlock32(const std::uint8_t* blk,
                                                  std::uint32_t block_bytes,
                                                  float* out32) {
   if (block_bytes == 34) {
-    const float sc = __half2float(*reinterpret_cast<const __half*>(blk + 32));
+    const float sc = blocked_kv::LoadScaleF16(blk + 32);
     const unsigned short* p = reinterpret_cast<const unsigned short*>(blk);
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
@@ -302,7 +293,7 @@ __device__ __forceinline__ void DecodeKeyBlock32(const std::uint8_t* blk,
           static_cast<float>(static_cast<std::int8_t>(u >> 8)) * sc;
     }
   } else {
-    const float sc = __half2float(*reinterpret_cast<const __half*>(blk + 16));
+    const float sc = blocked_kv::LoadScaleF16(blk + 16);
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
       const unsigned byte = blk[i];
@@ -321,13 +312,13 @@ __device__ __forceinline__ float2 DecodeValuePair(const std::uint8_t* row,
   const std::uint8_t* blk = row + static_cast<std::size_t>(p >> 5) * block_bytes;
   const std::uint32_t off = p & 31u;
   if (block_bytes == 34) {
-    const float sc = __half2float(*reinterpret_cast<const __half*>(blk + 32));
+    const float sc = blocked_kv::LoadScaleF16(blk + 32);
     const unsigned u = *reinterpret_cast<const unsigned short*>(blk + off);
     return make_float2(
         static_cast<float>(static_cast<std::int8_t>(u & 0xFFu)) * sc,
         static_cast<float>(static_cast<std::int8_t>(u >> 8)) * sc);
   }
-  const float sc = __half2float(*reinterpret_cast<const __half*>(blk + 16));
+  const float sc = blocked_kv::LoadScaleF16(blk + 16);
   const unsigned byte = blk[off >> 1];
   const int lo = static_cast<int>(byte & 0xFu);
   const int hi = static_cast<int>(byte >> 4);

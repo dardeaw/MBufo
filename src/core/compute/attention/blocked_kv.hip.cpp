@@ -1,4 +1,5 @@
 #include "src/core/compute/attention/blocked_kv.hpp"
+#include "src/core/compute/attention/blocked_kv_codec.hpp"
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
@@ -108,65 +109,16 @@ __device__ float BlockMax(float v, float* shared) {
 // kernels are templated on the codec and only the element encode/decode and
 // the quantization range differ.
 //
-// Q8_0 is a symmetric INT8 grid over amax/127. E4M3 is an OCP FP8 grid (bias 7,
-// three mantissa bits, max 448) over amax/448: its exponent field absorbs the
-// outliers that a per-block INT8 scale would clip, at the cost of mantissa
-// bits.
-struct KvCodecQ8 {
-  using Elem = std::uint8_t;  // the symmetric INT8 grid, stored as bytes
-  static constexpr float kRange = 127.0f;
-  static __device__ __forceinline__ Elem Encode(float v) {
-    v = v > 127.0f ? 127.0f : (v < -127.0f ? -127.0f : v);
-    return static_cast<Elem>(static_cast<std::int8_t>(rintf(v)));
-  }
-  static __device__ __forceinline__ float Decode(Elem e) {
-    return static_cast<float>(static_cast<std::int8_t>(e));
-  }
-};
+// Element codec tags now live in blocked_kv_codec.hpp (single definition
+// shared by every kernel TU and model engine). The kernels below use them
+// through the same names, so launches stay bitwise identical.
 
 // OCP E4M3 (no inf; 0x7F and 0xFF are NaN). Emulated in software: gfx1151 has
 // no fp8 conversion instruction and the mmq helper is CDNA3/Blackwell only.
 // Values round to nearest even; the block scale keeps in-range blocks below the
 // format maximum, and anything past it saturates.
-struct KvCodecFp8 {
-  using Elem = std::uint8_t;
-  static constexpr float kRange = 448.0f;
-  static __device__ __forceinline__ Elem Encode(float x) {
-    const std::uint32_t bits = __float_as_uint(x);
-    const std::uint32_t sign = (bits >> 24) & 0x80u;
-    const float a = fabsf(x);
-    if (a != a)  // NaN keeps the format's NaN encoding
-      return static_cast<Elem>(sign | 0x7Fu);
-    if (a >= 448.0f)  // saturate; also catches inf
-      return static_cast<Elem>(sign | 0x7Eu);
-    if (a < 0.015625f) {  // 2^-6: subnormal grid of step 2^-9
-      const std::uint32_t m = static_cast<std::uint32_t>(rintf(a * 512.0f));
-      return static_cast<Elem>(sign | m);
-    }
-    const std::uint32_t m23 = bits & 0x7FFFFFu;
-    const std::uint32_t r =
-        m23 + 0x7FFFFu + ((m23 >> 20) & 1u);  // round to nearest even, 3 bits
-    std::uint32_t m3 = r >> 20u;
-    std::uint32_t e = ((bits >> 23) & 0xFFu) - 120u;  // unbiased + E4M3 bias
-    if (m3 > 7u) {                                    // mantissa carry
-      m3 = 0u;
-      ++e;
-    }
-    if (e > 15u)  // unreachable below 448; kept so a bug cannot alias the sign
-      return static_cast<Elem>(sign | 0x7Eu);
-    return static_cast<Elem>(sign | (e << 3u) | m3);
-  }
-  static __device__ __forceinline__ float Decode(Elem e) {
-    const std::uint32_t sign = static_cast<std::uint32_t>(e & 0x80u) << 24;
-    const std::uint32_t f = static_cast<std::uint32_t>(e & 0x7Fu);
-    const std::uint32_t exp = f >> 3u;
-    if (exp == 0u) {  // subnormal grid: mant * 2^-9, exact in fp32
-      const float v = static_cast<float>(f & 0x7u) * (1.0f / 512.0f);
-      return sign == 0u ? v : -v;
-    }
-    return __uint_as_float(sign | ((exp + 120u) << 23u) | ((f & 0x7u) << 20u));
-  }
-};
+// (KvCodecFp8 lives in blocked_kv_codec.hpp now; the memcpy bit-cast
+// there is bit-exact with the __float_as_uint version it replaces.)
 
 // Blocked twin of PrepareAttentionKernel: identical RMS/RoPE/q/gate math, but
 // K and V rows go to `Codec` blocks with a real per-32-block scale (a per-head
@@ -296,20 +248,18 @@ __global__ void PrepareAttentionKvKernel(
         const auto nibble = [&](std::uint32_t e) -> std::uint32_t {
           if (e >= n)
             return 0u;
-          int q = static_cast<int>(rintf(norm[j][base + e] / sc));
-          q = q > 7 ? 7 : (q < -7 ? -7 : q);
-          return static_cast<std::uint32_t>(q) & 0xFu;
+          return KvCodecQ4::EncodeNibble(norm[j][base + e] / sc);
         };
         for (std::uint32_t e = 0; e < 16; ++e) {
           blk[e] = static_cast<std::uint8_t>(nibble(e * 2) |
                                              (nibble(e * 2 + 1) << 4));
         }
-        *reinterpret_cast<__half*>(blk + 16) = __float2half(sc);
+        blocked_kv::StoreScaleF16(blk + 16, sc);
       } else {
         for (std::uint32_t k = 0; k < n; ++k) {
           blk[k] = Codec::Encode(norm[j][base + k] / sc);
         }
-        *reinterpret_cast<__half*>(blk + 32) = __float2half(sc);
+        blocked_kv::StoreScaleF16(blk + 32, sc);
       }
     }
   }
@@ -345,14 +295,12 @@ __global__ void PrepareAttentionKvKernel(
           const auto nibble = [&](std::uint32_t e) -> std::uint32_t {
             if (e >= n)
               return 0u;
-            int q = static_cast<int>(rintf(vrow[base + e] / sc));
-            q = q > 7 ? 7 : (q < -7 ? -7 : q);
-            return static_cast<std::uint32_t>(q) & 0xFu;
+            return KvCodecQ4::EncodeNibble(vrow[base + e] / sc);
           };
           blk[j] = static_cast<std::uint8_t>(nibble(j * 2) |
                                              (nibble(j * 2 + 1) << 4));
         }
-        *reinterpret_cast<__half*>(blk + 16) = __float2half(sc);
+        blocked_kv::StoreScaleF16(blk + 16, sc);
       }
     } else {
       for (std::uint32_t i = tid; i < d; i += blockDim.x) {
@@ -367,8 +315,8 @@ __global__ void PrepareAttentionKvKernel(
         const float sc = mx > 0.0f ? mx / v_range : 1.0f;
         out[b * v_block_bytes + (i % 32)] = Codec::Encode(vrow[i] / sc);
         if (i % 32 == 0) {
-          *reinterpret_cast<__half*>(out + std::size_t(b) * v_block_bytes +
-                                     32) = __float2half(sc);
+          blocked_kv::StoreScaleF16(out + std::size_t(b) * v_block_bytes +
+                                     32, sc);
         }
       }
     }
@@ -413,20 +361,18 @@ __global__ void QuantizeKvRowsKernel(
       const auto nibble = [&](std::uint32_t e) -> std::uint32_t {
         if (e >= n)
           return 0u;
-        int q = static_cast<int>(rintf(row[base + e] / sc));
-        q = q > 7 ? 7 : (q < -7 ? -7 : q);
-        return static_cast<std::uint32_t>(q) & 0xFu;
+        return KvCodecQ4::EncodeNibble(row[base + e] / sc);
       };
       for (std::uint32_t j = 0; j < 16; ++j) {
         blk[j] =
             static_cast<std::uint8_t>(nibble(j * 2) | (nibble(j * 2 + 1) << 4));
       }
-      *reinterpret_cast<__half*>(blk + 16) = __float2half(sc);
+      blocked_kv::StoreScaleF16(blk + 16, sc);
     } else {
       for (std::uint32_t k = 0; k < n; ++k) {
         blk[k] = Codec::Encode(row[base + k] / sc);
       }
-      *reinterpret_cast<__half*>(blk + 32) = __float2half(sc);
+      blocked_kv::StoreScaleF16(blk + 32, sc);
     }
   }
 }
@@ -452,13 +398,13 @@ __global__ void DequantizeKvRowsKernel(
   const std::size_t out_off = std::size_t(r) * d + base + l;
   if (k_block_bytes == 18) {
     const auto* kbp = reinterpret_cast<const std::uint8_t*>(kb);
-    const float sk = __half2float(*reinterpret_cast<const __half*>(kbp + 16));
+    const float sk = blocked_kv::LoadScaleF16(kbp + 16);
     const std::uint32_t byte = kbp[l / 2];
     const std::uint32_t nib = (byte >> (4 * (l & 1u))) & 0xFu;
-    const int q = static_cast<int>(nib) - (nib & 8u ? 16 : 0);
+    const int q = KvCodecQ4::DecodeNibble(nib);
     dst_k[out_off] = __float2half(static_cast<float>(q) * sk);
   } else {
-    const float sk = __half2float(*reinterpret_cast<const __half*>(kb + 32));
+    const float sk = blocked_kv::LoadScaleF16(kb + 32);
     dst_k[out_off] = __float2half(Codec::Decode(kb[l]) * sk);
   }
   const std::size_t v_blk_off =
@@ -466,13 +412,13 @@ __global__ void DequantizeKvRowsKernel(
   const auto* vb = reinterpret_cast<const std::uint8_t*>(src_v + v_blk_off);
   if (v_block_bytes == 18) {
     // Two lanes share each payload byte; both only read it.
-    const float sv = __half2float(*reinterpret_cast<const __half*>(vb + 16));
+    const float sv = blocked_kv::LoadScaleF16(vb + 16);
     const std::uint32_t byte = vb[l / 2];
     const std::uint32_t nib = (byte >> (4 * (l & 1u))) & 0xFu;
-    const int q = static_cast<int>(nib) - (nib & 8u ? 16 : 0);
+    const int q = KvCodecQ4::DecodeNibble(nib);
     dst_v[out_off] = __float2half(static_cast<float>(q) * sv);
   } else {
-    const float sv = __half2float(*reinterpret_cast<const __half*>(vb + 32));
+    const float sv = blocked_kv::LoadScaleF16(vb + 32);
     dst_v[out_off] = __float2half(Codec::Decode(vb[l]) * sv);
   }
 }

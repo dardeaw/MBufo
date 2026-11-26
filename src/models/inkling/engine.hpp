@@ -25,6 +25,10 @@ namespace mbufo::models::inkling {
 struct ModelOptions {
   std::uint32_t max_context = 32768;
   std::string kv_cache_quant = "f16";
+  // True when kv_cache_quant was explicitly supplied (CLI flag / /admin
+  // field) rather than a mapped default. Lets the session tell "default
+  // q8" apart from an explicit q4-family request that arrived as "q8".
+  bool kv_cache_quant_supplied = false;
   std::string vision_model_path;
   std::string dspark_model_path;
 };
@@ -60,6 +64,12 @@ class Model final : public std::enable_shared_from_this<Model> {
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
+  }
+  [[nodiscard]] const std::string& KvCacheQuant() const noexcept {
+    return options_.kv_cache_quant;
+  }
+  [[nodiscard]] bool KvCacheQuantSupplied() const noexcept {
+    return options_.kv_cache_quant_supplied;
   }
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] const ModelWeights& weights() const noexcept {
@@ -210,6 +220,7 @@ class Session final {
   std::vector<void*> arena_;
   std::int32_t* d_tokens_{nullptr};
   std::uint32_t* d_pos_{nullptr};
+  // (d_store_pos_ declared with the Q8 members above)
   hipGraph_t decode_graph_{nullptr};
   hipGraphExec_t decode_graph_exec_{nullptr};
   bool capture_by_pos_{false};
@@ -267,15 +278,26 @@ class Session final {
   float* d_hsave_{nullptr};  // [chunk, h] pass snapshot (prev-pass hidden)
   // Per-pass sconv slot selected by ForwardChunk (0/1/2 for passes 1/2/3).
   std::uint32_t sconv_slot_{0};
-  // Per-layer KV planes (F16) and sconv rolling states (F32).
-  std::vector<void*> k_cache_;  // per layer: [ctx, kvdim] half
+  // Per-layer KV planes (F16, or blocked-Q8 rows when kv_q8_) and sconv
+  // rolling states (F32).
+  std::vector<void*> k_cache_;  // per layer: F16 [rows, kvdim] half, Q8 [rows, row_stride_] bytes
   std::vector<void*> v_cache_;
   std::vector<void*> sconv_k_;  // per layer: [pass_slots, kvdim*3] float
   std::vector<void*> sconv_v_;
   std::vector<void*> sconv_pa_;  // post-attn: [pass_slots, h*3] float
   std::vector<void*> sconv_pm_;  // post-mlp:  [pass_slots, h*3] float
-  std::vector<void*> kv_backup_k_;  // loop layers: [chunk, kvdim] half
+  std::vector<void*> kv_backup_k_;  // loop layers: [chunk, kvdim] half (Q8: [chunk, row_stride_] bytes)
   std::vector<void*> kv_backup_v_;
+  // Blocked KV modes: F16 (all-half planes), Q8 (34B blocks both sides)
+  // or K8V4 (34B keys, 18B packed-nibble values). The layout is the shared
+  // blocked_kv format (see blocked_kv_codec.hpp); keys always stay 8-bit
+  // (post-RoPE outliers need the range), values may pack to 4-bit.
+  // Attention fused-dequantizes on read through the trait codec.
+  enum class KvMode : std::uint8_t { kF16, kQ8, kK8V4 };
+  KvMode kv_mode_ = KvMode::kF16;
+  std::uint32_t kv_row_stride_k_ = 0;  // per-token K row bytes
+  std::uint32_t kv_row_stride_v_ = 0;  // per-token V row bytes
+  std::uint32_t* d_store_pos_{nullptr};  // blocked store slot scalar (non-graph)
   // Logits / sampling.
   float* d_logits_{nullptr};
   float* d_all_logits_{nullptr};

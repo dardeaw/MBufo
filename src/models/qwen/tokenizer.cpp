@@ -554,6 +554,10 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
       std::optional<std::string_view>{"laguna"}) {
     tokenizer->pre_tokenizer_ = PreTokenizer::kLaguna;
   }
+  if (reader.GetMetadataString("tokenizer.ggml.pre") ==
+      std::optional<std::string_view>{"inkling2"}) {
+    tokenizer->pre_tokenizer_ = PreTokenizer::kInkling;
+  }
 
   if (auto eos = reader.GetMetadataUint32("tokenizer.ggml.eos_token_id")) {
     tokenizer->eos_token_id_ = *eos;
@@ -869,7 +873,8 @@ std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
   if (pre_tokenizer_ != PreTokenizer::kQwen35 &&
       pre_tokenizer_ != PreTokenizer::kLlama &&
       pre_tokenizer_ != PreTokenizer::kLlama4 &&
-      pre_tokenizer_ != PreTokenizer::kLaguna) {
+      pre_tokenizer_ != PreTokenizer::kLaguna &&
+      pre_tokenizer_ != PreTokenizer::kInkling) {
     return BpeMergeChunk(text);
   }
 

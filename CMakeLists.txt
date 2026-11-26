@@ -309,6 +309,7 @@ add_subdirectory(src/models/bge_reranker)
 add_subdirectory(src/models/qwen_reranker)
 add_subdirectory(src/models/llama)
 add_subdirectory(src/models/laguna)
+add_subdirectory(src/models/inkling)
 add_subdirectory(src/models/glimmer)
 add_subdirectory(src/models/gptoss)
 
@@ -392,7 +393,7 @@ add_library(mbufo_llm_cli STATIC
   src/cli/prompt/prompt.cpp)
 target_link_libraries(mbufo_llm_cli PUBLIC mbufo_core mbufo_qwen38_flash_next)
 if(ENGINE_ENABLE_HIP)
-  target_link_libraries(mbufo_llm_cli PUBLIC mbufo_deepseek_v4_flash mbufo_gemma4 mbufo_llama mbufo_laguna mbufo_glimmer mbufo_gptoss)
+  target_link_libraries(mbufo_llm_cli PUBLIC mbufo_deepseek_v4_flash mbufo_gemma4 mbufo_llama mbufo_laguna mbufo_inkling mbufo_glimmer mbufo_gptoss)
 endif()
 
 add_library(mbufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)

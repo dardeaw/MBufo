@@ -150,7 +150,7 @@ namespace {
 const core::engine::EngineRegistrar kInklingRegistrar(
     core::engine::EngineBackendInfo{
         .name = "inkling",
-        .description = "Inkling-2-Mini hybrid sconv+loop MoE (f16 KV)",
+        .description = "Inkling-2-Mini hybrid sconv+loop MoE (f16/Q8/K8V4 KV)",
         .moe = true,
         .attention = true,
     },
@@ -159,6 +159,7 @@ const core::engine::EngineRegistrar kInklingRegistrar(
       ModelOptions opts;
       if (req.max_context > 0) opts.max_context = req.max_context;
       if (!req.kv_cache_quant.empty()) opts.kv_cache_quant = req.kv_cache_quant;
+      opts.kv_cache_quant_supplied = req.kv_cache_quant_supplied;
       return InklingEngineModel::Load(req.model_path, opts, err);
     });
 }  // namespace

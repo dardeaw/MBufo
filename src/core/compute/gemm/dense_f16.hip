@@ -916,7 +916,7 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
   // Wide batches reuse each staged fragment across twice the rows and
   // tokens (router 0.61 to 0.52 ms, GDN alpha/beta 0.14 to 0.09 ms at 4,096
   // tokens). Every output keeps its two K16 chains in K order.
-  if (batch >= 1024) {
+  if (batch >= 1024 && m > 64) {
     hipLaunchKernelGGL(
         (DenseF16GEMMKernel<128, 128, 2, 2, 4, 1, false, false, false, true>),
         dim3((batch + 127) / 128, (m + 127) / 128), dim3(kThreads), 0, stream,
@@ -985,6 +985,7 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
       // Shared-expert down: pairs of row tiles per token tile (-11 %).
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2, 2>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+
     } else {
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);

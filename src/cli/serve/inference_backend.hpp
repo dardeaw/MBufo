@@ -41,6 +41,10 @@ namespace mbufo::models::laguna {
 class Model;
 }
 
+namespace mbufo::models::inkling {
+class Model;
+}
+
 namespace mbufo::models::qwen38_flash_next {
 class Model;
 }
@@ -187,6 +191,14 @@ public:
   /// persistent disk cache is rejected and only the process-local RAM
   /// pool is used.
   bool load(std::shared_ptr<models::laguna::Model> model,
+            std::string* error, std::uint32_t max_context = 0,
+            std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {});
+  bool load(std::shared_ptr<models::inkling::Model> model,
             std::string* error, std::uint32_t max_context = 0,
             std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},

@@ -333,7 +333,9 @@ __launch_bounds__(256) __global__
                              const float* __restrict__ swiglu_gate,
                              float* __restrict__ out,
                              __half* __restrict__ out_half, std::size_t m,
-                             std::size_t k, const void* __restrict__ w_up) {
+                             std::size_t k, const void* __restrict__ w_up,
+                             const std::uint32_t* __restrict__ d_n_tiles = nullptr) {
+  if (d_n_tiles != nullptr && blockIdx.y >= *d_n_tiles) return;
   static_assert(BM == 128 || BM == 256, "eight waves, 16-row tiles");
   static_assert(!kPair || BM == 128);
   static_assert(BN % 16 == 0 && BN / 16 <= 8);
@@ -1098,7 +1100,8 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                      const std::int32_t* pad_bounds,
                      const std::int32_t* rows_in, const std::int32_t* rows_out,
                      const float* swiglu_gate, float* out, __half* out_half,
-                     std::size_t m, std::size_t k, hipStream_t stream) {
+                     std::size_t m, std::size_t k, hipStream_t stream,
+                     const std::uint32_t* d_n_tiles) {
   constexpr int kBM = 128;
   constexpr int kBK = 2;
   const dim3 grid(static_cast<unsigned int>((m + kBM - 1) / kBM), n_tiles);
@@ -1110,38 +1113,38 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
         hipLaunchKernelGGL(
             (RoutedF16GEMMKernel<WeightType::kQ4_K, kBM, BN, kBK>), grid,
             dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
-            rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+            rows_out, swiglu_gate, out, out_half, m, k, nullptr, d_n_tiles);
         return true;
       }
     case WeightType::kQ5_1:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ5_1, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
-                         out_half, m, k, nullptr);
+                         out_half, m, k, nullptr, d_n_tiles);
       return true;
     case WeightType::kQ8_0:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ8_0, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
-                         out_half, m, k, nullptr);
+                         out_half, m, k, nullptr, d_n_tiles);
       return true;
     case WeightType::kQ4_0:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ4_0, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
-                         out_half, m, k, nullptr);
+                         out_half, m, k, nullptr, d_n_tiles);
       return true;
     case WeightType::kMXFP4:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kMXFP4, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
-                         out_half, m, k, nullptr);
+                         out_half, m, k, nullptr, d_n_tiles);
       return true;
     case WeightType::kQ4_0_ROCMFP4_FAST:
       hipLaunchKernelGGL(
           (RoutedF16GEMMKernel<WeightType::kQ4_0_ROCMFP4_FAST, kBM, BN, kBK>),
           grid, dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
-          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr, d_n_tiles);
       return true;
     case WeightType::kQ5_K:
       if constexpr (BN > 48) {
@@ -1150,7 +1153,7 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
         hipLaunchKernelGGL(
             (RoutedF16GEMMKernel<WeightType::kQ5_K, kBM, BN, kBK>), grid,
             dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
-            rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+            rows_out, swiglu_gate, out, out_half, m, k, nullptr, d_n_tiles);
         return true;
       }
     default:
@@ -1194,7 +1197,8 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    std::uint32_t tile_rows, const std::int32_t* pad_bounds,
                    const std::int32_t* rows_in, const std::int32_t* rows_out,
                    const float* swiglu_gate, float* out, __half* out_half,
-                   std::size_t m, std::size_t k, hipStream_t stream) {
+                   std::size_t m, std::size_t k, hipStream_t stream,
+                   const std::uint32_t* d_n_tiles) {
   const std::size_t block_elems =
       (type == WeightType::kQ4_K || type == WeightType::kQ5_K) ? 256 : 64;
   if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||
@@ -1205,15 +1209,15 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
     case 16:
       return LaunchRoutedF16<16>(w, type, x, tiles, n_tiles, pad_bounds,
                                  rows_in, rows_out, swiglu_gate, out, out_half,
-                                 m, k, stream);
+                                 m, k, stream, d_n_tiles);
     case 48:
       return LaunchRoutedF16<48>(w, type, x, tiles, n_tiles, pad_bounds,
                                  rows_in, rows_out, swiglu_gate, out, out_half,
-                                 m, k, stream);
+                                 m, k, stream, d_n_tiles);
     case 64:
       return LaunchRoutedF16<64>(w, type, x, tiles, n_tiles, pad_bounds,
                                  rows_in, rows_out, swiglu_gate, out, out_half,
-                                 m, k, stream);
+                                 m, k, stream, d_n_tiles);
     default:
       return false;
   }

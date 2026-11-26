@@ -83,6 +83,11 @@ struct EngineLoadRequest {
   std::string model_path;
   std::uint32_t max_context{0};
   std::string kv_cache_quant;
+  // True when the caller explicitly supplied kv_cache_quant (CLI flag or
+  // /admin kv_cache_quant field), as opposed to a mapped/stacked default.
+  // Engines use it to tell "default q8" (mapped from default q4) apart from
+  // an explicit q4-family request that arrived mapped to "q8".
+  bool kv_cache_quant_supplied{false};
 };
 
 /// Factory producing an engine model from a request. Returns nullptr and

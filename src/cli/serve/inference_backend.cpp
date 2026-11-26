@@ -6762,6 +6762,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         models::inkling::ModelOptions{
             .max_context = max_context,
             .kv_cache_quant = kv_cache_quant,
+            .kv_cache_quant_supplied = kv_cache_quant_supplied,
             .vision_model_path = vision_model_path,
             .dspark_model_path =
                 want_dspark ? speculative_config.draft_model_path

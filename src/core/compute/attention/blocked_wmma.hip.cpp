@@ -20,17 +20,8 @@
 
 namespace mbufo::core::compute::blocked_wmma {
 
-// Device-side decode traits for the blocked KV codecs (the header stays
-// host-safe, so the bodies live here). Q8 is the symmetric INT8 grid over
-// amax/127, bit-compatible with blocked_kv::KvCodecQ8.
-template <typename Codec>
-struct CodecTraits;
-template <>
-struct CodecTraits<KvCodecQ8> {
-  static __device__ __forceinline__ float Decode(std::uint8_t e) {
-    return static_cast<float>(static_cast<std::int8_t>(e));
-  }
-};
+// Element decode comes from the unified codec trait (blocked_kv_codec.hpp)
+// via Codec::Decode; do not reintroduce a TU-local CodecTraits.
 
 // --- helpers carried over from the Qwen kernel ---
 namespace {
@@ -639,17 +630,17 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
           auto* hp = reinterpret_cast<__half*>(&reg);
           if (v_block_bytes == 34) {
             const float sc =
-                __half2float(*reinterpret_cast<const __half*>(vent + 32));
+                blocked_kv::LoadScaleF16(vent + 32);
 #pragma unroll
             for (std::uint32_t i = 0; i < 8; ++i) {
-              hp[i] = __float2half(CodecTraits<Codec>::Decode(vent[(dim % 32) + i]) * sc);
+              hp[i] = __float2half(Codec::Decode(vent[(dim % 32) + i]) * sc);
             }
           } else {
             // 18-byte 4-bit block: element 2e in the low nibble, 2e+1 in
             // the high (same packing the blocked writer emits); values
             // sign-extend from 4 bits, matching the scalar unpack path.
             const float sc =
-                __half2float(*reinterpret_cast<const __half*>(vent + 16));
+                blocked_kv::LoadScaleF16(vent + 16);
             std::uint32_t packed = 0;
             __builtin_memcpy(&packed, vent + ((dim % 32) / 2),
                              sizeof(std::uint32_t));
@@ -685,7 +676,7 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
             auto* hp = reinterpret_cast<__half*>(&reg);
             if (v_block_bytes == 34) {
               const float sc =
-                  __half2float(*reinterpret_cast<const __half*>(vent + 32));
+                  blocked_kv::LoadScaleF16(vent + 32);
 #pragma unroll
               for (std::uint32_t i = 0; i < 8; ++i) {
                 const int q = static_cast<int>(
@@ -694,7 +685,7 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
               }
             } else {
               const float sc =
-                  __half2float(*reinterpret_cast<const __half*>(vent + 16));
+                  blocked_kv::LoadScaleF16(vent + 16);
               std::uint32_t packed = 0;
               __builtin_memcpy(&packed, vent + ((dim % 32) / 2),
                                sizeof(std::uint32_t));
@@ -751,14 +742,14 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
           auto* hp = reinterpret_cast<__half*>(&reg);
           if (k_block_bytes == 34) {
             const float sc =
-                __half2float(*reinterpret_cast<const __half*>(kent + 32));
+                blocked_kv::LoadScaleF16(kent + 32);
 #pragma unroll
             for (std::uint32_t i = 0; i < 8; ++i) {
-              hp[i] = __float2half(CodecTraits<Codec>::Decode(kent[(d8 % 32) + i]) * sc);
+              hp[i] = __float2half(Codec::Decode(kent[(d8 % 32) + i]) * sc);
             }
           } else {
             const float sc =
-                __half2float(*reinterpret_cast<const __half*>(kent + 16));
+                blocked_kv::LoadScaleF16(kent + 16);
             std::uint32_t packed = 0;
             __builtin_memcpy(&packed, kent + ((d8 % 32) / 2),
                              sizeof(std::uint32_t));
@@ -798,14 +789,14 @@ __launch_bounds__(256, 2) __global__ void BlockedWmmaCausalAttentionKernel(
       float sc = 0.0F;
       if (live) {
         if (k_block_bytes == 34) {
-          sc = __half2float(*reinterpret_cast<const __half*>(
-              krow + 32));  // prod: codes-first
+          sc = blocked_kv::LoadScaleF16(
+              krow + 32);  // prod: codes-first
           __builtin_memcpy(out, krow + (slice % 32), 16);
         } else {
           // 18-byte 4-bit block: 16 nibble bytes + f16 scale at byte 16.
           // Nibble code semantics match the f16 unpack path below
           // (q - (q & 8 ? 16 : 0)); only the narrowing is skipped.
-          sc = __half2float(*reinterpret_cast<const __half*>(krow + 16));
+          sc = blocked_kv::LoadScaleF16(krow + 16);
           const std::uint8_t* nib = krow + ((slice % 32) / 2);
 #pragma unroll
           for (std::uint32_t i = 0; i < 16; ++i) {

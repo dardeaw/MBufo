@@ -9,26 +9,22 @@
 // f_attention_scale = 1.0: no 1/sqrt(d)).
 //
 // This header is host-safe (included from plain C++ TUs): it carries only
-// layout tags and the launcher declaration. The device-side codec traits
-// live in blocked_wmma.hip.cpp.
+// layout tags and the launcher declaration. The unified element codec lives
+// in blocked_kv_codec.hpp.
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+
+#include "src/core/compute/attention/blocked_kv_codec.hpp"
 
 #include <cstddef>
 #include <cstdint>
 
 namespace mbufo::core::compute::blocked_wmma {
 
-// Element codec tag of the shared blocked Q8 KV layout: symmetric INT8 over
-// amax/127 with a per-32-block f16 scale (34 bytes per block).
-// Bit-compatible with blocked_kv::KvCodecQ8; redeclared as a dependency-free
-// tag so this header stays includable from model engines without pulling in
-// the flash-next headers.
-struct KvCodecQ8 {
-  using Elem = std::uint8_t;
-  static constexpr float kRange = 127.0f;
-  static constexpr std::uint32_t kBlockBytes = 34;
-};
+// Single definition lives in blocked_kv_codec.hpp (same layout and codec
+// math as every other consumer); alias kept so existing template arguments
+// (blocked_wmma::KvCodecQ8) keep compiling.
+using KvCodecQ8 = blocked_kv::KvCodecQ8;
 
 /// Blocked-Q8 WMMA prefill attention (SWA geometry only: heads == 16,
 /// kv_heads == 8, d == `kHeadDim`). First version instantiates
