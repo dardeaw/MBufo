@@ -110,6 +110,22 @@ int main() {
     CHECK(f.Status().state == NpuServableState::kUnloaded);
     CHECK(!f.Rewarm(&err));
   }
+  {  // FnServable + registry
+    int closed = 0;
+    auto s = std::make_shared<NpuFnServable>(
+        "fn", [](const NpuLoadArgs&, std::string*) { return true; },
+        [](std::string*) { return true; }, [&] { ++closed; });
+    std::string err;
+    CHECK(s->Load({}, &err));
+    NpuServableRegistry::Global().Put("fn", s);
+    const auto snap = NpuServableRegistry::Global().Snapshot();
+    CHECK(snap.size() == 1 && snap[0].first == "fn" &&
+          snap[0].second.state == NpuServableState::kReady);
+    s->Unload();
+    CHECK(closed == 1);
+    NpuServableRegistry::Global().Remove("fn");
+    CHECK(NpuServableRegistry::Global().Snapshot().empty());
+  }
   if (g_failures == 0) std::cout << "NPU_SERVABLE_CONTRACT_TESTS_PASS\n";
   return g_failures == 0 ? 0 : 1;
 }

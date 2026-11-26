@@ -5,7 +5,7 @@
 // state machine is unit-testable on any host.
 //
 //   Unloaded -> Loading -> Warming -> Ready
-//                  \          \
+//                  |          |
 //                   +----------+--> Failed (error kept, retry via Load)
 //
 // `Ready` means "the first real request will not pay a cold-start cost":
@@ -16,9 +16,13 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace mbufo::core::npu {
 
@@ -203,6 +207,69 @@ class INpuServable {
 
  private:
   NpuServableTracker tracker_;
+};
+
+/// Adapter for runtimes whose lifetime is owned elsewhere (bge-m3, bge-reranker,
+/// EmbeddingGemma 2 live inside their serve backends). The three hooks are the
+/// existing load / dummy-inference / release code, so nothing is re-implemented
+/// and the lifecycle + status still come from the shared contract.
+class NpuFnServable final : public INpuServable {
+ public:
+  using OpenFn = std::function<bool(const NpuLoadArgs&, std::string*)>;
+  using WarmFn = std::function<bool(std::string*)>;
+  using CloseFn = std::function<void()>;
+
+  NpuFnServable(std::string id, OpenFn open, WarmFn warm, CloseFn close = {})
+      : id_(std::move(id)),
+        open_(std::move(open)),
+        warm_(std::move(warm)),
+        close_(std::move(close)) {}
+
+  [[nodiscard]] std::string_view id() const noexcept override { return id_; }
+
+ protected:
+  bool Open(const NpuLoadArgs& a, std::string* e) override {
+    return open_ ? open_(a, e) : true;
+  }
+  bool Warm(std::string* e) override { return warm_ ? warm_(e) : true; }
+  void Close() override {
+    if (close_) close_();
+  }
+
+ private:
+  std::string id_;
+  OpenFn open_;
+  WarmFn warm_;
+  CloseFn close_;
+};
+
+/// Process-wide view of every NPU servable so the admin API can report one
+/// uniform status regardless of how the model is hosted.
+class NpuServableRegistry {
+ public:
+  static NpuServableRegistry& Global() {
+    static NpuServableRegistry r;
+    return r;
+  }
+  void Put(const std::string& id, std::shared_ptr<INpuServable> s) {
+    std::lock_guard<std::mutex> lock(mu_);
+    map_[id] = std::move(s);
+  }
+  void Remove(const std::string& id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    map_.erase(id);
+  }
+  [[nodiscard]] std::vector<std::pair<std::string, NpuServableStatus>>
+  Snapshot() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::pair<std::string, NpuServableStatus>> out;
+    for (const auto& [k, v] : map_) out.emplace_back(k, v->Status());
+    return out;
+  }
+
+ private:
+  mutable std::mutex mu_;
+  std::map<std::string, std::shared_ptr<INpuServable>> map_;
 };
 
 }  // namespace mbufo::core::npu

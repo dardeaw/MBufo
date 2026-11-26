@@ -5996,19 +5996,26 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         }
       }
       std::string npu_err;
-      if (!eg_model->LoadNpuWeights("", &npu_err)) {
+      const bool eg_ok = LoadNpuServable(
+          "embeddinggemma-2",
+          [&](std::string* e) {
+            if (!eg_model->LoadNpuWeights("", e)) return false;
+            eg_model->SetNpuScheduler(&GlobalNpuScheduler());
+            eg_model->SetNpuLaneConfig(NpuLaneConfigForDevice("npu"));
+            return true;
+          },
+          [&](std::string* e) {
+            const std::vector<std::uint32_t> ids{2, 4, 5, 6, 7, 8, 9, 10};
+            return eg_model->Embed(ids, e).has_value();
+          },
+          &npu_err);
+      if (!eg_ok) {
         SetError(error, "EmbeddingGemma 2 NPU weight load failed: " + npu_err);
         return false;
       }
-      eg_model->SetNpuScheduler(&GlobalNpuScheduler());
-      eg_model->SetNpuLaneConfig(NpuLaneConfigForDevice("npu"));
       Logger::Info("loader",
                    "event=npu_loaded model=embeddinggemma-2 quant=" +
                        (npu_quant.empty() ? std::string("default") : npu_quant));
-      (void)RunNpuWarmup("embeddinggemma-2", [&](std::string* e) {
-        const std::vector<std::uint32_t> ids{2, 4, 5, 6, 7, 8, 9, 10};
-        return eg_model->Embed(ids, e).has_value();
-      });
 #else
       SetError(error,
                "NPU backend is disabled in this build (rebuild with "
@@ -6065,22 +6072,26 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       if (target_dev == "npu") {
 #ifdef MBUFO_ENABLE_NPU
         std::string npu_err;
-        if (!bge_model->LoadNpuWeights("", &npu_err)) {
+        const bool bge_ok = LoadNpuServable(
+            "bge-m3",
+            [&](std::string* e) { return bge_model->LoadNpuWeights("", e); },
+            [&](std::string* e) {
+              std::vector<std::uint32_t> ids{0, 6, 4, 5, 2};
+              std::vector<float> cls;
+              double ms = 0.0;
+              if (!bge_model->RunNpuCls(ids, &cls, &ms, e)) return false;
+              ids.assign(70, 6);  // spans two 64-row chunks
+              ids.front() = 0;
+              ids.back() = 2;
+              return bge_model->RunNpuCls(ids, &cls, &ms, e);
+            },
+            &npu_err);
+        if (!bge_ok) {
           SetError(error, "bge-m3 NPU weight load failed: " + npu_err);
           return false;
         }
         Logger::Info("loader",
                      "event=npu_loaded model=bge-m3 runtime=NpuBgeRuntime");
-        (void)RunNpuWarmup("bge-m3", [&](std::string* e) {
-          std::vector<std::uint32_t> ids{0, 6, 4, 5, 2};
-          std::vector<float> cls;
-          double ms = 0.0;
-          if (!bge_model->RunNpuCls(ids, &cls, &ms, e)) return false;
-          ids.assign(70, 6);  // spans two 64-row chunks
-          ids.front() = 0;
-          ids.back() = 2;
-          return bge_model->RunNpuCls(ids, &cls, &ms, e);
-        });
 #else
         SetError(error,
                  "NPU backend is disabled in this build (rebuild with "
@@ -6128,18 +6139,22 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     if (target_dev == "npu") {
 #ifdef MBUFO_ENABLE_NPU
       std::string npu_err;
-      if (!rerank_model->LoadNpuWeights("", &npu_err)) {
+      const bool rr_ok = LoadNpuServable(
+          "bge-reranker",
+          [&](std::string* e) { return rerank_model->LoadNpuWeights("", e); },
+          [&](std::string* e) {
+            std::vector<std::uint32_t> ids{0, 6, 4, 2, 2, 5, 7, 2};
+            std::vector<float> cls;
+            double ms = 0.0;
+            return rerank_model->Encoder().RunNpuCls(ids, &cls, &ms, e);
+          },
+          &npu_err);
+      if (!rr_ok) {
         SetError(error, "bge-reranker NPU weight load failed: " + npu_err);
         return false;
       }
       Logger::Info("loader",
                    "event=npu_loaded model=bge-reranker runtime=NpuBgeRuntime");
-      (void)RunNpuWarmup("bge-reranker", [&](std::string* e) {
-        std::vector<std::uint32_t> ids{0, 6, 4, 2, 2, 5, 7, 2};
-        std::vector<float> cls;
-        double ms = 0.0;
-        return rerank_model->Encoder().RunNpuCls(ids, &cls, &ms, e);
-      });
 #else
       SetError(error,
                "NPU backend is disabled in this build (rebuild with "
