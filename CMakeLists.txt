@@ -622,6 +622,11 @@ if (BUILD_TESTING)
   add_test(NAME npu_core_test COMMAND npu_core_test)
   set_tests_properties(npu_core_test PROPERTIES LABELS "cpu;core;npu")
 
+  add_executable(npu_servable_contract_test tests/core/npu_servable_contract_test.cpp)
+  target_link_libraries(npu_servable_contract_test PRIVATE mbufo_core)
+  add_test(NAME npu_servable_contract_test COMMAND npu_servable_contract_test)
+  set_tests_properties(npu_servable_contract_test PROPERTIES LABELS "cpu;core;npu")
+
   if (MBUFO_ENABLE_NPU)
     add_executable(npu_hrx_probe_test tests/core/npu_hrx_probe_test.cpp)
     target_link_libraries(npu_hrx_probe_test PRIVATE mbufo_core mbufo_npu)

@@ -90,6 +90,15 @@ struct SidecarLaunchSpec {
 [[nodiscard]] const SidecarLaunchSpec* FindSidecarSpec(
     std::string_view id) noexcept;
 
+/// Dummy request used to warm a sidecar. `path` empty = nothing to send.
+struct SidecarWarmupRequest {
+  std::string path;
+  std::string content_type;
+  std::string body;
+};
+[[nodiscard]] SidecarWarmupRequest WarmupRequestFor(
+    const SidecarLaunchSpec& spec);
+
 /// Human-readable launch command for display/copy (same argv Start uses).
 [[nodiscard]] std::string SidecarLaunchDisplay(const SidecarLaunchSpec& spec);
 
@@ -102,6 +111,13 @@ class SidecarManager {
     long pid{-1};          // -1 when unknown
     std::string base_url;
     SidecarStartOptions options;
+    // Warmup (M1 servable contract): `warm` is true once one dummy request
+    // completed. A sidecar is "ready" for dispatch when running && warm, or
+    // running && warmup_skipped (no warmup defined / adopted external).
+    bool warm{false};
+    bool warmup_skipped{false};
+    double warmup_ms{0.0};
+    std::string warmup_error;
   };
 
   SidecarManager() = default;
@@ -116,6 +132,11 @@ class SidecarManager {
   // SIGTERM, then SIGKILL after a grace period. Refuses untracked
   // externals (no pid) with an explanatory error.
   [[nodiscard]] bool Stop(const std::string& id, std::string* error);
+  // Send one dummy inference to a running sidecar so its first real request
+  // does not pay the cold-start cost. Safe to call repeatedly. Returns true
+  // when the warmup request succeeded (or none is defined for this sidecar).
+  // Disabled globally with MBUFO_SIDECAR_WARMUP=0.
+  [[nodiscard]] bool Warmup(const std::string& id, std::string* error);
   [[nodiscard]] bool IsRunning(const std::string& id);
   [[nodiscard]] std::vector<Status> ListRunning();
   [[nodiscard]] Status GetStatus(const std::string& id);
@@ -126,6 +147,10 @@ class SidecarManager {
     bool external{false};
     std::string base_url;
     SidecarStartOptions options;
+    bool warm{false};
+    bool warmup_skipped{false};
+    double warmup_ms{0.0};
+    std::string warmup_error;
   };
   std::mutex mu_;
   std::unordered_map<std::string, Entry> table_;

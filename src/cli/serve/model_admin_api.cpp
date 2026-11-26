@@ -544,6 +544,10 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["endpoint"] = spec->endpoint;
     row["pid"] = static_cast<std::int64_t>(st.pid);
     row["external"] = st.external;
+    row["warm"] = st.warm;
+    row["warmup_ms"] = st.warmup_ms;
+    if (!st.warmup_error.empty()) row["warmup_error"] = st.warmup_error;
+    row["ready"] = st.running && (st.warm || st.warmup_skipped);
     row["lru_rank"] = -1;
     if (spec->kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
       row["file_size_mib"] =
@@ -1142,6 +1146,8 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["capabilities"] = std::move(caps);
       item["backend"] = spec.backend;
       item["sidecar"] = true;
+      item["warm"] = sc_status.warm;
+      item["warmup_ms"] = sc_status.warmup_ms;
       item["actionable"] = true;
       item["default_port"] = spec.port;
       item["endpoint"] = spec.endpoint;
@@ -1247,8 +1253,14 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
                           npu_err.empty() ? "npu load failed" : npu_err,
                           "npu_load_failed");
         }
+        std::string warm_err;
+        const bool warmed = npu_holder_.Warm(npu_id, &warm_err);
+        const auto warm_info = npu_holder_.GetWarmInfo(npu_id);
         npu_registry_->SetReady(npu_id, true);
         json::Value resp = json::Value::object();
+        resp["warm"] = warmed && warm_info.warmed;
+        resp["warmup_ms"] = warm_info.ms;
+        if (!warm_err.empty()) resp["warmup_error"] = warm_err;
         resp["id"] = npu_id;
         resp["path"] = npu_spec->artifact;
         resp["model_path"] = npu_spec->artifact;
@@ -1376,6 +1388,9 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
           static_cast<std::uint64_t>(sc0->estimated_resident_mib);
       resp["pid"] = static_cast<std::int64_t>(st.pid);
       resp["external"] = st.external;
+      resp["warm"] = st.warm;
+      resp["warmup_ms"] = st.warmup_ms;
+      if (!st.warmup_error.empty()) resp["warmup_error"] = st.warmup_error;
       if (sc0->kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
         resp["image_dtype"] = st.options.dtype;
         resp["image_steps"] = static_cast<std::size_t>(st.options.steps);

@@ -118,3 +118,21 @@ whisper-v3-turbo `:8764` replay OK; gufo TTS `:8765` voice-clone 200;
 embedding/reranker stayed on HIP. EmbeddingGemma2 assembly notes (24L,
 sliding window NPU-friendly, RMSNorm/gelu-tanh references) moved to the
 in-process track (§1).
+
+## Servable contract and warmup (M1)
+
+- src/core/compute/npu/npu_servable.hpp: INpuServable with one lifecycle
+  Unloaded, Loading, Warming, Ready, Failed. Ready means weights are resident
+  AND one dummy inference completed. Warmup policy is kRequired or kBestEffort.
+  The state machine has no hardware dependency; tests/core/npu_servable_contract_test.cpp covers it.
+- src/cli/serve/npu_warmup.hpp: RunNpuWarmup, soft-fail, logs event=npu_warmup.
+  MBUFO_NPU_WARMUP=0 disables all NPU warmups; MBUFO_SIDECAR_WARMUP=0 disables sidecar warmups.
+- In-process warmups run right after weights are resident: bge-m3 (5 and 70 tokens, spans two 64-row chunks),
+  bge-reranker, EmbeddingGemma2 (8 tokens), and NpuServableHost::Warm (engine-level M=1 GEMM per quant shape).
+  Per-model dummy decode steps for the ASR/TTS/DiT decoders are a follow-up.
+- Sidecars: SidecarManager::Warmup posts a dummy request after a fresh spawn
+  (decide: /v1/systemone, asr: 0.5 s silent wav, tts: short text; image sidecars are skipped).
+  Adopted externals are never poked. /admin/load and /admin/models report warm, warmup_ms, warmup_error.
+- Measured on the XDNA2 host (11/27): bge-m3 410 ms, bge-reranker 223 ms, EmbeddingGemma2 90 ms,
+  Qwen3-ASR servable 153 ms. Loading all three embedding models plus ASR at once exhausts NPU BOs
+  (hrx_buffer_allocate failed), so eject before loading the next.

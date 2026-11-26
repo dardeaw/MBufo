@@ -28,6 +28,7 @@
 
 #include "src/cli/serve/component_text_cache.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/npu_warmup.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/core/gguf_identity.hpp"
@@ -6004,6 +6005,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       Logger::Info("loader",
                    "event=npu_loaded model=embeddinggemma-2 quant=" +
                        (npu_quant.empty() ? std::string("default") : npu_quant));
+      (void)RunNpuWarmup("embeddinggemma-2", [&](std::string* e) {
+        const std::vector<std::uint32_t> ids{2, 4, 5, 6, 7, 8, 9, 10};
+        return eg_model->Embed(ids, e).has_value();
+      });
 #else
       SetError(error,
                "NPU backend is disabled in this build (rebuild with "
@@ -6066,6 +6071,16 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         }
         Logger::Info("loader",
                      "event=npu_loaded model=bge-m3 runtime=NpuBgeRuntime");
+        (void)RunNpuWarmup("bge-m3", [&](std::string* e) {
+          std::vector<std::uint32_t> ids{0, 6, 4, 5, 2};
+          std::vector<float> cls;
+          double ms = 0.0;
+          if (!bge_model->RunNpuCls(ids, &cls, &ms, e)) return false;
+          ids.assign(70, 6);  // spans two 64-row chunks
+          ids.front() = 0;
+          ids.back() = 2;
+          return bge_model->RunNpuCls(ids, &cls, &ms, e);
+        });
 #else
         SetError(error,
                  "NPU backend is disabled in this build (rebuild with "
@@ -6119,6 +6134,12 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       }
       Logger::Info("loader",
                    "event=npu_loaded model=bge-reranker runtime=NpuBgeRuntime");
+      (void)RunNpuWarmup("bge-reranker", [&](std::string* e) {
+        std::vector<std::uint32_t> ids{0, 6, 4, 2, 2, 5, 7, 2};
+        std::vector<float> cls;
+        double ms = 0.0;
+        return rerank_model->Encoder().RunNpuCls(ids, &cls, &ms, e);
+      });
 #else
       SetError(error,
                "NPU backend is disabled in this build (rebuild with "

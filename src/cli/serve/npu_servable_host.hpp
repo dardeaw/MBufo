@@ -7,7 +7,10 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
+#include "src/cli/serve/npu_warmup.hpp"
 #include "src/core/compute/npu/flux_dit_npu.hpp"
 #include "src/core/compute/npu/npu_quant_gemm.hpp"
 #include "src/core/compute/npu/npu_thinker_decode.hpp"
@@ -33,6 +36,7 @@ class NpuServableHost {
       return false;
     }
     std::lock_guard<std::mutex> lock(mutex_);
+    mode_ = mode;
     if (!engine_ready_) {
       if (!engine_.Init(
               "/mnt/nvme-data/mbufo-models/npu-kernels/quant_gemm", error)) {
@@ -78,6 +82,7 @@ class NpuServableHost {
 
   bool Unload(const std::string& id, std::string* error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    warm_.erase(id);
     if (id == "qwen3-asr-1.7b") {
       asr_.reset();
       return true;
@@ -110,10 +115,63 @@ class NpuServableHost {
     return false;
   }
 
+  struct WarmInfo {
+    bool warmed{false};
+    double ms{0.0};
+    std::string error;
+  };
+
+  /// Engine-level warmup: one M=1 GEMM per quant shape in the loaded mode.
+  /// This instantiates the xclbins / HW context and primes DMA, which is the
+  /// dominant cold-start cost shared by all four servables. A per-model dummy
+  /// decode step is a follow-up (needs each decoder's dims).
+  /// Soft-fail: a failed warm never unloads the model.
+  bool Warm(const std::string& id, std::string* error) {
+    namespace npu = mbufo::core::npu;
+    if (!IsLoaded(id)) {
+      if (error != nullptr) *error = "servable not loaded: " + id;
+      return false;
+    }
+    const auto out = RunNpuWarmup(id, [&](std::string* e) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      for (const std::size_t kn : {std::size_t{256}, std::size_t{1024}}) {
+        std::vector<float> w(kn * kn, 0.01f), a(kn, 0.5f), c(kn);
+        npu::QuantWeightMatrix mat;
+        if (!engine_.PackMatrixKN(w.data(), kn, kn, mode_, false, &mat, e)) {
+          return false;
+        }
+        if (!engine_.Gemm(a.data(), 1, mat, c.data(), nullptr, nullptr, e)) {
+          return false;
+        }
+      }
+      return true;
+    });
+    std::lock_guard<std::mutex> lock(mutex_);
+    WarmInfo& wi = warm_[id];
+    if (!out.ran) {  // disabled via MBUFO_NPU_WARMUP=0
+      wi = WarmInfo{};
+      return true;
+    }
+    wi.warmed = out.ok;
+    wi.ms = out.ms;
+    wi.error = out.error;
+    if (!out.ok && error != nullptr) *error = out.error;
+    return out.ok;
+  }
+
+  [[nodiscard]] WarmInfo GetWarmInfo(const std::string& id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = warm_.find(id);
+    return it == warm_.end() ? WarmInfo{} : it->second;
+  }
+
  private:
   mutable std::mutex mutex_;
   mbufo::core::npu::NpuQuantGemmEngine engine_;
   bool engine_ready_ = false;
+  mbufo::core::npu::NpuQuantMode mode_ =
+      mbufo::core::npu::NpuQuantMode::kQ8Bfp16;
+  std::unordered_map<std::string, WarmInfo> warm_;
   std::unique_ptr<mbufo::core::npu::ThinkerNpuDecoder> asr_;
   std::unique_ptr<mbufo::core::npu::TalkerNpuDecoder> talker_;
   std::unique_ptr<mbufo::core::npu::PredictorNpuDecoder> predictor_;
