@@ -126,6 +126,32 @@ class Session final {
   [[nodiscard]] static bool DecodeBatch(std::span<BatchItem> items,
                                         std::string* error_msg = nullptr);
 
+  /// One prefill chunk riding a DecodeBatch pass. `prompt` is the prompt
+  /// prefix through the END of the chunk, `offset` the first row of the chunk,
+  /// so the chunk is prompt[offset, prompt.size()) (1..512 rows).
+  struct ChunkItem {
+    Session* session{nullptr};
+    std::span<const std::int32_t> prompt;
+    std::size_t offset{0};
+  };
+
+  /// Layer-synchronous batch step whose per-item arithmetic is bit-identical
+  /// to running Evaluate (1 token) / Sync (a chunk) on each item serially.
+  [[nodiscard]] static bool StepBatchExact(std::span<BatchItem> items,
+                                           std::string* error_msg = nullptr);
+
+  /// DecodeBatch with one session's prefill chunk in the same layer-
+  /// synchronous pass; bit-identical to Sync(prompt) on the chunk session plus
+  /// Evaluate on every decode session (StepBatchExact arithmetic). Refuses cleanly (returns false, `*refused` true,
+  /// nothing mutated) when the chunk is not exactly what Sync would forward
+  /// (retained prefix mismatch, offset/length drift), the chunk exceeds 512
+  /// rows, the batch exceeds the item limit, a session is shared between the
+  /// decodes and the chunk, or KV capacity is short. A false return with
+  /// `*refused` false is a real failure.
+  [[nodiscard]] static bool DecodeBatchWithChunk(
+      std::span<BatchItem> decodes, const ChunkItem& chunk,
+      std::string* error_msg = nullptr, bool* refused = nullptr);
+
   /// Reprocesses the prompt in 512-token chunks. Append-only growth
   /// (the new prompt extends the previously synced prefix) forwards only
   /// the delta; anything else falls back to a full resync from 0.
@@ -194,6 +220,15 @@ class Session final {
 
  private:
   Session(std::shared_ptr<Model> model);
+
+  /// DecodeBatch body. `exact` runs every item's attention through the same
+  /// per-session core Forward/Evaluate use (FlashSinkDecode for one row,
+  /// WMMA flash for a chunk) instead of the unified launcher, whose
+  /// arithmetic differs in the last bits; the layer-synchronous schedule is
+  /// the same.
+  [[nodiscard]] static bool DecodeBatchImpl(std::span<BatchItem> items,
+                                            bool exact,
+                                            std::string* error_msg);
 
   static void ForwardLayerPre(Session& s, std::uint32_t il, std::uint32_t n,
                               std::uint32_t start_pos, hipStream_t stream);

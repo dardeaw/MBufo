@@ -1157,6 +1157,16 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
 
 bool Session::DecodeBatch(std::span<BatchItem> items,
                           std::string* error_msg) {
+  return DecodeBatchImpl(items, /*exact=*/false, error_msg);
+}
+
+bool Session::StepBatchExact(std::span<BatchItem> items,
+                             std::string* error_msg) {
+  return DecodeBatchImpl(items, /*exact=*/true, error_msg);
+}
+
+bool Session::DecodeBatchImpl(std::span<BatchItem> items, bool exact,
+                              std::string* error_msg) {
   namespace mb = core::compute::mixed_batch;
   const auto fail = [&](const std::string& m) {
     if (error_msg != nullptr && error_msg->empty())
@@ -1212,7 +1222,7 @@ bool Session::DecodeBatch(std::span<BatchItem> items,
   // Caller-owned arena (§4.2): sized for this width, regrown on demand.
   // Opt-out valve (default on): MBUFO_GLIMMER_UNIFIED_BATCH=0 keeps the
   // legacy per-session attention cores everywhere (Forward and DecodeBatch).
-  const bool use_unified = UnifiedBatchEnabled();
+  const bool use_unified = UnifiedBatchEnabled() && !exact;
   if (use_unified) {
     std::string scratch_error;
     if (!model->EnsureMixedScratch(mb::MixedBatchScratchBytes(items.size()),
@@ -1287,12 +1297,13 @@ bool Session::DecodeBatch(std::span<BatchItem> items,
           model->mixed_scratch_bytes_, stream);
     }
     if (!attn_ran) {
-      // Unified refusal (or opt-out): legacy single-session cores,
-      // numerically identical to the serial per-session forwards.
+      // Unified refusal (or opt-out): per-session cores. Exact mode runs them
+      // exactly as Forward does (unified launcher only as ITS own fallback),
+      // so every item matches its serial Evaluate/Sync bit for bit.
       for (std::size_t i = 0; i < items.size(); ++i) {
         ForwardLayerAttn(*items[i].session, il, rows[i],
                          items[i].session->impl_->length, stream,
-                         /*try_unified=*/false);
+                         /*try_unified=*/exact && UnifiedBatchEnabled());
       }
     }
     for (std::size_t i = 0; i < items.size(); ++i) {
@@ -1306,6 +1317,65 @@ bool Session::DecodeBatch(std::span<BatchItem> items,
                   /*all_logits=*/false);
   }
   (void)hipStreamSynchronize(0);
+  return true;
+}
+
+bool Session::DecodeBatchWithChunk(std::span<BatchItem> decodes,
+                                   const ChunkItem& chunk,
+                                   std::string* error_msg, bool* refused) {
+  namespace mb = core::compute::mixed_batch;
+  if (refused != nullptr)
+    *refused = false;
+  const auto refuse = [&](const std::string& m) {
+    if (refused != nullptr)
+      *refused = true;
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = m;
+    return false;
+  };
+  Session* cs = chunk.session;
+  if (cs == nullptr || decodes.empty() ||
+      decodes.size() + 1 > mb::kMaxMixedBlks)
+    return refuse("glimmer mixed batch shape unsupported");
+  if (chunk.offset >= chunk.prompt.size())
+    return refuse("glimmer mixed chunk is empty");
+  const std::size_t n = chunk.prompt.size() - chunk.offset;
+  if (n > kMaxChunk)
+    return refuse("glimmer mixed chunk exceeds 512 rows");
+  if (chunk.prompt.size() > cs->impl_->capacity)
+    return refuse("glimmer mixed prompt exceeds KV capacity");
+  for (const auto& d : decodes) {
+    if (d.session == nullptr || d.session == cs ||
+        d.session->model_.get() != cs->model_.get())
+      return refuse("glimmer mixed decode session invalid");
+    if (d.tokens.size() != 1)
+      return refuse("glimmer mixed decodes must be single-token");
+    if (d.session->impl_->length + 1 > d.session->impl_->capacity)
+      return refuse("glimmer mixed decode exceeds KV capacity");
+  }
+  // Mirror Sync's start selection exactly: the chunk must begin where Sync
+  // would begin forwarding, otherwise the legacy path owns this prompt.
+  auto& cimpl = *cs->impl_;
+  const auto& prev = cimpl.synced_;
+  std::size_t start = 0;
+  if (!prev.empty() && chunk.prompt.size() >= prev.size() &&
+      cimpl.length == prev.size() &&
+      std::equal(prev.begin(), prev.end(), chunk.prompt.begin())) {
+    start = prev.size();
+  }
+  if (start != chunk.offset)
+    return refuse("glimmer mixed chunk does not continue the synced prefix");
+  if (start == 0)
+    cimpl.length = 0;  // fresh prompt: Sync resets the frontier
+  std::vector<BatchItem> items(decodes.begin(), decodes.end());
+  items.push_back({cs, chunk.prompt.subspan(chunk.offset, n)});
+  std::string error;
+  if (!StepBatchExact(items, &error)) {
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = error;
+    return false;
+  }
+  cimpl.synced_.assign(chunk.prompt.begin(), chunk.prompt.end());
   return true;
 }
 
