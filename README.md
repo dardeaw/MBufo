@@ -244,13 +244,13 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 | --- | --- | --- | --- | --- |
 | **D3-Lite / Nano / Mini / Turbo / Ultra** | 0.8B / 2B / 4B / — / — | Q4NX (flm NPU2) | `POST /v1/systemone` | ✅ Served (router proxy + admin cards; ⚡ DECIDE only, qwen3.8 stays CHAT) |
 | **Whisper-V3-Turbo** | 0.8B | Q4NX NPU2 (5 xclbins) | `POST /v1/audio/transcriptions` | ✅ Served (proxy; 1.4 s audio → 2.3 s verified) |
-| **EmbeddingGemma 2** | ~0.3B | Q8 bfp16ebs8 / Q4 q4nx | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (24-layer E2E cos > 0.993; engine seam wired, default kNone) |
-| **bge-m3** | 0.6B XLM-R | Q8 / Q4 | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (64×1024 GEMM cos 0.999988; encoder cos 0.999924) |
-| **bge-reranker-v2-m3** | Cross-Encoder | Q8 / Q4 | `/v1/reranking` (NPU lane) | 🧪 Runtime verified (score diff ~1e-5) |
-| **Qwen3-ASR 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions` (served via GPU sidecar) | 🧪 NPU runtime verified (cos > 0.967, top-1 match) |
-| **Qwen3-TTS 12Hz 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/speech` (served via GPU sidecar) | 🧪 NPU runtime verified (wav produced, cos > 0.98) |
-| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
-| **Z-Image-Turbo** | DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
+| **EmbeddingGemma 2** | ~0.3B | Q8 bfp16ebs8 (op graph) / Q4 q4nx | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (24-layer E2E cos > 0.993; engine seam wired, default kNone) |
+| **bge-m3** | 0.6B XLM-R | Q8 (op graph) | `/v1/embeddings` (NPU lane) | 🧪 Runtime verified (64×1024 GEMM cos 0.999988; encoder cos 0.999924) |
+| **bge-reranker-v2-m3** | Cross-Encoder | Q8 (op graph) | `/v1/reranking` (NPU lane) | 🧪 Runtime verified (score diff ~1e-5) |
+| **Qwen3-ASR 1.7B** | 1.7B | Q8 only (Q4 banned, cos 0.968) | `/v1/audio/transcriptions` (served via GPU sidecar) | 🧪 NPU runtime verified (Q8 cos > 0.999, top-1 match) |
+| **Qwen3-TTS 12Hz 1.7B** | 1.7B | Q8 only (Q4 banned, cos 0.981) | `/v1/audio/speech` (served via GPU sidecar) | 🧪 NPU runtime verified (wav produced, Q8 cos > 0.998) |
+| **FLUX.2-klein-4B** | 4B DiT | Q8 only (Q4 banned, cos 0.853) | test harness (PNG out) | 🧪 Runtime verified (E2E cos(pipe)=0.9485 q8; per-step v 0.978-0.999; no HTTP serving yet) |
+| **Z-Image-Turbo** | DiT | Q8 only (Q4 banned, cos 0.975) | test harness (PNG out) | 🧪 Runtime verified (E2E cos(pipe)=0.9918 q8; no HTTP serving yet) |
 
 ### Supported Quantization Formats
 
@@ -456,7 +456,7 @@ For container configurations and system tuning, refer to the [upstream build gui
 
 ---
 
-## License & Credits
+readme-en-ptr## License & Credits
 
 Upstream gufo is licensed under the MIT License. Notices for adapted code and dependencies are maintained in [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and `licenses/`.
 

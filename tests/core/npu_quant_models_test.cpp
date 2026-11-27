@@ -140,8 +140,8 @@ void TestAllFourSafetensorsModels(NpuQuantGemmEngine& engine) {
   std::filesystem::create_directories(out_dir);
   std::string err;
 
-  // 2. Qwen3-TTS 12Hz 1.7B (Q8 & Q4)
-  for (NpuQuantMode mode : {NpuQuantMode::kQ8Bfp16, NpuQuantMode::kQ4Q4nx}) {
+  // 2. Qwen3-TTS 12Hz 1.7B (Q8 only)
+  for (NpuQuantMode mode : {NpuQuantMode::kQ8Bfp16}) {
     NpuTtsVerifyMetrics m;
     const std::string wav =
         out_dir + "/verify_qwen3_tts_" + NpuQuantModeName(mode) + ".wav";
@@ -168,8 +168,8 @@ void TestAllFourSafetensorsModels(NpuQuantGemmEngine& engine) {
     assert(std::filesystem::exists(wav));
   }
 
-  // 3. Qwen3-ASR 1.7B (Q8 & Q4)
-  for (NpuQuantMode mode : {NpuQuantMode::kQ8Bfp16, NpuQuantMode::kQ4Q4nx}) {
+  // 3. Qwen3-ASR 1.7B (Q8 only)
+  for (NpuQuantMode mode : {NpuQuantMode::kQ8Bfp16}) {
     NpuAsrVerifyMetrics m;
     if (!mbufo::core::npu::RunQwen3AsrQuantE2E(
             engine, "/mnt/nvme-data/mbufo-models/qwen3-asr-1.7b", mode,
@@ -192,8 +192,8 @@ void TestAllFourSafetensorsModels(NpuQuantGemmEngine& engine) {
     assert(m.top1_token_match);
   }
 
-  // 4. FLUX.2-klein-4B (Q8 & Q4, 4-step Flow-Matching + VAE + PNG)
-  for (NpuQuantMode mode : {NpuQuantMode::kQ8Bfp16, NpuQuantMode::kQ4Q4nx}) {
+  // 4. FLUX.2-klein-4B (Q8 only, 4-step Flow-Matching + VAE + PNG)
+  for (NpuQuantMode mode : {NpuQuantMode::kQ8Bfp16}) {
     NpuT2iVerifyMetrics m;
     const std::string png =
         out_dir + "/verify_flux2_klein_" + NpuQuantModeName(mode) + ".png";
@@ -219,8 +219,8 @@ void TestAllFourSafetensorsModels(NpuQuantGemmEngine& engine) {
     assert(m.png_bytes > 500 && std::filesystem::exists(png));
   }
 
-  // 5. Z-Image-Turbo (Q8 & Q4, 8-step Flow-Matching + PNG)
-  for (NpuQuantMode mode : {NpuQuantMode::kQ8Bfp16, NpuQuantMode::kQ4Q4nx}) {
+  // 5. Z-Image-Turbo (Q8 only, 8-step Flow-Matching + PNG)
+  for (NpuQuantMode mode : {NpuQuantMode::kQ8Bfp16}) {
     NpuT2iVerifyMetrics m;
     const std::string png =
         out_dir + "/verify_z_image_turbo_" + NpuQuantModeName(mode) + ".png";

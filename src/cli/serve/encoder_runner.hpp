@@ -28,6 +28,11 @@ class EngineSession;
 namespace mbufo::models::embeddinggemma2 {
 class EngineModel;
 }
+#ifdef MBUFO_ENABLE_NPU
+namespace mbufo::core::npu {
+class NpuQwen3Encoder;
+}
+#endif
 namespace mbufo::hip {
 class QwenGpuModel;
 struct QwenExecutionPolicy;
@@ -97,6 +102,14 @@ using TokenizeFn = std::function<std::vector<std::uint32_t>(const std::string&)>
 [[nodiscard]] std::unique_ptr<RerankRunner> MakeQwenRerankRunner(
     std::shared_ptr<const hip::QwenGpuModel> model,
     hip::QwenExecutionPolicy policy, std::string* error);
+#ifdef MBUFO_ENABLE_NPU
+/// Qwen3-Embedding / Qwen3-Reranker on the NPU op-graph executor (one pair at a
+/// time on the NPU, so both declare the serial fallback).
+[[nodiscard]] std::unique_ptr<EmbeddingRunner> MakeNpuQwenEmbeddingRunner(
+    std::unique_ptr<mbufo::core::npu::NpuQwen3Encoder> encoder);
+[[nodiscard]] std::unique_ptr<RerankRunner> MakeNpuQwenRerankRunner(
+    std::unique_ptr<mbufo::core::npu::NpuQwen3Encoder> encoder);
+#endif
 #endif
 
 }  // namespace mbufo::server

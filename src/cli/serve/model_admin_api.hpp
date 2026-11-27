@@ -15,6 +15,8 @@
 
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/model_registry.hpp"
+#include "src/core/compute/npu/npu_model_registry.hpp"
+#include "src/cli/serve/npu_servable_host.hpp"
 
 namespace mbufo::server {
 
@@ -64,6 +66,12 @@ public:
   /// Dispatches an /admin/* request. `req` is the parsed HTTP request.
   HttpResponse Handle(const HttpRequest& req);
 
+  /// M6 status plane: attach the NPU registry for /admin/npu/status.
+  void SetNpuRegistry(
+      std::shared_ptr<mbufo::core::npu::NpuModelRegistry> reg) {
+    npu_registry_ = std::move(reg);
+  }
+
 private:
   HttpResponse HandleUi(const HttpRequest& req);
   HttpResponse HandleList(const HttpRequest& req);
@@ -74,8 +82,11 @@ private:
   HttpResponse HandleSetDefault(const HttpRequest& req);
   HttpResponse HandleDiskCacheList(const HttpRequest& req);
   HttpResponse HandleDiskCacheDelete(const HttpRequest& req);
+  HttpResponse HandleNpuStatus(const HttpRequest& req);
 
   std::shared_ptr<ModelRegistry> registry_;
+  std::shared_ptr<mbufo::core::npu::NpuModelRegistry> npu_registry_;
+  npu_wire::NpuServableHost npu_holder_;
   ModelLoader loader_;
   MemoryProbe probe_;
   std::mutex load_mutex_;  // one load/eject at a time

@@ -19,6 +19,14 @@
 #include "src/cli/serve/npu_sidecar_proxy.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 
+namespace mbufo {
+namespace core {
+namespace npu {
+class NpuModelRegistry;
+}  // namespace npu
+}  // namespace core
+}  // namespace mbufo
+
 namespace mbufo::server {
 
 class ModelAdminService;
@@ -123,7 +131,9 @@ public:
              HttpServerOptions options = {},
              std::shared_ptr<ImageService> images = nullptr,
              std::shared_ptr<ModelRegistry> registry = nullptr,
-             std::shared_ptr<ModelAdminService> admin = nullptr);
+             std::shared_ptr<ModelAdminService> admin = nullptr,
+             std::shared_ptr<mbufo::core::npu::NpuModelRegistry>
+                 npu_registry = nullptr);
   ~HttpServer();
 
   HttpServer(const HttpServer&) = delete;
@@ -158,6 +168,7 @@ private:
   std::shared_ptr<TextGenerationBackend> backend_;
   std::shared_ptr<ModelRegistry> registry_;
   std::shared_ptr<ModelAdminService> admin_;
+  std::shared_ptr<mbufo::core::npu::NpuModelRegistry> npu_registry_;
   std::shared_ptr<VideoJobService> video_jobs_;
   std::shared_ptr<TtsService> tts_;
   std::shared_ptr<AsrService> asr_;

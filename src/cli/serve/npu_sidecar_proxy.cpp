@@ -270,6 +270,90 @@ namespace {
 
 // ---- SidecarManager internals (POSIX only; header-only API above) ----
 
+// ---- Warmup (M1): dummy request per sidecar kind ----
+
+std::string SilentWav16kMono(double seconds) {
+  const std::uint32_t samples = static_cast<std::uint32_t>(seconds * 16000.0);
+  const std::uint32_t data_bytes = samples * 2;
+  std::string w;
+  auto u32 = [&](std::uint32_t v) {
+    for (int i = 0; i < 4; ++i)
+      w.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
+  };
+  auto u16 = [&](std::uint16_t v) {
+    for (int i = 0; i < 2; ++i)
+      w.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
+  };
+  w += "RIFF";
+  u32(36 + data_bytes);
+  w += "WAVE";
+  w += "fmt ";
+  u32(16);
+  u16(1);
+  u16(1);
+  u32(16000);
+  u32(32000);
+  u16(2);
+  u16(16);
+  w += "data";
+  u32(data_bytes);
+  w.append(data_bytes, '\0');
+  return w;
+}
+
+bool PostBlocking(const std::string& base_url, const std::string& path,
+                  const std::string& content_type, const std::string& body,
+                  long timeout_ms, std::string* error) {
+  try {
+    EnsureCurlGlobalInit();
+    const CurlPtr curl(curl_easy_init());
+    if (!curl) {
+      if (error != nullptr)
+        *error = "curl init failed";
+      return false;
+    }
+    std::string url = base_url;
+    while (!url.empty() && url.back() == '/')
+      url.pop_back();
+    url += path;
+    std::string sink;
+    curl_slist* hdrs = nullptr;
+    hdrs = curl_slist_append(hdrs, ("Content-Type: " + content_type).c_str());
+    curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_PROXY, "");
+    curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.data());
+    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE_LARGE,
+                     static_cast<curl_off_t>(body.size()));
+    curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT_MS, 2000L);
+    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS, timeout_ms);
+    curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, WriteBodyCallback);
+    curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &sink);
+    const CURLcode rc = curl_easy_perform(curl.get());
+    curl_slist_free_all(hdrs);
+    if (rc != CURLE_OK) {
+      if (error != nullptr)
+        *error = curl_easy_strerror(rc);
+      return false;
+    }
+    long code = 0;
+    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &code);
+    if (code < 200 || code >= 300) {
+      if (error != nullptr) {
+        *error = "HTTP " + std::to_string(code) + ": " + sink.substr(0, 160);
+      }
+      return false;
+    }
+    return true;
+  } catch (const std::exception& e) {
+    if (error != nullptr)
+      *error = e.what();
+    return false;
+  }
+}
+
 bool ProbeUrl(const std::string& base_url, const std::string& path,
               long timeout_ms) {
   try {
@@ -302,8 +386,23 @@ bool ProbeUrl(const std::string& base_url, const std::string& path,
 
 bool PidAlive(long pid) {
   if (pid <= 0) return false;
-  if (::kill(static_cast<pid_t>(pid), 0) == 0) return true;
-  return errno != ESRCH;
+  if (::kill(static_cast<pid_t>(pid), 0) != 0) return errno != ESRCH;
+  // kill(pid, 0) succeeds on zombies; an unreaped <defunct> child must
+  // not count as a running sidecar (it holds no port and serves nothing).
+  char path[64];
+  std::snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+  FILE* f = std::fopen(path, "r");
+  if (f == nullptr) return true;
+  int ppid_unused = 0;
+  char comm[256] = {0};
+  char state = 0;
+  const int n = std::fscanf(f, "%*d (%255[^)]) %c %d", comm,
+                         &state, &ppid_unused);
+  (void)comm;
+  (void)ppid_unused;
+  std::fclose(f);
+  if (n != 3) return true;
+  return state != 'Z' && state != 'X' && state != 'x';
 }
 
 // Best-effort lookup of a sidecar pid by matching its argv tokens
@@ -588,6 +687,34 @@ const std::vector<SidecarLaunchSpec>& KnownSidecars() noexcept {
   return kSpecs;
 }
 
+SidecarWarmupRequest WarmupRequestFor(const SidecarLaunchSpec& spec) {
+  SidecarWarmupRequest r;
+  if (spec.task == "decide") {
+    r.path = spec.endpoint;
+    r.content_type = "application/json";
+    r.body =
+        R"({"questions":{"q_priority":{"type":"choice","criteria":{"urgent":"needs immediate action","not urgent":"can wait"}}},"state":"warmup"})";
+  } else if (spec.task == "asr") {
+    const std::string boundary = "----mbufoWarmup7MA4YWxkTrZu0gW";
+    r.path = spec.endpoint;
+    r.content_type = "multipart/form-data; boundary=" + boundary;
+    r.body += "--" + boundary +
+              "\r\nContent-Disposition: form-data; name=\"file\"; "
+              "filename=\"warmup.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
+    r.body += SilentWav16kMono(0.5);
+    r.body += "\r\n--" + boundary +
+              "\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
+              "warmup\r\n--" +
+              boundary + "--\r\n";
+  } else if (spec.task == "tts") {
+    r.path = spec.endpoint;
+    r.content_type = "application/json";
+    r.body = R"({"input":"Hi.","response_format":"wav"})";
+  }
+  // image_generation: a dummy diffusion run costs seconds of GPU; skipped.
+  return r;
+}
+
 const SidecarLaunchSpec* FindSidecarSpec(std::string_view id) noexcept {
   for (const auto& s : KnownSidecars()) {
     if (s.id == id) return &s;
@@ -643,6 +770,10 @@ SidecarManager::Status SidecarManager::GetStatus(const std::string& id) {
     st.external = it->second.external;
     st.pid = it->second.pid;
     st.options = it->second.options;
+    st.warm = it->second.warm;
+    st.warmup_skipped = it->second.warmup_skipped;
+    st.warmup_ms = it->second.warmup_ms;
+    st.warmup_error = it->second.warmup_error;
   } else if (spec != nullptr) {
     st.options = NormalizeSidecarOptions(*spec, {});
   }
@@ -656,6 +787,41 @@ std::vector<SidecarManager::Status> SidecarManager::ListRunning() {
     if (st.running) out.push_back(st);
   }
   return out;
+}
+
+bool SidecarManager::Warmup(const std::string& id, std::string* error) {
+  const SidecarLaunchSpec* spec = FindSidecarSpec(id);
+  if (spec == nullptr) {
+    if (error != nullptr)
+      *error = "unknown sidecar id: " + id;
+    return false;
+  }
+  auto record = [&](bool warm, bool skipped, double ms, const std::string& e) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = table_.find(id);
+    if (it == table_.end())
+      return;
+    it->second.warm = warm;
+    it->second.warmup_skipped = skipped;
+    it->second.warmup_ms = ms;
+    it->second.warmup_error = e;
+  };
+  const SidecarWarmupRequest req = WarmupRequestFor(*spec);
+  if (req.path.empty()) {
+    record(false, true, 0.0, "");
+    return true;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  std::string err;
+  const bool ok = PostBlocking(spec->base_url, req.path, req.content_type,
+                               req.body, 120000, &err);
+  const double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+  record(ok, false, ms, ok ? std::string() : err);
+  if (!ok && error != nullptr)
+    *error = err;
+  return ok;
 }
 
 bool SidecarManager::Start(const std::string& id, std::string* error,
@@ -702,6 +868,7 @@ bool SidecarManager::Start(const std::string& id, std::string* error,
     std::lock_guard<std::mutex> lock(mu_);
     table_[id] = Entry{pid, true, spec->base_url,
                        NormalizeSidecarOptions(*spec, options)};
+    table_[id].warmup_skipped = true;  // adopted: do not poke someone else's
     return true;
   }
   const auto norm_opts = NormalizeSidecarOptions(*spec, options);
@@ -781,8 +948,15 @@ bool SidecarManager::Start(const std::string& id, std::string* error,
     }
     return false;
   }
-  std::lock_guard<std::mutex> lock(mu_);
-  table_[id] = Entry{static_cast<long>(child), false, spec->base_url, norm_opts};
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    table_[id] =
+        Entry{static_cast<long>(child), false, spec->base_url, norm_opts};
+  }
+  // Best-effort: a failed warmup leaves the sidecar running with
+  // warm=false + warmup_error so the admin UI can surface it.
+  std::string warm_err;
+  (void)Warmup(id, &warm_err);
   return true;
 }
 
@@ -805,8 +979,9 @@ bool SidecarManager::Stop(const std::string& id, std::string* error) {
         }
         table_.erase(it);
       }
-      if (error != nullptr) *error = "sidecar '" + id + "' is not running";
-      return false;
+      // Idempotent: desired state is stopped; already-stopped satisfies
+      // it (covers stale zombie records and double-eject races).
+      return true;
     }
     pid = it->second.pid;
   }

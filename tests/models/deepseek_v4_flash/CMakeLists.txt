@@ -60,7 +60,7 @@ if(ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
   target_link_libraries(ds4_serving_test PRIVATE mbufo_logging
-    mbufo_core mbufo_deepseek_v4_flash mbufo_qwen38_flash_next mbufo_cache_hip hip::host)
+    mbufo_core mbufo_llm_cli mbufo_deepseek_v4_flash mbufo_qwen38_flash_next mbufo_cache_hip hip::host)
   add_test(NAME ds4.serving COMMAND ds4_serving_test)
   set_tests_properties(ds4.serving PROPERTIES
     LABELS "gpu;hip;ds4;server;external-model;slow"

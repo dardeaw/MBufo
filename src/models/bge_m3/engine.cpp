@@ -7,7 +7,7 @@
 
 #include "src/core/compute/npu/npu_scheduler.hpp"
 #ifdef MBUFO_ENABLE_NPU
-#include "src/core/compute/npu/npu_bge_runtime.hpp"
+#include "src/core/compute/npu/npu_graph_models.hpp"
 #endif
 #include "src/core/pooling_norm.hpp"
 
@@ -17,7 +17,9 @@ namespace mbufo::models::bge_m3 {
 
 #ifdef MBUFO_ENABLE_NPU
 struct EngineModel::NpuState {
-  mbufo::core::npu::NpuBgeRuntime runtime;
+  // Declarative op-graph executor on the shared Q8 engine (the dedicated BF16
+  // gemm_1024x1024 NpuBgeRuntime is kept only as a regression reference).
+  mbufo::core::npu::NpuGraphBgeRuntime graph_runtime;
 };
 #else
 struct EngineModel::NpuState {};
@@ -26,21 +28,16 @@ struct EngineModel::NpuState {};
 bool EngineModel::LoadNpuWeights(const std::string& kernel_dir,
                                  std::string* error_msg) {
 #ifdef MBUFO_ENABLE_NPU
-  std::string dir = kernel_dir;
-  if (dir.empty()) {
-    if (const char* env = std::getenv("MBUFO_NPU_BGE_KERNELS");
-        env != nullptr && env[0] != '\0') {
-      dir = env;
-    } else {
-      dir = "/mnt/nvme-data/mbufo-models/npu-kernels/bge_m64";
-    }
-  }
+  (void)kernel_dir;  // the graph path uses the shared quant-gemm kernels
   auto state = std::make_shared<NpuState>();
-  if (!state->runtime.Init(f32_, dir, error_msg)) {
+  if (!state->graph_runtime.Init(
+          f32_, mbufo::core::npu::graph::LinearBackend::kNpuQ8, error_msg)) {
+    std::lock_guard<std::mutex> lock(npu_mu_);
     npu_.reset();
     npu_weights_resident_ = false;
     return false;
   }
+  std::lock_guard<std::mutex> lock(npu_mu_);
   npu_ = std::move(state);
   npu_weights_resident_ = true;
   return true;
@@ -53,15 +50,36 @@ bool EngineModel::LoadNpuWeights(const std::string& kernel_dir,
 #endif
 }
 
+void EngineModel::UnloadNpuWeights() {
+#ifdef MBUFO_ENABLE_NPU
+  std::shared_ptr<NpuState> state;
+  {
+    std::lock_guard<std::mutex> lock(npu_mu_);
+    state = std::move(npu_);
+    npu_weights_resident_ = false;
+  }
+  if (state != nullptr) {
+    state->graph_runtime.Release();  // waits for an in-flight run
+  }
+#endif
+}
+
 bool EngineModel::RunNpuCls(std::span<const std::uint32_t> ids,
                             std::vector<float>* cls_out, double* prefill_ms,
                             std::string* error_msg) const {
 #ifdef MBUFO_ENABLE_NPU
-  if (!npu_weights_resident_ || npu_ == nullptr) {
-    if (error_msg != nullptr) *error_msg = "bge-m3 NPU weights not loaded";
+  std::shared_ptr<NpuState> state;
+  {
+    std::lock_guard<std::mutex> lock(npu_mu_);
+    if (npu_weights_resident_)
+      state = npu_;
+  }
+  if (state == nullptr) {
+    if (error_msg != nullptr)
+      *error_msg = "bge-m3 NPU weights not loaded";
     return false;
   }
-  return npu_->runtime.ForwardCls(ids, f32_, cls_out, prefill_ms, error_msg);
+  return state->graph_runtime.ForwardCls(ids, cls_out, prefill_ms, error_msg);
 #else
   (void)ids;
   (void)cls_out;

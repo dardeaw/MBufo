@@ -18,6 +18,9 @@
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen_reranker/engine.hpp"
+#ifdef MBUFO_ENABLE_NPU
+#include "src/core/compute/npu/npu_graph_models.hpp"
+#endif
 #endif
 
 namespace mbufo::server {
@@ -509,6 +512,69 @@ class QwenRerankRunner final : public RerankRunner {
   std::unique_ptr<models::qwen_reranker::EngineSession> session_;
 };
 
+#ifdef MBUFO_ENABLE_NPU
+// ------------------------------------------------------- NPU Qwen3 encoders
+class NpuQwenEmbeddingRunner final : public EmbeddingRunner {
+ public:
+  explicit NpuQwenEmbeddingRunner(std::unique_ptr<core::npu::NpuQwen3Encoder> enc)
+      : enc_(std::move(enc)) {}
+  std::string_view Kind() const noexcept override { return "npu-qwen-embedding"; }
+  bool NativeBatch() const noexcept override { return false; }
+  std::optional<std::vector<EmbeddingResult>> EmbedBatch(
+      const std::vector<std::string>& texts, std::string* error) override {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return SerialEmbedBatch(
+        texts, error,
+        [this](const std::string& text, std::string* err)
+            -> std::optional<EmbeddingResult> {
+          std::vector<float> values;
+          std::size_t toks = 0;
+          double ms = 0.0;
+          if (!enc_->Embed(text, &values, &toks, &ms, err)) return std::nullopt;
+          EmbeddingResult result;
+          result.values = std::move(values);
+          result.prompt_tokens = toks;
+          result.prefill_ms = ms;
+          return result;
+        });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::unique_ptr<core::npu::NpuQwen3Encoder> enc_;
+};
+
+class NpuQwenRerankRunner final : public RerankRunner {
+ public:
+  explicit NpuQwenRerankRunner(std::unique_ptr<core::npu::NpuQwen3Encoder> enc)
+      : enc_(std::move(enc)) {}
+  std::string_view Kind() const noexcept override { return "npu-qwen-reranker"; }
+  bool NativeBatch() const noexcept override { return false; }
+  std::optional<RerankResult> RerankBatch(const std::string& query,
+                                          const std::vector<std::string>& documents,
+                                          std::string* error) override {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    RerankResult result;
+    result.scores.reserve(documents.size());
+    for (const auto& doc : documents) {
+      float score = 0.0F;
+      std::size_t toks = 0;
+      double ms = 0.0;
+      if (!enc_->ScorePair(query, doc, "", &score, &toks, &ms, error))
+        return std::nullopt;
+      result.scores.push_back(score);
+      result.prompt_tokens += toks;
+      result.prefill_ms += ms;
+    }
+    return result;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::unique_ptr<core::npu::NpuQwen3Encoder> enc_;
+};
+#endif
+
 }  // namespace
 
 std::unique_ptr<EmbeddingRunner> MakeEmbeddingGemma2Runner(
@@ -550,6 +616,16 @@ std::unique_ptr<RerankRunner> MakeQwenRerankRunner(
   wrapped->SetPolicy(policy);
   return std::make_unique<QwenRerankRunner>(std::move(wrapped));
 }
+#ifdef MBUFO_ENABLE_NPU
+std::unique_ptr<EmbeddingRunner> MakeNpuQwenEmbeddingRunner(
+    std::unique_ptr<core::npu::NpuQwen3Encoder> encoder) {
+  return std::make_unique<NpuQwenEmbeddingRunner>(std::move(encoder));
+}
+std::unique_ptr<RerankRunner> MakeNpuQwenRerankRunner(
+    std::unique_ptr<core::npu::NpuQwen3Encoder> encoder) {
+  return std::make_unique<NpuQwenRerankRunner>(std::move(encoder));
+}
+#endif
 #endif  // ENGINE_ENABLE_HIP
 
 }  // namespace mbufo::server

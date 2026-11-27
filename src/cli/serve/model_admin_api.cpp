@@ -1,6 +1,7 @@
 #include "src/cli/serve/model_admin_api.hpp"
 
 #include "src/cli/serve/npu_sidecar_proxy.hpp"
+#include "src/cli/serve/npu_serve_wire.hpp"
 #include "src/cli/serve/admin_ops.hpp"
 
 #include <algorithm>
@@ -24,6 +25,7 @@
 #include "mbufo_build_version.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/model_admin_ui.hpp"
+#include "src/core/compute/npu/npu_servable.hpp"
 #include "src/core/json.hpp"
 
 namespace mbufo::server {
@@ -290,10 +292,32 @@ HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
        req.path == "/admin/ui")) {
     return HandleUi(req);
   }
+  // Single-modality servers (asr/tts/image): no GPU registry here.
+  // Only static/read-only routes stay reachable; the rest 404s
+  // instead of dereferencing a null registry.
+  if (registry_ == nullptr) {
+    const bool safe =
+        ((req.method == "GET" &&
+          (req.path == "/" || req.path == "/admin" ||
+           req.path == "/admin/" || req.path == "/admin/ui" ||
+           req.path == "/admin/models" ||
+           req.path == "/admin/catalog" ||
+           req.path == "/admin/model-mapping" ||
+           req.path == "/admin/npu/status")) ||
+         (req.method == "POST" &&
+          (req.path == "/admin/load" || req.path == "/admin/eject")));
+    if (!safe) {
+      return AdminErr(404, "Not Found",
+                      "admin registry not mounted on this server",
+                      "not_found");
+    }
+  }
   if (req.path == "/admin/models" && req.method == "GET")
     return HandleList(req);
   if (req.path == "/admin/catalog" && req.method == "GET")
     return HandleCatalog(req);
+  if (req.path == "/admin/npu/status" && req.method == "GET")
+    return HandleNpuStatus(req);
   if (req.path == "/admin/model-mapping" && req.method == "GET")
     return admin_ops::HandleGetModelMapping(req);
   if (req.path == "/admin/model-mapping/sync" && req.method == "POST")
@@ -348,6 +372,31 @@ HttpResponse ModelAdminService::Handle(const HttpRequest& req) {
                   "not_found");
 }
 
+HttpResponse ModelAdminService::HandleNpuStatus(const HttpRequest&) {
+  json::Value resp = json::Value::object();
+  json::Value arr = json::Value::array();
+  if (npu_registry_) {
+    for (const auto& info : npu_registry_->List()) {
+      json::Value row = json::Value::object();
+      row["id"] = info.id;
+      json::Value names = json::Value::array();
+      for (const auto& n : info.names) names.push_back(n);
+      row["names"] = std::move(names);
+      row["lane"] = npu_wire::NpuLaneName(info.lane);
+      row["kind"] = npu_wire::NpuKindName(info.kind);
+      row["artifact"] = info.artifact;
+      row["ready"] = info.ready;
+      row["is_default"] = info.is_default;
+      row["estimated_resident_mib"] =
+          static_cast<std::size_t>(info.estimated_resident_mib);
+      row["last_used_ms"] = static_cast<std::size_t>(info.last_used_ms);
+      arr.push_back(std::move(row));
+    }
+  }
+  resp["npu_models"] = std::move(arr);
+  return AdminOk(std::move(resp));
+}
+
 HttpResponse ModelAdminService::HandleUi(const HttpRequest&) {
   HttpResponse resp;
   resp.status = 200;
@@ -360,11 +409,15 @@ HttpResponse ModelAdminService::HandleUi(const HttpRequest&) {
 }
 
 HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
+  const bool has_gpu = (registry_ != nullptr);
   json::Value resp = json::Value::object();
   resp["object"] = "list";
-  const auto lru_order = registry_->LruCandidates();
+  const auto lru_order = has_gpu ? registry_->LruCandidates()
+                                 : std::vector<std::string>{};
   json::Value data = json::Value::array();
-  for (const auto& info : registry_->List()) {
+  const auto gpu_list =
+      has_gpu ? registry_->List() : decltype(registry_->List()){};
+  for (const auto& info : gpu_list) {
     json::Value row = json::Value::object();
     row["id"] = info.id;
     row["path"] = info.path;
@@ -493,6 +546,11 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["endpoint"] = spec->endpoint;
     row["pid"] = static_cast<std::int64_t>(st.pid);
     row["external"] = st.external;
+    row["warm"] = st.warm;
+    row["warmup_ms"] = st.warmup_ms;
+    if (!st.warmup_error.empty())
+      row["warmup_error"] = st.warmup_error;
+    row["ready"] = st.running && (st.warm || st.warmup_skipped);
     row["lru_rank"] = -1;
     if (spec->kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
       row["file_size_mib"] =
@@ -506,10 +564,83 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["sessions"] = std::move(sessions);
     data.push_back(std::move(row));
   }
+  // Loaded NPU in-process servables appear as loaded models so the UI
+  // renders the same cards (amber border, NPU slots bar, Eject) as GPU
+  // models. Task/capability mirror the catalog ExtraDir rows.
+  if (npu_registry_ != nullptr) {
+    for (const auto& info : npu_registry_->List()) {
+      if (!npu_holder_.IsLoaded(info.id)) continue;
+      std::string task = "chat";
+      std::string cap = "NPU";
+      if (info.lane ==
+          mbufo::core::npu::NpuModelLane::kAsr) {
+        task = "audio";
+        cap = "AUDIO";
+      } else if (info.lane ==
+                 mbufo::core::npu::NpuModelLane::kTts) {
+        task = "tts";
+        cap = "SPEECH";
+      } else if (info.lane ==
+                 mbufo::core::npu::NpuModelLane::kImage) {
+        task = "image_generation";
+        cap = "IMAGE";
+      }
+      json::Value row = json::Value::object();
+      row["id"] = info.id;
+      row["path"] = info.artifact;
+      row["model_path"] = info.artifact;
+      json::Value names = json::Value::array();
+      for (const auto& n : info.names) names.push_back(n);
+      row["names"] = std::move(names);
+      row["context_length"] = 0;
+      row["ready"] = true;
+      row["is_default"] = info.is_default;
+      row["task"] = task;
+      row["has_vision"] = false;
+      row["has_audio"] =
+          task == "audio" || task == "tts";
+      row["has_tools"] = false;
+      json::Value caps = json::Value::array();
+      caps.push_back(cap);
+      row["capabilities"] = std::move(caps);
+      row["total_sessions"] = 0;
+      row["active_sessions"] = 0;
+      row["busy"] = false;
+      row["file_size_mib"] = 0;
+      row["estimated_resident_mib"] =
+          static_cast<std::uint64_t>(info.estimated_resident_mib);
+      row["id_suggestion"] = info.id;
+      row["backend"] = "npu";
+      row["sidecar"] = false;
+      row["lru_rank"] = -1;
+      json::Value sessions = json::Value::array();
+      row["sessions"] = std::move(sessions);
+      data.push_back(std::move(row));
+    }
+  }
   resp["build_sha"] = mbufo::build::kGitCommit;
   resp["models"] = data;
   resp["data"] = std::move(data);
   resp["memory"] = QueryMemorySnapshot(probe_).ToJson();
+
+  {
+    // Uniform lifecycle of every in-process NPU servable (INpuServable).
+    json::Value servables = json::Value::array();
+    for (const auto& [sid, st] :
+         mbufo::core::npu::NpuServableRegistry::Global().Snapshot()) {
+      json::Value item = json::Value::object();
+      item["id"] = sid;
+      item["state"] = mbufo::core::npu::NpuServableStateName(st.state);
+      item["ready"] = st.state == mbufo::core::npu::NpuServableState::kReady;
+      item["warm"] = st.warmed;
+      item["load_ms"] = st.load_ms;
+      item["warmup_ms"] = st.warmup_ms;
+      if (!st.last_error.empty())
+        item["error"] = st.last_error;
+      servables.push_back(std::move(item));
+    }
+    resp["npu_servables"] = std::move(servables);
+  }
 
   {
     std::lock_guard lock(loading_state_mutex_);
@@ -558,7 +689,8 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
   if (std::getenv("MBUFO_MODELS_DIR") == nullptr) {
     add_root_unique("/mnt/nvme-data/mbufo-models");
   }
-  const auto loaded_list = registry_->List();
+  const auto loaded_list =
+      registry_ ? registry_->List() : decltype(registry_->List()){};
   for (const auto& info : loaded_list) {
     if (info.path.empty()) continue;
     std::filesystem::path p(info.path);
@@ -855,7 +987,9 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     item["npu_capable"] =
         id_lower.find("bge-m3") != std::string::npos ||
         id_lower.find("embeddinggemma") != std::string::npos ||
-        id_lower.find("bge-reranker") != std::string::npos;
+        id_lower.find("bge-reranker") != std::string::npos ||
+        id_lower.find("qwen3-embedding") != std::string::npos ||
+        id_lower.find("qwen3-reranker") != std::string::npos;
     item["size_mib"] = f.size_bytes >> 20;
     item["file_size_mib"] = f.size_bytes >> 20;
     item["estimated_resident_mib"] = est_bytes >> 20;
@@ -909,15 +1043,33 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     struct ExtraDir {
       const char* id;
       const char* subdir;
+      const char* family;
       const char* task;
       const char* capability;
       const char* backend;
       bool npu_capable;
+      bool has_audio;
+      bool has_vision;
+      std::size_t resident_mib;
       const char* note;
     };
     const ExtraDir kExtraDirs[] = {
-        {"qwen-image-2.1", "qwen-image-2.1", "image_generation", "IMAGE", "gpu", false,
+        {"qwen-image-2.1", "qwen-image-2.1", "image", "image_generation",
+         "IMAGE", "gpu", false, false, false, 0,
          "GPU safetensors image model (mbufo serve image)"},
+        // M6: NPU in-process servables (verified 2026-11-24; M3 MiB).
+        {"qwen3-asr-1.7b", "qwen3-asr-1.7b", "qwen3-asr-1.7b", "audio",
+         "AUDIO", "npu", true, true, false, 520,
+         "NPU in-process thinker (decode cos=1.0, top1 match)"},
+        {"qwen3-tts-12hz-1.7b", "qwen3-tts-1.7b-base", "qwen3-tts-1.7b-base",
+         "tts", "SPEECH", "npu", true, true, false, 2200,
+         "NPU in-process talker+predictor+frame (decode cos=1.0)"},
+        {"flux2-klein-4b", "flux2-klein-4b", "flux2-klein-4b",
+         "image_generation", "IMAGE", "npu", true, false, false, 930,
+         "NPU in-process DiT 4-step (E2E cos(pipe)=0.9485)"},
+        {"z-image-turbo", "z-image-turbo", "z-image-turbo",
+         "image_generation", "IMAGE", "npu", true, false, false, 750,
+         "NPU in-process DiT 8-step (E2E cos(pipe)=0.9918)"},
     };
     for (const auto& ed : kExtraDirs) {
       std::filesystem::path dir;
@@ -945,27 +1097,30 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["id_suggestion"] = ed.id;
       item["name"] = std::string(ed.subdir) + "/";
       item["relative_path"] = std::string(ed.subdir) + "/";
-      item["family"] = "image";
+      item["family"] = ed.family;
       item["task"] = ed.task;
-      item["has_vision"] = false;
-      item["has_audio"] = false;
+      item["has_vision"] = ed.has_vision;
+      item["has_audio"] = ed.has_audio;
       item["has_tools"] = false;
       json::Value caps = json::Value::array();
       caps.push_back(ed.capability);
       item["capabilities"] = std::move(caps);
       item["backend"] = ed.backend;
       item["sidecar"] = false;
-      item["actionable"] = false;
+      item["actionable"] = true;
+      const bool npu_loaded =
+          std::string(ed.backend) == "npu" && npu_holder_.IsLoaded(ed.id);
       item["note"] = ed.note;
       const std::uint64_t mib = static_cast<std::uint64_t>(bytes >> 20);
       item["size_mib"] = mib;
       item["file_size_mib"] = mib;
-      item["estimated_resident_mib"] = std::uint64_t{0};
+      item["estimated_resident_mib"] =
+          static_cast<std::uint64_t>(ed.resident_mib);
       item["shards"] = 0;
-      item["loaded"] = false;
+      item["loaded"] = npu_loaded;
       item["loaded_id"] = "";
       item["is_default"] = false;
-      item["running"] = false;
+      item["running"] = npu_loaded;
       item["npu_capable"] = ed.npu_capable;
       item["path"] = dir.string();
       item["suggested_mmproj"] = "";
@@ -1032,6 +1187,8 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
       item["capabilities"] = std::move(caps);
       item["backend"] = spec.backend;
       item["sidecar"] = true;
+      item["warm"] = sc_status.warm;
+      item["warmup_ms"] = sc_status.warmup_ms;
       item["actionable"] = true;
       item["default_port"] = spec.port;
       item["endpoint"] = spec.endpoint;
@@ -1089,9 +1246,84 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
 }
 
 HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
-  if (!loader_)
-    return AdminErr(503, "Service Unavailable",
-                    "dynamic model loading is not enabled", "loader_disabled");
+  // M6b L2: in-process NPU servables load weights via the servable host
+  // (no GGUF path needed). Mirrors the sidecar branch response shape.
+  // NOTE: body is parsed lazily here; the shared parse below reuses it.
+  // NOTE: the loader_ gate lives BELOW the sidecar branch: sidecar
+  // spawn/stop needs no GPU loader, so neutered single-modality
+  // servers can manage sidecars too.
+  {
+    json::Value pre;
+    try {
+      pre = json::parse(req.body);
+    } catch (const std::exception&) {
+    }
+    const std::string npu_id =
+        pre.is_object()
+            ? pre.member_str("id", pre.member_str("model", ""))
+            : "";
+    if (!npu_id.empty() && npu_registry_ != nullptr) {
+      auto npu_spec = npu_registry_->Resolve(npu_id);
+      if (npu_spec != nullptr &&
+          npu_spec->kind ==
+              mbufo::core::npu::NpuArtifactKind::kNpuInProcess) {
+        const std::string quant =
+            pre.is_object() ? pre.member_str("npu_quant", "q8") : "q8";
+        if (quant != "q8" && quant != "Q8") {
+          return AdminErr(400, "Bad Request",
+                          "npu_quant must be 'q8' for " + npu_id +
+                              " (q4 is not allowed: accuracy drift too large)",
+                          "invalid_npu_quant");
+        }
+        {
+          std::lock_guard lock(loading_state_mutex_);
+          loading_id_ = npu_id;
+          loading_path_ = npu_spec->artifact;
+          loading_started_ms_ = NowSteadyMs();
+        }
+        const auto t_load_start = NowSteadyMs();
+        std::string npu_err;
+        bool ok = false;
+        {
+          std::lock_guard serialize(load_mutex_);
+          ok = npu_holder_.Load(npu_id, npu_spec->artifact, quant,
+                              &npu_err);
+        }
+        {
+          std::lock_guard lock(loading_state_mutex_);
+          loading_id_.clear();
+          loading_path_.clear();
+          loading_started_ms_ = 0;
+        }
+        if (!ok) {
+          return AdminErr(502, "Bad Gateway",
+                          npu_err.empty() ? "npu load failed" : npu_err,
+                          "npu_load_failed");
+        }
+        const auto warm_info = npu_holder_.GetWarmInfo(npu_id);
+        const bool warmed = warm_info.warmed;
+        const std::string warm_err = warm_info.error;
+        npu_registry_->SetReady(npu_id, true);
+        json::Value resp = json::Value::object();
+        resp["warm"] = warmed && warm_info.warmed;
+        resp["warmup_ms"] = warm_info.ms;
+        if (!warm_err.empty()) resp["warmup_error"] = warm_err;
+        resp["id"] = npu_id;
+        resp["path"] = npu_spec->artifact;
+        resp["model_path"] = npu_spec->artifact;
+        resp["status"] = "running";
+        resp["backend"] = "npu";
+        resp["sidecar"] = false;
+        resp["estimated_resident_mib"] =
+            static_cast<std::uint64_t>(
+                npu_spec->estimated_resident_mib);
+        resp["load_ms"] = NowSteadyMs() >= t_load_start
+                              ? NowSteadyMs() - t_load_start
+                              : std::uint64_t{0};
+        return AdminOk(std::move(resp));
+      }
+    }
+  }
   json::Value body;
   try {
     body = json::parse(req.body);
@@ -1203,6 +1435,9 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
           static_cast<std::uint64_t>(sc0->estimated_resident_mib);
       resp["pid"] = static_cast<std::int64_t>(st.pid);
       resp["external"] = st.external;
+      resp["warm"] = st.warm;
+      resp["warmup_ms"] = st.warmup_ms;
+      if (!st.warmup_error.empty()) resp["warmup_error"] = st.warmup_error;
       if (sc0->kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
         resp["image_dtype"] = st.options.dtype;
         resp["image_steps"] = static_cast<std::size_t>(st.options.steps);
@@ -1216,6 +1451,9 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
     }
   }
 
+  if (!loader_)
+    return AdminErr(503, "Service Unavailable",
+                    "dynamic model loading is not enabled", "loader_disabled");
   if (request.path.empty())
     return AdminErr(400, "Bad Request", "'path' is required", "missing_path");
   if (request.session_count == 0) request.session_count = 1;
@@ -1283,10 +1521,16 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
 
   const std::uint64_t t_load_start = NowSteadyMs();
   std::string error;
-  auto backend = loader_(request, &error);
-  if (backend == nullptr)
+  std::shared_ptr<TextGenerationBackend> backend;
+  {
+    const mbufo::core::npu::NpuServableRegistry::TagScope tag(request.id);
+    backend = loader_(request, &error);
+  }
+  if (backend == nullptr) {
+    mbufo::core::npu::NpuServableRegistry::Global().Remove(request.id);
     return AdminErr(500, "Internal Server Error",
                     error.empty() ? "load failed" : error, "load_failed");
+  }
   LoadedModelConfig reg_cfg;
   reg_cfg.kv_cache_quant = request.kv_cache_quant;
   reg_cfg.speculative = request.speculative;
@@ -1329,19 +1573,53 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
   const std::string id = body.member_str("id");
   if (id.empty())
     return AdminErr(400, "Bad Request", "'id' is required", "missing_id");
+  // M6b L2: in-process NPU servables unload weights via the host.
+  // NPU registry wins ties (same id can exist as a sidecar spec).
+  if (npu_registry_ != nullptr) {
+    auto npu_spec = npu_registry_->Resolve(id);
+    if (npu_spec != nullptr &&
+        npu_spec->kind ==
+            mbufo::core::npu::NpuArtifactKind::kNpuInProcess) {
+      std::lock_guard serialize(load_mutex_);
+      if (!npu_holder_.IsLoaded(id)) {
+        npu_registry_->SetReady(id, false);
+        json::Value resp = json::Value::object();
+        resp["id"] = id;
+        resp["status"] = "ejected";
+        resp["note"] = "npu model was already unloaded";
+        return AdminOk(std::move(resp));
+      }
+      std::string npu_err;
+      if (!npu_holder_.Unload(id, &npu_err)) {
+        return AdminErr(502, "Bad Gateway",
+                        npu_err.empty() ? "npu eject failed" : npu_err,
+                        "npu_eject_failed");
+      }
+      npu_registry_->SetReady(id, false);
+      json::Value resp = json::Value::object();
+      resp["id"] = id;
+      resp["status"] = "ejected";
+      resp["note"] = "npu weights unloaded";
+      return AdminOk(std::move(resp));
+    }
+  }
   // Sidecars stop their OS process; mirrors the GPU eject flow above.
   if (FindSidecarSpec(id) != nullptr) {
     std::lock_guard serialize(load_mutex_);
     const auto st = GlobalSidecarManager().GetStatus(id);
-    if (!st.running) {
-      return AdminErr(404, "Not Found",
-                      "sidecar '" + id + "' is not running", "not_loaded");
-    }
+    const bool was_live = st.running;
     std::string sc_err;
     if (!GlobalSidecarManager().Stop(id, &sc_err)) {
       return AdminErr(502, "Bad Gateway",
                       sc_err.empty() ? "failed to stop sidecar" : sc_err,
                       "sidecar_stop_failed");
+    }
+    if (!was_live) {
+      json::Value already = json::Value::object();
+      already["id"] = id;
+      already["status"] = "ejected";
+      already["note"] = "sidecar was already stopped";
+      return AdminOk(std::move(already));
     }
     json::Value resp = json::Value::object();
     resp["id"] = id;
@@ -1351,14 +1629,36 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
                        : "sidecar process stopped; port released";
     return AdminOk(std::move(resp));
   }
+  if (registry_ == nullptr)
+    return AdminErr(404, "Not Found", "model '" + id + "' is not loaded",
+                    "not_loaded");
   std::lock_guard serialize(load_mutex_);
   if (!registry_->HasId(id))
     return AdminErr(404, "Not Found", "model '" + id + "' is not loaded",
                     "not_loaded");
   const auto mem_before = QueryMemorySnapshot(probe_);
   std::string error;
-  if (!registry_->Remove(id, &error))
-    return AdminErr(409, "Conflict", error, "eject_failed");
+  // Release the NPU weights through the servable contract while the backend
+  // (which owns the model) is still alive, then drop the backend.
+  // Unload is synchronous (it waits for an in-flight NPU run), so Remove only
+  // starts after the weights are released. Guard the reverse case: if Remove
+  // still fails, the model is either already gone (the goal state, treat as
+  // ejected) or, impossible under load_mutex_ but checked anyway, still
+  // listed with its NPU weights released: report that precisely and retry
+  // once instead of leaving a half-ejected model behind silently.
+  mbufo::core::npu::NpuServableRegistry::Global().Unload(id);
+  if (!registry_->Remove(id, &error) && registry_->HasId(id)) {
+    Logger::Warn("admin", "event=eject_retry id=" + id + " error=" + error);
+    error.clear();
+    if (!registry_->Remove(id, &error) && registry_->HasId(id)) {
+      return AdminErr(
+          500, "Internal Server Error",
+          "NPU weights of '" + id +
+              "' were released but the model could not be removed (" + error +
+              "); call /admin/eject again",
+          "eject_incomplete");
+    }
+  }
 #if defined(__GLIBC__)
   ::malloc_trim(0);
 #endif
@@ -1602,7 +1902,12 @@ HttpResponse ModelAdminService::HandleReload(const HttpRequest& req) {
 
   auto try_rollback = [&](const std::string& reason) -> HttpResponse {
     std::string rb_err;
-    auto rb_backend = loader_(rollback_req, &rb_err);
+    std::shared_ptr<TextGenerationBackend> rb_backend;
+    {
+      const mbufo::core::npu::NpuServableRegistry::TagScope tag(
+          rollback_req.id);
+      rb_backend = loader_(rollback_req, &rb_err);
+    }
     if (rb_backend != nullptr) {
       std::string add_err;
       if (registry_->Add(rollback_req.id, rollback_req.aliases,
@@ -1649,7 +1954,11 @@ HttpResponse ModelAdminService::HandleReload(const HttpRequest& req) {
 
   const std::uint64_t t_load_start = NowSteadyMs();
   std::string load_err;
-  auto backend = loader_(request, &load_err);
+  std::shared_ptr<TextGenerationBackend> backend;
+  {
+    const mbufo::core::npu::NpuServableRegistry::TagScope tag(request.id);
+    backend = loader_(request, &load_err);
+  }
   if (backend == nullptr) {
     return try_rollback(load_err.empty() ? "reload failed" : load_err);
   }

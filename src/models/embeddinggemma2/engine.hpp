@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -91,6 +92,8 @@ class EngineModel {
   /// HRX buffers (returns false when MBUFO_ENABLE_NPU=OFF).
   [[nodiscard]] bool LoadNpuWeights(const std::string& kernel_dir = "",
                                     std::string* error_msg = nullptr);
+  /// Eject: release the NPU weights (waits for an in-flight NPU run).
+  void UnloadNpuWeights();
   [[nodiscard]] bool npu_weights_resident() const noexcept {
     return npu_weights_resident_;
   }
@@ -121,6 +124,7 @@ class EngineModel {
   std::unique_ptr<core::GgufReader> reader_;
   mbufo::npu::NpuLaneConfig npu_config_{};
   mbufo::core::npu::NpuScheduler* npu_scheduler_{nullptr};
+  mutable std::mutex npu_mu_;
   bool npu_weights_resident_{false};
   struct NpuState;
   std::shared_ptr<NpuState> npu_;

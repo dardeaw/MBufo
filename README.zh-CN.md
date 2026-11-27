@@ -23,7 +23,7 @@
 [§2 低精度计算与成本优化](#2-低精度计算与成本优化) ·
 [§3 GGUF 全家族支持与多模型路由](#3-gguf-全家族支持与多模型路由) ·
 [快速开始](#快速开始) ·
-[性能基准](#性能基准-gfx1151-strix-halo) ·
+[性能基准](#性能基准gfx1151-strix-halo) ·
 [从源码构建](#从源码构建) ·
 [文档索引](#文档索引) ·
 [兼容性与限制](#兼容性与限制)
@@ -242,13 +242,13 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 | --- | --- | --- | --- | --- |
 | **D3-Lite / Nano / Mini / Turbo / Ultra** | 0.8B / 2B / 4B / — / — | Q4NX（flm NPU2） | `POST /v1/systemone` | ✅ 已上线（router 代理＋admin 卡片；⚡ DECIDE 专用，qwen3.8 维持 CHAT） |
 | **Whisper-V3-Turbo** | 0.8B | Q4NX NPU2（5 个 xclbin） | `POST /v1/audio/transcriptions` | ✅ 已上线（代理；1.4 秒音频 → 2.3 秒已验证） |
-| **EmbeddingGemma 2** | 约 0.3B | Q8 bfp16ebs8 / Q4 q4nx | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（24 层端到端 cos > 0.993；引擎已接缝，默认 kNone） |
-| **bge-m3** | 0.6B XLM-R | Q8 / Q4 | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（64×1024 GEMM cos 0.999988；编码器 cos 0.999924） |
-| **bge-reranker-v2-m3** | Cross-Encoder | Q8 / Q4 | `/v1/reranking`（NPU lane） | 🧪 运行时已验证（评分差约 1e-5） |
-| **Qwen3-ASR 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（cos > 0.967，top-1 吻合） |
-| **Qwen3-TTS 12Hz 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/speech`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（已产出 wav，cos > 0.98） |
-| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
-| **Z-Image-Turbo** | DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
+| **EmbeddingGemma 2** | 约 0.3B | Q8 bfp16ebs8（算子图） / Q4 q4nx | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（24 层端到端 cos > 0.993；引擎已接缝，默认 kNone） |
+| **bge-m3** | 0.6B XLM-R | Q8（算子图） | `/v1/embeddings`（NPU lane） | 🧪 运行时已验证（64×1024 GEMM cos 0.999988；编码器 cos 0.999924） |
+| **bge-reranker-v2-m3** | Cross-Encoder | Q8（算子图） | `/v1/reranking`（NPU lane） | 🧪 运行时已验证（评分差约 1e-5） |
+| **Qwen3-ASR 1.7B** | 1.7B | 仅 Q8（Q4 禁用，cos 0.968） | `/v1/audio/transcriptions`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（Q8 cos > 0.999，top-1 吻合） |
+| **Qwen3-TTS 12Hz 1.7B** | 1.7B | 仅 Q8（Q4 禁用，cos 0.981） | `/v1/audio/speech`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（已产出 wav，Q8 cos > 0.998） |
+| **FLUX.2-klein-4B** | 4B DiT | 仅 Q8（Q4 禁用，cos 0.853） | 测试线束（输出 PNG） | 🧪 运行时已验证（E2E cos(pipe)=0.9485 q8；单步 v 0.978-0.999；尚无 HTTP 服务） |
+| **Z-Image-Turbo** | DiT | 仅 Q8（Q4 禁用，cos 0.975） | 测试线束（输出 PNG） | 🧪 运行时已验证（E2E cos(pipe)=0.9918 q8；尚无 HTTP 服务） |
 
 ### 支持的量化格式
 
@@ -453,7 +453,7 @@ cmake --build --preset release --parallel 4
 
 ---
 
-## 授权与致谢
+readme-cn-ptr## 授权与致谢
 
 上游 gufo 采用 MIT 授权条款；第三方依赖库授权声明详见 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 `licenses/`。模型权重文件依其各原始发布者之许可协议规范。
 
