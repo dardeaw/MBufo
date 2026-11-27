@@ -6545,12 +6545,14 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     const std::string qwen_id =
         qwen_is_embed ? "qwen3-embedding" : "qwen3-reranker";
     std::unique_ptr<NpuEnc> enc;
+    auto qwen_slot = std::make_shared<NpuEnc*>(nullptr);
     std::string npu_err;
     const bool q_ok = LoadNpuServable(
         qwen_id,
         [&](std::string* e) {
           enc = NpuEnc::Load(model_path, qwen_role,
                              mbufo::core::npu::graph::LinearBackend::kNpuQ8, e);
+          *qwen_slot = enc.get();
           return enc != nullptr;
         },
         [&](std::string* e) {
@@ -6565,6 +6567,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
           std::size_t toks = 0;
           return enc->ScorePair("warmup query", "warmup document", "", &score,
                                 &toks, &ms, e);
+        },
+        [qwen_slot]() {
+          if (*qwen_slot != nullptr)
+            (*qwen_slot)->Release();
         },
         &npu_err);
     if (!q_ok) {
@@ -6639,14 +6645,19 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             const std::vector<std::uint32_t> ids{2, 4, 5, 6, 7, 8, 9, 10};
             return eg_model->Embed(ids, e).has_value();
           },
-          &npu_err);
+          [m = eg_model.get()]() { m->UnloadNpuWeights(); }, &npu_err);
       if (!eg_ok) {
         SetError(error, "EmbeddingGemma 2 NPU weight load failed: " + npu_err);
         return false;
       }
+      const bool eg_graph = mbufo::core::npu::EmbGemma2UseGraph();
       Logger::Info("loader",
-                   "event=npu_loaded model=embeddinggemma-2 quant=" +
-                       (npu_quant.empty() ? std::string("default") : npu_quant));
+                   "event=npu_loaded model=embeddinggemma-2 runtime=" +
+                       std::string(eg_graph ? "NpuOpGraph quant=q8"
+                                            : "NpuEmbGemma2Runtime quant=" +
+                                                  (npu_quant.empty()
+                                                       ? std::string("default")
+                                                       : npu_quant)));
 #else
       SetError(error,
                "NPU backend is disabled in this build (rebuild with "
@@ -6717,13 +6728,14 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
               ids.back() = 2;
               return bge_model->RunNpuCls(ids, &cls, &ms, e);
             },
-            &npu_err);
+            [m = bge_model.get()]() { m->UnloadNpuWeights(); }, &npu_err);
         if (!bge_ok) {
           SetError(error, "bge-m3 NPU weight load failed: " + npu_err);
           return false;
         }
-        Logger::Info("loader",
-                     "event=npu_loaded model=bge-m3 runtime=NpuBgeRuntime");
+        Logger::Info(
+            "loader",
+            "event=npu_loaded model=bge-m3 runtime=NpuOpGraph quant=q8");
 #else
         SetError(error,
                  "NPU backend is disabled in this build (rebuild with "
@@ -6780,13 +6792,14 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             double ms = 0.0;
             return rerank_model->Encoder().RunNpuCls(ids, &cls, &ms, e);
           },
-          &npu_err);
+          [m = rerank_model.get()]() { m->UnloadNpuWeights(); }, &npu_err);
       if (!rr_ok) {
         SetError(error, "bge-reranker NPU weight load failed: " + npu_err);
         return false;
       }
-      Logger::Info("loader",
-                   "event=npu_loaded model=bge-reranker runtime=NpuBgeRuntime");
+      Logger::Info(
+          "loader",
+          "event=npu_loaded model=bge-reranker runtime=NpuOpGraph quant=q8");
 #else
       SetError(error,
                "NPU backend is disabled in this build (rebuild with "

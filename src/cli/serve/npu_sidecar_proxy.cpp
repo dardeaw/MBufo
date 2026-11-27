@@ -354,11 +354,6 @@ bool PostBlocking(const std::string& base_url, const std::string& path,
   }
 }
 
-bool WarmupEnabled() {
-  const char* v = std::getenv("MBUFO_SIDECAR_WARMUP");
-  return v == nullptr || std::string_view(v) != "0";
-}
-
 bool ProbeUrl(const std::string& base_url, const std::string& path,
               long timeout_ms) {
   try {
@@ -812,7 +807,7 @@ bool SidecarManager::Warmup(const std::string& id, std::string* error) {
     it->second.warmup_error = e;
   };
   const SidecarWarmupRequest req = WarmupRequestFor(*spec);
-  if (req.path.empty() || !WarmupEnabled()) {
+  if (req.path.empty()) {
     record(false, true, 0.0, "");
     return true;
   }

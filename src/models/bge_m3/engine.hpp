@@ -138,6 +138,8 @@ class EngineModel {
 
   [[nodiscard]] bool LoadNpuWeights(const std::string& kernel_dir = "",
                                     std::string* error_msg = nullptr);
+  /// Eject: release the NPU weights (waits for an in-flight NPU run).
+  void UnloadNpuWeights();
   [[nodiscard]] bool npu_weights_resident() const noexcept {
     return npu_weights_resident_;
   }
@@ -151,6 +153,7 @@ class EngineModel {
   BgeM3Weights weights_;
   BgeM3F32Weights f32_;
   std::unique_ptr<SpmUnigramTokenizer> tokenizer_;
+  mutable std::mutex npu_mu_;
   bool npu_weights_resident_{false};
   struct NpuState;
   std::shared_ptr<NpuState> npu_;

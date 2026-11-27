@@ -1294,9 +1294,9 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
                           npu_err.empty() ? "npu load failed" : npu_err,
                           "npu_load_failed");
         }
-        std::string warm_err;
-        const bool warmed = npu_holder_.Warm(npu_id, &warm_err);
         const auto warm_info = npu_holder_.GetWarmInfo(npu_id);
+        const bool warmed = warm_info.warmed;
+        const std::string warm_err = warm_info.error;
         npu_registry_->SetReady(npu_id, true);
         json::Value resp = json::Value::object();
         resp["warm"] = warmed && warm_info.warmed;
@@ -1632,9 +1632,27 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
                     "not_loaded");
   const auto mem_before = QueryMemorySnapshot(probe_);
   std::string error;
-  if (!registry_->Remove(id, &error))
-    return AdminErr(409, "Conflict", error, "eject_failed");
-  mbufo::core::npu::NpuServableRegistry::Global().Remove(id);
+  // Release the NPU weights through the servable contract while the backend
+  // (which owns the model) is still alive, then drop the backend.
+  // Unload is synchronous (it waits for an in-flight NPU run), so Remove only
+  // starts after the weights are released. Guard the reverse case: if Remove
+  // still fails, the model is either already gone (the goal state, treat as
+  // ejected) or, impossible under load_mutex_ but checked anyway, still
+  // listed with its NPU weights released: report that precisely and retry
+  // once instead of leaving a half-ejected model behind silently.
+  mbufo::core::npu::NpuServableRegistry::Global().Unload(id);
+  if (!registry_->Remove(id, &error) && registry_->HasId(id)) {
+    Logger::Warn("admin", "event=eject_retry id=" + id + " error=" + error);
+    error.clear();
+    if (!registry_->Remove(id, &error) && registry_->HasId(id)) {
+      return AdminErr(
+          500, "Internal Server Error",
+          "NPU weights of '" + id +
+              "' were released but the model could not be removed (" + error +
+              "); call /admin/eject again",
+          "eject_incomplete");
+    }
+  }
 #if defined(__GLIBC__)
   ::malloc_trim(0);
 #endif

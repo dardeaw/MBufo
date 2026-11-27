@@ -3,7 +3,6 @@
 // resident so the first real request does not pay xclbin/HW-context cold
 // start. Soft-fail by design: a failed warmup never fails the load, it is
 // logged and reported (`warm=false`) so the admin UI can show it.
-// MBUFO_NPU_WARMUP=0 disables every NPU warmup.
 
 #include <chrono>
 #include <cstdlib>
@@ -16,11 +15,6 @@
 
 namespace mbufo::server {
 
-[[nodiscard]] inline bool NpuWarmupEnabled() {
-  const char* v = std::getenv("MBUFO_NPU_WARMUP");
-  return v == nullptr || std::string_view(v) != "0";
-}
-
 struct NpuWarmupOutcome {
   bool ran{false};
   bool ok{false};
@@ -31,8 +25,6 @@ struct NpuWarmupOutcome {
 inline NpuWarmupOutcome RunNpuWarmup(
     const std::string& model, const std::function<bool(std::string*)>& fn) {
   NpuWarmupOutcome out;
-  if (!NpuWarmupEnabled())
-    return out;
   out.ran = true;
   const auto t0 = std::chrono::steady_clock::now();
   try {
@@ -53,22 +45,25 @@ inline NpuWarmupOutcome RunNpuWarmup(
 
 /// Load an in-process NPU model through the shared INpuServable lifecycle.
 /// `open` runs the model's existing weight load; `warm` is its dummy inference
-/// (skipped when MBUFO_NPU_WARMUP=0). Warmup is best-effort: a failed warmup
-/// leaves the model Ready with warmed=false. Open failure returns false and
-/// fills `error`. On success the servable is published to the global registry.
+/// . `close` releases the model's NPU weights and is mandatory: eject calls it
+/// (INpuServable::Unload) before the owning backend is destroyed. Warmup is
+/// best-effort: a failed warmup leaves the model Ready with warmed=false. Open
+/// failure returns false and fills `error`. On success the servable is
+/// published to the global registry.
 inline bool LoadNpuServable(const std::string& id,
                             std::function<bool(std::string*)> open,
                             std::function<bool(std::string*)> warm,
-                            std::string* error) {
+                            std::function<void()> close, std::string* error) {
   namespace npu = mbufo::core::npu;
   auto s = std::make_shared<npu::NpuFnServable>(
       id, [open](const npu::NpuLoadArgs&, std::string* e) { return open(e); },
-      std::move(warm));
+      std::move(warm), std::move(close));
   npu::NpuLoadArgs args;
-  args.warmup = NpuWarmupEnabled();
+  args.warmup = true;
   args.warmup_policy = npu::NpuWarmupPolicy::kBestEffort;
   if (!s->Load(args, error))
     return false;
+  s->DetachLoadHooks();  // hooks capture the caller's locals by reference
   const auto st = s->Status();
   Logger::Info("loader",
                "event=npu_servable model=" + id +

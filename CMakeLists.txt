@@ -647,6 +647,24 @@ if (BUILD_TESTING)
 
     add_executable(npu_graph_models_test tests/core/npu_graph_models_test.cpp)
     target_link_libraries(npu_graph_models_test PRIVATE mbufo_core mbufo_npu)
+    # Hardware accuracy gates for the op-graph Qwen3 models; skipped (77) when
+    # the weights are not present on the machine.
+    add_test(NAME npu_graph_qwen3_embedding_test
+      COMMAND npu_graph_models_test qwen-emb
+        /mnt/nvme-data/mbufo-models/qwen3-embedding/Qwen3-Embedding-0.6B-Q8_0.gguf)
+    add_test(NAME npu_graph_qwen3_reranker_test
+      COMMAND npu_graph_models_test qwen-rerank
+        /mnt/nvme-data/mbufo-models/qwen3-reranker/Qwen3-Reranker-0.6B-Q8_0.gguf)
+    add_test(NAME npu_graph_bge_m3_test
+      COMMAND npu_graph_models_test bge-check
+        /mnt/nvme-data/mbufo-models/bge-m3/bge-m3-Q4_K_M.gguf)
+    add_test(NAME npu_graph_embgemma2_test
+      COMMAND npu_graph_models_test gemma-emb
+        /mnt/nvme-data/mbufo-models/embeddinggemma-2-gguf/embeddinggemma-2-bf16.gguf)
+    set_tests_properties(npu_graph_qwen3_embedding_test npu_graph_qwen3_reranker_test
+      npu_graph_embgemma2_test npu_graph_bge_m3_test
+      PROPERTIES LABELS "npu;hardware;embedding;rerank"
+      RESOURCE_LOCK npu SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     add_executable(npu_quant_models_test tests/core/npu_quant_models_test.cpp)
     target_link_libraries(npu_quant_models_test PRIVATE mbufo_core mbufo_npu)
@@ -685,9 +703,15 @@ if (BUILD_TESTING)
 
     add_executable(npu_te_decode_test tests/core/npu_te_decode_test.cpp)
     add_executable(npu_flux_dit_test tests/core/npu_flux_dit_test.cpp)
+    add_executable(npu_flux_block0_test tests/core/npu_flux_block0_test.cpp)
+    add_executable(npu_flux_replay_test tests/core/npu_flux_replay_test.cpp)
+    target_link_libraries(npu_flux_replay_test PRIVATE mbufo_core mbufo_npu)
+    target_link_libraries(npu_flux_block0_test PRIVATE mbufo_core mbufo_npu)
     add_executable(npu_zimage_dit_test tests/core/npu_zimage_dit_test.cpp)
     target_link_libraries(npu_zimage_dit_test PRIVATE mbufo_core mbufo_npu)
     add_test(NAME npu_zimage_dit_test COMMAND npu_zimage_dit_test)
+    add_executable(npu_zimage_block0_test tests/core/npu_zimage_block0_test.cpp)
+    target_link_libraries(npu_zimage_block0_test PRIVATE mbufo_core mbufo_npu)
     set_tests_properties(npu_zimage_dit_test PROPERTIES
       LABELS "npu;hardware;quant"
       RESOURCE_LOCK npu)

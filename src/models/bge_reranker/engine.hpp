@@ -135,6 +135,7 @@ public:
                                     std::string* error_msg = nullptr) {
     return encoder_->LoadNpuWeights(kernel_dir, error_msg);
   }
+  void UnloadNpuWeights() { encoder_->UnloadNpuWeights(); }
   [[nodiscard]] bool npu_weights_resident() const noexcept {
     return encoder_->npu_weights_resident();
   }

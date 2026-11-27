@@ -1,14 +1,24 @@
 #pragma once
-// FLUX.2-klein DiT NPU path (P4): 5 double-stream + 20 single-stream blocks,
-// 4-step distilled Euler flow. Exact port of RunFlux2KleinQuantE2E math with
-// NPU-only GEMMs (d=3072, 24 heads x 128, rope_theta=2000, eps=1e-6).
+// FLUX.2-klein DiT NPU path, TRUE PORT of the diffusers pipeline math
+// (P8a). v1 followed the parity shell (RMSNorm / separate attention / no
+// txt FFN / 1D rope / tanh gates) and diverged from the pipeline (step-0
+// cos 0.996, E2E PSNR ~7dB). This version ports the real math:
 //
-// Per-step flow: TimestepEmbed(sigma) -> modulations -> XEmbed(z) ->
-// DoubleBlocks(img+txt) -> SingleBlocks(img) -> VelocityHead -> z -= dt*v.
-// Text conditioning (context_embedder over the 3 TE taps) is computed once
-// per prompt via EncodeContext. VAE decode stays on the existing path.
+// - LayerNorm (no affine) everywhere the pipeline uses it
+// - JOINT attention over concat [txt; img] in double AND single blocks
+// - txt FFN (ff_context) with raw c_gate_mlp
+// - Flux2Modulation: SiLU(temb) BEFORE the modulation linears; split as
+//   [shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp]
+// - 4-axis adjacent-pair RoPE (theta=2000, axes 32x4), raw (non-tanh) gates
+// - single-block MLP = plain SiLU (no GLU gating)
+// - norm_out = AdaLayerNormContinuous (SiLU(temb) -> linear -> chunk)
+//
+// NPU GEMMs, host norms/activations/softmax. Token layout unchanged:
+// img tokens row-major (py*8+px), txt first in joint sequences.
 
 #include <cstddef>
+#include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -24,16 +34,18 @@ struct FluxDitConfig {
   std::size_t n_single = 20;
   float eps = 1.0e-6F;
   float rope_theta = 2000.0F;
+  std::size_t rope_axes[4] = {32, 32, 32, 32};
 };
 
 struct FluxModulations {
-  std::vector<float> img;  // [18432]
+  std::vector<float>
+      img;  // [18432]: msa(shift,scale,gate)+mlp(shift,scale,gate)
   std::vector<float> txt;  // [18432]
-  std::vector<float> sgl;  // [9216]
+  std::vector<float> sgl;  // [9216]: (shift,scale,gate)
 };
 
 class FluxDitNpu {
- public:
+public:
   FluxDitNpu() = default;
 
   [[nodiscard]] bool Open(const std::string& transformer_dir,
@@ -48,19 +60,25 @@ class FluxDitNpu {
                                  FluxModulations* mod, double* npu_ms = nullptr,
                                  std::string* error = nullptr);
   [[nodiscard]] bool EncodeContext(std::span<const float> cond7680,
-                                   std::size_t tokens,
-                                   std::vector<float>* txt,
+                                   std::size_t tokens, std::vector<float>* txt,
                                    double* npu_ms = nullptr,
                                    std::string* error = nullptr);
   [[nodiscard]] bool XEmbed(std::span<const float> z, std::size_t patches,
                             std::vector<float>* img, double* npu_ms = nullptr,
                             std::string* error = nullptr);
 
+  /// 4-axis RoPE tables for joint [txt; img]: txt rows (0,0,0,l),
+  /// img rows (0,h,w,0) in token order py*8+px.
+  void BuildRopeTables(std::size_t St, std::size_t Si,
+                       std::vector<float>* cos_t,
+                       std::vector<float>* sin_t) const;
+
   // In-place over img [Si*d] and txt [St*d].
   [[nodiscard]] bool DenoiseBlocks(std::vector<float>* img,
                                    std::vector<float>* txt, std::size_t Si,
-                                   std::size_t St,
-                                   const FluxModulations& mod,
+                                   std::size_t St, const FluxModulations& mod,
+                                   const std::vector<float>& rope_cos,
+                                   const std::vector<float>& rope_sin,
                                    std::size_t n_double, std::size_t n_single,
                                    double* npu_ms = nullptr,
                                    std::string* error = nullptr);
@@ -77,18 +95,41 @@ class FluxDitNpu {
                               std::size_t n_single, double* npu_ms = nullptr,
                               std::string* error = nullptr);
 
+  /// Debug: run one double block in place (input verification harness).
+  [[nodiscard]] bool DebugDoubleBlock(
+      std::vector<float>* img, std::vector<float>* txt, std::size_t Si,
+      std::size_t St, std::size_t bi, std::span<const float> mod_img,
+      std::span<const float> mod_txt, std::span<const float> rope_cos,
+      std::span<const float> rope_sin, double* npu_ms = nullptr,
+      std::string* error = nullptr) {
+    return DoubleBlock(img, txt, Si, St, bi, mod_img, mod_txt, rope_cos,
+                       rope_sin, npu_ms, error);
+  }
+
+  /// Debug: run one single block on a joint sequence in place.
+  [[nodiscard]] bool DebugSingleBlock(std::vector<float>* joint, std::size_t Sj,
+                                      std::size_t bi,
+                                      std::span<const float> mod_sgl,
+                                      std::span<const float> rope_cos,
+                                      std::span<const float> rope_sin,
+                                      double* npu_ms = nullptr,
+                                      std::string* error = nullptr) {
+    return SingleBlock(joint, Sj, bi, mod_sgl, rope_cos, rope_sin, npu_ms,
+                       error);
+  }
+
   [[nodiscard]] const FluxDitConfig& config() const noexcept { return cfg_; }
 
- private:
-  [[nodiscard]] bool DoubleBlock(std::vector<float>* img,
-                                 std::vector<float>* txt, std::size_t Si,
-                                 std::size_t St, std::size_t bi,
-                                 std::span<const float> mod_img,
-                                 std::span<const float> mod_txt,
-                                 double* npu_ms, std::string* error);
-  [[nodiscard]] bool SingleBlock(std::vector<float>* img, std::size_t Si,
-                                 std::size_t bi,
-                                 std::span<const float> mod_sgl,
+private:
+  [[nodiscard]] bool DoubleBlock(
+      std::vector<float>* img, std::vector<float>* txt, std::size_t Si,
+      std::size_t St, std::size_t bi, std::span<const float> mod_img,
+      std::span<const float> mod_txt, std::span<const float> rope_cos,
+      std::span<const float> rope_sin, double* npu_ms, std::string* error);
+  [[nodiscard]] bool SingleBlock(std::vector<float>* joint, std::size_t Sj,
+                                 std::size_t bi, std::span<const float> mod_sgl,
+                                 std::span<const float> rope_cos,
+                                 std::span<const float> rope_sin,
                                  double* npu_ms, std::string* error);
 
   FluxDitConfig cfg_;
