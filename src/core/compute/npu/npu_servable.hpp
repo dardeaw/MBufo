@@ -37,11 +37,16 @@ enum class NpuServableState : std::uint8_t {
 [[nodiscard]] inline const char* NpuServableStateName(
     NpuServableState s) noexcept {
   switch (s) {
-    case NpuServableState::kUnloaded: return "unloaded";
-    case NpuServableState::kLoading:  return "loading";
-    case NpuServableState::kWarming:  return "warming";
-    case NpuServableState::kReady:    return "ready";
-    case NpuServableState::kFailed:   return "failed";
+    case NpuServableState::kUnloaded:
+      return "unloaded";
+    case NpuServableState::kLoading:
+      return "loading";
+    case NpuServableState::kWarming:
+      return "warming";
+    case NpuServableState::kReady:
+      return "ready";
+    case NpuServableState::kFailed:
+      return "failed";
   }
   return "unknown";
 }
@@ -57,7 +62,7 @@ struct NpuServableStatus {
 
 /// Thread-safe state holder embedded by every servable implementation.
 class NpuServableTracker {
- public:
+public:
   [[nodiscard]] NpuServableStatus Snapshot() const {
     std::lock_guard<std::mutex> lock(mu_);
     return status_;
@@ -66,7 +71,9 @@ class NpuServableTracker {
     std::lock_guard<std::mutex> lock(mu_);
     return status_.state;
   }
-  [[nodiscard]] bool ready() const { return state() == NpuServableState::kReady; }
+  [[nodiscard]] bool ready() const {
+    return state() == NpuServableState::kReady;
+  }
 
   void Set(NpuServableState s) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -100,29 +107,29 @@ class NpuServableTracker {
     status_ = NpuServableStatus{};
   }
 
- private:
+private:
   mutable std::mutex mu_;
   NpuServableStatus status_;
 };
 
 /// What to do when Warmup fails after a successful Load.
 enum class NpuWarmupPolicy : std::uint8_t {
-  kRequired,  ///< Warmup failure => kFailed (model never reports Ready).
-  kBestEffort ///< Warmup failure => still Ready, `warmed=false`, error kept.
+  kRequired,   ///< Warmup failure => kFailed (model never reports Ready).
+  kBestEffort  ///< Warmup failure => still Ready, `warmed=false`, error kept.
 };
 
 struct NpuLoadArgs {
   std::string artifact;  ///< weights dir / model path / sidecar spec id
   std::string quant;     ///< "q8" | "q4" | "" (model default)
   NpuWarmupPolicy warmup_policy{NpuWarmupPolicy::kRequired};
-  bool warmup{true};     ///< false = Load only (legacy behaviour)
+  bool warmup{true};  ///< false = Load only (legacy behaviour)
 };
 
 /// The single contract. Implementations only fill in Open/Warm/Close; the
 /// lifecycle (timing, state transitions, error capture) lives in the base so
 /// every servable behaves identically.
 class INpuServable {
- public:
+public:
   virtual ~INpuServable() = default;
 
   [[nodiscard]] virtual std::string_view id() const noexcept = 0;
@@ -130,7 +137,8 @@ class INpuServable {
   /// Load + (optional) warmup under one state machine. Idempotent: calling it
   /// on an already-Ready servable is a no-op success.
   [[nodiscard]] bool Load(const NpuLoadArgs& args, std::string* error) {
-    if (tracker_.ready()) return true;
+    if (tracker_.ready())
+      return true;
     using Clock = std::chrono::steady_clock;
     const auto ms = [](Clock::time_point a, Clock::time_point b) {
       return std::chrono::duration<double, std::milli>(b - a).count();
@@ -140,7 +148,8 @@ class INpuServable {
     std::string err;
     if (!Open(args, &err)) {
       tracker_.Fail(err.empty() ? "open failed" : err);
-      if (error != nullptr) *error = tracker_.Snapshot().last_error;
+      if (error != nullptr)
+        *error = tracker_.Snapshot().last_error;
       return false;
     }
     const auto t1 = Clock::now();
@@ -153,7 +162,8 @@ class INpuServable {
         if (args.warmup_policy == NpuWarmupPolicy::kRequired) {
           Close();
           tracker_.Fail("warmup: " + msg);
-          if (error != nullptr) *error = tracker_.Snapshot().last_error;
+          if (error != nullptr)
+            *error = tracker_.Snapshot().last_error;
           return false;
         }
         tracker_.SoftWarmMiss("warmup: " + msg);
@@ -171,14 +181,16 @@ class INpuServable {
   [[nodiscard]] bool Rewarm(std::string* error) {
     const auto st = tracker_.state();
     if (st != NpuServableState::kReady && st != NpuServableState::kFailed) {
-      if (error != nullptr) *error = "servable is not open";
+      if (error != nullptr)
+        *error = "servable is not open";
       return false;
     }
     const auto t = std::chrono::steady_clock::now();
     std::string err;
     if (!Warm(&err)) {
       tracker_.SoftWarmMiss("warmup: " + (err.empty() ? "failed" : err));
-      if (error != nullptr) *error = tracker_.Snapshot().last_error;
+      if (error != nullptr)
+        *error = tracker_.Snapshot().last_error;
       return false;
     }
     tracker_.SetWarmed(std::chrono::duration<double, std::milli>(
@@ -196,7 +208,7 @@ class INpuServable {
   [[nodiscard]] NpuServableStatus Status() const { return tracker_.Snapshot(); }
   [[nodiscard]] bool Ready() const { return tracker_.ready(); }
 
- protected:
+protected:
   /// Acquire resources (weights, xclbins, process). Must be repeat-safe.
   [[nodiscard]] virtual bool Open(const NpuLoadArgs& args,
                                   std::string* error) = 0;
@@ -205,16 +217,17 @@ class INpuServable {
   /// Release resources. Must tolerate being called when not open.
   virtual void Close() = 0;
 
- private:
+private:
   NpuServableTracker tracker_;
 };
 
-/// Adapter for runtimes whose lifetime is owned elsewhere (bge-m3, bge-reranker,
-/// EmbeddingGemma 2 live inside their serve backends). The three hooks are the
-/// existing load / dummy-inference / release code, so nothing is re-implemented
-/// and the lifecycle + status still come from the shared contract.
+/// Adapter for runtimes whose lifetime is owned elsewhere (bge-m3,
+/// bge-reranker, EmbeddingGemma 2 live inside their serve backends). The three
+/// hooks are the existing load / dummy-inference / release code, so nothing is
+/// re-implemented and the lifecycle + status still come from the shared
+/// contract.
 class NpuFnServable final : public INpuServable {
- public:
+public:
   using OpenFn = std::function<bool(const NpuLoadArgs&, std::string*)>;
   using WarmFn = std::function<bool(std::string*)>;
   using CloseFn = std::function<void()>;
@@ -227,16 +240,17 @@ class NpuFnServable final : public INpuServable {
 
   [[nodiscard]] std::string_view id() const noexcept override { return id_; }
 
- protected:
+protected:
   bool Open(const NpuLoadArgs& a, std::string* e) override {
     return open_ ? open_(a, e) : true;
   }
   bool Warm(std::string* e) override { return warm_ ? warm_(e) : true; }
   void Close() override {
-    if (close_) close_();
+    if (close_)
+      close_();
   }
 
- private:
+private:
   std::string id_;
   OpenFn open_;
   WarmFn warm_;
@@ -246,7 +260,7 @@ class NpuFnServable final : public INpuServable {
 /// Process-wide view of every NPU servable so the admin API can report one
 /// uniform status regardless of how the model is hosted.
 class NpuServableRegistry {
- public:
+public:
   static NpuServableRegistry& Global() {
     static NpuServableRegistry r;
     return r;
@@ -263,11 +277,12 @@ class NpuServableRegistry {
   Snapshot() const {
     std::lock_guard<std::mutex> lock(mu_);
     std::vector<std::pair<std::string, NpuServableStatus>> out;
-    for (const auto& [k, v] : map_) out.emplace_back(k, v->Status());
+    for (const auto& [k, v] : map_)
+      out.emplace_back(k, v->Status());
     return out;
   }
 
- private:
+private:
   mutable std::mutex mu_;
   std::map<std::string, std::shared_ptr<INpuServable>> map_;
 };

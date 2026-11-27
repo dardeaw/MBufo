@@ -10,13 +10,13 @@ using namespace mbufo::core::npu;
 namespace {
 
 int g_failures = 0;
-#define CHECK(cond)                                                       \
-  do {                                                                    \
-    if (!(cond)) {                                                        \
-      std::cerr << "FAIL " << __FILE__ << ":" << __LINE__ << " " #cond    \
-                << "\n";                                                  \
-      ++g_failures;                                                       \
-    }                                                                     \
+#define CHECK(cond)                                                    \
+  do {                                                                 \
+    if (!(cond)) {                                                     \
+      std::cerr << "FAIL " << __FILE__ << ":" << __LINE__ << " " #cond \
+                << "\n";                                               \
+      ++g_failures;                                                    \
+    }                                                                  \
   } while (0)
 
 struct Fake final : INpuServable {
@@ -25,15 +25,21 @@ struct Fake final : INpuServable {
   int opens{0}, warms{0}, closes{0};
   std::string_view id() const noexcept override { return "fake"; }
 
- protected:
+protected:
   bool Open(const NpuLoadArgs&, std::string* e) override {
     ++opens;
-    if (!open_ok) { *e = "no weights"; return false; }
+    if (!open_ok) {
+      *e = "no weights";
+      return false;
+    }
     return true;
   }
   bool Warm(std::string* e) override {
     ++warms;
-    if (!warm_ok) { *e = "kernel timeout"; return false; }
+    if (!warm_ok) {
+      *e = "kernel timeout";
+      return false;
+    }
     return true;
   }
   void Close() override { ++closes; }
@@ -126,6 +132,7 @@ int main() {
     NpuServableRegistry::Global().Remove("fn");
     CHECK(NpuServableRegistry::Global().Snapshot().empty());
   }
-  if (g_failures == 0) std::cout << "NPU_SERVABLE_CONTRACT_TESTS_PASS\n";
+  if (g_failures == 0)
+    std::cout << "NPU_SERVABLE_CONTRACT_TESTS_PASS\n";
   return g_failures == 0 ? 0 : 1;
 }

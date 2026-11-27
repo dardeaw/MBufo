@@ -546,7 +546,8 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
     row["external"] = st.external;
     row["warm"] = st.warm;
     row["warmup_ms"] = st.warmup_ms;
-    if (!st.warmup_error.empty()) row["warmup_error"] = st.warmup_error;
+    if (!st.warmup_error.empty())
+      row["warmup_error"] = st.warmup_error;
     row["ready"] = st.running && (st.warm || st.warmup_skipped);
     row["lru_rank"] = -1;
     if (spec->kind == SidecarLaunchSpec::Kind::kPyImageSidecar) {
@@ -948,7 +949,9 @@ HttpResponse ModelAdminService::HandleCatalog(const HttpRequest& req) {
     item["npu_capable"] =
         id_lower.find("bge-m3") != std::string::npos ||
         id_lower.find("embeddinggemma") != std::string::npos ||
-        id_lower.find("bge-reranker") != std::string::npos;
+        id_lower.find("bge-reranker") != std::string::npos ||
+        id_lower.find("qwen3-embedding") != std::string::npos ||
+        id_lower.find("qwen3-reranker") != std::string::npos;
     item["size_mib"] = f.size_bytes >> 20;
     item["file_size_mib"] = f.size_bytes >> 20;
     item["estimated_resident_mib"] = est_bytes >> 20;

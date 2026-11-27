@@ -129,7 +129,8 @@ class NpuServableHost {
   bool Warm(const std::string& id, std::string* error) {
     namespace npu = mbufo::core::npu;
     if (!IsLoaded(id)) {
-      if (error != nullptr) *error = "servable not loaded: " + id;
+      if (error != nullptr)
+        *error = "servable not loaded: " + id;
       return false;
     }
     const auto out = RunNpuWarmup(id, [&](std::string* e) {
@@ -155,7 +156,8 @@ class NpuServableHost {
     wi.warmed = out.ok;
     wi.ms = out.ms;
     wi.error = out.error;
-    if (!out.ok && error != nullptr) *error = out.error;
+    if (!out.ok && error != nullptr)
+      *error = out.error;
     return out.ok;
   }
 

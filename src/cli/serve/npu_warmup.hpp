@@ -31,7 +31,8 @@ struct NpuWarmupOutcome {
 inline NpuWarmupOutcome RunNpuWarmup(
     const std::string& model, const std::function<bool(std::string*)>& fn) {
   NpuWarmupOutcome out;
-  if (!NpuWarmupEnabled()) return out;
+  if (!NpuWarmupEnabled())
+    return out;
   out.ran = true;
   const auto t0 = std::chrono::steady_clock::now();
   try {
@@ -66,16 +67,16 @@ inline bool LoadNpuServable(const std::string& id,
   npu::NpuLoadArgs args;
   args.warmup = NpuWarmupEnabled();
   args.warmup_policy = npu::NpuWarmupPolicy::kBestEffort;
-  if (!s->Load(args, error)) return false;
+  if (!s->Load(args, error))
+    return false;
   const auto st = s->Status();
-  Logger::Info("loader", "event=npu_servable model=" + id +
-                             " state=" + npu::NpuServableStateName(st.state) +
-                             " load_ms=" + std::to_string(st.load_ms) +
-                             " warm=" + (st.warmed ? "true" : "false") +
-                             " warmup_ms=" + std::to_string(st.warmup_ms) +
-                             (st.last_error.empty()
-                                  ? ""
-                                  : " error=" + st.last_error));
+  Logger::Info("loader",
+               "event=npu_servable model=" + id +
+                   " state=" + npu::NpuServableStateName(st.state) +
+                   " load_ms=" + std::to_string(st.load_ms) +
+                   " warm=" + (st.warmed ? "true" : "false") +
+                   " warmup_ms=" + std::to_string(st.warmup_ms) +
+                   (st.last_error.empty() ? "" : " error=" + st.last_error));
   npu::NpuServableRegistry::Global().Put(id, std::move(s));
   return true;
 }

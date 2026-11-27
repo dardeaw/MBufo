@@ -270,23 +270,33 @@ namespace {
 
 // ---- SidecarManager internals (POSIX only; header-only API above) ----
 
-
 // ---- Warmup (M1): dummy request per sidecar kind ----
 
 std::string SilentWav16kMono(double seconds) {
-  const std::uint32_t samples =
-      static_cast<std::uint32_t>(seconds * 16000.0);
+  const std::uint32_t samples = static_cast<std::uint32_t>(seconds * 16000.0);
   const std::uint32_t data_bytes = samples * 2;
   std::string w;
   auto u32 = [&](std::uint32_t v) {
-    for (int i = 0; i < 4; ++i) w.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
+    for (int i = 0; i < 4; ++i)
+      w.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
   };
   auto u16 = [&](std::uint16_t v) {
-    for (int i = 0; i < 2; ++i) w.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
+    for (int i = 0; i < 2; ++i)
+      w.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
   };
-  w += "RIFF"; u32(36 + data_bytes); w += "WAVE";
-  w += "fmt "; u32(16); u16(1); u16(1); u32(16000); u32(32000); u16(2); u16(16);
-  w += "data"; u32(data_bytes);
+  w += "RIFF";
+  u32(36 + data_bytes);
+  w += "WAVE";
+  w += "fmt ";
+  u32(16);
+  u16(1);
+  u16(1);
+  u32(16000);
+  u32(32000);
+  u16(2);
+  u16(16);
+  w += "data";
+  u32(data_bytes);
   w.append(data_bytes, '\0');
   return w;
 }
@@ -298,11 +308,13 @@ bool PostBlocking(const std::string& base_url, const std::string& path,
     EnsureCurlGlobalInit();
     const CurlPtr curl(curl_easy_init());
     if (!curl) {
-      if (error != nullptr) *error = "curl init failed";
+      if (error != nullptr)
+        *error = "curl init failed";
       return false;
     }
     std::string url = base_url;
-    while (!url.empty() && url.back() == '/') url.pop_back();
+    while (!url.empty() && url.back() == '/')
+      url.pop_back();
     url += path;
     std::string sink;
     curl_slist* hdrs = nullptr;
@@ -322,7 +334,8 @@ bool PostBlocking(const std::string& base_url, const std::string& path,
     const CURLcode rc = curl_easy_perform(curl.get());
     curl_slist_free_all(hdrs);
     if (rc != CURLE_OK) {
-      if (error != nullptr) *error = curl_easy_strerror(rc);
+      if (error != nullptr)
+        *error = curl_easy_strerror(rc);
       return false;
     }
     long code = 0;
@@ -335,7 +348,8 @@ bool PostBlocking(const std::string& base_url, const std::string& path,
     }
     return true;
   } catch (const std::exception& e) {
-    if (error != nullptr) *error = e.what();
+    if (error != nullptr)
+      *error = e.what();
     return false;
   }
 }
@@ -695,7 +709,8 @@ SidecarWarmupRequest WarmupRequestFor(const SidecarLaunchSpec& spec) {
     r.body += SilentWav16kMono(0.5);
     r.body += "\r\n--" + boundary +
               "\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
-              "warmup\r\n--" + boundary + "--\r\n";
+              "warmup\r\n--" +
+              boundary + "--\r\n";
   } else if (spec.task == "tts") {
     r.path = spec.endpoint;
     r.content_type = "application/json";
@@ -782,13 +797,15 @@ std::vector<SidecarManager::Status> SidecarManager::ListRunning() {
 bool SidecarManager::Warmup(const std::string& id, std::string* error) {
   const SidecarLaunchSpec* spec = FindSidecarSpec(id);
   if (spec == nullptr) {
-    if (error != nullptr) *error = "unknown sidecar id: " + id;
+    if (error != nullptr)
+      *error = "unknown sidecar id: " + id;
     return false;
   }
   auto record = [&](bool warm, bool skipped, double ms, const std::string& e) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = table_.find(id);
-    if (it == table_.end()) return;
+    if (it == table_.end())
+      return;
     it->second.warm = warm;
     it->second.warmup_skipped = skipped;
     it->second.warmup_ms = ms;
@@ -807,7 +824,8 @@ bool SidecarManager::Warmup(const std::string& id, std::string* error) {
                         std::chrono::steady_clock::now() - t0)
                         .count();
   record(ok, false, ms, ok ? std::string() : err);
-  if (!ok && error != nullptr) *error = err;
+  if (!ok && error != nullptr)
+    *error = err;
   return ok;
 }
 
