@@ -17,6 +17,7 @@
 #include <span>
 #include <string>
 #include <vector>
+
 #include "src/core/compute/npu/npu_quant_gemm.hpp"
 #include "src/core/compute/npu/npu_shard_reader.hpp"
 
@@ -33,8 +34,8 @@ inline void RmsNormRows(const float* x, const float* w_or_null,
     for (std::size_t c = 0; c < cols; ++c) {
       ss += static_cast<double>(xr[c]) * static_cast<double>(xr[c]);
     }
-    const float inv =
-        static_cast<float>(1.0 / std::sqrt(ss / static_cast<double>(cols) + eps));
+    const float inv = static_cast<float>(
+        1.0 / std::sqrt(ss / static_cast<double>(cols) + eps));
     for (std::size_t c = 0; c < cols; ++c) {
       yr[c] = xr[c] * inv * (w_or_null != nullptr ? w_or_null[c] : 1.0F);
     }
@@ -42,7 +43,8 @@ inline void RmsNormRows(const float* x, const float* w_or_null,
 }
 
 inline void SiluInPlace(std::vector<float>& v) {
-  for (float& x : v) x = x / (1.0F + std::exp(-x));
+  for (float& x : v)
+    x = x / (1.0F + std::exp(-x));
 }
 
 /// LayerNorm without affine (Flux/Z-Image blocks use elementwise_affine=False).
@@ -53,7 +55,8 @@ inline void LayerNormRows(const float* x, std::size_t rows, std::size_t cols,
     const float* xr = x + r * cols;
     float* yr = out->data() + r * cols;
     double sum = 0.0;
-    for (std::size_t c = 0; c < cols; ++c) sum += (double)xr[c];
+    for (std::size_t c = 0; c < cols; ++c)
+      sum += (double)xr[c];
     const double mean = sum / (double)cols;
     double var = 0.0;
     for (std::size_t c = 0; c < cols; ++c) {
@@ -77,7 +80,8 @@ inline void FluxRopeTables(std::span<const std::int32_t> pos_ids,
                            std::vector<float>* cos_out,
                            std::vector<float>* sin_out) {
   std::size_t total_dim = 0;
-  for (std::size_t a = 0; a < n_axes; ++a) total_dim += axes_dims[a];
+  for (std::size_t a = 0; a < n_axes; ++a)
+    total_dim += axes_dims[a];
   cos_out->assign(rows * total_dim, 0.0F);
   sin_out->assign(rows * total_dim, 0.0F);
   std::size_t dim_off = 0;
@@ -110,7 +114,8 @@ inline void RopeApplyTables(std::vector<float>* qkv, std::size_t rows,
                             std::size_t dim, std::span<const float> cos_t,
                             std::span<const float> sin_t,
                             std::size_t total_dim = 0) {
-  if (total_dim == 0) total_dim = dim;
+  if (total_dim == 0)
+    total_dim = dim;
   const std::size_t heads = dim / total_dim;
   for (std::size_t s = 0; s < rows; ++s) {
     float* v = qkv->data() + s * dim;
@@ -135,8 +140,8 @@ inline void RopeApplyTables(std::vector<float>* qkv, std::size_t rows,
 inline void TimestepSinusoid(float sigma, std::vector<float>* out) {
   out->assign(256, 0.0F);
   for (std::size_t i = 0; i < 128; ++i) {
-    const float freq = std::pow(10000.0F, -static_cast<float>(i) / 128.0F) *
-                       sigma * 1000.0F;
+    const float freq =
+        std::pow(10000.0F, -static_cast<float>(i) / 128.0F) * sigma * 1000.0F;
     (*out)[i] = std::cos(freq);
     (*out)[128 + i] = std::sin(freq);
   }
@@ -168,7 +173,8 @@ inline float CosineSimHost(std::span<const float> a, std::span<const float> b) {
     na += static_cast<double>(a[i]) * static_cast<double>(a[i]);
     nb += static_cast<double>(b[i]) * static_cast<double>(b[i]);
   }
-  if (na <= 0.0 || nb <= 0.0) return 0.0F;
+  if (na <= 0.0 || nb <= 0.0)
+    return 0.0F;
   return static_cast<float>(dot / (std::sqrt(na) * std::sqrt(nb)));
 }
 
@@ -193,15 +199,17 @@ inline void RopeAttn(const std::vector<float>& q_in,
       float* qh = q.data() + t * qd + h * head_dim;
       if (!q_norm_w.empty()) {
         double ss = 0.0;
-        for (std::size_t i = 0; i < head_dim; ++i) ss += (double)qh[i] * qh[i];
-        const float inv =
-            static_cast<float>(1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
-        for (std::size_t i = 0; i < head_dim; ++i) qh[i] = qh[i] * inv * q_norm_w[i];
+        for (std::size_t i = 0; i < head_dim; ++i)
+          ss += (double)qh[i] * qh[i];
+        const float inv = static_cast<float>(
+            1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
+        for (std::size_t i = 0; i < head_dim; ++i)
+          qh[i] = qh[i] * inv * q_norm_w[i];
       }
       if (rope_theta > 0.0F) {
         for (std::size_t i = 0; i < half; ++i) {
-          const double freq = std::pow((double)rope_theta,
-                                       -2.0 * (double)i / (double)head_dim);
+          const double freq =
+              std::pow((double)rope_theta, -2.0 * (double)i / (double)head_dim);
           const double ang = (double)t * freq;
           const float cs = (float)std::cos(ang), sn = (float)std::sin(ang);
           const float x0 = qh[i], x1 = qh[half + i];
@@ -214,15 +222,17 @@ inline void RopeAttn(const std::vector<float>& q_in,
       float* kh = k.data() + t * kd + h * head_dim;
       if (!k_norm_w.empty()) {
         double ss = 0.0;
-        for (std::size_t i = 0; i < head_dim; ++i) ss += (double)kh[i] * kh[i];
-        const float inv =
-            static_cast<float>(1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
-        for (std::size_t i = 0; i < head_dim; ++i) kh[i] = kh[i] * inv * k_norm_w[i];
+        for (std::size_t i = 0; i < head_dim; ++i)
+          ss += (double)kh[i] * kh[i];
+        const float inv = static_cast<float>(
+            1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
+        for (std::size_t i = 0; i < head_dim; ++i)
+          kh[i] = kh[i] * inv * k_norm_w[i];
       }
       if (rope_theta > 0.0F) {
         for (std::size_t i = 0; i < half; ++i) {
-          const double freq = std::pow((double)rope_theta,
-                                       -2.0 * (double)i / (double)head_dim);
+          const double freq =
+              std::pow((double)rope_theta, -2.0 * (double)i / (double)head_dim);
           const double ang = (double)t * freq;
           const float cs = (float)std::cos(ang), sn = (float)std::sin(ang);
           const float x0 = kh[i], x1 = kh[half + i];
@@ -245,10 +255,12 @@ inline void RopeAttn(const std::vector<float>& q_in,
       for (std::size_t tk = 0; tk < tk_max; ++tk) {
         const float* kvec = k.data() + tk * kd + kvh * head_dim;
         double dot = 0.0;
-        for (std::size_t i = 0; i < head_dim; ++i) dot += (double)qvec[i] * kvec[i];
+        for (std::size_t i = 0; i < head_dim; ++i)
+          dot += (double)qvec[i] * kvec[i];
         const float s = (float)dot * scale;
         scores[tk] = s;
-        if (s > max_s) max_s = s;
+        if (s > max_s)
+          max_s = s;
       }
       double sum_exp = 0.0;
       for (std::size_t tk = 0; tk < tk_max; ++tk) {
@@ -261,7 +273,8 @@ inline void RopeAttn(const std::vector<float>& q_in,
       for (std::size_t tk = 0; tk < tk_max; ++tk) {
         const float p = scores[tk] * inv_sum;
         const float* vvec = v_in.data() + tk * kd + kvh * head_dim;
-        for (std::size_t i = 0; i < head_dim; ++i) cdst[i] += p * vvec[i];
+        for (std::size_t i = 0; i < head_dim; ++i)
+          cdst[i] += p * vvec[i];
       }
     }
   }
@@ -271,18 +284,14 @@ inline void RopeAttn(const std::vector<float>& q_in,
 /// QK RMS-norm (weights per head dim). q [Sq,qd], k/v [Sk,kd]; rope tables
 /// cover q rows (cos_q/sin_q) and k rows (cos_k/sin_k) separately. Full
 /// (non-causal) softmax at 1/sqrt(hd). Used by the true-port FLUX blocks.
-inline void JointAttnTables(const std::vector<float>& q_in,
-                            const std::vector<float>& k_in,
-                            const std::vector<float>& v_in,
-                            std::span<const float> q_norm_w,
-                            std::span<const float> k_norm_w, std::size_t Sq,
-                            std::size_t Sk, std::size_t n_heads,
-                            std::size_t n_kv_heads, std::size_t head_dim,
-                            std::span<const float> cos_q,
-                            std::span<const float> sin_q,
-                            std::span<const float> cos_k,
-                            std::span<const float> sin_k, float rms_eps,
-                            std::vector<float>* ctx_out) {
+inline void JointAttnTables(
+    const std::vector<float>& q_in, const std::vector<float>& k_in,
+    const std::vector<float>& v_in, std::span<const float> q_norm_w,
+    std::span<const float> k_norm_w, std::size_t Sq, std::size_t Sk,
+    std::size_t n_heads, std::size_t n_kv_heads, std::size_t head_dim,
+    std::span<const float> cos_q, std::span<const float> sin_q,
+    std::span<const float> cos_k, std::span<const float> sin_k, float rms_eps,
+    std::vector<float>* ctx_out) {
   const std::size_t qd = n_heads * head_dim;
   const std::size_t kd = n_kv_heads * head_dim;
   std::vector<float> q = q_in;
@@ -293,9 +302,12 @@ inline void JointAttnTables(const std::vector<float>& q_in,
       if (!q_norm_w.empty()) {
         const float* nw = q_norm_w.data() + t * qd + h * head_dim;
         double ss = 0.0;
-        for (std::size_t i = 0; i < head_dim; ++i) ss += (double)qh[i] * qh[i];
-        const float inv = static_cast<float>(1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
-        for (std::size_t i = 0; i < head_dim; ++i) qh[i] = qh[i] * inv * nw[i];
+        for (std::size_t i = 0; i < head_dim; ++i)
+          ss += (double)qh[i] * qh[i];
+        const float inv = static_cast<float>(
+            1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
+        for (std::size_t i = 0; i < head_dim; ++i)
+          qh[i] = qh[i] * inv * nw[i];
       }
     }
   }
@@ -305,9 +317,12 @@ inline void JointAttnTables(const std::vector<float>& q_in,
       if (!k_norm_w.empty()) {
         const float* nw = k_norm_w.data() + t * kd + h * head_dim;
         double ss = 0.0;
-        for (std::size_t i = 0; i < head_dim; ++i) ss += (double)kh[i] * kh[i];
-        const float inv = static_cast<float>(1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
-        for (std::size_t i = 0; i < head_dim; ++i) kh[i] = kh[i] * inv * nw[i];
+        for (std::size_t i = 0; i < head_dim; ++i)
+          ss += (double)kh[i] * kh[i];
+        const float inv = static_cast<float>(
+            1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
+        for (std::size_t i = 0; i < head_dim; ++i)
+          kh[i] = kh[i] * inv * nw[i];
       }
     }
   }
@@ -325,10 +340,12 @@ inline void JointAttnTables(const std::vector<float>& q_in,
       for (std::size_t tk = 0; tk < Sk; ++tk) {
         const float* kvec = k.data() + tk * kd + kvh * head_dim;
         double dot = 0.0;
-        for (std::size_t i = 0; i < head_dim; ++i) dot += (double)qvec[i] * kvec[i];
+        for (std::size_t i = 0; i < head_dim; ++i)
+          dot += (double)qvec[i] * kvec[i];
         const float s = (float)dot * scale;
         scores[tk] = s;
-        if (s > max_s) max_s = s;
+        if (s > max_s)
+          max_s = s;
       }
       double sum_exp = 0.0;
       for (std::size_t tk = 0; tk < Sk; ++tk) {
@@ -341,7 +358,8 @@ inline void JointAttnTables(const std::vector<float>& q_in,
       for (std::size_t tk = 0; tk < Sk; ++tk) {
         const float p = scores[tk] * inv_sum;
         const float* vvec = v_in.data() + tk * kd + kvh * head_dim;
-        for (std::size_t i = 0; i < head_dim; ++i) cdst[i] += p * vvec[i];
+        for (std::size_t i = 0; i < head_dim; ++i)
+          cdst[i] += p * vvec[i];
       }
     }
   }
@@ -349,7 +367,7 @@ inline void JointAttnTables(const std::vector<float>& q_in,
 
 /// Streamed NPU linear: read f32 [N,K] (+ optional [N] bias), pack, GEMM.
 class DitNpuLinear {
- public:
+public:
   DitNpuLinear() = default;
   void Bind(NpuShardReader* reader, NpuQuantGemmEngine* engine,
             NpuQuantMode mode) {
@@ -358,15 +376,17 @@ class DitNpuLinear {
     mode_ = mode;
   }
   [[nodiscard]] bool Run(const std::string& weight_name,
-                         const std::string& bias_name,
-                         std::span<const float> x, std::size_t M,
-                         std::size_t N, std::size_t K, std::vector<float>* y,
-                         double* npu_ms, std::string* error) {
+                         const std::string& bias_name, std::span<const float> x,
+                         std::size_t M, std::size_t N, std::size_t K,
+                         std::vector<float>* y, double* npu_ms,
+                         std::string* error) {
     std::vector<float> w, b;
-    if (!reader_->ReadF32(weight_name, N * K, &w, error)) return false;
+    if (!reader_->ReadF32(weight_name, N * K, &w, error))
+      return false;
     const float* bp = nullptr;
     if (!bias_name.empty()) {
-      if (!reader_->ReadF32(bias_name, N, &b, error)) return false;
+      if (!reader_->ReadF32(bias_name, N, &b, error))
+        return false;
       bp = b.data();
     }
     // Diagnostic: NPU_HOST_GEMM=1 forces host FP32 (isolates math vs quant).
@@ -390,7 +410,7 @@ class DitNpuLinear {
     return engine_->Gemm(x.data(), M, qm, y->data(), bp, npu_ms, error);
   }
 
- private:
+private:
   NpuShardReader* reader_ = nullptr;
   NpuQuantGemmEngine* engine_ = nullptr;
   NpuQuantMode mode_ = NpuQuantMode::kQ8Bfp16;

@@ -17,10 +17,12 @@ bool FluxDitNpu::Open(const std::string& transformer_dir,
                       NpuQuantGemmEngine* engine, NpuQuantMode mode,
                       const FluxDitConfig& config, std::string* error) {
   if (engine == nullptr || !engine->ready()) {
-    if (error != nullptr) *error = "NPU engine not ready";
+    if (error != nullptr)
+      *error = "NPU engine not ready";
     return false;
   }
-  if (!NpuShardReader::OpenDir(transformer_dir, &reader_, error)) return false;
+  if (!NpuShardReader::OpenDir(transformer_dir, &reader_, error))
+    return false;
   engine_ = engine;
   mode_ = mode;
   cfg_ = config;
@@ -46,7 +48,8 @@ bool FluxDitNpu::TimestepEmbed(float sigma, std::vector<float>* temb,
 bool FluxDitNpu::Modulations(std::span<const float> temb, FluxModulations* mod,
                              double* npu_ms, std::string* error) {
   if (temb.size() < cfg_.d) {
-    if (error != nullptr) *error = "bad temb";
+    if (error != nullptr)
+      *error = "bad temb";
     return false;
   }
   // Flux2Modulation.forward: SiLU(temb) BEFORE the linear.
@@ -63,15 +66,15 @@ bool FluxDitNpu::Modulations(std::span<const float> temb, FluxModulations* mod,
 bool FluxDitNpu::EncodeContext(std::span<const float> cond7680,
                                std::size_t tokens, std::vector<float>* txt,
                                double* npu_ms, std::string* error) {
-  return lin_.Run("context_embedder.weight", "", cond7680, tokens, cfg_.d,
-                  7680, txt, npu_ms, error);
+  return lin_.Run("context_embedder.weight", "", cond7680, tokens, cfg_.d, 7680,
+                  txt, npu_ms, error);
 }
 
 bool FluxDitNpu::XEmbed(std::span<const float> z, std::size_t patches,
                         std::vector<float>* img, double* npu_ms,
                         std::string* error) {
-  return lin_.Run("x_embedder.weight", "", z, patches, cfg_.d, 128, img,
-                  npu_ms, error);
+  return lin_.Run("x_embedder.weight", "", z, patches, cfg_.d, 128, img, npu_ms,
+                  error);
 }
 
 void FluxDitNpu::BuildRopeTables(std::size_t St, std::size_t Si,
@@ -137,12 +140,18 @@ bool FluxDitNpu::DoubleBlock(std::vector<float>* img, std::vector<float>* txt,
       in_txt[t * D + c] = in_txt[t * D + c] * (1.0F + tsc[c]) + tsh[c];
 
   std::vector<float> qi, ki, vi, qt, kt, vt;
-  if (!lin_.Run(p + "attn.to_q.weight", "", in_img, Si, D, D, &qi, npu_ms, error) ||
-      !lin_.Run(p + "attn.to_k.weight", "", in_img, Si, D, D, &ki, npu_ms, error) ||
-      !lin_.Run(p + "attn.to_v.weight", "", in_img, Si, D, D, &vi, npu_ms, error) ||
-      !lin_.Run(p + "attn.add_q_proj.weight", "", in_txt, St, D, D, &qt, npu_ms, error) ||
-      !lin_.Run(p + "attn.add_k_proj.weight", "", in_txt, St, D, D, &kt, npu_ms, error) ||
-      !lin_.Run(p + "attn.add_v_proj.weight", "", in_txt, St, D, D, &vt, npu_ms, error)) {
+  if (!lin_.Run(p + "attn.to_q.weight", "", in_img, Si, D, D, &qi, npu_ms,
+                error) ||
+      !lin_.Run(p + "attn.to_k.weight", "", in_img, Si, D, D, &ki, npu_ms,
+                error) ||
+      !lin_.Run(p + "attn.to_v.weight", "", in_img, Si, D, D, &vi, npu_ms,
+                error) ||
+      !lin_.Run(p + "attn.add_q_proj.weight", "", in_txt, St, D, D, &qt, npu_ms,
+                error) ||
+      !lin_.Run(p + "attn.add_k_proj.weight", "", in_txt, St, D, D, &kt, npu_ms,
+                error) ||
+      !lin_.Run(p + "attn.add_v_proj.weight", "", in_txt, St, D, D, &vt, npu_ms,
+                error)) {
     return false;
   }
   // Joint [txt; img] attention.
@@ -173,14 +182,15 @@ bool FluxDitNpu::DoubleBlock(std::vector<float>* img, std::vector<float>* txt,
     }
   }
   std::vector<float> ctx;
-  JointAttnTables(q, k, v, qn, kn, S, S, cfg_.heads, cfg_.heads,
-                  cfg_.head_dim, rope_cos, rope_sin, rope_cos, rope_sin,
-                  cfg_.eps, &ctx);
+  JointAttnTables(q, k, v, qn, kn, S, S, cfg_.heads, cfg_.heads, cfg_.head_dim,
+                  rope_cos, rope_sin, rope_cos, rope_sin, cfg_.eps, &ctx);
   std::vector<float> oi, ot;
   std::vector<float> ctx_t(ctx.begin(), ctx.begin() + St * D);
   std::vector<float> ctx_i(ctx.begin() + St * D, ctx.end());
-  if (!lin_.Run(p + "attn.to_out.0.weight", "", ctx_i, Si, D, D, &oi, npu_ms, error) ||
-      !lin_.Run(p + "attn.to_add_out.weight", "", ctx_t, St, D, D, &ot, npu_ms, error)) {
+  if (!lin_.Run(p + "attn.to_out.0.weight", "", ctx_i, Si, D, D, &oi, npu_ms,
+                error) ||
+      !lin_.Run(p + "attn.to_add_out.weight", "", ctx_t, St, D, D, &ot, npu_ms,
+                error)) {
     return false;
   }
   for (std::size_t t = 0; t < Si; ++t)
@@ -206,8 +216,8 @@ bool FluxDitNpu::DoubleBlock(std::vector<float>* img, std::vector<float>* txt,
       ffi_act[t * 3 * D + c] =
           (ffi_in[t * 6 * D + c] / (1.0F + std::exp(-ffi_in[t * 6 * D + c]))) *
           ffi_in[t * 6 * D + 3 * D + c];
-  if (!lin_.Run(p + "ff.linear_out.weight", "", ffi_act, Si, D, 3 * D,
-                &ffi_out, npu_ms, error)) {
+  if (!lin_.Run(p + "ff.linear_out.weight", "", ffi_act, Si, D, 3 * D, &ffi_out,
+                npu_ms, error)) {
     return false;
   }
   for (std::size_t t = 0; t < Si; ++t)
@@ -262,8 +272,8 @@ bool FluxDitNpu::SingleBlock(std::vector<float>* joint, std::size_t Sj,
     for (std::size_t c = 0; c < D; ++c)
       s_in[t * D + c] = s_in[t * D + c] * (1.0F + scale[c]) + shift[c];
   std::vector<float> qkv_mlp;
-  if (!lin_.Run(p + "to_qkv_mlp_proj.weight", "", s_in, Sj, 9 * D, D,
-                &qkv_mlp, npu_ms, error)) {
+  if (!lin_.Run(p + "to_qkv_mlp_proj.weight", "", s_in, Sj, 9 * D, D, &qkv_mlp,
+                npu_ms, error)) {
     return false;
   }
   std::vector<float> q(Sj * D), k(Sj * D), v(Sj * D);
@@ -277,8 +287,10 @@ bool FluxDitNpu::SingleBlock(std::vector<float>* joint, std::size_t Sj,
   std::vector<float> qn(Sj * D), kn(Sj * D);
   for (std::size_t t = 0; t < Sj; ++t) {
     for (std::size_t h = 0; h < cfg_.heads; ++h) {
-      std::copy(nq_w.begin(), nq_w.end(), qn.begin() + t * D + h * cfg_.head_dim);
-      std::copy(nk_w.begin(), nk_w.end(), kn.begin() + t * D + h * cfg_.head_dim);
+      std::copy(nq_w.begin(), nq_w.end(),
+                qn.begin() + t * D + h * cfg_.head_dim);
+      std::copy(nk_w.begin(), nk_w.end(),
+                kn.begin() + t * D + h * cfg_.head_dim);
     }
   }
   std::vector<float> ctx;
@@ -315,8 +327,8 @@ bool FluxDitNpu::DenoiseBlocks(std::vector<float>* img, std::vector<float>* txt,
                                std::size_t n_double, std::size_t n_single,
                                double* npu_ms, std::string* error) {
   for (std::size_t bi = 0; bi < n_double; ++bi) {
-    if (!DoubleBlock(img, txt, Si, St, bi, mod.img, mod.txt, rope_cos,
-                     rope_sin, npu_ms, error)) {
+    if (!DoubleBlock(img, txt, Si, St, bi, mod.img, mod.txt, rope_cos, rope_sin,
+                     npu_ms, error)) {
       return false;
     }
   }
@@ -336,8 +348,9 @@ bool FluxDitNpu::DenoiseBlocks(std::vector<float>* img, std::vector<float>* txt,
 }
 
 bool FluxDitNpu::VelocityHead(std::span<const float> img, std::size_t Si,
-                             std::span<const float> temb, std::vector<float>* v,
-                             double* npu_ms, std::string* error) {
+                              std::span<const float> temb,
+                              std::vector<float>* v, double* npu_ms,
+                              std::string* error) {
   const std::size_t D = cfg_.d;
   // AdaLayerNormContinuous: SiLU(temb) -> linear -> chunk(shift, scale).
   std::vector<float> act(temb.begin(), temb.end());
@@ -363,13 +376,16 @@ bool FluxDitNpu::FullStep(std::vector<float>* z, std::size_t Si,
                           std::size_t n_single, double* npu_ms,
                           std::string* error) {
   std::vector<float> temb;
-  if (!TimestepEmbed(sigma, &temb, npu_ms, error)) return false;
+  if (!TimestepEmbed(sigma, &temb, npu_ms, error))
+    return false;
   FluxModulations mod;
-  if (!Modulations(temb, &mod, npu_ms, error)) return false;
+  if (!Modulations(temb, &mod, npu_ms, error))
+    return false;
   std::vector<float> rope_cos, rope_sin;
   BuildRopeTables(St, Si, &rope_cos, &rope_sin);
   std::vector<float> img;
-  if (!XEmbed(*z, Si, &img, npu_ms, error)) return false;
+  if (!XEmbed(*z, Si, &img, npu_ms, error))
+    return false;
   if (const char* dp0 = std::getenv("NPU_DUMP_MID")) {
     const std::string pre0 = dp0;
     std::ofstream oi(pre0 + "_in_img.f32", std::ios::binary);
@@ -390,7 +406,8 @@ bool FluxDitNpu::FullStep(std::vector<float>* z, std::size_t Si,
     return false;
   }
   std::vector<float> v;
-  if (!VelocityHead(img, Si, temb, &v, npu_ms, error)) return false;
+  if (!VelocityHead(img, Si, temb, &v, npu_ms, error))
+    return false;
   if (const char* dp = std::getenv("NPU_DUMP_MID")) {
     const std::string pre = dp;
     auto dump = [&](const char* n, const std::vector<float>& x) {
@@ -407,7 +424,8 @@ bool FluxDitNpu::FullStep(std::vector<float>* z, std::size_t Si,
     dump("txt", txt_w);
     dump("v", v);
   }
-  for (std::size_t i = 0; i < Si * 128; ++i) (*z)[i] -= dt * v[i];
+  for (std::size_t i = 0; i < Si * 128; ++i)
+    (*z)[i] -= dt * v[i];
   return true;
 }
 

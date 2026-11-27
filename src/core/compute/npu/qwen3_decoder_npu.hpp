@@ -49,10 +49,13 @@ inline void RmsNormRow(const float* x, const float* w, std::size_t dim,
   }
   const float inv =
       static_cast<float>(1.0 / std::sqrt(ss / static_cast<double>(dim) + eps));
-  for (std::size_t i = 0; i < dim; ++i) y[i] = x[i] * inv * w[i];
+  for (std::size_t i = 0; i < dim; ++i)
+    y[i] = x[i] * inv * w[i];
 }
 
-inline float SiluLocal(float x) noexcept { return x / (1.0F + std::exp(-x)); }
+inline float SiluLocal(float x) noexcept {
+  return x / (1.0F + std::exp(-x));
+}
 
 // Per-head QK-norm then RoPE at absolute position `pos`, in place over
 // [n_vec, head_dim]. Mirrors the parity shell's per-position math.
@@ -68,11 +71,12 @@ inline void QkNormRope(float* t, const float* norm_w, std::size_t n_vec,
     }
     const float inv = static_cast<float>(
         1.0 / std::sqrt(ss / static_cast<double>(head_dim) + rms_eps));
-    for (std::size_t i = 0; i < head_dim; ++i) v[i] = v[i] * inv * norm_w[i];
+    for (std::size_t i = 0; i < head_dim; ++i)
+      v[i] = v[i] * inv * norm_w[i];
     for (std::size_t i = 0; i < half; ++i) {
-      const double freq = std::pow(static_cast<double>(rope_theta),
-                                   -2.0 * static_cast<double>(i) /
-                                       static_cast<double>(head_dim));
+      const double freq = std::pow(
+          static_cast<double>(rope_theta),
+          -2.0 * static_cast<double>(i) / static_cast<double>(head_dim));
       const double ang = static_cast<double>(pos) * freq;
       const float cs = static_cast<float>(std::cos(ang));
       const float sn = static_cast<float>(std::sin(ang));
@@ -87,8 +91,7 @@ inline void QkNormRope(float* t, const float* norm_w, std::size_t n_vec,
 // Single query row q[hd] over K/V [kv_len, hd] (already sliced to one kv
 // head). Softmax scale 1/sqrt(hd), matching the parity shell.
 inline void AttnOneQuery(const float* q, const float* K, const float* V,
-                         std::size_t kv_len, std::size_t head_dim,
-                         float* ctx) {
+                         std::size_t kv_len, std::size_t head_dim, float* ctx) {
   const float scale = 1.0F / std::sqrt(static_cast<float>(head_dim));
   std::vector<float> scores(kv_len);
   float max_s = -1.0e30F;
@@ -100,7 +103,8 @@ inline void AttnOneQuery(const float* q, const float* K, const float* V,
     }
     const float s = static_cast<float>(dot) * scale;
     scores[k] = s;
-    if (s > max_s) max_s = s;
+    if (s > max_s)
+      max_s = s;
   }
   double sum = 0.0;
   for (std::size_t k = 0; k < kv_len; ++k) {
@@ -109,18 +113,20 @@ inline void AttnOneQuery(const float* q, const float* K, const float* V,
     sum += static_cast<double>(e);
   }
   const float inv = (sum > 0.0) ? static_cast<float>(1.0 / sum) : 0.0F;
-  for (std::size_t i = 0; i < head_dim; ++i) ctx[i] = 0.0F;
+  for (std::size_t i = 0; i < head_dim; ++i)
+    ctx[i] = 0.0F;
   for (std::size_t k = 0; k < kv_len; ++k) {
     const float p = scores[k] * inv;
     const float* vvec = V + k * head_dim;
-    for (std::size_t i = 0; i < head_dim; ++i) ctx[i] += p * vvec[i];
+    for (std::size_t i = 0; i < head_dim; ++i)
+      ctx[i] += p * vvec[i];
   }
 }
 
 }  // namespace qwen3_detail
 
 class Qwen3NpuDecoder {
- public:
+public:
   Qwen3NpuDecoder() = default;
 
   [[nodiscard]] bool Open(const std::string& model_dir,
@@ -128,15 +134,17 @@ class Qwen3NpuDecoder {
                           const Qwen3NpuDecoderConfig& config,
                           std::string* error = nullptr) {
     if (engine == nullptr || !engine->ready()) {
-      if (error != nullptr) *error = "NPU engine not ready";
+      if (error != nullptr)
+        *error = "NPU engine not ready";
       return false;
     }
-    if (!NpuShardReader::OpenDir(model_dir, &reader_, error)) return false;
+    if (!NpuShardReader::OpenDir(model_dir, &reader_, error))
+      return false;
     engine_ = engine;
     mode_ = mode;
     cfg_ = config;
     kv_ = kv::GqaKvCache(kv::GqaKvConfig{cfg_.layers, cfg_.n_kv_heads,
-                                        cfg_.head_dim, cfg_.max_seq});
+                                         cfg_.head_dim, cfg_.max_seq});
     if (!reader_.ReadF32(cfg_.norm_key, cfg_.hidden, &final_norm_w_, error)) {
       return false;
     }
@@ -151,16 +159,19 @@ class Qwen3NpuDecoder {
                              double* npu_ms = nullptr,
                              std::string* error = nullptr) {
     if (T == 0 || hidden_rows.size() < T * cfg_.hidden) {
-      if (error != nullptr) *error = "bad prefill input";
+      if (error != nullptr)
+        *error = "bad prefill input";
       return false;
     }
     if (T > cfg_.max_seq) {
-      if (error != nullptr) *error = "prefill exceeds max_seq";
+      if (error != nullptr)
+        *error = "prefill exceeds max_seq";
       return false;
     }
     std::vector<float> h(hidden_rows.begin(),
                          hidden_rows.begin() + T * cfg_.hidden);
-    if (!RunLayers(&h, T, 0, true, npu_ms, error)) return false;
+    if (!RunLayers(&h, T, 0, true, npu_ms, error))
+      return false;
     pos_ = T;
     last_hidden->assign(h.end() - cfg_.hidden, h.end());
     return true;
@@ -173,43 +184,47 @@ class Qwen3NpuDecoder {
                                  double* npu_ms = nullptr,
                                  std::string* error = nullptr) {
     if (T == 0 || hidden_rows.size() < T * cfg_.hidden) {
-      if (error != nullptr) *error = "bad prefill input";
+      if (error != nullptr)
+        *error = "bad prefill input";
       return false;
     }
     if (T > cfg_.max_seq) {
-      if (error != nullptr) *error = "prefill exceeds max_seq";
+      if (error != nullptr)
+        *error = "prefill exceeds max_seq";
       return false;
     }
     all_hidden->assign(hidden_rows.begin(),
                        hidden_rows.begin() + T * cfg_.hidden);
-    if (!RunLayers(all_hidden, T, 0, true, npu_ms, error)) return false;
+    if (!RunLayers(all_hidden, T, 0, true, npu_ms, error))
+      return false;
     pos_ = T;
     return true;
   }
 
   /// Prefill variant with intermediate layer snapshots (TE tap capture:
   /// snapshots are raw post-layer hidden rows, no final norm).
-  [[nodiscard]] bool PrefillFullTaps(std::span<const float> hidden_rows,
-                                    std::size_t T,
-                                    std::span<const std::size_t> tap_layers,
-                                    std::vector<std::vector<float>>* taps,
-                                    std::vector<float>* all_last,
-                                    double* npu_ms = nullptr,
-                                    std::string* error = nullptr,
-                                    const std::vector<std::uint8_t>* key_keep = nullptr) {
+  [[nodiscard]] bool PrefillFullTaps(
+      std::span<const float> hidden_rows, std::size_t T,
+      std::span<const std::size_t> tap_layers,
+      std::vector<std::vector<float>>* taps, std::vector<float>* all_last,
+      double* npu_ms = nullptr, std::string* error = nullptr,
+      const std::vector<std::uint8_t>* key_keep = nullptr) {
     if (T == 0 || hidden_rows.size() < T * cfg_.hidden) {
-      if (error != nullptr) *error = "bad prefill input";
+      if (error != nullptr)
+        *error = "bad prefill input";
       return false;
     }
     if (T > cfg_.max_seq) {
-      if (error != nullptr) *error = "prefill exceeds max_seq";
+      if (error != nullptr)
+        *error = "prefill exceeds max_seq";
       return false;
     }
     std::vector<float> h(hidden_rows.begin(),
                          hidden_rows.begin() + T * cfg_.hidden);
     std::vector<std::size_t> layers(tap_layers.begin(), tap_layers.end());
     taps->clear();
-    if (!RunLayers(&h, T, 0, true, npu_ms, error, &layers, taps, key_keep)) return false;
+    if (!RunLayers(&h, T, 0, true, npu_ms, error, &layers, taps, key_keep))
+      return false;
     pos_ = T;
     *all_last = h;
     return true;
@@ -221,16 +236,18 @@ class Qwen3NpuDecoder {
                                 double* npu_ms = nullptr,
                                 std::string* error = nullptr) {
     if (hidden_row.size() < cfg_.hidden) {
-      if (error != nullptr) *error = "bad decode input";
+      if (error != nullptr)
+        *error = "bad decode input";
       return false;
     }
     if (pos_ >= cfg_.max_seq) {
-      if (error != nullptr) *error = "decode exceeds max_seq";
+      if (error != nullptr)
+        *error = "decode exceeds max_seq";
       return false;
     }
-    std::vector<float> h(hidden_row.begin(),
-                         hidden_row.begin() + cfg_.hidden);
-    if (!RunLayers(&h, 1, pos_, false, npu_ms, error)) return false;
+    std::vector<float> h(hidden_row.begin(), hidden_row.begin() + cfg_.hidden);
+    if (!RunLayers(&h, 1, pos_, false, npu_ms, error))
+      return false;
     ++pos_;
     *next_hidden = std::move(h);
     return true;
@@ -247,12 +264,12 @@ class Qwen3NpuDecoder {
   /// Full logit row over a caller-owned [vocab, hidden] f32 head table.
   [[nodiscard]] bool HeadLogits(std::span<const float> normed_hidden,
                                 std::span<const float> head_table,
-                                std::size_t vocab,
-                                std::vector<float>* logits, double* npu_ms,
-                                std::string* error) {
+                                std::size_t vocab, std::vector<float>* logits,
+                                double* npu_ms, std::string* error) {
     if (normed_hidden.size() < cfg_.hidden ||
         head_table.size() < vocab * cfg_.hidden) {
-      if (error != nullptr) *error = "bad head input";
+      if (error != nullptr)
+        *error = "bad head input";
       return false;
     }
     QuantWeightMatrix qm;
@@ -298,26 +315,24 @@ class Qwen3NpuDecoder {
                                      std::size_t num_rows, std::size_t cols,
                                      std::vector<float>* out,
                                      std::string* error = nullptr) {
-    return reader_.ReadRowSliceF32(name, start_row, num_rows, cols, out,
-                                   error);
+    return reader_.ReadRowSliceF32(name, start_row, num_rows, cols, out, error);
   }
 
   [[nodiscard]] std::size_t pos() const noexcept { return pos_; }
   [[nodiscard]] const Qwen3NpuDecoderConfig& config() const noexcept {
     return cfg_;
   }
-  [[nodiscard]] std::size_t hidden_size() const noexcept {
-    return cfg_.hidden;
-  }
+  [[nodiscard]] std::size_t hidden_size() const noexcept { return cfg_.hidden; }
 
- private:
+private:
   [[nodiscard]] bool LinearNpu(const std::string& weight_name,
                                std::span<const float> x, std::size_t M,
                                std::size_t N, std::size_t K,
                                std::vector<float>* y, double* npu_ms,
                                std::string* error) {
     std::vector<float> w;
-    if (!reader_.ReadF32(weight_name, N * K, &w, error)) return false;
+    if (!reader_.ReadF32(weight_name, N * K, &w, error))
+      return false;
     QuantWeightMatrix qm;
     if (!engine_->PackMatrixNK(w.data(), N, K, mode_, false, &qm, error)) {
       return false;
@@ -329,12 +344,12 @@ class Qwen3NpuDecoder {
     return true;
   }
 
-  [[nodiscard]] bool RunLayers(std::vector<float>* h, std::size_t T,
-                              std::size_t pos_base, bool append_kv,
-                              double* npu_ms, std::string* error,
-                              const std::vector<std::size_t>* tap_layers = nullptr,
-                              std::vector<std::vector<float>>* tap_snaps = nullptr,
-                              const std::vector<std::uint8_t>* key_keep = nullptr) {
+  [[nodiscard]] bool RunLayers(
+      std::vector<float>* h, std::size_t T, std::size_t pos_base,
+      bool append_kv, double* npu_ms, std::string* error,
+      const std::vector<std::size_t>* tap_layers = nullptr,
+      std::vector<std::vector<float>>* tap_snaps = nullptr,
+      const std::vector<std::uint8_t>* key_keep = nullptr) {
     const std::size_t H = cfg_.hidden;
     const std::size_t F = cfg_.inter;
     const std::size_t nh = cfg_.n_heads;
@@ -358,8 +373,7 @@ class Qwen3NpuDecoder {
           !reader_.ReadF32(p + ".post_attention_layernorm.weight", H, &post_w,
                            error) ||
           !reader_.ReadF32(p + ".self_attn.q_norm.weight", hd, &qn_w, error) ||
-          !reader_.ReadF32(p + ".self_attn.k_norm.weight", hd, &kn_w,
-                           error)) {
+          !reader_.ReadF32(p + ".self_attn.k_norm.weight", hd, &kn_w, error)) {
         return false;
       }
       for (std::size_t t = 0; t < T; ++t) {
@@ -390,7 +404,8 @@ class Qwen3NpuDecoder {
             kh_slice.clear();
             vh_slice.clear();
             for (std::size_t k = 0; k <= t; ++k) {
-              if (key_keep != nullptr && (*key_keep)[k] == 0) continue;
+              if (key_keep != nullptr && (*key_keep)[k] == 0)
+                continue;
               const float* ksrc = k_all.data() + k * kd + kvh * hd;
               const float* vsrc = v_all.data() + k * kd + kvh * hd;
               kh_slice.insert(kh_slice.end(), ksrc, ksrc + hd);
@@ -432,7 +447,8 @@ class Qwen3NpuDecoder {
                      npu_ms, error)) {
         return false;
       }
-      for (std::size_t i = 0; i < T * H; ++i) (*h)[i] += tmp[i];
+      for (std::size_t i = 0; i < T * H; ++i)
+        (*h)[i] += tmp[i];
       for (std::size_t t = 0; t < T; ++t) {
         qwen3_detail::RmsNormRow(h->data() + t * H, post_w.data(), H,
                                  cfg_.rms_eps, x.data() + t * H);
@@ -450,7 +466,8 @@ class Qwen3NpuDecoder {
                      error)) {
         return false;
       }
-      for (std::size_t i = 0; i < T * H; ++i) (*h)[i] += down[i];
+      for (std::size_t i = 0; i < T * H; ++i)
+        (*h)[i] += down[i];
       if (tap_layers != nullptr && tap_snaps != nullptr) {
         for (std::size_t tl : *tap_layers) {
           if (tl == li) {

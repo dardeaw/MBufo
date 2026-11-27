@@ -41,11 +41,13 @@ int main() {
   using mbufo::core::npu::NpuQuantMode;
   using mbufo::core::npu::dit::ZImageDitNpu;
   constexpr std::size_t D = 3840;
-  const std::string dir = "/mnt/nvme-data/mbufo-models/z-image-turbo/transformer";
+  const std::string dir =
+      "/mnt/nvme-data/mbufo-models/z-image-turbo/transformer";
   const std::string pre = "/home/dardeaw/q_ab/";
   mbufo::core::npu::NpuQuantGemmEngine engine;
   std::string err;
-  assert(engine.Init("/mnt/nvme-data/mbufo-models/npu-kernels/quant_gemm", &err));
+  assert(
+      engine.Init("/mnt/nvme-data/mbufo-models/npu-kernels/quant_gemm", &err));
   ZImageDitNpu dit;
   assert(dit.Open(dir, &engine, NpuQuantMode::kQ8Bfp16, {}, &err));
   double ms = 0.0;
@@ -56,7 +58,8 @@ int main() {
     std::vector<float> sin = Load(pre + "z_rope_sin.f32", 96 * 128);
     std::vector<float> ccos(cos.begin() + 64 * 128, cos.end());
     std::vector<float> csin(sin.begin() + 64 * 128, sin.end());
-    assert(dit.Block("context_refiner.0", &h, 32, nullptr, ccos, csin, &ms, &err));
+    assert(
+        dit.Block("context_refiner.0", &h, 32, nullptr, ccos, csin, &ms, &err));
     std::vector<float> ref = Load(pre + "z_ref0_out.f32", 32 * D);
     std::printf("[zrefiner0] cos=%.6f\n", Cosine(h, ref));
   }
@@ -68,7 +71,8 @@ int main() {
     std::vector<float> sin = Load(pre + "z_rope_sin.f32", 96 * 128);
     std::vector<float> icos(cos.begin(), cos.begin() + 64 * 128);
     std::vector<float> isin(sin.begin(), sin.begin() + 64 * 128);
-    assert(dit.Block("noise_refiner.0", &h, 64, mod.data(), icos, isin, &ms, &err));
+    assert(dit.Block("noise_refiner.0", &h, 64, mod.data(), icos, isin, &ms,
+                     &err));
     std::vector<float> ref = Load(pre + "z_noise0_out.f32", 64 * D);
     std::printf("[znoise0] cos=%.6f\n", Cosine(h, ref));
   }

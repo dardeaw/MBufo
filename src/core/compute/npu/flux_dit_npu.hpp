@@ -38,13 +38,14 @@ struct FluxDitConfig {
 };
 
 struct FluxModulations {
-  std::vector<float> img;  // [18432]: msa(shift,scale,gate)+mlp(shift,scale,gate)
+  std::vector<float>
+      img;  // [18432]: msa(shift,scale,gate)+mlp(shift,scale,gate)
   std::vector<float> txt;  // [18432]
   std::vector<float> sgl;  // [9216]: (shift,scale,gate)
 };
 
 class FluxDitNpu {
- public:
+public:
   FluxDitNpu() = default;
 
   [[nodiscard]] bool Open(const std::string& transformer_dir,
@@ -59,8 +60,7 @@ class FluxDitNpu {
                                  FluxModulations* mod, double* npu_ms = nullptr,
                                  std::string* error = nullptr);
   [[nodiscard]] bool EncodeContext(std::span<const float> cond7680,
-                                   std::size_t tokens,
-                                   std::vector<float>* txt,
+                                   std::size_t tokens, std::vector<float>* txt,
                                    double* npu_ms = nullptr,
                                    std::string* error = nullptr);
   [[nodiscard]] bool XEmbed(std::span<const float> z, std::size_t patches,
@@ -76,8 +76,7 @@ class FluxDitNpu {
   // In-place over img [Si*d] and txt [St*d].
   [[nodiscard]] bool DenoiseBlocks(std::vector<float>* img,
                                    std::vector<float>* txt, std::size_t Si,
-                                   std::size_t St,
-                                   const FluxModulations& mod,
+                                   std::size_t St, const FluxModulations& mod,
                                    const std::vector<float>& rope_cos,
                                    const std::vector<float>& rope_sin,
                                    std::size_t n_double, std::size_t n_single,
@@ -97,22 +96,19 @@ class FluxDitNpu {
                               std::string* error = nullptr);
 
   /// Debug: run one double block in place (input verification harness).
-  [[nodiscard]] bool DebugDoubleBlock(std::vector<float>* img,
-                                      std::vector<float>* txt, std::size_t Si,
-                                      std::size_t St, std::size_t bi,
-                                      std::span<const float> mod_img,
-                                      std::span<const float> mod_txt,
-                                      std::span<const float> rope_cos,
-                                      std::span<const float> rope_sin,
-                                      double* npu_ms = nullptr,
-                                      std::string* error = nullptr) {
+  [[nodiscard]] bool DebugDoubleBlock(
+      std::vector<float>* img, std::vector<float>* txt, std::size_t Si,
+      std::size_t St, std::size_t bi, std::span<const float> mod_img,
+      std::span<const float> mod_txt, std::span<const float> rope_cos,
+      std::span<const float> rope_sin, double* npu_ms = nullptr,
+      std::string* error = nullptr) {
     return DoubleBlock(img, txt, Si, St, bi, mod_img, mod_txt, rope_cos,
                        rope_sin, npu_ms, error);
   }
 
   /// Debug: run one single block on a joint sequence in place.
-  [[nodiscard]] bool DebugSingleBlock(std::vector<float>* joint,
-                                      std::size_t Sj, std::size_t bi,
+  [[nodiscard]] bool DebugSingleBlock(std::vector<float>* joint, std::size_t Sj,
+                                      std::size_t bi,
                                       std::span<const float> mod_sgl,
                                       std::span<const float> rope_cos,
                                       std::span<const float> rope_sin,
@@ -124,18 +120,14 @@ class FluxDitNpu {
 
   [[nodiscard]] const FluxDitConfig& config() const noexcept { return cfg_; }
 
- private:
-  [[nodiscard]] bool DoubleBlock(std::vector<float>* img,
-                                 std::vector<float>* txt, std::size_t Si,
-                                 std::size_t St, std::size_t bi,
-                                 std::span<const float> mod_img,
-                                 std::span<const float> mod_txt,
-                                 std::span<const float> rope_cos,
-                                 std::span<const float> rope_sin,
-                                 double* npu_ms, std::string* error);
+private:
+  [[nodiscard]] bool DoubleBlock(
+      std::vector<float>* img, std::vector<float>* txt, std::size_t Si,
+      std::size_t St, std::size_t bi, std::span<const float> mod_img,
+      std::span<const float> mod_txt, std::span<const float> rope_cos,
+      std::span<const float> rope_sin, double* npu_ms, std::string* error);
   [[nodiscard]] bool SingleBlock(std::vector<float>* joint, std::size_t Sj,
-                                 std::size_t bi,
-                                 std::span<const float> mod_sgl,
+                                 std::size_t bi, std::span<const float> mod_sgl,
                                  std::span<const float> rope_cos,
                                  std::span<const float> rope_sin,
                                  double* npu_ms, std::string* error);

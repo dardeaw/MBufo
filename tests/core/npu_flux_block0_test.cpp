@@ -42,12 +42,14 @@ float Cosine(std::span<const float> a, std::span<const float> b) {
 int main() {
   using mbufo::core::npu::NpuQuantMode;
   using mbufo::core::npu::dit::FluxDitNpu;
-  const std::string dir = "/mnt/nvme-data/mbufo-models/flux2-klein-4b/transformer";
+  const std::string dir =
+      "/mnt/nvme-data/mbufo-models/flux2-klein-4b/transformer";
   const std::string pre = "/home/dardeaw/q_ab/b0_";
   constexpr std::size_t Si = 64, St = 22, D = 3072;
   mbufo::core::npu::NpuQuantGemmEngine engine;
   std::string err;
-  assert(engine.Init("/mnt/nvme-data/mbufo-models/npu-kernels/quant_gemm", &err));
+  assert(
+      engine.Init("/mnt/nvme-data/mbufo-models/npu-kernels/quant_gemm", &err));
   FluxDitNpu dit;
   assert(dit.Open(dir, &engine, NpuQuantMode::kQ8Bfp16, {}, &err));
   std::vector<float> img = Load((pre + "img_in.f32").c_str(), Si * D);
@@ -57,8 +59,8 @@ int main() {
   std::vector<float> cos = Load((pre + "cos.f32").c_str(), (Si + St) * 128);
   std::vector<float> sin = Load((pre + "sin.f32").c_str(), (Si + St) * 128);
   double ms = 0.0;
-  assert(dit.DebugDoubleBlock(&img, &txt, Si, St, 0, mod_img, mod_txt, cos,
-                              sin, &ms, &err));
+  assert(dit.DebugDoubleBlock(&img, &txt, Si, St, 0, mod_img, mod_txt, cos, sin,
+                              &ms, &err));
   std::vector<float> img_ref = Load((pre + "img_ref.f32").c_str(), Si * D);
   std::vector<float> txt_ref = Load((pre + "txt_ref.f32").c_str(), St * D);
   std::printf("[block0] cos_img=%.6f cos_txt=%.6f\n", Cosine(img, img_ref),

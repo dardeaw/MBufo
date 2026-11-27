@@ -50,14 +50,14 @@ struct Tensor {
 };
 
 class WeightStore {
- public:
+public:
   void Put(std::string name, Tensor t) { map_[std::move(name)] = std::move(t); }
   [[nodiscard]] const Tensor* Find(const std::string& name) const {
     const auto it = map_.find(name);
     return it == map_.end() ? nullptr : &it->second;
   }
 
- private:
+private:
   std::unordered_map<std::string, Tensor> map_;
 };
 
@@ -147,8 +147,9 @@ struct Qwen3GraphConfig {
 
 /// Pre-norm causal GQA Qwen3 (QK-norm + RoPE + SwiGLU), last-token pooling.
 /// Weight names `tok`, `out_norm.w`, `L{i}.attn_norm.w`, `L{i}.{q,k,v,o}.w`,
-/// `L{i}.q_norm.w`, `L{i}.k_norm.w`, `L{i}.ffn_norm.w`, `L{i}.{gate,up,down}.w`.
-/// Embedding variant: output `emb` [1, hidden] (final-norm + L2).
+/// `L{i}.q_norm.w`, `L{i}.k_norm.w`, `L{i}.ffn_norm.w`,
+/// `L{i}.{gate,up,down}.w`. Embedding variant: output `emb` [1, hidden]
+/// (final-norm + L2).
 [[nodiscard]] Graph BuildQwen3EmbeddingGraph(const Qwen3GraphConfig& cfg);
 /// Reranker variant: output `logits` [1, ids.size()] (final-norm, lm-head rows
 /// of `ids`, tied to `tok`).
@@ -188,8 +189,8 @@ struct EmbGemma2GraphConfig {
 
 struct RunStats {
   double total_ms{0.0};
-  double npu_ms{0.0};      ///< time inside NpuQuantGemmEngine kernel chains
-  double linear_ms{0.0};   ///< wall time of all Linear ops (pack + NPU + unpack)
+  double npu_ms{0.0};     ///< time inside NpuQuantGemmEngine kernel chains
+  double linear_ms{0.0};  ///< wall time of all Linear ops (pack + NPU + unpack)
   double attention_ms{0.0};
   double other_host_ms{0.0};
 };
@@ -200,7 +201,7 @@ enum class LinearBackend : std::uint8_t {
 };
 
 class GraphExecutor {
- public:
+public:
   GraphExecutor() = default;
   GraphExecutor(const GraphExecutor&) = delete;
   GraphExecutor& operator=(const GraphExecutor&) = delete;
@@ -227,14 +228,14 @@ class GraphExecutor {
   [[nodiscard]] bool prepared() const noexcept { return prepared_; }
   [[nodiscard]] const Graph& graph() const noexcept { return graph_; }
 
- private:
+private:
   struct Buf {
     std::vector<float> v;
     std::size_t rows{0};
     std::size_t cols{0};
   };
-  bool RunOp(const Op& op, std::span<const std::uint32_t> ids,
-             RunStats* stats, std::string* error);
+  bool RunOp(const Op& op, std::span<const std::uint32_t> ids, RunStats* stats,
+             std::string* error);
   Buf* Get(const std::string& name) {
     const auto it = bufs_.find(name);
     return it == bufs_.end() ? nullptr : &it->second;
@@ -248,8 +249,9 @@ class GraphExecutor {
   LinearBackend backend_{LinearBackend::kNpuQ8};
   std::unordered_map<std::string, QuantWeightMatrix> packed_;
   std::unordered_map<std::string, std::vector<float>> hostw_;  // kHostF32 only
-  std::unordered_map<std::string, std::vector<float>> bias_;  // resolved f32
-  std::unordered_map<std::string, std::vector<float>> small_;  // norm scales etc.
+  std::unordered_map<std::string, std::vector<float>> bias_;   // resolved f32
+  std::unordered_map<std::string, std::vector<float>>
+      small_;  // norm scales etc.
   std::unordered_map<std::string, Buf> bufs_;
 };
 

@@ -196,6 +196,6 @@ resident BOs exhaust the NPU buffer-object pool). Measured on 5 texts (9-263 tok
 cos(graph NPU, CPU/GPU reference) 0.9992-0.9999, host-fp32 graph = 1.00000;
 serve latency 99-215 ms vs 398-444 ms for the dedicated BF16 runtime; inputs up to
 512 tokens (the dedicated runtime stops at 128).
-Selection: `MBUFO_NPU_EMBGEMMA_RUNTIME=legacy|graph` forces a runtime; `MBUFO_NPU_QUANT=q4`
+Selection: the graph is the default; an explicit `MBUFO_NPU_QUANT=q4`
 keeps the dedicated runtime (no Q4 path in the graph). Gate: ctest
 `npu_graph_embgemma2_test` (skips when the gguf is absent).

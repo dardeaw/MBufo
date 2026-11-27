@@ -43,7 +43,9 @@ float Bf16ToFloat(std::uint16_t b) {
   return f;
 }
 
-inline float Silu(float x) { return x / (1.0F + std::exp(-x)); }
+inline float Silu(float x) {
+  return x / (1.0F + std::exp(-x));
+}
 
 inline float GeluTanh(float x) {
   const float u = 0.7978845608028654F * (x + 0.044715F * x * x * x);
@@ -64,12 +66,14 @@ void RoundBfp16Ebs8NK(float* w, std::size_t N, std::size_t K) {
       std::uint32_t max_exp = 0;
       bool finite = true;
       for (int i = 0; i < 8; ++i) {
-        if (!std::isfinite(p[i])) finite = false;
+        if (!std::isfinite(p[i]))
+          finite = false;
         std::uint32_t bits;
         std::memcpy(&bits, &p[i], sizeof(bits));
         max_exp = std::max<std::uint32_t>(max_exp, (bits >> 23U) & 0xFFU);
       }
-      if (!finite || max_exp < 16U) continue;  // zero/denormal: leave
+      if (!finite || max_exp < 16U)
+        continue;  // zero/denormal: leave
       const float q = std::ldexp(1.0F, static_cast<int>(max_exp) - 133);
       for (int i = 0; i < 8; ++i) {
         const float r = std::nearbyint(p[i] / q);
@@ -80,7 +84,8 @@ void RoundBfp16Ebs8NK(float* w, std::size_t N, std::size_t K) {
 }
 
 std::string Fail(std::string* error, const std::string& msg) {
-  if (error != nullptr) *error = msg;
+  if (error != nullptr)
+    *error = msg;
   return msg;
 }
 
@@ -120,18 +125,20 @@ void Tensor::ReadRow(std::size_t r, float* dst) const {
       break;
     case TensorKind::kBf16: {
       const auto* p = static_cast<const std::uint16_t*>(data) + r * cols;
-      for (std::size_t i = 0; i < cols; ++i) dst[i] = Bf16ToFloat(p[i]);
+      for (std::size_t i = 0; i < cols; ++i)
+        dst[i] = Bf16ToFloat(p[i]);
       break;
     }
     case TensorKind::kF16: {
       const auto* p = static_cast<const std::uint16_t*>(data) + r * cols;
-      for (std::size_t i = 0; i < cols; ++i) dst[i] = F16ToFloat(p[i]);
+      for (std::size_t i = 0; i < cols; ++i)
+        dst[i] = F16ToFloat(p[i]);
       break;
     }
     case TensorKind::kQ8_0: {
       constexpr std::size_t kBlk = 34;  // fp16 scale + 32 x int8
-      const auto* p = static_cast<const std::uint8_t*>(data) +
-                      r * (cols / 32U) * kBlk;
+      const auto* p =
+          static_cast<const std::uint8_t*>(data) + r * (cols / 32U) * kBlk;
       mbufo::quant::DequantizeQ8_0(p, dst, cols);
       break;
     }
@@ -141,7 +148,8 @@ void Tensor::ReadRow(std::size_t r, float* dst) const {
 void Tensor::ReadAll(std::vector<float>* out) const {
   out->resize(rows * cols);
 #pragma omp parallel for schedule(static) if (rows > 64)
-  for (std::size_t r = 0; r < rows; ++r) ReadRow(r, out->data() + r * cols);
+  for (std::size_t r = 0; r < rows; ++r)
+    ReadRow(r, out->data() + r * cols);
 }
 
 // ---------------------------------------------------------------- builders --
@@ -480,7 +488,8 @@ bool GraphExecutor::Prepare(Graph graph, const WeightStore* weights,
   }
   auto need = [&](const std::string& name) -> const Tensor* {
     const Tensor* t = weights_->Find(name);
-    if (t == nullptr) Fail(error, "graph: missing weight '" + name + "'");
+    if (t == nullptr)
+      Fail(error, "graph: missing weight '" + name + "'");
     return t;
   };
   for (const auto& op : graph_.ops) {
@@ -490,7 +499,8 @@ bool GraphExecutor::Prepare(Graph graph, const WeightStore* weights,
           // shared weight: pack once
         } else {
           const Tensor* w = need(op.w);
-          if (w == nullptr) return false;
+          if (w == nullptr)
+            return false;
           if (backend_ == LinearBackend::kNpuQ8 && !op.host_f32) {
             if (w->cols % 256U != 0 || w->rows % 256U != 0) {
               Fail(error, "graph: Linear '" + op.w +
@@ -517,7 +527,8 @@ bool GraphExecutor::Prepare(Graph graph, const WeightStore* weights,
         }
         if (!op.b.empty() && bias_.count(op.b) == 0) {
           const Tensor* b = need(op.b);
-          if (b == nullptr) return false;
+          if (b == nullptr)
+            return false;
           std::vector<float> bv;
           b->ReadAll(&bv);
           bias_.emplace(op.b, std::move(bv));
@@ -528,9 +539,11 @@ bool GraphExecutor::Prepare(Graph graph, const WeightStore* weights,
       case OpKind::kRmsNorm:
       case OpKind::kAttention: {
         for (const std::string* nm : {&op.w, &op.w2, &op.w3, &op.b}) {
-          if (nm->empty() || small_.count(*nm) != 0) continue;
+          if (nm->empty() || small_.count(*nm) != 0)
+            continue;
           const Tensor* t = need(*nm);
-          if (t == nullptr) return false;
+          if (t == nullptr)
+            return false;
           std::vector<float> v;
           t->ReadAll(&v);
           small_.emplace(*nm, std::move(v));
@@ -539,9 +552,11 @@ bool GraphExecutor::Prepare(Graph graph, const WeightStore* weights,
       }
       case OpKind::kEmbed:
       case OpKind::kRowDot:
-        if (need(op.w) == nullptr) return false;
+        if (need(op.w) == nullptr)
+          return false;
         for (const std::string* nm : {&op.b, &op.w2}) {
-          if (!nm->empty() && need(*nm) == nullptr) return false;
+          if (!nm->empty() && need(*nm) == nullptr)
+            return false;
         }
         break;
       default:
@@ -568,7 +583,8 @@ bool GraphExecutor::Run(std::span<const std::uint32_t> ids,
   *st = RunStats{};
   const auto t0 = Clock::now();
   for (const auto& op : graph_.ops) {
-    if (!RunOp(op, ids, st, error)) return false;
+    if (!RunOp(op, ids, st, error))
+      return false;
   }
   st->total_ms = MsSince(t0);
   Buf* o = Get(graph_.output);
@@ -585,7 +601,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
   const auto t0 = Clock::now();
   auto input = [&](const std::string& name) -> Buf* {
     Buf* b = Get(name);
-    if (b == nullptr) Fail(error, "graph: buffer '" + name + "' not produced");
+    if (b == nullptr)
+      Fail(error, "graph: buffer '" + name + "' not produced");
     return b;
   };
   auto set = [&](const std::string& name, std::vector<float> v,
@@ -621,14 +638,17 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
         tok->ReadRow(ids[t], row);
         if (pos != nullptr) {
           pos->ReadRow(t, tmp.data());
-          for (std::size_t c = 0; c < d; ++c) row[c] += tmp[c];
+          for (std::size_t c = 0; c < d; ++c)
+            row[c] += tmp[c];
         }
         if (typ != nullptr) {
           typ->ReadRow(0, tmp.data());
-          for (std::size_t c = 0; c < d; ++c) row[c] += tmp[c];
+          for (std::size_t c = 0; c < d; ++c)
+            row[c] += tmp[c];
         }
         if (op.scale != 1.0F) {
-          for (std::size_t c = 0; c < d; ++c) row[c] *= op.scale;
+          for (std::size_t c = 0; c < d; ++c)
+            row[c] *= op.scale;
         }
       }
       set(op.out, std::move(out), n, d);
@@ -636,7 +656,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
     }
     case OpKind::kLayerNorm: {
       Buf* in = input(op.in);
-      if (in == nullptr) return false;
+      if (in == nullptr)
+        return false;
       const auto& w = small_.at(op.w);
       const auto& b = small_.at(op.b);
       std::vector<float> out(in->rows * in->cols);
@@ -655,7 +676,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
     }
     case OpKind::kRmsNorm: {
       Buf* in = input(op.in);
-      if (in == nullptr) return false;
+      if (in == nullptr)
+        return false;
       const float* w = op.w.empty() ? nullptr : small_.at(op.w).data();
       const float pre = op.scale;
       std::vector<float> out(in->rows * in->cols);
@@ -679,7 +701,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
     case OpKind::kLinear: {
       is_linear = true;
       Buf* in = input(op.in);
-      if (in == nullptr) return false;
+      if (in == nullptr)
+        return false;
       const float* bias = op.b.empty() ? nullptr : bias_.at(op.b).data();
       std::size_t N = 0;
       std::vector<float> out;
@@ -711,9 +734,10 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
             const float* a = in->v.data() + r * K;
             const float* b = w.data() + n * K;
             double acc = 0.0;
-            for (std::size_t k = 0; k < K; ++k) acc += double(a[k]) * b[k];
-            out[r * N + n] = static_cast<float>(acc) +
-                             (bias != nullptr ? bias[n] : 0.0F);
+            for (std::size_t k = 0; k < K; ++k)
+              acc += double(a[k]) * b[k];
+            out[r * N + n] =
+                static_cast<float>(acc) + (bias != nullptr ? bias[n] : 0.0F);
           }
         }
       }
@@ -725,7 +749,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
       Buf* q = input(op.in);
       Buf* k = input(op.in2);
       Buf* v = input(op.in3);
-      if (q == nullptr || k == nullptr || v == nullptr) return false;
+      if (q == nullptr || k == nullptr || v == nullptr)
+        return false;
       const std::size_t n = q->rows;
       const std::size_t H = op.heads, KVH = op.kv_heads, hd = op.head_dim;
       if (H == 0 || KVH == 0 || hd == 0 || H % KVH != 0 || q->cols != H * hd ||
@@ -813,7 +838,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
             for (std::size_t j = lo; j < lim; ++j) {
               const float* kj = kv.data() + j * KVH * hd + kvh * hd;
               float dot = 0.0F;
-              for (std::size_t d = 0; d < hd; ++d) dot += qi[d] * kj[d];
+              for (std::size_t d = 0; d < hd; ++d)
+                dot += qi[d] * kj[d];
               dot *= scale;
               sc[j] = dot;
               mx = std::max(mx, dot);
@@ -828,7 +854,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
             for (std::size_t j = lo; j < lim; ++j) {
               const float w = sc[j] * inv;
               const float* vj = vdat.data() + j * KVH * hd + kvh * hd;
-              for (std::size_t d = 0; d < hd; ++d) ci[d] += w * vj[d];
+              for (std::size_t d = 0; d < hd; ++d)
+                ci[d] += w * vj[d];
             }
           }
         }
@@ -838,7 +865,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
     }
     case OpKind::kGelu: {
       Buf* in = input(op.in);
-      if (in == nullptr) return false;
+      if (in == nullptr)
+        return false;
       std::vector<float> out(in->v.size());
       if (!core::gelu::ApplyGelu(std::span<const float>(in->v),
                                  std::span<float>(out),
@@ -852,7 +880,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
     case OpKind::kSwiGlu: {
       Buf* g = input(op.in);
       Buf* u = input(op.in2);
-      if (g == nullptr || u == nullptr) return false;
+      if (g == nullptr || u == nullptr)
+        return false;
       if (g->v.size() != u->v.size()) {
         Fail(error, "graph: SwiGlu shape mismatch");
         return false;
@@ -885,7 +914,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
     case OpKind::kResidual: {
       Buf* a = input(op.in);
       Buf* b = input(op.in2);
-      if (a == nullptr || b == nullptr) return false;
+      if (a == nullptr || b == nullptr)
+        return false;
       if (a->v.size() != b->v.size()) {
         Fail(error, "graph: Residual shape mismatch");
         return false;
@@ -899,7 +929,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
     }
     case OpKind::kPool: {
       Buf* in = input(op.in);
-      if (in == nullptr) return false;
+      if (in == nullptr)
+        return false;
       std::vector<float> out(in->cols, 0.0F);
       if (op.pool == PoolMode::kCls) {
         std::copy(in->v.begin(), in->v.begin() + in->cols, out.begin());
@@ -912,14 +943,16 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
             out[c] += in->v[r * in->cols + c];
           }
         }
-        for (auto& x : out) x /= static_cast<float>(in->rows);
+        for (auto& x : out)
+          x /= static_cast<float>(in->rows);
       }
       set(op.out, std::move(out), 1, in->cols);
       break;
     }
     case OpKind::kL2Norm: {
       Buf* in = input(op.in);
-      if (in == nullptr) return false;
+      if (in == nullptr)
+        return false;
       std::vector<float> out = in->v;
       for (std::size_t r = 0; r < in->rows; ++r) {
         double ss = 0.0;
@@ -931,14 +964,16 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
           return false;
         }
         const float inv = static_cast<float>(1.0 / std::sqrt(ss));
-        for (std::size_t c = 0; c < in->cols; ++c) out[r * in->cols + c] *= inv;
+        for (std::size_t c = 0; c < in->cols; ++c)
+          out[r * in->cols + c] *= inv;
       }
       set(op.out, std::move(out), in->rows, in->cols);
       break;
     }
     case OpKind::kRowDot: {
       Buf* in = input(op.in);
-      if (in == nullptr) return false;
+      if (in == nullptr)
+        return false;
       const Tensor* w = weights_->Find(op.w);
       if (w->cols != in->cols) {
         Fail(error, "graph: RowDot width mismatch");
@@ -954,7 +989,8 @@ bool GraphExecutor::RunOp(const Op& op, std::span<const std::uint32_t> ids,
         }
         w->ReadRow(op.ids[j], row.data());
         double acc = 0.0;
-        for (std::size_t c = 0; c < w->cols; ++c) acc += double(x[c]) * row[c];
+        for (std::size_t c = 0; c < w->cols; ++c)
+          acc += double(x[c]) * row[c];
         out[j] = static_cast<float>(acc);
       }
       set(op.out, std::move(out), 1, op.ids.size());
@@ -981,9 +1017,11 @@ std::weak_ptr<NpuQuantGemmEngine> g_engine;
 
 std::shared_ptr<NpuQuantGemmEngine> SharedQuantEngine(std::string* error) {
   std::lock_guard<std::mutex> lock(g_engine_mu);
-  if (auto e = g_engine.lock()) return e;
+  if (auto e = g_engine.lock())
+    return e;
   auto e = std::make_shared<NpuQuantGemmEngine>();
-  if (!e->Init("", error)) return nullptr;
+  if (!e->Init("", error))
+    return nullptr;
   g_engine = e;
   return e;
 }

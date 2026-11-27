@@ -33,7 +33,8 @@ bool TeNpuDecoder::Encode(std::span<const float> prompt_hidden, std::size_t T,
                           std::vector<float>* all_hidden, double* npu_ms,
                           std::string* error) {
   std::vector<float> raw;
-  if (!dec_.PrefillFull(prompt_hidden, T, &raw, npu_ms, error)) return false;
+  if (!dec_.PrefillFull(prompt_hidden, T, &raw, npu_ms, error))
+    return false;
   all_hidden->resize(T * cfg_.hidden);
   std::vector<float> normed;
   for (std::size_t t = 0; t < T; ++t) {
@@ -54,7 +55,8 @@ bool TeNpuDecoder::EncodeTaps(std::span<const float> prompt_hidden,
                               std::string* error,
                               const std::vector<std::uint8_t>* key_keep) {
   if (taps == nullptr || final_raw == nullptr) {
-    if (error != nullptr) *error = "bad taps output";
+    if (error != nullptr)
+      *error = "bad taps output";
     return false;
   }
   return dec_.PrefillFullTaps(prompt_hidden, T, tap_layers, taps, final_raw,
@@ -62,14 +64,14 @@ bool TeNpuDecoder::EncodeTaps(std::span<const float> prompt_hidden,
 }
 
 bool TeNpuDecoder::PrefillFull(std::span<const float> prompt_hidden,
-                                std::size_t T, std::vector<float>* all_raw,
-                                double* npu_ms, std::string* error) {
+                               std::size_t T, std::vector<float>* all_raw,
+                               double* npu_ms, std::string* error) {
   return dec_.PrefillFull(prompt_hidden, T, all_raw, npu_ms, error);
 }
 
 bool TeNpuDecoder::Prefill(std::span<const float> prompt_hidden, std::size_t T,
-                            std::vector<float>* last_hidden, double* npu_ms,
-                            std::string* error) {
+                           std::vector<float>* last_hidden, double* npu_ms,
+                           std::string* error) {
   return dec_.Prefill(prompt_hidden, T, last_hidden, npu_ms, error);
 }
 

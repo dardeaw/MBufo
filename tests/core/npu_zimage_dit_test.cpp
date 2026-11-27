@@ -72,7 +72,8 @@ void RefRefinerBlock0(NpuShardReader* st, std::vector<float>* h,
   rd("context_refiner.0.attention.to_out.0.weight", D * D, &w);
   MatMulRefHost(ctx.data(), seq, w.data(), D, D, nullptr, &o);
   RmsNormRows(o.data(), an2.data(), seq, D, 1e-5F, &on);
-  for (std::size_t i = 0; i < seq * D; ++i) (*h)[i] += on[i];
+  for (std::size_t i = 0; i < seq * D; ++i)
+    (*h)[i] += on[i];
   RmsNormRows(h->data(), fn1.data(), seq, D, 1e-5F, &x);
   std::vector<float> w1, w3;
   rd("context_refiner.0.feed_forward.w1.weight", F * D, &w);
@@ -85,12 +86,14 @@ void RefRefinerBlock0(NpuShardReader* st, std::vector<float>* h,
   rd("context_refiner.0.feed_forward.w2.weight", D * F, &w);
   MatMulRefHost(w1.data(), seq, w.data(), D, F, nullptr, &w2);
   RmsNormRows(w2.data(), fn2.data(), seq, D, 1e-5F, &fn);
-  for (std::size_t i = 0; i < seq * D; ++i) (*h)[i] += fn[i];
+  for (std::size_t i = 0; i < seq * D; ++i)
+    (*h)[i] += fn[i];
 }
 
 void TestPlumbing(mbufo::core::npu::NpuQuantGemmEngine& engine) {
   using mbufo::core::npu::NpuQuantMode;
-  const std::string dir = "/mnt/nvme-data/mbufo-models/z-image-turbo/transformer";
+  const std::string dir =
+      "/mnt/nvme-data/mbufo-models/z-image-turbo/transformer";
   std::string err;
   ZImageDitNpu dit;
   assert(dit.Open(dir, &engine, NpuQuantMode::kQ8Bfp16, {}, &err));
@@ -99,17 +102,19 @@ void TestPlumbing(mbufo::core::npu::NpuQuantGemmEngine& engine) {
   std::uniform_real_distribution<float> dist(-0.1F, 0.1F);
   constexpr std::size_t S = 4, D = 3840;
   std::vector<float> h(S * D);
-  for (float& x : h) x = dist(rng);
+  for (float& x : h)
+    x = dist(rng);
   std::vector<float> h_n = h;
   double ms = 0.0;
   // Shared tables (plumbing gate only checks NPU-vs-host consistency).
   std::vector<std::int32_t> pids(S * 4u, 0);
-  for (std::size_t t = 0; t < S; ++t) pids[t * 4u] = static_cast<std::int32_t>(t + 1u);
+  for (std::size_t t = 0; t < S; ++t)
+    pids[t * 4u] = static_cast<std::int32_t>(t + 1u);
   const std::size_t zaxes[3] = {32, 48, 48};
   std::vector<float> rcos, rsin;
   FluxRopeTables(pids, S, zaxes, 3u, 256.0, &rcos, &rsin);
-  assert(dit.Block("context_refiner.0", &h_n, S, nullptr, rcos, rsin, &ms,
-                   &err));
+  assert(
+      dit.Block("context_refiner.0", &h_n, S, nullptr, rcos, rsin, &ms, &err));
   NpuShardReader st;
   assert(NpuShardReader::OpenDir(dir, &st, &err));
   RefRefinerBlock0(&st, &h, S, rcos, rsin);
@@ -120,19 +125,23 @@ void TestPlumbing(mbufo::core::npu::NpuQuantGemmEngine& engine) {
 }
 
 std::vector<float> ReadF32File(const char* path, std::size_t expect,
-                                std::string* err) {
+                               std::string* err) {
   std::vector<float> out;
-  if (path == nullptr) return out;
+  if (path == nullptr)
+    return out;
   std::ifstream ifs(path, std::ios::binary);
-  if (!ifs.good()) return out;
+  if (!ifs.good())
+    return out;
   ifs.seekg(0, std::ios::end);
   const std::size_t bytes = static_cast<std::size_t>(ifs.tellg());
   ifs.seekg(0, std::ios::beg);
-  if (bytes != expect * sizeof(float)) return out;
+  if (bytes != expect * sizeof(float))
+    return out;
   out.resize(expect);
   ifs.read(reinterpret_cast<char*>(out.data()),
            static_cast<std::streamsize>(bytes));
-  if (!ifs.good()) out.clear();
+  if (!ifs.good())
+    out.clear();
   return out;
 }
 
@@ -149,8 +158,7 @@ std::vector<float> RunFull(mbufo::core::npu::NpuQuantGemmEngine& engine,
                            const std::vector<std::uint32_t>& ids,
                            std::span<const float> z0,
                            std::span<const float> sigmas, std::size_t n_ref,
-                           std::size_t n_main,
-                           std::vector<float>* tap34_out) {
+                           std::size_t n_main, std::vector<float>* tap34_out) {
   using mbufo::core::npu::NpuShardReader;
   using mbufo::core::npu::TeNpuDecoder;
   std::string err;
@@ -161,15 +169,16 @@ std::vector<float> RunFull(mbufo::core::npu::NpuQuantGemmEngine& engine,
   assert(NpuShardReader::OpenDir(
       "/mnt/nvme-data/mbufo-models/z-image-turbo/text_encoder", &tr, &err));
   std::vector<float> erows;
-  assert(tr.GatherRowsF32("model.embed_tokens.weight", ids, 2560, &erows,
-                          &err));
+  assert(
+      tr.GatherRowsF32("model.embed_tokens.weight", ids, 2560, &erows, &err));
   // Pipeline uses hidden_states[-2] == post-layer 34 (36 layers 0..35).
   const std::vector<std::size_t> tap34 = {34};
   std::vector<std::vector<float>> taps;
   std::vector<float> te_final;
   assert(te.EncodeTaps(erows, ids.size(), tap34, &taps, &te_final, ms, &err));
   assert(taps.size() == 1);
-  if (tap34_out != nullptr) *tap34_out = taps[0];
+  if (tap34_out != nullptr)
+    *tap34_out = taps[0];
 
   ZImageDitNpu dit;
   assert(dit.Open("/mnt/nvme-data/mbufo-models/z-image-turbo/transformer",
@@ -217,7 +226,8 @@ void TestFull(mbufo::core::npu::NpuQuantGemmEngine& engine,
     assert(ifs.good());
     sigmas.clear();
     float v = 0;
-    while (ifs >> v) sigmas.push_back(v);
+    while (ifs >> v)
+      sigmas.push_back(v);
     assert(sigmas.size() >= 2);
   }
   double ms8 = 0.0, ms8b = 0.0, ms4 = 0.0;
@@ -225,9 +235,8 @@ void TestFull(mbufo::core::npu::NpuQuantGemmEngine& engine,
   std::vector<float> z8 =
       RunFull(engine, NpuQuantMode::kQ8Bfp16, &ms8, ids, z0, sigmas, 2, 30,
               dump_prefix != nullptr ? &tap34 : nullptr);
-  std::vector<float> z8b =
-      RunFull(engine, NpuQuantMode::kQ8Bfp16, &ms8b, ids, z0, sigmas, 2, 30,
-              nullptr);
+  std::vector<float> z8b = RunFull(engine, NpuQuantMode::kQ8Bfp16, &ms8b, ids,
+                                   z0, sigmas, 2, 30, nullptr);
   assert(z8 == z8b);
   double energy = 0.0;
   for (float v : z8) {
@@ -235,9 +244,8 @@ void TestFull(mbufo::core::npu::NpuQuantGemmEngine& engine,
     energy += (double)v * v;
   }
   assert(energy > 1.0);
-  std::vector<float> z4 =
-      RunFull(engine, NpuQuantMode::kQ4Q4nx, &ms4, ids, z0, sigmas, 2, 30,
-              nullptr);
+  std::vector<float> z4 = RunFull(engine, NpuQuantMode::kQ4Q4nx, &ms4, ids, z0,
+                                  sigmas, 2, 30, nullptr);
   const float c84 = CosineSimHost(z8, z4);
   std::printf(
       "[zimg-full 2ref+30main x8] q8_ms=%.1f deter=1 energy=%.1f "
@@ -268,14 +276,15 @@ int main() {
     return 1;
   }
   TestPlumbing(engine);
-  std::vector<std::uint32_t> ids = {151644, 872, 198,  32, 6977,
+  std::vector<std::uint32_t> ids = {151644, 872,  198, 32,    6977,
                                     17822,  4128, 304, 151645};
   if (const char* ip = std::getenv("NPU_DUMP_IDS")) {
     std::ifstream ifs(ip);
     assert(ifs.good());
     ids.clear();
     std::uint32_t v = 0;
-    while (ifs >> v) ids.push_back(v);
+    while (ifs >> v)
+      ids.push_back(v);
     assert(!ids.empty());
     std::printf("[zimg-dump] %zu ids from %s\n", ids.size(), ip);
     std::fflush(stdout);

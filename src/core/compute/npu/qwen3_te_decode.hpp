@@ -33,7 +33,7 @@ struct TeDecodeConfig {
 };
 
 class TeNpuDecoder {
- public:
+public:
   TeNpuDecoder() = default;
 
   [[nodiscard]] bool Open(const std::string& model_dir,
@@ -42,8 +42,8 @@ class TeNpuDecoder {
                           std::string* error = nullptr);
 
   /// Full-sequence encode: [T, hidden] final-normed conditioning rows.
-  [[nodiscard]] bool Encode(std::span<const float> prompt_hidden,
-                            std::size_t T, std::vector<float>* all_hidden,
+  [[nodiscard]] bool Encode(std::span<const float> prompt_hidden, std::size_t T,
+                            std::vector<float>* all_hidden,
                             double* npu_ms = nullptr,
                             std::string* error = nullptr);
 
@@ -52,14 +52,12 @@ class TeNpuDecoder {
   /// layer n/2, final, concatenated 3x2560 -> 7680).
   /// Optional key_keep mask (1=keep, 0=masked padding key) mirrors the
   /// pipeline's causal+padding mask.
-  [[nodiscard]] bool EncodeTaps(std::span<const float> prompt_hidden,
-                                std::size_t T,
-                                std::span<const std::size_t> tap_layers,
-                                std::vector<std::vector<float>>* taps,
-                                std::vector<float>* final_raw,
-                                double* npu_ms = nullptr,
-                                std::string* error = nullptr,
-                                const std::vector<std::uint8_t>* key_keep = nullptr);
+  [[nodiscard]] bool EncodeTaps(
+      std::span<const float> prompt_hidden, std::size_t T,
+      std::span<const std::size_t> tap_layers,
+      std::vector<std::vector<float>>* taps, std::vector<float>* final_raw,
+      double* npu_ms = nullptr, std::string* error = nullptr,
+      const std::vector<std::uint8_t>* key_keep = nullptr);
 
   // Prefill/DecodeStep exposed for the decode-consistency gate (same
   // prefill-vs-incremental math check as P1/P2a on TE weights).
@@ -80,7 +78,7 @@ class TeNpuDecoder {
   [[nodiscard]] std::size_t pos() const noexcept { return dec_.pos(); }
   [[nodiscard]] const TeDecodeConfig& config() const noexcept { return cfg_; }
 
- private:
+private:
   Qwen3NpuDecoder dec_;
   TeDecodeConfig cfg_;
 };

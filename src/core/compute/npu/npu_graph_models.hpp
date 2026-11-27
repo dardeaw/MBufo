@@ -26,19 +26,19 @@ namespace mbufo::core::npu {
 /// bge-m3 / bge-reranker encoder as a declarative graph on the Q8 engine.
 /// Drop-in twin of NpuBgeRuntime (same ForwardCls contract).
 class NpuGraphBgeRuntime {
- public:
+public:
   /// `weights` must outlive the runtime (zero-copy views into its F32 table).
   [[nodiscard]] bool Init(const models::bge_m3::BgeM3F32Weights& weights,
                           graph::LinearBackend backend, std::string* error);
   [[nodiscard]] bool ForwardCls(std::span<const std::uint32_t> ids,
-                                std::vector<float>* cls_out,
-                                double* prefill_ms, std::string* error);
+                                std::vector<float>* cls_out, double* prefill_ms,
+                                std::string* error);
   [[nodiscard]] bool resident() const noexcept { return exec_.prepared(); }
   [[nodiscard]] const graph::RunStats& last_stats() const noexcept {
     return stats_;
   }
 
- private:
+private:
   graph::WeightStore store_;
   graph::GraphExecutor exec_;
   graph::RunStats stats_;
@@ -47,14 +47,9 @@ class NpuGraphBgeRuntime {
 /// Which EmbeddingGemma 2 NPU runtime to use. Graph (Q8 on the shared engine)
 /// is the default: measured cos >= 0.9992 vs the CPU/GPU reference, faster than
 /// the dedicated runtime, inputs up to 512 tokens instead of 128.
-/// MBUFO_NPU_EMBGEMMA_RUNTIME=legacy|graph overrides; MBUFO_NPU_QUANT=q4 keeps
-/// the dedicated runtime (the graph has no Q4 path).
+/// Only an explicit MBUFO_NPU_QUANT other than q8 (q4) keeps the dedicated
+/// runtime, because the graph has no Q4 path.
 [[nodiscard]] inline bool EmbGemma2UseGraph() {
-  const char* rt = std::getenv("MBUFO_NPU_EMBGEMMA_RUNTIME");
-  if (rt != nullptr && std::string(rt) == "legacy")
-    return false;
-  if (rt != nullptr && std::string(rt) == "graph")
-    return true;
   const char* q = std::getenv("MBUFO_NPU_QUANT");
   if (q != nullptr && q[0] != '\0') {
     const std::string qs(q);
@@ -95,7 +90,7 @@ private:
 /// BF16/F32 GGUF, in embedding (last-token pool + L2) or reranker (yes/no
 /// logit) role.
 class NpuQwen3Encoder {
- public:
+public:
   enum class Role : std::uint8_t { kEmbedding, kReranker };
 
   [[nodiscard]] static std::unique_ptr<NpuQwen3Encoder> Load(
@@ -105,8 +100,7 @@ class NpuQwen3Encoder {
   /// Tokenizes `text`, appends EOS when missing (artifact convention), runs
   /// the graph and returns the L2-normalized embedding.
   [[nodiscard]] bool Embed(std::string_view text, std::vector<float>* out,
-                           std::size_t* tokens, double* ms,
-                           std::string* error);
+                           std::size_t* tokens, double* ms, std::string* error);
   [[nodiscard]] bool EmbedIds(std::span<const std::uint32_t> ids,
                               std::vector<float>* out, double* ms,
                               std::string* error);
@@ -132,7 +126,7 @@ class NpuQwen3Encoder {
     return stats_;
   }
 
- private:
+private:
   NpuQwen3Encoder() = default;
   Role role_{Role::kEmbedding};
   graph::Qwen3GraphConfig cfg_;

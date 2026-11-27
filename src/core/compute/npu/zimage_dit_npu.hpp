@@ -37,7 +37,7 @@ struct ZImageDitConfig {
 };
 
 class ZImageDitNpu {
- public:
+public:
   ZImageDitNpu() = default;
 
   [[nodiscard]] bool Open(const std::string& transformer_dir,
@@ -47,9 +47,9 @@ class ZImageDitNpu {
 
   /// Caption conditioning: TE tap34 [S,2560] -> rms -> linear+bias.
   [[nodiscard]] bool CapEmbed(std::span<const float> te_tap34,
-                             std::size_t tokens, std::vector<float>* cap,
-                             double* npu_ms = nullptr,
-                             std::string* error = nullptr);
+                              std::size_t tokens, std::vector<float>* cap,
+                              double* npu_ms = nullptr,
+                              std::string* error = nullptr);
   /// Pad cap to cap_pad rows with the learned cap_pad_token (pipeline
   /// _prepare_sequence parity: pad positions take pad_token, NOT last-row).
   static void PadCap(std::span<const float> cap_in, std::size_t tokens,
@@ -95,7 +95,7 @@ class ZImageDitNpu {
 
   [[nodiscard]] const ZImageDitConfig& config() const noexcept { return cfg_; }
 
- private:
+private:
   ZImageDitConfig cfg_;
   NpuShardReader reader_;
   NpuQuantGemmEngine* engine_ = nullptr;
