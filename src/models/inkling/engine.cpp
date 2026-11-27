@@ -3041,6 +3041,83 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
                  static_cast<std::uint32_t>(history_.size() - 1), error_msg);
 }
 
+bool Session::AdvanceBatchWithChunk(
+    std::span<Session* const> lanes, std::span<const std::int32_t> tokens,
+    Session* chunk, std::span<const std::int32_t> prefix,
+    std::string* error_msg, bool* refused) {
+  const auto refuse = [&](const char* why) {
+    if (refused != nullptr) *refused = true;
+    if (error_msg != nullptr) *error_msg = std::string("inkling batch refused: ") + why;
+    return false;
+  };
+  if (refused != nullptr) *refused = false;
+  if (lanes.size() != tokens.size()) return refuse("lane/token count mismatch");
+  if (lanes.empty() && chunk == nullptr) return refuse("nothing to run");
+  if (InklingDebugEnabled() || ParityEnabled() || ProfileEnabled()) {
+    return refuse("debug/parity/profile mode runs the eager path");
+  }
+  for (std::size_t i = 0; i < lanes.size(); ++i) {
+    Session* lane = lanes[i];
+    if (lane == nullptr || lane == chunk) return refuse("invalid lane");
+    for (std::size_t j = 0; j < i; ++j) {
+      if (lanes[j] == lane) return refuse("duplicate lane");
+    }
+    if (lane->dspark_ != nullptr) return refuse("speculative session");
+    if (lane->history_.empty()) return refuse("lane has no prefix");
+    if (lane->history_.size() + 1 > lane->model_->MaxContext()) {
+      return refuse("lane context full");
+    }
+  }
+  if (chunk != nullptr) {
+    if (prefix.empty()) return refuse("empty chunk prefix");
+    if (prefix.size() > chunk->model_->MaxContext()) return refuse("chunk exceeds context");
+  }
+  // Lanes without a captured decode graph take their (capturing) first
+  // Evaluate now, alone, before anything is enqueued on the shared stream.
+  std::vector<bool> warmed(lanes.size(), false);
+  for (std::size_t i = 0; i < lanes.size(); ++i) {
+    if (lanes[i]->decode_graph_exec_ == nullptr) {
+      warmed[i] = true;
+      if (!lanes[i]->Evaluate(tokens[i], error_msg)) return false;
+    }
+  }
+  hipStream_t stream = chunk != nullptr ? chunk->stream_
+                                        : (lanes.empty() ? nullptr : lanes[0]->stream_);
+  std::vector<std::uint32_t> positions(lanes.size());
+  for (std::size_t i = 0; i < lanes.size(); ++i) {
+    Session* lane = lanes[i];
+    if (warmed[i]) continue;  // advanced above
+    lane->history_.push_back(tokens[i]);
+    positions[i] = static_cast<std::uint32_t>(lane->history_.size() - 1);
+    lane->sconv_slot_ = 0;
+    if (!Check(hipMemcpyAsync(lane->d_tokens_, &tokens[i], sizeof(std::int32_t),
+                              hipMemcpyHostToDevice, stream),
+               error_msg, "batch copy token") ||
+        !Check(hipMemcpyAsync(lane->d_pos_, &positions[i], sizeof(std::uint32_t),
+                              hipMemcpyHostToDevice, stream),
+               error_msg, "batch copy pos") ||
+        !Check(hipGraphLaunch(lane->decode_graph_exec_, stream), error_msg,
+               "batch launch decode graph") ||
+        !Check(hipMemcpyAsync(lane->host_logits_.data(), lane->d_logits_,
+                              static_cast<std::size_t>(lane->vocab_rows_) * sizeof(float),
+                              hipMemcpyDeviceToHost, stream),
+               error_msg, "batch copy logits")) {
+      (void)hipStreamSynchronize(stream);
+      return false;
+    }
+  }
+  bool ok = true;
+  if (chunk != nullptr) {
+    // Unchanged Sync: it restarts at position 0 when the prompt is not the
+    // retained history, exactly as the unmixed Prefill does.
+    ok = chunk->Sync(prefix, error_msg);
+  }
+  if (stream != nullptr && !Check(hipStreamSynchronize(stream), error_msg, "batch sync")) {
+    ok = false;
+  }
+  return ok;
+}
+
 std::span<const float> Session::Logits() const noexcept {
   return std::span<const float>(host_logits_.data(), host_logits_.size());
 }

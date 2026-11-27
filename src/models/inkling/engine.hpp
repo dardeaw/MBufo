@@ -161,6 +161,17 @@ class Session final {
                              std::string* error_msg = nullptr);
   [[nodiscard]] std::span<const float> Logits() const noexcept;
   [[nodiscard]] std::uint32_t Length() const noexcept;
+  /// Advance several decode lanes by one token each (== Evaluate per lane) and
+  /// optionally Sync `chunk` to `prefix` (== chunk->Sync(prefix)), all on ONE
+  /// in-order stream (the chunk's, else the first lane's) with one host sync.
+  /// The decode graphs and the chunk forward are the unchanged single-session
+  /// ones, so every result is bit-identical to the separate calls; nothing runs
+  /// concurrently because core kernels use process-wide single-stream scratch.
+  /// `*refused` is set when a precondition failed before any state moved.
+  [[nodiscard]] static bool AdvanceBatchWithChunk(
+      std::span<Session* const> lanes, std::span<const std::int32_t> tokens,
+      Session* chunk, std::span<const std::int32_t> prefix,
+      std::string* error_msg, bool* refused);
   [[nodiscard]] std::int32_t SampleGreedy();
   [[nodiscard]] bool SpeculativeRound(std::uint32_t n_draft,
                                       std::vector<std::int32_t>* out_tokens,
