@@ -225,11 +225,14 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 | Runner | `DecodeBatch` | `AdvanceBatch` | Merged prefill + decode |
 | --- | --- | --- | --- |
 | Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes) | no (investigated 2026-11-27: `ForwardPromptBatchMulti` decode lanes run prefill arithmetic and are not bit-identical to `ForwardTokenBatch`/decode; see Qwen mixed batch below) |
-| DeepSeek V4 Flash | native (serial in some conditions) | native | no |
+| DeepSeek V4 Flash | native (serial in some conditions) | native | no (`MBUFO_RUNNER_NO_MIXED_BATCH`; see note below) |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
-| Muse Glimmer | native without a shared draft, serial otherwise | serial | no |
+| Muse Glimmer | native without a shared draft, serial otherwise | native without a shared draft (bit-identical to serial), serial otherwise | **yes** without a shared draft (`AdvanceBatchWithPrefillChunk`); `DecodeBatchWithPrefillChunk` refuses (DFlash verify is per-session) |
 | Gemma 4 | serial | serial | **yes, plain advances** (`AdvanceBatchWithPrefillChunk` via `Session::DecodeBatchWithChunk`: decode lanes and one prefill chunk share one layer pass, lanes on the unified mixed-batch attention launch); `DecodeBatchWithPrefillChunk` refuses explicitly (no MTP verify pass to ride); MTP-enabled runners advertise `mixed_prefill_decode = false` |
-| GPT-OSS, Laguna, Inkling, Llama | serial | serial | no |
+| GPT-OSS | serial (no multi-token decode) | native (`Session::EvaluateBatch`, one layer-synchronous pass, every lane on its own single-token decode core) | **yes, plain advances** (`AdvanceBatchWithPrefillChunk` via `Session::EvaluateBatchWithChunk`: lanes and one prefill block share one layer pass, bit-identical to Sync + Evaluate; the chunk stays inside one 256-row Sync block so it may consume fewer tokens than budgeted, and recomputes the rows of that block already prefilled); `DecodeBatchWithPrefillChunk` refuses explicitly |
+| Laguna 2.1 | serial (no multi-token decode) | native (`Session::AdvanceBatchWithChunk`, one in-order stream, per-lane decode core) | **yes** plain advances (`AdvanceBatchWithPrefillChunk`; `DecodeBatchWithPrefillChunk` refuses) |
+| Llama (Q8_0 weights) | serial | native (packed lanes, up to 8 per pass) | **yes** (`AdvanceBatchWithPrefillChunk`; `DecodeBatchWithPrefillChunk` refuses, no multi-token decode) |
+| Inkling | serial | serial | no (kept `MBUFO_RUNNER_NO_MIXED_BATCH`; blocked, see "Inkling" below) |
 
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
@@ -251,7 +254,125 @@ Blocked-Q8 KV (`--kv-quant q8`, the production default for head_dim 256) is
 refused by both `ForwardTokenBatch` and `ForwardPromptBatchMulti`, so it would
 additionally need blocked-cache dual writes and a decode-exact Q8 read.
 
-Separate finding: `TextRunnerPool::Request::PrefillWithCoworkers` refuses
-whenever `snapshot_tokens`, `checkpoints` or `boundaries` is non-empty, which
-is the case for every long prompt on snapshot-capable runners, so merged
-prefill+decode never fires there regardless of the runner.
+Separate finding, since fixed: `TextRunnerPool::Request::PrefillWithCoworkers`
+used to refuse whenever `snapshot_tokens`, `checkpoints` or `boundaries` was
+non-empty, which is the case for every long prompt on snapshot-capable runners,
+so the plain merged prefill+decode never fired there. It now cuts the chunk at
+the next snapshot/checkpoint/boundary frontier like `PrefillWithDecoders`, and
+`MBUFO_MIXED_TRACE=1` prints one stderr line per merged step.
+
+### Muse Glimmer notes
+
+- Engine entry points: `Session::StepBatchExact` (advance lanes) and
+  `Session::DecodeBatchWithChunk` (lanes plus one prefill chunk). Both run a
+  layer-synchronous pass whose per-item arithmetic is the same per-session
+  core `Evaluate` / `Sync` use (FlashSinkDecode for one row, WMMA flash for a
+  chunk). The unified varlen launcher used by `Session::DecodeBatch` is *not*
+  bit-identical to those cores, so the exact entry points do not use it.
+- Verified bit-identical (completion SHA and per-step logits checksum at every
+  position) against `MBUFO_MIXED_BATCH=0` with a 6.5k-token prompt prefilling
+  while 3 to 4 streams decode on `muse-glimmer-30b`.
+- No speedup claim: Glimmer's GEMMs still run per session, so a merged pass
+  shares no weight reads between lanes (decode is weight-bandwidth bound).
+  Sharing weights needs lane-stacked GEMM rows in `ForwardLayerPre/Post`.
+- The chunk is capped at 512 rows per step (engine limit); the scheduler budget
+  is usually below that. A request whose engine session does not continue the
+  retained prefix at the chunk offset is refused cleanly (legacy pair runs).
+- `MBUFO_GLIMMER_MIXED_TRACE=1` prints one stderr line per merged step.
+
+
+### Laguna notes
+
+- Bit-identity design: every decode lane runs its own unchanged n == 1 forward and the chunk runs its unchanged
+  prefill forward, all enqueued back to back on the chunk session's stream with one host sync. No weight sharing
+  between lanes: a shared GEMM changes the kernel/reduction route and is not bit-identical.
+- One stream, not one per session: the decode GEMV/MoE kernels use process-global device scratch
+  (`g_moe_u_*` in `moe_fused.hip`, `g_gemv_q8_scratch`), so concurrent streams would race.
+- Chunk capped at `Session::MaxChunkTokens()` (512), the engine's own step size, so the chunk boundaries equal the
+  separate `Sync` path. Validation (distinct lanes, chunk continues the retained prefix, context fits) happens before
+  any state moves; a failure there is `MixedBatchRefused` / serial fallback.
+- Verified on laguna-2.1-xs Q4_K_M: ~6k-token prompt prefilling while 4 streams decode (600 tokens each), greedy:
+  combined completion SHA identical between `MBUFO_MIXED_BATCH=1` (18 merged chunks, up to 4 lanes) and `=0`.
+- Pre-existing, unrelated: a prompt shorter than about 512 tokens (a single chunk starting at position 0) yields
+  "logit distribution contains no finite values" on the base branch too. Test prompts were therefore >= 650 tokens.
+
+
+### Llama notes (native advance + merged advance/prefill)
+
+- Engine: `Session::StepBatch` runs up to 8 decode lanes in one layer-synchronous pass. The projections of all lanes share
+  one `GemvBatched` weight read (for Q8_0 weights n = 1 already takes that kernel, so a lane's row is bit-identical to
+  `Evaluate`); rope / KV append / attention stay per lane through `AttentionCore`, the same code `Evaluate` runs
+  (`FlashSinkDecode` for f16 KV, split-K for q8 KV). `Session::DecodeBatchWithChunk` adds one prefill chunk: the chunk never
+  shares a GEMM with the lanes (`Extend`, the same prefill core as `Sync`), so both halves equal the separate runs.
+  Non-Q8_0 weights (F16 GGUF) refuse the packed path (`MixedBatchRefused` / serial advance), because n = 1 and n > 1 take
+  different GEMV kernels there.
+- Prefill is now incremental: `Session::Extend(prompt, offset)` forwards only the new rows (the old `Sync(prefix)` restarted
+  at 0 on every scheduler chunk). A piece's arithmetic depends on its row count (odd or tiny row counts take other
+  kernel routes; measured: grids of 63/65/33/16/1 rows differ from `Sync`), so the pieces are a function of the prompt
+  alone: `Session::PrefillTarget` lets the engine compute only up to the last 512-row grid boundary at or before the
+  consumed position (everything at prompt end) and keeps the rest pending. Mixed and separate runs, and any budget
+  slicing, forward identical pieces. Consequence: an interior scheduler chunk smaller than 512 rows may compute nothing
+  (work arrives in grid-sized bursts) and the merged step then steps only the lanes.
+- Not a perf win for the chunk itself: on one 5k prompt with 4 streams decoding, mixed vs separate was 10.3 s vs 9.8 s
+  (f16 KV) and 11.3 s vs 11.1 s (q8 KV). The win is the shared lane weight read in `AdvanceBatch` and the removal of the
+  quadratic prefix recompute. Multi-chunk prompts now use the 512-aligned grid instead of equal splits, so their logits
+  differ in the last bits from the pre-change build (5081-token prompt: greedy text diverges after ~15 tokens).
+- Verified: `llama_mixed_exact_test` (tests/models/llama; Extend budget walks == Sync, StepBatch 2-4 lanes == serial
+  Evaluate, mixed chunk == Sync + lanes, f16 and q8 KV) and a serve A/B (5067-token prompt prefilling while 4 streams
+  decode, `MBUFO_MIXED_BATCH` 1 vs 0, 13 merged steps, all five completion SHAs identical for f16 and q8 KV).
+
+
+### Inkling: why there is no native batch path yet
+
+Inkling sessions each own a HIP stream, a whole-forward decode graph and a
+private arena, and `Session::ForwardLayer` is one monolithic per-session call.
+There is no layer-synchronous multi-session pass to hang lanes and a chunk on,
+and the two cheap substitutes do not work:
+
+- **Concurrent per-session streams** (launch every lane graph and the chunk
+  without syncing, then collect) would be bit-identical by construction, but
+  core kernels use process-wide single-stream scratch: `g_gemv_q8_scratch`
+  (`gemv_wave32_sdot4.hip`, also reallocated on growth) and the
+  `g_moe_u_*` MoE routing buffers (`moe_fused.hip`). Two sessions in flight
+  at once race on them. They would have to become per-session/per-stream
+  arguments first (16 `QuantizeToQ8Scratch` call sites plus the MoE unique
+  buckets); that touches shared core used by every model.
+- **A layer-synchronous single-stream pass** is safe but gains nothing while
+  every lane keeps its own decode core (no shared weight read), and it loses
+  the decode graph. Sharing the GEMMs instead is not bit-identical to
+  separate decode.
+
+Also note `Session::Sync` restarts from position 0 whenever the prompt is not
+identical to the retained history (the rolling sconv state cannot rewind), so a
+chunked `Prefill` recomputes the whole prefix on each chunk. A merged chunk
+must keep that behaviour to stay bit-identical to the unmixed path; making
+`Sync` continue a pure extension would help both paths but changes chunk
+alignment (and so numerics) versus today.
+
+
+### Why DeepSeek V4 Flash has no merged prefill + decode
+
+Not feasible without a new engine-level forward; the fallback is deliberate.
+
+- Decode rows and prefill rows run through different graph code. A decode batch
+  (`rocm_graph_eval_sessions_batch`, 2 to 8 sessions, `ds4_gpu_set_small_batch_mode(1)`)
+  drives each session's own stateful attention core row by row
+  (`rocm_graph_encode_sessions_attention_batch`). Prefill
+  (`rocm_graph_encode_layer_attention_batch`) is one session, consecutive
+  positions, with batched compressor/indexer state updates.
+- The `*_mixed_batch_heads` attention kernels are not decode+prefill mixing:
+  "mixed" means raw sliding-window plus compressed KV for one session's
+  consecutive tokens. Nothing in them takes per-row sessions.
+- Row count selects kernels: dense matmul and routed-MoE switch to MMQ at
+  >= 32 rows when small-batch mode is off. Decode rows riding in a 32+ row
+  pass would change reduction order, so output could not stay bit-identical
+  to separate prefill + advance.
+- `DeepSeekTextRunner::Prefill` is `Session::Sync(prefix)` on the session's own
+  graph, so the runner has no chunk primitive that can be handed a shared pass.
+
+Work needed: a layer-major forward over a heterogeneous row set (decode rows
+via per-session cores, prefill rows via the batched path, row-offset views of
+the shared `batch_*` tensors), a FFN/MoE stage whose per-row numerics do not
+depend on total row count (or per-group kernel selection), batch width above 8,
+and a `Session` chunk API. Roughly 1500 to 2500 lines in
+`runtime/rocm_graph.cpp` plus kernel-selection work, high regression risk.
