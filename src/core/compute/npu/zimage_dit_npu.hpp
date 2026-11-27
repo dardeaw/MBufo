@@ -1,16 +1,18 @@
 #pragma once
-// Z-Image-Turbo DiT NPU path (P5): caption embedder + 2 context-refiner
-// blocks + 2 noise-refiner + 30 single-stream main layers, 8-step Euler
-// flow. Exact port of RunZImageTurboQuantE2E math with NPU-only GEMMs
-// (d=3840, 30 heads x 128, rope_theta=256, eps=1e-5; FFN=10240).
-//
-// Per-step flow: TEmbed(sigma) -> XEmbed(z) -> NoiseRefiner(img, mod) ->
-// concat(img, cap) -> MainLayers(all, per-block mod) -> FinalHead ->
-// z -= dt*v. Caption conditioning (CapEmbed over the TE final sequence +
-// context refiner) is computed once per prompt. VAE decode stays on the
-// existing path.
+// Z-Image-Turbo DiT NPU path, TRUE PORT of the diffusers pipeline math
+// (P8b). v1 followed the parity shell (1D rope, RMSNorm final head with
+// 1+scale, no cap padding) and diverged from the pipeline. This version:
+// - complex-cis 3-axis RoPE (axes 32/48/48, theta=256) via adjacent-pair
+//   tables (same rotation math as the complex path)
+// - cap padded to 32 with learned cap_pad_token; real cap t=1..St,
+//   pad rows [0,0,0]; img t=33 (cap_len+1)
+// - joint [img(64); cap(32)] = 96 tokens, img rope (t=33,h,w), cap (t,h=0,w=0)
+// - FinalLayer: LayerNorm (no affine, eps 1e-6!) + pure scale (no +1)
+// - everything else unchanged (RMSNorms, mod chunk(4), tanh gates,
+//   SwiGLU FFN, no-mod refiner branch, t_scale=1000)
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 #include <vector>
@@ -26,8 +28,12 @@ struct ZImageDitConfig {
   std::size_t ffn = 10240;
   std::size_t n_refiner = 2;
   std::size_t n_main = 30;
+  std::size_t cap_pad = 32;  // SEQ_MULTI_OF padding for cap tokens
   float eps = 1.0e-5F;
   float rope_theta = 256.0F;
+  float final_eps = 1.0e-6F;
+  // From the model config (NOT the RopeEmbedder defaults): axes (32,48,48).
+  std::size_t rope_axes[3] = {32, 48, 48};
 };
 
 class ZImageDitNpu {
@@ -39,14 +45,22 @@ class ZImageDitNpu {
                           const ZImageDitConfig& config = {},
                           std::string* error = nullptr);
 
-  /// Caption conditioning: TE final raw [S,2560] -> rms -> linear+bias.
-  [[nodiscard]] bool CapEmbed(std::span<const float> te_final,
+  /// Caption conditioning: TE tap34 [S,2560] -> rms -> linear+bias.
+  [[nodiscard]] bool CapEmbed(std::span<const float> te_tap34,
                              std::size_t tokens, std::vector<float>* cap,
                              double* npu_ms = nullptr,
                              std::string* error = nullptr);
+  /// Pad cap to cap_pad rows with the learned cap_pad_token (pipeline
+  /// _prepare_sequence parity: pad positions take pad_token, NOT last-row).
+  static void PadCap(std::span<const float> cap_in, std::size_t tokens,
+                     std::size_t hidden, std::size_t padded,
+                     std::span<const float> pad_token,
+                     std::vector<float>* cap_out);
   /// Context refiner blocks (no modulation), in place.
   [[nodiscard]] bool RefineContext(std::vector<float>* cap, std::size_t tokens,
                                    std::size_t n_ref,
+                                   std::span<const float> rope_cos,
+                                   std::span<const float> rope_sin,
                                    double* npu_ms = nullptr,
                                    std::string* error = nullptr);
   /// Timestep MLP: sinusoid -> mlp.0+bias -> silu -> mlp.2+bias = temb[256].
@@ -58,11 +72,19 @@ class ZImageDitNpu {
                             std::vector<float>* img, double* npu_ms = nullptr,
                             std::string* error = nullptr);
 
+  /// 3-axis rope tables for joint [img; cap]: img (t=33,h,w), real cap
+  /// rows (t=1..St,h=0,w=0), PAD cap rows [0,0,0] (pipeline _pad_with_ids).
+  void BuildRopeTables(std::size_t cap_tokens, std::size_t cap_real,
+                       std::size_t Si, std::vector<float>* cos_t,
+                       std::vector<float>* sin_t) const;
+
   // Generic block: norms an1/an2/fn1/fn2 + qk-norm rope attn + SwiGLU FFN.
   // mod is null for context refiner, else [15360] per-block modulation.
   [[nodiscard]] bool Block(const std::string& prefix, std::vector<float>* h,
                            std::size_t seq, const float* mod,
-                           double* npu_ms, std::string* error);
+                           std::span<const float> rope_cos,
+                           std::span<const float> rope_sin, double* npu_ms,
+                           std::string* error);
 
   /// One Euler step in place over latents z [Si*64].
   [[nodiscard]] bool FullStep(std::vector<float>* z, std::size_t Si,

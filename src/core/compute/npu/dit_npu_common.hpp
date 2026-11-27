@@ -13,10 +13,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <span>
 #include <string>
 #include <vector>
-
 #include "src/core/compute/npu/npu_quant_gemm.hpp"
 #include "src/core/compute/npu/npu_shard_reader.hpp"
 
@@ -43,6 +43,91 @@ inline void RmsNormRows(const float* x, const float* w_or_null,
 
 inline void SiluInPlace(std::vector<float>& v) {
   for (float& x : v) x = x / (1.0F + std::exp(-x));
+}
+
+/// LayerNorm without affine (Flux/Z-Image blocks use elementwise_affine=False).
+inline void LayerNormRows(const float* x, std::size_t rows, std::size_t cols,
+                          float eps, std::vector<float>* out) {
+  out->resize(rows * cols);
+  for (std::size_t r = 0; r < rows; ++r) {
+    const float* xr = x + r * cols;
+    float* yr = out->data() + r * cols;
+    double sum = 0.0;
+    for (std::size_t c = 0; c < cols; ++c) sum += (double)xr[c];
+    const double mean = sum / (double)cols;
+    double var = 0.0;
+    for (std::size_t c = 0; c < cols; ++c) {
+      const double d = (double)xr[c] - mean;
+      var += d * d;
+    }
+    const float inv =
+        static_cast<float>(1.0 / std::sqrt(var / (double)cols + eps));
+    for (std::size_t c = 0; c < cols; ++c) {
+      yr[c] = (float)((double)xr[c] - mean) * inv;
+    }
+  }
+}
+
+/// 4-axis RoPE tables, exact port of Flux2PosEmbed + get_1d_rotary_pos_embed:
+/// per-axis freqs in float64, adjacent-pair repeat_interleave, concatenated.
+/// pos_ids rows are (t, h, w, l); axes_dims e.g. {32,32,32,32}, theta=2000.
+inline void FluxRopeTables(std::span<const std::int32_t> pos_ids,
+                           std::size_t rows, const std::size_t* axes_dims,
+                           std::size_t n_axes, double theta,
+                           std::vector<float>* cos_out,
+                           std::vector<float>* sin_out) {
+  std::size_t total_dim = 0;
+  for (std::size_t a = 0; a < n_axes; ++a) total_dim += axes_dims[a];
+  cos_out->assign(rows * total_dim, 0.0F);
+  sin_out->assign(rows * total_dim, 0.0F);
+  std::size_t dim_off = 0;
+  for (std::size_t a = 0; a < n_axes; ++a) {
+    const std::size_t dim = axes_dims[a];
+    const std::size_t half = dim / 2u;
+    for (std::size_t s = 0; s < rows; ++s) {
+      const double pos = (double)pos_ids[s * 4u + a];
+      float* co = cos_out->data() + s * total_dim + dim_off;
+      float* so = sin_out->data() + s * total_dim + dim_off;
+      for (std::size_t j = 0; j < half; ++j) {
+        const double freq =
+            1.0 / std::pow(theta, 2.0 * (double)j / (double)dim);
+        const double ang = pos * freq;
+        const float c = (float)std::cos(ang);
+        const float si = (float)std::sin(ang);
+        co[2u * j] = c;
+        co[2u * j + 1u] = c;
+        so[2u * j] = si;
+        so[2u * j + 1u] = si;
+      }
+    }
+    dim_off += dim;
+  }
+}
+
+/// Apply precomputed adjacent-pair RoPE tables in place over [rows, dim].
+/// The table row (total_dim, e.g. 128) repeats for each attention head chunk.
+inline void RopeApplyTables(std::vector<float>* qkv, std::size_t rows,
+                            std::size_t dim, std::span<const float> cos_t,
+                            std::span<const float> sin_t,
+                            std::size_t total_dim = 0) {
+  if (total_dim == 0) total_dim = dim;
+  const std::size_t heads = dim / total_dim;
+  for (std::size_t s = 0; s < rows; ++s) {
+    float* v = qkv->data() + s * dim;
+    const float* co = cos_t.data() + s * total_dim;
+    const float* so = sin_t.data() + s * total_dim;
+    for (std::size_t h = 0; h < heads; ++h) {
+      for (std::size_t k = 0; k < total_dim; k += 2u) {
+        float& x0 = v[h * total_dim + k];
+        float& x1 = v[h * total_dim + k + 1u];
+        const float c0 = co[k], s0 = so[k], c1 = co[k + 1u], s1 = so[k + 1u];
+        const float y0 = x0 * c0 - x1 * s0;
+        const float y1 = x0 * s1 + x1 * c1;
+        x0 = y0;
+        x1 = y1;
+      }
+    }
+  }
 }
 
 /// FLUX/Z-Image timestep sinusoid [256]: cos half then sin half,
@@ -182,6 +267,86 @@ inline void RopeAttn(const std::vector<float>& q_in,
   }
 }
 
+/// Joint attention with precomputed adjacent-pair RoPE tables and per-head
+/// QK RMS-norm (weights per head dim). q [Sq,qd], k/v [Sk,kd]; rope tables
+/// cover q rows (cos_q/sin_q) and k rows (cos_k/sin_k) separately. Full
+/// (non-causal) softmax at 1/sqrt(hd). Used by the true-port FLUX blocks.
+inline void JointAttnTables(const std::vector<float>& q_in,
+                            const std::vector<float>& k_in,
+                            const std::vector<float>& v_in,
+                            std::span<const float> q_norm_w,
+                            std::span<const float> k_norm_w, std::size_t Sq,
+                            std::size_t Sk, std::size_t n_heads,
+                            std::size_t n_kv_heads, std::size_t head_dim,
+                            std::span<const float> cos_q,
+                            std::span<const float> sin_q,
+                            std::span<const float> cos_k,
+                            std::span<const float> sin_k, float rms_eps,
+                            std::vector<float>* ctx_out) {
+  const std::size_t qd = n_heads * head_dim;
+  const std::size_t kd = n_kv_heads * head_dim;
+  std::vector<float> q = q_in;
+  std::vector<float> k = k_in;
+  for (std::size_t t = 0; t < Sq; ++t) {
+    for (std::size_t h = 0; h < n_heads; ++h) {
+      float* qh = q.data() + t * qd + h * head_dim;
+      if (!q_norm_w.empty()) {
+        const float* nw = q_norm_w.data() + t * qd + h * head_dim;
+        double ss = 0.0;
+        for (std::size_t i = 0; i < head_dim; ++i) ss += (double)qh[i] * qh[i];
+        const float inv = static_cast<float>(1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
+        for (std::size_t i = 0; i < head_dim; ++i) qh[i] = qh[i] * inv * nw[i];
+      }
+    }
+  }
+  for (std::size_t t = 0; t < Sk; ++t) {
+    for (std::size_t h = 0; h < n_kv_heads; ++h) {
+      float* kh = k.data() + t * kd + h * head_dim;
+      if (!k_norm_w.empty()) {
+        const float* nw = k_norm_w.data() + t * kd + h * head_dim;
+        double ss = 0.0;
+        for (std::size_t i = 0; i < head_dim; ++i) ss += (double)kh[i] * kh[i];
+        const float inv = static_cast<float>(1.0 / std::sqrt(ss / (double)head_dim + rms_eps));
+        for (std::size_t i = 0; i < head_dim; ++i) kh[i] = kh[i] * inv * nw[i];
+      }
+    }
+  }
+  RopeApplyTables(&q, Sq, qd, cos_q, sin_q, head_dim);
+  RopeApplyTables(&k, Sk, kd, cos_k, sin_k, head_dim);
+  ctx_out->assign(Sq * qd, 0.0F);
+  const std::size_t group = n_heads / n_kv_heads;
+  const float scale = 1.0F / std::sqrt(static_cast<float>(head_dim));
+  std::vector<float> scores(Sk);
+  for (std::size_t h = 0; h < n_heads; ++h) {
+    const std::size_t kvh = h / group;
+    for (std::size_t tq = 0; tq < Sq; ++tq) {
+      const float* qvec = q.data() + tq * qd + h * head_dim;
+      float max_s = -1.0e30F;
+      for (std::size_t tk = 0; tk < Sk; ++tk) {
+        const float* kvec = k.data() + tk * kd + kvh * head_dim;
+        double dot = 0.0;
+        for (std::size_t i = 0; i < head_dim; ++i) dot += (double)qvec[i] * kvec[i];
+        const float s = (float)dot * scale;
+        scores[tk] = s;
+        if (s > max_s) max_s = s;
+      }
+      double sum_exp = 0.0;
+      for (std::size_t tk = 0; tk < Sk; ++tk) {
+        const float e = std::exp(scores[tk] - max_s);
+        scores[tk] = e;
+        sum_exp += (double)e;
+      }
+      const float inv_sum = (sum_exp > 0.0) ? (float)(1.0 / sum_exp) : 0.0F;
+      float* cdst = ctx_out->data() + tq * qd + h * head_dim;
+      for (std::size_t tk = 0; tk < Sk; ++tk) {
+        const float p = scores[tk] * inv_sum;
+        const float* vvec = v_in.data() + tk * kd + kvh * head_dim;
+        for (std::size_t i = 0; i < head_dim; ++i) cdst[i] += p * vvec[i];
+      }
+    }
+  }
+}
+
 /// Streamed NPU linear: read f32 [N,K] (+ optional [N] bias), pack, GEMM.
 class DitNpuLinear {
  public:
@@ -203,6 +368,12 @@ class DitNpuLinear {
     if (!bias_name.empty()) {
       if (!reader_->ReadF32(bias_name, N, &b, error)) return false;
       bp = b.data();
+    }
+    // Diagnostic: NPU_HOST_GEMM=1 forces host FP32 (isolates math vs quant).
+    static const bool host_only = std::getenv("NPU_HOST_GEMM") != nullptr;
+    if (host_only) {
+      MatMulRefHost(x.data(), M, w.data(), N, K, bp, y);
+      return true;
     }
     // The NPU kernel packs in 256-wide tiles; narrow projections (DiT
     // embedders/heads) fall back to host FP32, exactly as the parity shell
