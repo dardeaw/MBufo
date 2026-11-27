@@ -225,10 +225,38 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 | Runner | `DecodeBatch` | `AdvanceBatch` | Merged prefill + decode |
 | --- | --- | --- | --- |
 | Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes) | no |
-| DeepSeek V4 Flash | native (serial in some conditions) | native | no |
+| DeepSeek V4 Flash | native (serial in some conditions) | native | no (`MBUFO_RUNNER_NO_MIXED_BATCH`; see note below) |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
 | Muse Glimmer | native without a shared draft, serial otherwise | serial | no |
 | GPT-OSS, Laguna, Inkling, Llama, Gemma 4 | serial | serial | no |
 
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
+
+### Why DeepSeek V4 Flash has no merged prefill + decode
+
+Not feasible without a new engine-level forward; the fallback is deliberate.
+
+- Decode rows and prefill rows run through different graph code. A decode batch
+  (`rocm_graph_eval_sessions_batch`, 2 to 8 sessions, `ds4_gpu_set_small_batch_mode(1)`)
+  drives each session's own stateful attention core row by row
+  (`rocm_graph_encode_sessions_attention_batch`). Prefill
+  (`rocm_graph_encode_layer_attention_batch`) is one session, consecutive
+  positions, with batched compressor/indexer state updates.
+- The `*_mixed_batch_heads` attention kernels are not decode+prefill mixing:
+  "mixed" means raw sliding-window plus compressed KV for one session's
+  consecutive tokens. Nothing in them takes per-row sessions.
+- Row count selects kernels: dense matmul and routed-MoE switch to MMQ at
+  >= 32 rows when small-batch mode is off. Decode rows riding in a 32+ row
+  pass would change reduction order, so output could not stay bit-identical
+  to separate prefill + advance.
+- `DeepSeekTextRunner::Prefill` is `Session::Sync(prefix)` on the session's own
+  graph, so the runner has no chunk primitive that can be handed a shared pass.
+
+Work needed: a layer-major forward over a heterogeneous row set (decode rows
+via per-session cores, prefill rows via the batched path, row-offset views of
+the shared `batch_*` tensors), a FFN/MoE stage whose per-row numerics do not
+depend on total row count (or per-group kernel selection), batch width above 8,
+and a `Session` chunk API. Roughly 1500 to 2500 lines in
+`runtime/rocm_graph.cpp` plus kernel-selection work, high regression risk.
+
