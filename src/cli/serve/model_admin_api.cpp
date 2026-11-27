@@ -25,6 +25,7 @@
 #include "mbufo_build_version.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/model_admin_ui.hpp"
+#include "src/core/compute/npu/npu_servable.hpp"
 #include "src/core/json.hpp"
 
 namespace mbufo::server {
@@ -620,6 +621,25 @@ HttpResponse ModelAdminService::HandleList(const HttpRequest&) {
   resp["models"] = data;
   resp["data"] = std::move(data);
   resp["memory"] = QueryMemorySnapshot(probe_).ToJson();
+
+  {
+    // Uniform lifecycle of every in-process NPU servable (INpuServable).
+    json::Value servables = json::Value::array();
+    for (const auto& [sid, st] :
+         mbufo::core::npu::NpuServableRegistry::Global().Snapshot()) {
+      json::Value item = json::Value::object();
+      item["id"] = sid;
+      item["state"] = mbufo::core::npu::NpuServableStateName(st.state);
+      item["ready"] = st.state == mbufo::core::npu::NpuServableState::kReady;
+      item["warm"] = st.warmed;
+      item["load_ms"] = st.load_ms;
+      item["warmup_ms"] = st.warmup_ms;
+      if (!st.last_error.empty())
+        item["error"] = st.last_error;
+      servables.push_back(std::move(item));
+    }
+    resp["npu_servables"] = std::move(servables);
+  }
 
   {
     std::lock_guard lock(loading_state_mutex_);
@@ -1477,10 +1497,16 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
 
   const std::uint64_t t_load_start = NowSteadyMs();
   std::string error;
-  auto backend = loader_(request, &error);
-  if (backend == nullptr)
+  std::shared_ptr<TextGenerationBackend> backend;
+  {
+    const mbufo::core::npu::NpuServableRegistry::TagScope tag(request.id);
+    backend = loader_(request, &error);
+  }
+  if (backend == nullptr) {
+    mbufo::core::npu::NpuServableRegistry::Global().Remove(request.id);
     return AdminErr(500, "Internal Server Error",
                     error.empty() ? "load failed" : error, "load_failed");
+  }
   LoadedModelConfig reg_cfg;
   reg_cfg.kv_cache_quant = request.kv_cache_quant;
   reg_cfg.speculative = request.speculative;
@@ -1590,6 +1616,7 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
   std::string error;
   if (!registry_->Remove(id, &error))
     return AdminErr(409, "Conflict", error, "eject_failed");
+  mbufo::core::npu::NpuServableRegistry::Global().Remove(id);
 #if defined(__GLIBC__)
   ::malloc_trim(0);
 #endif
@@ -1833,7 +1860,12 @@ HttpResponse ModelAdminService::HandleReload(const HttpRequest& req) {
 
   auto try_rollback = [&](const std::string& reason) -> HttpResponse {
     std::string rb_err;
-    auto rb_backend = loader_(rollback_req, &rb_err);
+    std::shared_ptr<TextGenerationBackend> rb_backend;
+    {
+      const mbufo::core::npu::NpuServableRegistry::TagScope tag(
+          rollback_req.id);
+      rb_backend = loader_(rollback_req, &rb_err);
+    }
     if (rb_backend != nullptr) {
       std::string add_err;
       if (registry_->Add(rollback_req.id, rollback_req.aliases,
@@ -1880,7 +1912,11 @@ HttpResponse ModelAdminService::HandleReload(const HttpRequest& req) {
 
   const std::uint64_t t_load_start = NowSteadyMs();
   std::string load_err;
-  auto backend = loader_(request, &load_err);
+  std::shared_ptr<TextGenerationBackend> backend;
+  {
+    const mbufo::core::npu::NpuServableRegistry::TagScope tag(request.id);
+    backend = loader_(request, &load_err);
+  }
   if (backend == nullptr) {
     return try_rollback(load_err.empty() ? "reload failed" : load_err);
   }

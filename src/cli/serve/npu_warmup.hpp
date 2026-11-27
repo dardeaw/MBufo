@@ -77,7 +77,11 @@ inline bool LoadNpuServable(const std::string& id,
                    " warm=" + (st.warmed ? "true" : "false") +
                    " warmup_ms=" + std::to_string(st.warmup_ms) +
                    (st.last_error.empty() ? "" : " error=" + st.last_error));
-  npu::NpuServableRegistry::Global().Put(id, std::move(s));
+  {
+    const std::string& tag = npu::NpuServableRegistry::CurrentTag();
+    npu::NpuServableRegistry::Global().Put(tag.empty() ? id : tag,
+                                           std::move(s));
+  }
   return true;
 }
 

@@ -261,6 +261,26 @@ private:
 /// uniform status regardless of how the model is hosted.
 class NpuServableRegistry {
 public:
+  /// Admin load/eject tag: HandleLoad sets it (same thread) around the model
+  /// loader so servables are registered under the admin model id and can be
+  /// dropped again on eject.
+  static std::string& CurrentTag() {
+    static thread_local std::string tag;
+    return tag;
+  }
+  class TagScope {
+  public:
+    explicit TagScope(std::string tag) : prev_(CurrentTag()) {
+      CurrentTag() = std::move(tag);
+    }
+    ~TagScope() { CurrentTag() = prev_; }
+    TagScope(const TagScope&) = delete;
+    TagScope& operator=(const TagScope&) = delete;
+
+  private:
+    std::string prev_;
+  };
+
   static NpuServableRegistry& Global() {
     static NpuServableRegistry r;
     return r;
