@@ -4860,7 +4860,7 @@ class InklingTextRunner final : public HipTextModelRunner {
       st.set_position(st.session().Length());
     }
   }
-  enum class Guard { kNone, kForce, kStop };
+  enum class Guard { kNone, kForce, kStop, kRestrict };
   [[nodiscard]] Guard GuardAction(InklingTextRunnerState& st,
                                   const sampling::SamplerState& sampler,
                                   std::int32_t* forced = nullptr) const {
@@ -4871,7 +4871,18 @@ class InklingTextRunner final : public HipTextModelRunner {
     const auto history = st.session().History();
     const std::size_t start = st.generation_start();
     const std::size_t n = history.size();
-    if (n <= start) return Guard::kNone;
+    // A reply always opens with the assistant header. Sampled requests used to
+    // draw a stray token here and right after it; the first token is forced
+    // and the one after the header is restricted to the two message kinds a
+    // grammar-free reply may start with.
+    if (n == start) {
+      if (forced != nullptr) *forced = tok_message_model_;
+      return Guard::kForce;
+    }
+    if (n < start) return Guard::kNone;
+    if (n == start + 1 && history[n - 1] == tok_message_model_) {
+      return Guard::kRestrict;
+    }
     // 1 = the message ending at index `end` is a thinking message.
     const auto thinking_ended = [&](std::size_t end) {
       for (std::size_t i = end; i-- > start;) {
@@ -4911,6 +4922,17 @@ class InklingTextRunner final : public HipTextModelRunner {
                 .piece = model_->Decode(std::span<const std::int32_t>(&forced, 1))};
       case Guard::kStop:
         return {.stop = true, .token = 0, .piece = {}};
+      case Guard::kRestrict: {
+        const auto raw = st.session().Logits();
+        if (raw.empty()) throw std::runtime_error("Inkling token selection has no logits");
+        std::vector<float> masked(raw.size(), -std::numeric_limits<float>::infinity());
+        masked[static_cast<std::size_t>(tok_thinking_)] = raw[static_cast<std::size_t>(tok_thinking_)];
+        masked[static_cast<std::size_t>(tok_content_text_)] = raw[static_cast<std::size_t>(tok_content_text_)];
+        const auto choice = static_cast<std::int32_t>(sampler.Sample(masked));
+        return {.stop = false,
+                .token = static_cast<TextRunnerToken>(choice),
+                .piece = model_->Decode(std::span<const std::int32_t>(&choice, 1))};
+      }
       case Guard::kNone:
         break;
     }
@@ -4954,8 +4976,11 @@ class InklingTextRunner final : public HipTextModelRunner {
     // Rounds stop committing after a message end so the guard can steer it.
     const bool guarded = structure_guard_ && st.stop_at_eos() &&
                          sampler.config().constraint == nullptr;
+    // A round also stops after the assistant header, so the token drawn right
+    // after it goes through the guard's restriction.
+    const std::int32_t guard_boundary[2] = {tok_end_message_, tok_message_model_};
     const std::span<const std::int32_t> boundary =
-        guarded ? std::span<const std::int32_t>(&tok_end_message_, 1)
+        guarded ? std::span<const std::int32_t>(guard_boundary, 2)
                 : std::span<const std::int32_t>{};
     const std::uint32_t n_draft = static_cast<std::uint32_t>(
         std::min<std::size_t>(max_draft_tokens_, max_tokens - 1));
