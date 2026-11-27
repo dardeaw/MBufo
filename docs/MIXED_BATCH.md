@@ -224,7 +224,7 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 
 | Runner | `DecodeBatch` | `AdvanceBatch` | Merged prefill + decode |
 | --- | --- | --- | --- |
-| Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes) | no (investigated 2026-11-27: `ForwardPromptBatchMulti` decode lanes run prefill arithmetic and are not bit-identical to `ForwardTokenBatch`/decode; see Qwen mixed batch below) |
+| Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes on F16 KV; serial per-session decode cores on blocked-Q8 KV) | **yes, plain advances** without DFlash (`AdvanceBatchWithPrefillChunk`: lanes through the unchanged advance path, the chunk through the unchanged `Prefill`; F16 and Q8 KV); `DecodeBatchWithPrefillChunk` refuses; DFlash runners advertise `mixed_prefill_decode = false` |
 | DeepSeek V4 Flash | native (serial in some conditions) | native | no (`MBUFO_RUNNER_NO_MIXED_BATCH`; see note below) |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
 | Muse Glimmer | native without a shared draft, serial otherwise | native without a shared draft (bit-identical to serial), serial otherwise | **yes** without a shared draft (`AdvanceBatchWithPrefillChunk`); `DecodeBatchWithPrefillChunk` refuses (DFlash verify is per-session) |
@@ -237,22 +237,53 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
 
-## Qwen mixed batch (investigated, not enabled)
+## Qwen mixed batch (native, plain advances)
 
-`QwenTextRunner` keeps `MBUFO_RUNNER_NO_MIXED_BATCH()`. A prototype ran each
-decode lane as a one-token item of `QwenGpuExecutor::ForwardPromptBatchMulti`
-next to the prefill chunk (F16 KV, Qwen3.5-9B Q4_K_M, 3 decoding streams plus a
-~14k-token prefill, greedy). The merge fired (`lanes=3 chunk=512`) but every
-completion differed from `MBUFO_MIXED_BATCH=0` (different SHA on all four
-streams) and wall time was ~5x worse. A one-token prefill row uses the GEMM
-route and recurrent-state arithmetic of prefill, not the decode kernels
-(`ResumeGeneratedToken` documents the same effect), so it cannot meet the
-"equal to separate prefill + advance" bar. A correct merge needs a layer pass
-that runs the lanes through the decode kernels (as `ForwardTokenBatch` does)
-and the chunk through prefill kernels around one shared attention launch.
-Blocked-Q8 KV (`--kv-quant q8`, the production default for head_dim 256) is
-refused by both `ForwardTokenBatch` and `ForwardPromptBatchMulti`, so it would
-additionally need blocked-cache dual writes and a decode-exact Q8 read.
+`QwenTextRunner::AdvanceBatchWithPrefillChunk` runs the decode lanes through
+`AdvanceLanes` (two or more lanes on F16 KV: one `ForwardTokenBatch` pass on the
+decode kernels; a single lane or blocked-Q8 KV: each session's own
+`ForwardToken` decode core) and then the chunk through the unchanged `Prefill`
+(`ForwardPromptBatch`, which handles blocked-Q8, vision, resumed tokens and
+cancellation). Each half therefore runs exactly the code its unmerged step runs
+and the merged step is bit-identical to `MBUFO_MIXED_BATCH=0` by construction
+(verified below). Lanes and chunk live in different executors (own arena,
+scratch and stream); an experiment that submitted the lane pass from a helper
+thread while the chunk ran (`MBUFO_QWEN_MIXED_OVERLAP`, removed again) was also
+bit-identical but not faster, so the two run back to back. A chunk that ends
+at a snapshot/checkpoint frontier short of the prompt end is refused by the
+pool as for every runner; the chunk that completes the prompt leaves its
+frontier exactly as `Prefill` does (the next token comes from the retained
+logits). DFlash runners (`mixed_prefill_decode = false`) and
+`DecodeBatchWithPrefillChunk` refuse with `MixedBatchRefused`.
+
+History: a first prototype ran each lane as a one-token item of
+`QwenGpuExecutor::ForwardPromptBatchMulti` next to the chunk. Every completion
+differed from `MBUFO_MIXED_BATCH=0` and it was ~5x slower, because a one-token
+prefill row takes the GEMM route and recurrent-state arithmetic of prefill, not
+the decode kernels. The native version does not share a layer pass between lanes
+and chunk, so it keeps the lanes on decode arithmetic.
+
+Also fixed here: `AdvanceBatch` (two or more concurrent decoding streams) threw
+"blocked-Q8 attention does not support batched decode" on `--kv-quant q8`, so
+every concurrent stream failed on the production default. It now falls back to
+the serial per-session decode cores on blocked-Q8 KV.
+
+Measurements (2026-11-27, Strix Halo, greedy, 3 decoding streams of 300 to 500
+tokens plus a 6819-token prompt that starts 4 s later, `--sessions 5`):
+
+| Model / KV | prefill of the long prompt (unmerged -> merged) | lane tokens per second per stream while it prefills | completion SHA merged vs unmerged |
+| --- | --- | --- | --- |
+| Qwen3.5-9B Q4_K_M, F16 | 5.43 s -> 5.88 s | 4.24 -> 6.29 | all 4 equal |
+| Qwen3.5-9B Q4_K_M, Q8 | 6.53 s -> 7.69 s | 3.06 -> 4.42 | all 4 equal |
+| Qwen3.8-27B UD-Q4_K_XL, F16 | 17.14 s -> 18.55 s | 1.28 -> 1.94 | all 4 equal |
+| Qwen3.8-27B UD-Q4_K_XL, Q8 | 20.0 s -> 24.08 s | 1.0 -> 1.45 | all 4 equal |
+
+Merging is a trade, not a speedup: the lanes decode noticeably more tokens
+while the prompt prefills (every merged tick advances them), the prompt finishes
+8 to 20% later, and total wall time of the run is unchanged. Decode-lane batching on
+F16 KV is not bit-identical to serial decode in every case (9B F16: 1 of 3 solo
+runs differs from its batched run; 27B F16: all equal); the merged step
+inherits exactly the unmerged step's lane arithmetic.
 
 Separate finding, since fixed: `TextRunnerPool::Request::PrefillWithCoworkers`
 used to refuse whenever `snapshot_tokens`, `checkpoints` or `boundaries` was
