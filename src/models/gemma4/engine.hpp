@@ -62,6 +62,13 @@ public:
   }
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
 
+  /// Whether the model's own chat template closes the generation prompt with
+  /// the empty thought channel (`<|channel>thought\n<channel|>`) when thinking
+  /// is off. The 12B and 26B-A4B templates do; the E2B / E4B templates end the
+  /// prompt at `<|turn>model\n`, and adding the channel to those makes the
+  /// model emit stray `<channel|>` markers and keep generating past its answer.
+  [[nodiscard]] bool EmptyThoughtGenerationPrompt() const;
+
 private:
   Model() = default;
 

@@ -6084,7 +6084,8 @@ std::string Gemma4StripThinking(std::string_view text) {
 // empty-thought generation prompt.
 std::string Gemma4RenderPrompt(
     std::span<const tokenization::ChatMessage> messages,
-    std::span<const tokenization::ChatTool> tools) {
+    std::span<const tokenization::ChatTool> tools,
+    bool empty_thought_prompt) {
   std::string out;
   std::size_t body_begin = 0;
   std::string system_text;
@@ -6176,7 +6177,11 @@ std::string Gemma4RenderPrompt(
     }
     previous_non_tool_role = role;
   }
-  out += "<|turn>model\n<|channel>thought\n<channel|>";
+  // The empty thought channel belongs to the 12B / 26B-A4B templates only
+  // (see Model::EmptyThoughtGenerationPrompt); E2B / E4B end at the turn open.
+  out += "<|turn>model\n";
+  if (empty_thought_prompt)
+    out += "<|channel>thought\n<channel|>";
   return out;
 }
 
@@ -6402,7 +6407,8 @@ class Gemma4TextRunner final : public HipTextModelRunner {
         request.tool_choice == ChatRequest::ToolChoice::kNone
             ? std::span<const tokenization::ChatTool>{}
             : std::span<const tokenization::ChatTool>{request.tools};
-    const std::string prompt = Gemma4RenderPrompt(request.messages, tools);
+    const std::string prompt = Gemma4RenderPrompt(
+        request.messages, tools, model_->EmptyThoughtGenerationPrompt());
     if (prompt.empty())
       return std::nullopt;
     return Tokenize(prompt);

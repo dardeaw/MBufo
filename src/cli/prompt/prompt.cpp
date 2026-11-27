@@ -1080,7 +1080,15 @@ int RunPrompt(std::span<const char* const> args) {
       out += opt.prompt_text;
       out += "<turn|>\n";
       out += "<|turn>model\n";
-      out += "<|channel>thought\n<channel|>";
+      // Only the 12B / 26B-A4B templates close the prompt with the empty
+      // thought channel; E2B / E4B end at the turn open.
+      const auto chat_template =
+          reader->GetMetadataString("tokenizer.chat_template");
+      if (chat_template.has_value() &&
+          chat_template->find("<|channel>thought\\n<channel|>") !=
+              std::string_view::npos) {
+        out += "<|channel>thought\n<channel|>";
+      }
       return out;
     }();
     models::gemma4::ModelOptions gopt;

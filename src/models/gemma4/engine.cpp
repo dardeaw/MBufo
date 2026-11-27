@@ -943,6 +943,14 @@ std::vector<float> SyntheticRopeFreqs(std::uint32_t head_dim,
 }
 }  // namespace
 
+bool Model::EmptyThoughtGenerationPrompt() const {
+  const auto chat_template = reader_->GetMetadataString("tokenizer.chat_template");
+  // The jinja source holds the literal backslash-n of the template string.
+  return chat_template.has_value() &&
+         chat_template->find("<|channel>thought\\n<channel|>") !=
+             std::string_view::npos;
+}
+
 std::shared_ptr<Model> Model::Load(const std::string& model_path,
                                    const ModelOptions& options,
                                    std::string* error_msg) {
