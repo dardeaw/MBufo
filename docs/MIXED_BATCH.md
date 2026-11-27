@@ -228,7 +228,35 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 | DeepSeek V4 Flash | native (serial in some conditions) | native | no |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
 | Muse Glimmer | native without a shared draft, serial otherwise | serial | no |
-| GPT-OSS, Laguna, Inkling, Llama, Gemma 4 | serial | serial | no |
+| GPT-OSS, Laguna, Llama, Gemma 4 | serial | serial | no |
+| Inkling | serial | serial | no (kept `MBUFO_RUNNER_NO_MIXED_BATCH`; blocked, see "Inkling" below) |
 
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
+
+### Inkling: why there is no native batch path yet
+
+Inkling sessions each own a HIP stream, a whole-forward decode graph and a
+private arena, and `Session::ForwardLayer` is one monolithic per-session call.
+There is no layer-synchronous multi-session pass to hang lanes and a chunk on,
+and the two cheap substitutes do not work:
+
+- **Concurrent per-session streams** (launch every lane graph and the chunk
+  without syncing, then collect) would be bit-identical by construction, but
+  core kernels use process-wide single-stream scratch: `g_gemv_q8_scratch`
+  (`gemv_wave32_sdot4.hip`, also reallocated on growth) and the
+  `g_moe_u_*` MoE routing buffers (`moe_fused.hip`). Two sessions in flight
+  at once race on them. They would have to become per-session/per-stream
+  arguments first (16 `QuantizeToQ8Scratch` call sites plus the MoE unique
+  buckets); that touches shared core used by every model.
+- **A layer-synchronous single-stream pass** is safe but gains nothing while
+  every lane keeps its own decode core (no shared weight read), and it loses
+  the decode graph. Sharing the GEMMs instead is not bit-identical to
+  separate decode.
+
+Also note `Session::Sync` restarts from position 0 whenever the prompt is not
+identical to the retained history (the rolling sconv state cannot rewind), so a
+chunked `Prefill` recomputes the whole prefix on each chunk. A merged chunk
+must keep that behaviour to stay bit-identical to the unmixed path; making
+`Sync` continue a pure extension would help both paths but changes chunk
+alignment (and so numerics) versus today.
