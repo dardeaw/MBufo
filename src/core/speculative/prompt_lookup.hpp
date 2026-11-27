@@ -6,7 +6,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace mbufo::speculative {
@@ -37,6 +40,88 @@ namespace mbufo::speculative {
 ///
 /// Proposals depend only on the prefix, so rejection sampling (with the
 /// proposal as a point mass) keeps the target distribution exact.
+
+/// Normalizes tool-output prompt text for retrieval lookup by un-escaping
+/// JSON string escapes (`\n`, `\t`, `\"`, `\\`, `\r`) and stripping
+/// common line-number prefixes (`123: `, `  12 | `, `L123: `) at line starts.
+/// Returns std::nullopt if neither pattern is present (zero-cost fast path).
+[[nodiscard]] inline std::optional<std::string> NormalizeToolPromptText(
+    std::string_view text) {
+  const bool has_escapes =
+      text.find("\\n") != std::string_view::npos &&
+      (text.find("\\\"") != std::string_view::npos ||
+       text.find("\\t") != std::string_view::npos);
+  bool has_lineno = false;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (i == 0 || text[i - 1] == '\n') {
+      std::size_t j = i;
+      while (j < text.size() && (text[j] == ' ' || text[j] == '\t')) ++j;
+      if (j < text.size() && text[j] == 'L') ++j;
+      std::size_t d = j;
+      while (d < text.size() && text[d] >= '0' && text[d] <= '9' &&
+             (d - j) < 6) {
+        ++d;
+      }
+      if (d > j && d < text.size() &&
+          (text[d] == ':' || text[d] == '|' || text[d] == '\t')) {
+        has_lineno = true;
+        break;
+      }
+    }
+  }
+  if (!has_escapes && !has_lineno) {
+    return std::nullopt;
+  }
+
+  std::string unescaped;
+  std::string_view src = text;
+  if (has_escapes) {
+    unescaped.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+      if (text[i] == '\\' && i + 1 < text.size()) {
+        const char nxt = text[i + 1];
+        if (nxt == 'n') { unescaped.push_back('\n'); ++i; continue; }
+        if (nxt == 't') { unescaped.push_back('\t'); ++i; continue; }
+        if (nxt == 'r') { ++i; continue; }
+        if (nxt == '"') { unescaped.push_back('"'); ++i; continue; }
+        if (nxt == '\\') { unescaped.push_back('\\'); ++i; continue; }
+      }
+      unescaped.push_back(text[i]);
+    }
+    src = unescaped;
+  }
+
+  std::string out;
+  out.reserve(src.size());
+  std::size_t pos = 0;
+  while (pos < src.size()) {
+    const std::size_t nl = src.find('\n', pos);
+    const std::size_t end = (nl == std::string_view::npos) ? src.size() : nl + 1;
+    std::string_view line = src.substr(pos, end - pos);
+    std::size_t j = 0;
+    while (j < line.size() && (line[j] == ' ' || line[j] == '\t')) ++j;
+    if (j < line.size() && line[j] == 'L') ++j;
+    std::size_t d = j;
+    while (d < line.size() && line[d] >= '0' && line[d] <= '9' && (d - j) < 6) {
+      ++d;
+    }
+    if (d > j && d < line.size()) {
+      if (line[d] == ':' || line[d] == '\t') {
+        std::size_t skip = d + 1;
+        if (skip < line.size() && line[skip] == ' ') ++skip;
+        line.remove_prefix(skip);
+      } else if (line[d] == '|') {
+        std::size_t skip = d + 1;
+        if (skip < line.size() && line[skip] == ' ') ++skip;
+        line.remove_prefix(skip);
+      }
+    }
+    out.append(line);
+    pos = end;
+  }
+  return out;
+}
+
 template<typename TokenId = std::int32_t>
 class PromptLookup {
 public:
@@ -54,8 +139,9 @@ public:
   static constexpr std::size_t kResumeBack = 8;
 
   struct Match {
-    std::size_t start{0};   ///< committed index of the first proposal
+    std::size_t start{0};   ///< committed/shadow index of the first proposal
     std::size_t length{0};  ///< matched context tokens (>= kKeyTokens)
+    bool from_shadow{false};
   };
 
   /// Copy state the index cannot rebuild from the tokens. Session snapshots
@@ -111,8 +197,48 @@ public:
   /// Records a verified copy of `proposed` tokens from committed index
   /// `start` of which `accepted` were kept; the copied text continues at
   /// start + accepted. Only a mostly accepted copy enables short matches.
-  void Observe(std::size_t start, std::size_t proposed, std::size_t accepted) {
-    resume_ = 2 * accepted < proposed ? kNoResume : start + accepted;
+  void Observe(std::size_t start, std::size_t proposed, std::size_t accepted,
+               bool from_shadow = false) {
+    if (from_shadow) {
+      shadow_resume_ = 2 * accepted < proposed ? kNoResume : start + accepted;
+    } else {
+      resume_ = 2 * accepted < proposed ? kNoResume : start + accepted;
+    }
+  }
+
+  [[nodiscard]] bool HasShadow() const noexcept {
+    return shadow_attempted_;
+  }
+
+  void MarkShadowAttempted() noexcept { shadow_attempted_ = true; }
+
+  void SetShadow(std::vector<TokenId> tokens) {
+    shadow_attempted_ = true;
+    shadow_head_.Clear();
+    shadow_prev_.clear();
+    shadow_tokens_ = std::move(tokens);
+    shadow_resume_ = kNoResume;
+    for (std::size_t end = 0; end < shadow_tokens_.size(); ++end) {
+      std::uint32_t previous = kNone;
+      if (end >= kKeyTokens) {
+        previous = shadow_head_.Exchange(
+            Key(std::span<const TokenId>(shadow_tokens_)
+                    .subspan(end - kKeyTokens, kKeyTokens)),
+            static_cast<std::uint32_t>(end));
+      }
+      shadow_prev_.push_back(previous);
+    }
+  }
+
+  [[nodiscard]] std::size_t AvailableAfter(const Match& m) const noexcept {
+    const std::size_t total = m.from_shadow ? shadow_tokens_.size() : prev_.size();
+    return total > m.start ? total - m.start : 0;
+  }
+
+  [[nodiscard]] TokenId TokenAt(const Match& m, std::size_t offset,
+                                std::span<const TokenId> committed) const {
+    return m.from_shadow ? shadow_tokens_[m.start + offset]
+                         : committed[m.start + offset];
   }
 
   /// Indexes committed tokens appended since the last call. `committed`
@@ -214,6 +340,31 @@ public:
       }
       end = prev_[end];
     }
+    if (best.length > 0 || shadow_tokens_.empty()) {
+      return best;
+    }
+    if (require_resume && shadow_resume_ == kNoResume) {
+      return {};
+    }
+    std::uint32_t send = shadow_head_.Find(Key(std::span<const TokenId>(key_tokens)));
+    for (std::size_t n = 0; n < kMaxCandidates && send != kNone; ++n) {
+      std::size_t length = kKeyTokens;
+      while (length < max_match && send > length &&
+             shadow_tokens_[send - length - 1] == at(context - length - 1)) {
+        ++length;
+      }
+      const bool resumes = shadow_resume_ != kNoResume &&
+                           send + kResumeBack >= shadow_resume_ &&
+                           send <= shadow_resume_ + kResumeWindow;
+      const bool allowed =
+          require_resume
+              ? resumes && length >= minimum
+              : length >= minimum || (resumes && length >= kResumeMinMatch);
+      if (send < shadow_prev_.size() && length > best.length && allowed) {
+        best = {send, length, true};
+      }
+      send = shadow_prev_[send];
+    }
     return best;
   }
 
@@ -222,6 +373,11 @@ private:
     head_.Clear();
     prev_.clear();
     resume_ = kNoResume;
+    shadow_head_.Clear();
+    shadow_prev_.clear();
+    shadow_tokens_.clear();
+    shadow_resume_ = kNoResume;
+    shadow_attempted_ = false;
   }
 
   static constexpr std::uint32_t kNone =
@@ -328,6 +484,11 @@ private:
 
   Heads head_;
   std::vector<std::uint32_t> prev_;
+  Heads shadow_head_;
+  std::vector<std::uint32_t> shadow_prev_;
+  std::vector<TokenId> shadow_tokens_;
+  std::size_t shadow_resume_{kNoResume};
+  bool shadow_attempted_{false};
   TokenId last_{0};                ///< committed[prev_.size() - 1] when indexed
   std::size_t resume_{kNoResume};  ///< where the last copy's source continues
   std::size_t request_start_{kNoResume};

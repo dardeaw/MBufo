@@ -889,11 +889,12 @@ std::unique_ptr<PrefillCheckpoint> Executor::MakePrefillCheckpoint(
   const auto conv = std::size_t{c.ssm_conv_kernel - 1} * c.SsmConvChannels();
   const auto recurrent =
       std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim * c.ssm_head_dim;
+  const auto recurrent_floats = (recurrent * sizeof(__half) + sizeof(float) - 1) / sizeof(float);
   std::size_t floats =
       has_mtp() ? std::size_t{options_.max_speculative} * c.HcDim() : 0;
   for (const auto& linear : source.linear_)
     if (linear.state)
-      floats += conv + recurrent;
+      floats += conv + recurrent_floats;
   if (c.ple_layer >= 0)
     floats += std::size_t{c.PleConvHistory()} * c.HcDim();
   if (!checkpoint_storage_) {
@@ -908,8 +909,8 @@ std::unique_ptr<PrefillCheckpoint> Executor::MakePrefillCheckpoint(
       continue;
     view.linear_[il].conv_state = storage;
     storage += conv;
-    view.linear_[il].state = storage;
-    storage += recurrent;
+    view.linear_[il].state = reinterpret_cast<__half*>(storage);
+    storage += recurrent_floats;
   }
   if (c.ple_layer >= 0) {
     view.ple_history_ = storage;
@@ -981,7 +982,7 @@ void Session::Reset(bool reuse_mtp) {
       zero(l.conv_state, static_cast<std::size_t>(c.ssm_conv_kernel - 1) *
                              c.SsmConvChannels() * sizeof(float));
       zero(l.state, static_cast<std::size_t>(c.ssm_num_v_heads) *
-                        c.ssm_head_dim * c.ssm_head_dim * sizeof(float));
+                        c.ssm_head_dim * c.ssm_head_dim * sizeof(__half));
     }
   }
   blocks_ = 0;
@@ -1372,7 +1373,7 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       auto& l = s->linear_[il];
       l.conv_state =
           Alloc<float>(a, conv_elems, error_msg, &s->allocated_bytes_);
-      l.state = Alloc<float>(a, state_elems, error_msg, &s->allocated_bytes_);
+      l.state = Alloc<__half>(a, state_elems, error_msg, &s->allocated_bytes_);
     } else {
       auto& at = s->attention_[il];
       if (KvBlocked(s->kv_format_)) {
@@ -1635,8 +1636,9 @@ std::size_t Executor::SessionBytes(
                         GdnRollbackRowFloats(1, c.ssm_num_k_heads,
                                              c.ssm_num_v_heads, c.ssm_head_dim);
   return ((linear * conv + ple) * (rollback_depth + 1) +
-          linear * (state + rollback_state)) *
+          linear * rollback_state) *
              sizeof(float) +
+         linear * state * sizeof(__half) +
          attention * (kv + index) + sizeof(Session::Control) +
          (mode == core::SessionMode::kSpeculative
               ? kv + index +
@@ -4249,7 +4251,7 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
       if (!region(l != nullptr ? l->conv_state : nullptr,
                   std::uint64_t{h.conv_elems} * sizeof(float), "conv state") ||
           !region(l != nullptr ? l->state : nullptr,
-                  std::uint64_t{h.state_elems} * sizeof(float),
+                  std::uint64_t{h.state_elems} * sizeof(__half),
                   "recurrent state")) {
         return 0;
       }

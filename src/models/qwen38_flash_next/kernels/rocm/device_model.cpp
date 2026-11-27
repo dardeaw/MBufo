@@ -191,6 +191,86 @@ struct Uploader {
   // or dual scale, Q6_K): convert on the host. Everything else uploads
   // raw; F32-only consumers (norms/router/biases/nextn, inject below)
   // never see these types because the bind sets reject them there.
+
+  static bool MtpQ4ExpsEnabled() noexcept {
+    const char* env = std::getenv("MBUFO_MTP_Q4_EXPS");
+    return env == nullptr || env[0] != '0';
+  }
+
+  DeviceTensor CopyConvertedQ4_0(const TensorRef& t) {
+    DeviceTensor d;
+    if (t.empty() || !ok)
+      return d;
+    if (t.type != core::GgmlType::kQ8_0 || (t.cols % 32) != 0)
+      return Copy(t);
+    const std::size_t blocks_per_row = static_cast<std::size_t>(t.cols) / 32;
+    const std::size_t dst_row_bytes = blocks_per_row * 18;
+    const std::size_t dst_expert_bytes =
+        static_cast<std::size_t>(t.rows) * dst_row_bytes;
+    const std::size_t dst_bytes =
+        static_cast<std::size_t>(t.experts) * dst_expert_bytes;
+    void* ptr = nullptr;
+    if (Allocate(&ptr, dst_bytes + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for Q4_0 " + std::string(t.name));
+      return d;
+    }
+    if (Measuring())
+      return d;
+    std::vector<std::uint8_t> staging(dst_bytes);
+    for (std::size_t e = 0; e < t.experts; ++e) {
+      const std::uint8_t* src_e = t.Expert(e);
+      std::uint8_t* dst_e = staging.data() + e * dst_expert_bytes;
+      const std::size_t n_blocks = static_cast<std::size_t>(t.rows) * blocks_per_row;
+      for (std::size_t b = 0; b < n_blocks; ++b) {
+        const std::uint8_t* sb = src_e + b * 34;
+        std::uint8_t* db = dst_e + b * 18;
+        __half h_scale;
+        std::memcpy(&h_scale, sb, 2);
+        const float d8 = __half2float(h_scale);
+        const std::int8_t* q8 = reinterpret_cast<const std::int8_t*>(sb + 2);
+        int amax = 0;
+        int max_q = 0;
+        for (int j = 0; j < 32; ++j) {
+          const int v = q8[j];
+          const int av = v < 0 ? -v : v;
+          if (av > amax) {
+            amax = av;
+            max_q = v;
+          }
+        }
+        const float d4 = (d8 * static_cast<float>(max_q)) / -8.0F;
+        const float id = d4 != 0.0F ? (d8 / d4) : 0.0F;
+        const __half h4 = __float2half_rn(d4);
+        std::memcpy(db, &h4, 2);
+        for (int j = 0; j < 16; ++j) {
+          const int x0 = std::clamp(
+              static_cast<int>(std::lround(static_cast<float>(q8[j]) * id + 8.5F)),
+              0, 15);
+          const int x1 = std::clamp(
+              static_cast<int>(
+                  std::lround(static_cast<float>(q8[j + 16]) * id + 8.5F)),
+              0, 15);
+          db[2 + j] = static_cast<std::uint8_t>(x0 | (x1 << 4));
+        }
+      }
+    }
+    allocations.push_back(ptr);
+    bytes += dst_bytes + kTailMargin;
+    if (hipMemcpy(ptr, staging.data(), dst_bytes, hipMemcpyHostToDevice) !=
+        hipSuccess) {
+      Fail("Q4_0 upload failed for " + std::string(t.name));
+      return d;
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + dst_bytes, 0,
+                         kTailMargin, nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kQ4_0;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = static_cast<std::uint32_t>(t.experts);
+    return d;
+  }
+
   DeviceTensor CopyQ8(const TensorRef& t) {
     if (!t.empty() && ok && Q8Convertible(t.type)) {
       return CopyConvertedQ8(t);
@@ -509,7 +589,7 @@ struct Uploader {
     return {Copy(m.norm), CopyQ8(m.down), CopyQ8(m.up), CopyF32(m.inject)};
   }
 
-  DeviceLayer Layer(const LayerWeights& l) {
+  DeviceLayer Layer(const LayerWeights& l, bool q4_exps = false) {
     DeviceLayer d;
     d.linear = l.linear;
     d.hc_attn = Mixer(l.hc_attn);
@@ -569,9 +649,9 @@ struct Uploader {
     d.ple_norm_conv = Copy(l.ple_norm_conv);
     d.ple_conv1d = Copy(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
-    d.ffn_gate_exps = Copy(l.ffn_gate_exps);
-    d.ffn_up_exps = Copy(l.ffn_up_exps);
-    d.ffn_down_exps = Copy(l.ffn_down_exps);
+    d.ffn_gate_exps = q4_exps ? CopyConvertedQ4_0(l.ffn_gate_exps) : Copy(l.ffn_gate_exps);
+    d.ffn_up_exps = q4_exps ? CopyConvertedQ4_0(l.ffn_up_exps) : Copy(l.ffn_up_exps);
+    d.ffn_down_exps = q4_exps ? CopyConvertedQ4_0(l.ffn_down_exps) : Copy(l.ffn_down_exps);
     d.shexp_gate = CopyQ8(l.shexp_gate);
     d.shexp_up = CopyQ8(l.shexp_up);
     d.shexp_down = CopyQ8(l.shexp_down);
@@ -599,7 +679,7 @@ struct Uploader {
     }
     if (mtp != nullptr) {
       shard_base = trunk_shards;
-      u.mtp = Layer(mtp->block);
+      u.mtp = Layer(mtp->block, MtpQ4ExpsEnabled());
     }
     return u;
   }

@@ -33,7 +33,7 @@ constexpr std::size_t GdnRollbackRowFloats(std::uint32_t row,
   return row == 0 ? std::size_t{v_heads} * dim * dim
                   : std::size_t{k_heads} * dim + v_heads * (dim + 2);
 }
-void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
+void RestoreGdnState(__half* state, RollbackRows snapshots, std::uint32_t keep,
                      std::uint32_t k_heads, std::uint32_t v_heads,
                      hipStream_t stream);
 
@@ -340,7 +340,7 @@ void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
                    hipStream_t stream);
 
 struct GdnCheckpoint {
-  float* state = nullptr;
+  __half* state = nullptr;
   float* history = nullptr;
   std::uint32_t tokens = 0;
 };
@@ -370,7 +370,7 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t z_stride, const float* alpha_beta,
                    const float* conv_w, const float* a, const float* dt,
                    const float* norm_w, float* conv_state, float* conv_scratch,
-                   float* qn, float* kn, float* raw, float* state, float* out,
+                   float* qn, float* kn, float* raw, __half* state, float* out,
                    void* out_q8, RollbackRows state_snapshots,
                    RollbackRows conv_snapshots, std::uint32_t n_tokens,
                    std::uint32_t k_heads, std::uint32_t v_heads,
@@ -390,7 +390,7 @@ struct GdnBatchItem {
   float* qn;
   float* kn;
   float* raw;
-  float* state;
+  __half* state;
   float* out;
   RollbackRows state_snapshots;
   RollbackRows conv_snapshots;

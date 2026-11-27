@@ -931,8 +931,10 @@ struct Session::PendingDecode {
   bool draft_subset{false};  ///< this cycle drafts through the subset head
   /// Trailing chain tokens copied by prompt lookup (after the MTP drafts).
   std::uint32_t lookup{0};
+  std::uint32_t grammar_forced{0};
   /// Committed index the copied tokens were taken from.
   std::size_t lookup_start{0};
+  bool lookup_from_shadow{false};
   /// Identical copy budget in isolated and batched execution; zero on the
   /// request's first speculative step.
   std::size_t lookup_cap{0};
@@ -967,12 +969,12 @@ bool Session::AppendLookup(PendingDecode& pending, bool stop_at_eos,
     return false;
   }
   const std::size_t available = std::min(cap - pending.chain.size(),
-                                         lookup_.IndexedTokens() - match.start);
+                                         lookup_.AvailableAfter(match));
   if (available < minimum)
     return false;
   std::size_t count = 0;
   for (; count < available; ++count) {
-    const std::int32_t token = tokens_[match.start + count];
+    const std::int32_t token = lookup_.TokenAt(match, count, tokens_);
     pending.chain.push_back(token);
     if (pending.sampled) {
       // A point-mass proposal: accepted with the target's p(token), and a
@@ -992,6 +994,7 @@ bool Session::AppendLookup(PendingDecode& pending, bool stop_at_eos,
   }
   pending.lookup = static_cast<std::uint32_t>(count);
   pending.lookup_start = match.start;
+  pending.lookup_from_shadow = match.from_shadow;
   pending.width = pending.chain.size();
   return count != 0;
 }
@@ -1085,11 +1088,52 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   }
   // Both execution paths use the same request-local copy rule. Scheduling
   // a peer must not change a sampled request's proposals or RNG sequence.
+  // Grammar-forced drafter: when JSON schema / strict tools uniquely
+  // determine the next tokens, emit them directly without running MTP.
+  if (sampler.config().constraint && cap > 1) {
+    auto forced = sampler.ForcedConstraintTokens(
+        cap - 1, static_cast<sampling::TokenId>(anchor));
+    if (!forced.empty()) {
+      for (const auto tok : forced) {
+        if (stop_at_eos && model_->IsStopToken(static_cast<std::int32_t>(tok)))
+          break;
+        pending->chain.push_back(static_cast<std::int32_t>(tok));
+        if (sampled) {
+          MtpProposal proposal;
+          proposal.ids[0] = tok;
+          proposal.probabilities[0] = 1.0F;
+          proposal.size = 1;
+          proposal.token = tok;
+          proposal.probability = 1.0F;
+          pending->proposals.push_back(proposal);
+        }
+        ++pending->grammar_forced;
+      }
+      if (pending->grammar_forced > 0) {
+        return defer_head || DraftCatchUp(anchor, false, error_msg);
+      }
+    }
+  }
   // A request's first speculative step copies nothing (see
   // speculative::PromptLookup<>).
   pending->lookup_cap = lookup_.Step(base) ? cap : 0;
   if (pending->lookup_cap != 0) {
     lookup_.Extend(tokens_, sampled);
+    if (!lookup_.HasShadow() && tokens_.size() >= 64) {
+      std::vector<tokenization::TokenId> uids;
+      uids.reserve(tokens_.size());
+      for (auto tk : tokens_) uids.push_back(static_cast<tokenization::TokenId>(tk));
+      const auto raw_text = model_->tokenizer().Decode(uids);
+      if (const auto cleaned = speculative::NormalizeToolPromptText(raw_text)) {
+        auto enc = model_->tokenizer().Encode(*cleaned);
+        std::vector<std::int32_t> shadow_ids;
+        shadow_ids.reserve(enc.size());
+        for (auto id : enc) shadow_ids.push_back(static_cast<std::int32_t>(id));
+        lookup_.SetShadow(std::move(shadow_ids));
+      } else {
+        lookup_.MarkShadowAttempted();
+      }
+    }
   }
   // A sampled copy can skip the neural head only after an accepted copy
   // established its source and a full sampled match still holds. New or
@@ -1298,13 +1342,13 @@ bool Session::FinishDecode(const DecodeRequest& request,
   // drafts: a copy that ended drafting early would otherwise make a perfect
   // chain look short, and the controller would probe shallower afterwards. A
   // rejected copy says nothing about the MTP head, so it is not a failure.
-  const std::uint32_t mtp_drafts = k - 1 - pending.lookup;
+  const std::uint32_t mtp_drafts = k - 1 - pending.lookup - pending.grammar_forced;
   const std::uint32_t mtp_accepted = std::min(keep - 1, mtp_drafts);
   stats_.lookup += pending.lookup;
   stats_.lookup_accepted += keep - 1 - mtp_accepted;
   if (pending.lookup != 0) {
     lookup_.Observe(pending.lookup_start, pending.lookup,
-                    keep - 1 - mtp_accepted);
+                    keep - 1 - mtp_accepted, pending.lookup_from_shadow);
   }
   const bool mtp_all = mtp_accepted == mtp_drafts;
   const std::uint32_t observed = mtp_all ? keep - 1 : mtp_accepted;
@@ -1921,8 +1965,8 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
       continue;
     }
   }
-  const bool used_lookup =
-      std::ranges::any_of(pending, [](const auto& p) { return p.lookup != 0; });
+  const bool used_lookup = std::ranges::any_of(
+      pending, [](const auto& p) { return p.lookup != 0 || p.grammar_forced != 0; });
   if (used_lookup || with_chunk)
     policy.SkipCycle();
   // A riding chunk's cost is not a decode cost: never train the controller.

@@ -500,6 +500,25 @@ SamplerState SamplerState::WithoutConstraint() const {
   return copy;
 }
 
+
+std::vector<TokenId> SamplerState::ForcedConstraintTokens(
+    std::size_t max_tokens, std::optional<TokenId> pending_token) const {
+  if (!config_.constraint || !config_.constraint->grammar ||
+      !config_.constraint->vocabulary || max_tokens == 0) {
+    return {};
+  }
+  JsonConstraint::State state = constraint_state_;
+  if (pending_token) {
+    state = config_.constraint->vocabulary->Accept(
+        *config_.constraint->grammar, state, *pending_token);
+  }
+  auto raw = config_.constraint->ForcedTokens(state, max_tokens);
+  std::vector<TokenId> out;
+  out.reserve(raw.size());
+  for (auto t : raw) out.push_back(static_cast<TokenId>(t));
+  return out;
+}
+
 bool SamplerState::NeedsConstraintMask() const {
   // Executors that sample on the GPU fall back to Sample/Distribution here,
   // which return the forced reasoning end.

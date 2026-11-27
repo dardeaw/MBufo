@@ -1627,7 +1627,7 @@ constexpr int kGdnRowSplitRowsPerBlock = 8 * kGdnRows * kGdnWaves;
 
 __launch_bounds__(kGdnWaves * 32) __global__
     void GdnRowSplitKernel(const float* conv_out, const float* scales,
-                           const float* ab, float* state, float* raw,
+                           const float* ab, __half* state, float* raw,
                            std::uint32_t n_tokens, std::uint32_t k_heads,
                            std::uint32_t v_heads, GdnCheckpoint checkpoint) {
   constexpr int kRows = kGdnRows;
@@ -1672,11 +1672,13 @@ __launch_bounds__(kGdnWaves * 32) __global__
 #pragma unroll
   for (int rr = 0; rr < kRows; ++rr) {
     const int row = blockIdx.x * kRowsPerBlock + row_local(rr);
-    const auto* state4 = reinterpret_cast<const float4*>(
+    const auto* state2 = reinterpret_cast<const __half2*>(
         state + (static_cast<std::size_t>(h) * d + row) * d);
 #pragma unroll
     for (int i = 0; i < kVec; ++i) {
-      s[rr][i] = state4[vec0 + i];
+      const float2 lo = __half22float2(state2[2 * (vec0 + i)]);
+      const float2 hi = __half22float2(state2[2 * (vec0 + i) + 1]);
+      s[rr][i] = make_float4(lo.x, lo.y, hi.x, hi.y);
     }
   }
 
@@ -1844,11 +1846,13 @@ __launch_bounds__(kGdnWaves * 32) __global__
         if (checkpoint.state != nullptr &&
             w * kW + tl + 1 == checkpoint.tokens) {
           const int row = blockIdx.x * kRowsPerBlock + row_local(rr);
-          auto* target = reinterpret_cast<float4*>(
+          auto* target2 = reinterpret_cast<__half2*>(
               checkpoint.state + (static_cast<std::size_t>(h) * d + row) * d);
 #pragma unroll
-          for (int i = 0; i < kVec; ++i)
-            target[vec0 + i] = s[rr][i];
+          for (int i = 0; i < kVec; ++i) {
+            target2[2 * (vec0 + i)] = __float22half2_rn(make_float2(s[rr][i].x, s[rr][i].y));
+            target2[2 * (vec0 + i) + 1] = __float22half2_rn(make_float2(s[rr][i].z, s[rr][i].w));
+          }
         }
       }
       out_base += v_heads * d;
@@ -1868,11 +1872,12 @@ __launch_bounds__(kGdnWaves * 32) __global__
 #pragma unroll
   for (int rr = 0; rr < kRows; ++rr) {
     const int row = blockIdx.x * kRowsPerBlock + row_local(rr);
-    auto* state4 = reinterpret_cast<float4*>(
+    auto* state2 = reinterpret_cast<__half2*>(
         state + (static_cast<std::size_t>(h) * d + row) * d);
 #pragma unroll
     for (int i = 0; i < kVec; ++i) {
-      state4[vec0 + i] = s[rr][i];
+      state2[2 * (vec0 + i)] = __float22half2_rn(make_float2(s[rr][i].x, s[rr][i].y));
+      state2[2 * (vec0 + i) + 1] = __float22half2_rn(make_float2(s[rr][i].z, s[rr][i].w));
     }
   }
 }
@@ -1907,7 +1912,7 @@ __device__ __forceinline__ float GdnLastUpdate(float state, float decay,
 template<bool kBatch>
 __global__ void GdnKernel(const float* conv_out, const float* qn,
                           const float* kn, const float* alpha_beta,
-                          const float* a, const float* dt, float* state,
+                          const float* a, const float* dt, __half* state,
                           float* raw, RollbackRows snapshots,
                           std::uint32_t n_tokens, std::uint32_t k_heads,
                           std::uint32_t v_heads, const GdnBatchItem* batch,
@@ -1935,11 +1940,11 @@ __global__ void GdnKernel(const float* conv_out, const float* qn,
   const std::uint32_t channels = 2 * k_heads * d + v_heads * d;
   const float a_h = a[h];
   const float dt_h = dt[h];
-  float* S = state + static_cast<std::size_t>(h) * d * d + j * d + i0;
+  __half* S = state + static_cast<std::size_t>(h) * d * d + j * d + i0;
   float row[slice];
 #pragma unroll
   for (std::uint32_t i = 0; i < slice; ++i) {
-    row[i] = S[i];
+    row[i] = __half2float(S[i]);
   }
   const float q_scale = rsqrtf(static_cast<float>(d));
   for (std::uint32_t t = 0; t < n_tokens; ++t) {
@@ -1986,11 +1991,11 @@ __global__ void GdnKernel(const float* conv_out, const float* qn,
     }
     if constexpr (!kBatch) {
       if (checkpoint.state != nullptr && t + 1 == checkpoint.tokens) {
-        float* target =
+        __half* target =
             checkpoint.state + static_cast<std::size_t>(h) * d * d + j * d + i0;
 #pragma unroll
         for (std::uint32_t i = 0; i < slice; ++i)
-          target[i] = row[i];
+          target[i] = __float2half_rn(row[i]);
       }
     }
     if ((kBatch ? batch[blockIdx.z].state_snapshots.rows[0]
@@ -1999,10 +2004,11 @@ __global__ void GdnKernel(const float* conv_out, const float* qn,
       float* snap = kBatch ? batch[blockIdx.z].state_snapshots.rows[t]
                            : snapshots.rows[t];
       if (t == 0) {
-        snap += static_cast<std::size_t>(h) * d * d + j * d + i0;
+        __half* snap_h = reinterpret_cast<__half*>(snap) +
+                         static_cast<std::size_t>(h) * d * d + j * d + i0;
 #pragma unroll
         for (std::uint32_t i = 0; i < slice; ++i)
-          snap[i] = row[i];
+          snap_h[i] = __float2half_rn(row[i]);
       } else {
         if (j == 0 && h < k_heads) {
 #pragma unroll
@@ -2021,11 +2027,11 @@ __global__ void GdnKernel(const float* conv_out, const float* qn,
   }
 #pragma unroll
   for (std::uint32_t i = 0; i < slice; ++i) {
-    S[i] = row[i];
+    S[i] = __float2half_rn(row[i]);
   }
 }
 
-__global__ void RestoreGdnStateKernel(float* state, RollbackRows snapshots,
+__global__ void RestoreGdnStateKernel(__half* state, RollbackRows snapshots,
                                       std::uint32_t keep, std::uint32_t k_heads,
                                       std::uint32_t v_heads) {
   constexpr std::uint32_t d = kGdnDim;
@@ -2035,7 +2041,7 @@ __global__ void RestoreGdnStateKernel(float* state, RollbackRows snapshots,
   const auto h = i / (d * d);
   const auto j = (i / d) % d;
   const auto k = i % d;
-  float value = snapshots.rows[0][i];
+  float value = __half2float(reinterpret_cast<const __half*>(snapshots.rows[0])[i]);
   for (std::uint32_t t = 1; t < keep; ++t) {
     const auto* update = snapshots.rows[t];
     const float key = update[(h % k_heads) * d + k];
@@ -2047,7 +2053,7 @@ __global__ void RestoreGdnStateKernel(float* state, RollbackRows snapshots,
                 ? GdnLastUpdate(value, decay, error, key, beta)
                 : __fmaf_rn(beta, correction, __fmul_rn(value, decay));
   }
-  state[i] = value;
+  state[i] = __float2half_rn(value);
 }
 
 /// Per-head RMSNorm of the raw attention rows and the sigmoid output gate,
@@ -8932,7 +8938,7 @@ void PleInject(float* res, const float* gated, const float* conv,
                      stream, res, gated, conv, count);
 }
 
-void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
+void RestoreGdnState(__half* state, RollbackRows snapshots, std::uint32_t keep,
                      std::uint32_t k_heads, std::uint32_t v_heads,
                      hipStream_t stream) {
   const auto count = std::size_t{v_heads} * kGdnDim * kGdnDim;
@@ -8954,7 +8960,7 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t z_stride, const float* alpha_beta,
                    const float* conv_w, const float* a, const float* dt,
                    const float* norm_w, float* conv_state, float* conv_scratch,
-                   float* qn, float* kn, float* raw, float* state, float* out,
+                   float* qn, float* kn, float* raw, __half* state, float* out,
                    void* out_q8, RollbackRows state_snapshots,
                    RollbackRows conv_snapshots, std::uint32_t n_tokens,
                    std::uint32_t k_heads, std::uint32_t v_heads,

@@ -1731,6 +1731,29 @@ int RunServe(std::span<const char* const> args) {
           " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
           " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled") +
           served_names);
+
+      if (backend->ready()) {
+        const auto warm_start = std::chrono::steady_clock::now();
+        try {
+          sampling::SamplingConfig warm_sampling;
+          warm_sampling.temperature = 0.0f;
+          (void)backend->complete("Hi", 2, warm_sampling, {}, {}, "warmup", {},
+                                  /*cache_prompt=*/false);
+          const double warm_ms =
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - warm_start)
+                  .count();
+          std::ostringstream warm_log;
+          warm_log << "event=gpu_warmup_completed model=" << backend->model_id()
+                   << " elapsed_ms=" << std::fixed << std::setprecision(1)
+                   << warm_ms;
+          server::Logger::Info("loader", warm_log.str());
+        } catch (const std::exception& e) {
+          server::Logger::Warn("loader",
+                               std::string("event=gpu_warmup_failed error=") +
+                                   e.what());
+        }
+      }
     }
 
     if (multi_model) {

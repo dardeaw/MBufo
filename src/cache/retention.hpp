@@ -160,6 +160,8 @@ private:
     RetentionPurpose purpose{};
     Rows stable{};
     std::uint64_t last_used{};
+    // work_tokens_ at the last hit/admission of this record.
+    std::uint64_t last_work_tokens{};
     // admitted_bytes_ at the last reuse of this record's conversation.
     std::optional<std::uint64_t> reused_at;
     // Two continuations once extended this record directly.
@@ -169,6 +171,7 @@ private:
   };
   std::size_t Find(CheckpointId) const;
   bool Branch(std::size_t) const;
+  bool WorkProtected(std::size_t) const;
   std::uint32_t Priority(std::size_t, const RetentionRequest* = nullptr) const;
   bool Related(std::size_t, std::size_t) const;
   void Relate(std::size_t);
@@ -190,6 +193,8 @@ private:
   std::array<Record, kRecordLimit> records_;
   std::size_t limit_, size_{};
   std::uint64_t clock_{}, sequence_{};
+  // Cumulative token work processed; used for length-aware anti-eviction.
+  std::uint64_t work_tokens_{};
   // Unique payload bytes admitted so far; measures budget turnover.
   std::uint64_t admitted_bytes_{};
   // Payload capacities are immutable. Only record membership changes this

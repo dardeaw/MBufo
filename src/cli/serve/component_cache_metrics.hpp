@@ -22,6 +22,8 @@ struct ComponentCacheMetrics {
   std::vector<std::uint64_t> captured_checkpoint_ids;
   std::size_t disk_queued_bytes{};
   double disk_enqueue_ms{};
+  bool end_of_reply_captured{false};
+  std::size_t end_of_reply_bytes{};
   cache::ResourceSnapshot ledger;
   std::optional<cache::PersistenceQueueStats> persistence;
   cache::SpillMetrics spill;
@@ -41,6 +43,8 @@ inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
   result["captured_capacity_bytes"] = value.captured_bytes;
   result["borrowed_capacity_bytes"] = value.borrowed_capacity_bytes;
   result["copied_payload_bytes"] = value.copied_payload_bytes;
+  result["end_of_reply_captured"] = value.end_of_reply_captured;
+  result["end_of_reply_bytes"] = value.end_of_reply_bytes;
   auto checkpoints = json::Value::array();
   for (const auto id : value.captured_checkpoint_ids)
     checkpoints.push_back(id);

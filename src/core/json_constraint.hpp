@@ -9,6 +9,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <optional>
 #include <vector>
 
 #include "src/core/json.hpp"
@@ -67,6 +68,8 @@ public:
   [[nodiscard]] State Start() const;
   [[nodiscard]] State Advance(const State& state, unsigned char byte) const;
   [[nodiscard]] bool Complete(const State& state) const;
+  [[nodiscard]] std::optional<unsigned char> SingleForcedByte(
+      const State& state) const;
   [[nodiscard]] const std::string& prompt() const { return prompt_; }
 
 private:
@@ -134,6 +137,8 @@ struct TokenConstraint {
   std::shared_ptr<const ConstraintVocabulary> vocabulary;
   [[nodiscard]] std::shared_ptr<const std::vector<std::uint8_t>> Allowed(
       const JsonConstraint::State& state) const;
+  [[nodiscard]] std::vector<std::uint32_t> ForcedTokens(
+      const JsonConstraint::State& state, std::size_t max_tokens) const;
 
 private:
   mutable std::mutex mutex_;

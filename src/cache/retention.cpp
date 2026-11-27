@@ -132,6 +132,16 @@ bool RetentionPolicy::Branch(std::size_t candidate) const {
   }
   return learned;
 }
+bool RetentionPolicy::WorkProtected(std::size_t i) const {
+  const auto& e = records_[i];
+  if (!e.checkpoint)
+    return false;
+  const std::uint64_t elapsed =
+      work_tokens_ >= e.last_work_tokens ? work_tokens_ - e.last_work_tokens : 0;
+  const std::uint64_t length =
+      std::max<std::uint64_t>(1, e.checkpoint->Boundary());
+  return elapsed < length;
+}
 std::uint32_t RetentionPolicy::Priority(
     std::size_t candidate, const RetentionRequest* incoming) const {
   const auto& e = records_[candidate];
@@ -223,6 +233,7 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
                              e.checkpoint->Boundary() < r.tokens.size() &&
                              Prefix(e.checkpoint->Tokens(), r.tokens);
   const bool cheap = rows * 8 < state && !shared_prefix;
+  bool work_protected = !cheap && WorkProtected(i);
   if (cheap && !fresh(e))
     return {1, e.last_used, 0, 0};
   bool rooted = false, reused = fresh(e);
@@ -232,6 +243,8 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
     if (e.below[j]) {
       recency = std::max(recency, records_[j].last_used);
       reused |= fresh(records_[j]);
+      if (!cheap)
+        work_protected |= WorkProtected(j);
     }
     rooted |= records_[j].below[i];
   }
@@ -243,6 +256,8 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
                                 e.purpose == RetentionPurpose::kBranchPoint));
   const auto depth =
       std::numeric_limits<std::uint64_t>::max() - e.checkpoint->Boundary();
+  if (work_protected)
+    return {4, fork ? 2U : covered ? 0U : 1U, recency, depth};
   if (reused && !cheap)
     return {3, fork ? 2U : covered ? 0U : 1U, recency, depth};
   return {2, recency, shared ? 2U : covered ? 0U : 1U, depth};
@@ -429,7 +444,8 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
       }
     } else if (target == limit_ || priority(i) < priority(target) ||
                (priority(i) == priority(target) &&
-                records_[i].last_used < records_[target].last_used)) {
+                std::tuple{WorkProtected(i), records_[i].last_used} <
+                    std::tuple{WorkProtected(target), records_[target].last_used})) {
       target = i;
     }
   }
@@ -578,8 +594,13 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       std::size_t target = 0;
       while (records_[target].checkpoint)
         ++target;
+      const std::uint64_t work = static_cast<std::uint64_t>(
+          r.tokens.size() > r.reused_tokens ? r.tokens.size() - r.reused_tokens
+                                            : 1);
+      work_tokens_ += work;
       auto& e = records_[target];
-      e = {std::move(checkpoint), entry, purpose, r.stable, ++clock_};
+      e = {std::move(checkpoint), entry, purpose, r.stable, ++clock_,
+           work_tokens_};
       ++size_;
       // Keep each event's exact total without recounting every retained
       // checkpoint after each individual eviction or insertion.
@@ -685,6 +706,7 @@ void RetentionPolicy::Touch(CheckpointId id) {
     throw std::invalid_argument("unknown retained checkpoint");
   auto& e = records_[i];
   e.last_used = ++clock_;
+  e.last_work_tokens = work_tokens_;
   e.reused_at = admitted_bytes_;
   Emit(RetentionAction::kTouched, RetentionReason::kExplicit, id,
        e.checkpoint->Boundary(), e.purpose, Priority(i), e.last_used);

@@ -2338,6 +2338,81 @@ JsonConstraint::State JsonConstraint::Advance(const State& state,
   return Expand(std::move(next));
 }
 
+
+std::optional<unsigned char> JsonConstraint::SingleForcedByte(
+    const State& state) const {
+  if (state.empty() || Complete(state)) return std::nullopt;
+  std::bitset<256> allowed;
+  for (const auto& stack : state) {
+    if (stack.symbols.empty()) return std::nullopt;
+    const auto symbol = stack.symbols.back();
+    if (symbol & kLexeme) {
+      const auto& lexeme = lexemes_.at(symbol & ~kLexeme);
+      for (int b = 0; b < 256; ++b) {
+        if (lexeme->AllowsByte(static_cast<unsigned char>(b))) {
+          allowed.set(static_cast<std::size_t>(b));
+          if (allowed.count() > 1) return std::nullopt;
+        }
+      }
+    } else {
+      allowed |= classes_.at(symbol & ~kTerminal);
+      if (allowed.count() > 1) return std::nullopt;
+    }
+  }
+  if (allowed.count() != 1) return std::nullopt;
+  for (int b = 0; b < 256; ++b) {
+    if (allowed.test(static_cast<std::size_t>(b))) {
+      return static_cast<unsigned char>(b);
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<std::uint32_t> TokenConstraint::ForcedTokens(
+    const JsonConstraint::State& state, std::size_t max_tokens) const {
+  std::vector<std::uint32_t> out;
+  if (!grammar || !vocabulary || max_tokens == 0) return out;
+  std::string bytes;
+  const std::size_t max_bytes = std::min<std::size_t>(max_tokens * 16, 64);
+  JsonConstraint::State cur = state;
+  while (bytes.size() < max_bytes) {
+    const auto b = grammar->SingleForcedByte(cur);
+    if (!b) break;
+    bytes.push_back(static_cast<char>(*b));
+    cur = grammar->Advance(cur, *b);
+  }
+  if (bytes.empty()) return out;
+
+  // Greedily match longest non-stop token in vocabulary->trie_
+  const auto& trie = vocabulary->trie_;
+  const auto& pieces = vocabulary->pieces_;
+  std::size_t pos = 0;
+  while (pos < bytes.size() && out.size() < max_tokens) {
+    std::uint32_t node = 0;
+    std::uint32_t best_tok = UINT32_MAX;
+    std::size_t best_end = pos;
+    for (std::size_t i = pos; i < bytes.size(); ++i) {
+      const unsigned char ch = static_cast<unsigned char>(bytes[i]);
+      std::uint32_t child = trie[node].child;
+      while (child != UINT32_MAX && trie[child].byte != ch) {
+        child = trie[child].sibling;
+      }
+      if (child == UINT32_MAX) break;
+      node = child;
+      if (trie[node].token != UINT32_MAX &&
+          !pieces[trie[node].token].stop &&
+          !pieces[trie[node].token].text.empty()) {
+        best_tok = trie[node].token;
+        best_end = i + 1;
+      }
+    }
+    if (best_tok == UINT32_MAX) break;
+    out.push_back(best_tok);
+    pos = best_end;
+  }
+  return out;
+}
+
 bool JsonConstraint::Complete(const State& state) const {
   return std::ranges::any_of(
       state, [](const auto& stack) { return stack.symbols.empty(); });

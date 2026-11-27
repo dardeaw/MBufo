@@ -66,7 +66,7 @@ ContinuationLayout::ContinuationLayout(const Config& c, bool mtp,
           layer);
       add(ContinuationPart::kRecurrent, 0,
           std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim * c.ssm_head_dim *
-              sizeof(float),
+              sizeof(std::uint16_t),
           layer);
     } else {
       add(ContinuationPart::kKey, kv_key_row, 0, layer);

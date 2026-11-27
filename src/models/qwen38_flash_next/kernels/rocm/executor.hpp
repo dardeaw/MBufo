@@ -147,7 +147,7 @@ private:
 
   struct LinearState {
     float* conv_state{nullptr};    ///< [kernel-1][channels]
-    float* state{nullptr};         ///< [v_heads][d][d]
+    __half* state{nullptr};         ///< [v_heads][d][d]
     RollbackRows conv_snapshots;   ///< [max_spec-1][kernel-1][channels]
     RollbackRows state_snapshots;  ///< [max_spec-1][v_heads][d][d]
   };

@@ -44,7 +44,7 @@ std::uint32_t KvQuantId(const std::string& quant) {
   return 0;
 }
 struct Metadata {
-  std::uint32_t version{2};
+  std::uint32_t version{3};
   std::uint32_t target{}, draft{}, blocks{}, draft_blocks{}, hidden_base{};
   std::uint32_t residual_valid{}, image_bytes{};
   NgramHistory ngram;
@@ -235,7 +235,7 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
     for (unsigned i = 0; i < 4; ++i)
       identity_.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
   };
-  put(2);  // Private components attest the target checkpoint boundary.
+  put(3);  // Private components attest the target checkpoint boundary (FP16 GDN state).
   put(Session::kSnapshotPayloadVersion);
   put(context);
   put(mode == core::SessionMode::kSpeculative);
@@ -828,7 +828,7 @@ bool ContinuationAdapter::Validate(
   auto& session = *state.session;
   auto& native = *session.session_;
   auto policy = session.draft_length_;
-  if (metadata.version != 2 || metadata.hidden_base > metadata.target ||
+  if (metadata.version != 3 || metadata.hidden_base > metadata.target ||
       metadata.target - metadata.hidden_base >
           model_->executor_->max_speculative() ||
       metadata.residual_valid > 1 ||

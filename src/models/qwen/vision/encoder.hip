@@ -351,6 +351,190 @@ __global__ void Finish(float* output, const float* bias, unsigned size,
     output[i] = Round(output[i] + bias[i % width]);
 }
 
+
+using WmmaFragment = __attribute__((ext_vector_type(16))) unsigned short;
+using WmmaAccumulator = __attribute__((ext_vector_type(8))) float;
+
+__device__ __forceinline__ WmmaFragment LoadWmma16(const std::uint16_t* x) {
+  union {
+    WmmaFragment f;
+    uint4 u[2];
+  } value;
+  value.u[0] = *reinterpret_cast<const uint4*>(x);
+  value.u[1] = *reinterpret_cast<const uint4*>(x + 8);
+  return value.f;
+}
+
+__device__ __forceinline__ WmmaFragment LoadWmma8Zero(const std::uint16_t* x) {
+  union {
+    WmmaFragment f;
+    uint4 u[2];
+  } value;
+  value.u[0] = *reinterpret_cast<const uint4*>(x);
+  value.u[1] = uint4{0, 0, 0, 0};
+  return value.f;
+}
+
+__global__ void FlashAttentionWmma(const std::uint16_t* __restrict__ queries,
+                                   const std::uint16_t* __restrict__ keys,
+                                   const std::uint16_t* __restrict__ values,
+                                   Bf16* __restrict__ output,
+                                   unsigned count) {
+#if defined(__HIP_DEVICE_COMPILE__)
+  __shared__ union {
+    std::uint16_t key[32][88];
+    std::uint16_t value[80][36];
+  } staging;
+
+  const unsigned tid = threadIdx.x;
+  const unsigned lane = tid % 32;
+  const unsigned wave = tid / 32;
+  const unsigned first_query = blockIdx.x * 128 + wave * 16;
+  const unsigned head = blockIdx.y;
+
+  const std::size_t head_offset = std::size_t(head) * count * kHeadDim;
+  queries += head_offset;
+  keys += head_offset;
+  values += head_offset;
+
+  WmmaFragment q_frag[5]{};
+  const unsigned qr = first_query + lane % 16;
+  if (qr < count) {
+    const auto* qp = queries + std::size_t(qr) * kHeadDim;
+#pragma unroll
+    for (int d = 0; d < 4; ++d)
+      q_frag[d] = LoadWmma16(qp + d * 16);
+    q_frag[4] = LoadWmma8Zero(qp + 64);
+  }
+
+  WmmaAccumulator result[5]{};
+  float maximum = -INFINITY;
+  float sum = 0.0F;
+
+  for (unsigned base = 0; base < count; base += 32) {
+    for (unsigned idx = tid; idx < 32 * 9; idx += 256) {
+      const unsigned kr = idx / 9;
+      const unsigned kd = (idx % 9) * 8;
+      *reinterpret_cast<uint4*>(staging.key[kr] + kd) =
+          (base + kr < count)
+              ? *reinterpret_cast<const uint4*>(
+                    keys + std::size_t(base + kr) * kHeadDim + kd)
+              : uint4{0, 0, 0, 0};
+    }
+    staging.key[tid / 8][72 + (tid % 8)] = 0;
+    __syncthreads();
+
+    WmmaAccumulator scores[2]{};
+#pragma unroll
+    for (int d = 0; d < 5; ++d) {
+#pragma unroll
+      for (int half = 0; half < 2; ++half) {
+        const WmmaFragment k_frag =
+            LoadWmma16(staging.key[half * 16 + lane % 16] + d * 16);
+        scores[half] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(
+            k_frag, q_frag[d], scores[half]);
+      }
+      __builtin_amdgcn_sched_barrier(0);
+    }
+    __syncthreads();
+
+    for (unsigned idx = tid; idx < 32 * 9; idx += 256) {
+      const unsigned vk = idx / 9;
+      const unsigned vd = (idx % 9) * 8;
+      const uint4 vec =
+          (base + vk < count)
+              ? *reinterpret_cast<const uint4*>(
+                    values + std::size_t(base + vk) * kHeadDim + vd)
+              : uint4{0, 0, 0, 0};
+      const auto* elems = reinterpret_cast<const std::uint16_t*>(&vec);
+#pragma unroll
+      for (int e = 0; e < 8; ++e)
+        staging.value[vd + e][vk] = elems[e];
+    }
+    staging.value[72 + (tid / 32)][tid % 32] = 0;
+
+    if (base + 32 > count) {
+#pragma unroll
+      for (int half = 0; half < 2; ++half)
+#pragma unroll
+        for (int i = 0; i < 8; ++i)
+          if (base + half * 16 + 2 * i + lane / 16 >= count)
+            scores[half][i] = -INFINITY;
+    }
+
+    float next = maximum;
+#pragma unroll
+    for (int half = 0; half < 2; ++half) {
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        // log2(e) / sqrt(72) for base-2 online softmax.
+        scores[half][i] *= 0.1700232325781962F;
+        next = fmaxf(next, scores[half][i]);
+      }
+    }
+    next = fmaxf(next, __uint_as_float(__builtin_amdgcn_permlanex16(
+                           __float_as_uint(next), __float_as_uint(next),
+                           0x76543210U, 0xfedcba98U, false, false)));
+
+    const float correction = __builtin_amdgcn_exp2f(maximum - next);
+    float subtotal = 0.0F;
+    WmmaFragment probability_fragments[2];
+#pragma unroll
+    for (int half = 0; half < 2; ++half) {
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const float prob = __builtin_amdgcn_exp2f(scores[half][i] - next);
+        subtotal += prob;
+        const unsigned own = Bf16(prob).data;
+        const unsigned peer = __builtin_amdgcn_permlanex16(
+            own, own, 0x76543210U, 0xfedcba98U, false, false);
+        probability_fragments[half][2 * i] = lane < 16 ? own : peer;
+        probability_fragments[half][2 * i + 1] = lane < 16 ? peer : own;
+      }
+    }
+    subtotal += __uint_as_float(__builtin_amdgcn_permlanex16(
+        __float_as_uint(subtotal), __float_as_uint(subtotal), 0x76543210U,
+        0xfedcba98U, false, false));
+    sum = sum * correction + subtotal;
+    maximum = next;
+
+#pragma unroll
+    for (int d = 0; d < 5; ++d)
+      result[d] *= correction;
+
+    __syncthreads();
+
+#pragma unroll
+    for (int half = 0; half < 2; ++half) {
+      const WmmaFragment p_frag = probability_fragments[half];
+#pragma unroll
+      for (int d = 0; d < 5; ++d) {
+        const WmmaFragment v_frag =
+            LoadWmma16(staging.value[d * 16 + lane % 16] + half * 16);
+        result[d] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(
+            v_frag, p_frag, result[d]);
+      }
+    }
+    __syncthreads();
+  }
+
+  const unsigned row = first_query + lane % 16;
+  if (row < count) {
+    const float inv = __builtin_amdgcn_rcpf(sum);
+    auto* out = output + std::size_t(row) * kHidden + head * kHeadDim;
+#pragma unroll
+    for (int d = 0; d < 5; ++d) {
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const unsigned dim = d * 16 + 2 * i + lane / 16;
+        if (dim < kHeadDim)
+          out[dim] = Bf16(result[d][i] * inv);
+      }
+    }
+  }
+#endif
+}
+
 std::uint16_t ToBf16(float value) {
   const auto bits = std::bit_cast<std::uint32_t>(value);
   return static_cast<std::uint16_t>((bits + 0x7fff + ((bits >> 16) & 1)) >> 16);
@@ -684,6 +868,14 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
               stream>>>(work.As<float>(),
                         impl_->FloatWeight(prefix + "attn_qkv.bias"), q, k, v,
                         count, image.width / 16);
+    if (true) {
+      FlashAttentionWmma<<<dim3((count + 127) / 128, kHeads), kThreads, 0,
+                           stream>>>(
+          reinterpret_cast<const std::uint16_t*>(q),
+          reinterpret_cast<const std::uint16_t*>(k),
+          reinterpret_cast<const std::uint16_t*>(v),
+          attention.As<Bf16>(), count);
+    } else {
     for (unsigned begin = 0; begin < count; begin += tile) {
       check_cancelled();
       const unsigned rows = std::min(tile, count - begin);
@@ -718,6 +910,7 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
       AttentionRows<<<(rows * kHidden + kThreads - 1) / kThreads, kThreads, 0,
                       stream>>>(output_tile.As<float>(), attention.As<Bf16>(),
                                 begin, rows);
+    }
     }
     impl_->Gemm(prefix + "attn_out.weight", attention.As<Bf16>(),
                 work.As<float>(), count, kHidden, kHidden);

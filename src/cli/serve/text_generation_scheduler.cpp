@@ -2817,6 +2817,16 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
         "stop sequences require exact incremental token decoding");
 
   auto request = std::make_shared<ScheduledRequest>();
+  if (metadata.stop_at_eos && impl_->incremental_text_is_exact) {
+    for (const char* marker :
+         {"<|im_start|>user", "<|im_start|>assistant", "<|im_start|>system"}) {
+      if (metadata.stop_sequences.size() >= kMaxStopSequences) break;
+      if (std::ranges::find(metadata.stop_sequences, marker) ==
+          metadata.stop_sequences.end()) {
+        metadata.stop_sequences.emplace_back(marker);
+      }
+    }
+  }
   request->stop_filter = StopSequenceFilter(std::move(metadata.stop_sequences));
   request->id = impl_->next_request_id.fetch_add(1, std::memory_order_relaxed);
   request->client_id =

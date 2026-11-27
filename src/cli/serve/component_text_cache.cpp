@@ -645,7 +645,7 @@ struct ComponentTextCache::Lease::Impl {
   std::vector<cache::Token> prompt;
   std::size_t cached{}, restored{}, stable{}, capture_boundary{};
   double restore_time{};
-  bool disk_hit{}, active{true}, preserve_source{};
+  bool disk_hit{}, active{true}, preserve_source{}, ram_only_capture{false};
   cache::CheckpointId source{};
   std::array<cache::CheckpointId, cache::RetentionPolicy::kRecordLimit>
       edit_boundaries{};
@@ -1484,9 +1484,10 @@ ContinuationLookup ComponentTextCache::Lease::lookup() const noexcept {
 bool ComponentTextCache::Lease::HasSnapshotFor(
     std::span<const ContinuationToken> tokens) const {
   const std::lock_guard lock(impl_->cache->mutex);
+  const auto bound = std::min(tokens.size(), impl_->prompt.size());
   return impl_->cache->index.HasCheckpoint(
       {impl_->cache->identity, tokens,
-       cache::InputIdentity(tokens.size(), At(impl_->input, tokens.size()))},
+       cache::InputIdentity(tokens.size(), At(impl_->input, bound))},
       tokens.size());
 }
 bool ComponentTextCache::Lease::TryReserveSnapshot(
@@ -1691,7 +1692,8 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
       break;
     } catch (const cache::ResourceExhausted&) {
       if (!reclaim()) {
-        if (cache.queue && request.purpose != SnapshotPurpose::kHistory) {
+        if (!request.ram_only_capture && cache.queue &&
+            request.purpose != SnapshotPurpose::kHistory) {
           try {
             if (auto durable = request.CaptureDurable())
               return durable;
@@ -1722,61 +1724,102 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
   snapshot->bytes = bytes;
   return snapshot;
 }
-std::size_t ComponentTextCache::Lease::PublishSnapshot(
+namespace {
+std::size_t PublishComponentSnapshot(
+    ComponentTextCache::Lease::Impl& lease_impl,
     std::vector<ContinuationToken> tokens,
-    std::shared_ptr<const ContinuationSnapshot> snapshot, bool preserve) {
+    std::shared_ptr<const ContinuationSnapshot> snapshot, bool preserve,
+    bool persist) {
   const auto* component =
       dynamic_cast<const ComponentSnapshot*>(snapshot.get());
   if (component && component->durable) {
+    if (!persist)
+      return 0;
     const auto started = Clock::now();
-    impl_->metrics.disk_queued_bytes +=
-        impl_->cache->Persist(component->durable);
-    impl_->metrics.disk_enqueue_ms +=
+    lease_impl.metrics.disk_queued_bytes +=
+        lease_impl.cache->Persist(component->durable);
+    lease_impl.metrics.disk_enqueue_ms +=
         std::chrono::duration<double, std::milli>(Clock::now() - started)
             .count();
     return 0;
   }
   if (!component || !component->checkpoint)
     return 0;
-  auto retain = impl_->Retain(tokens);
+  auto retain = lease_impl.Retain(tokens);
   retain.preserve_source = preserve;
   bool admitted;
   {
-    const std::lock_guard lock(impl_->cache->mutex);
-    admitted = impl_->cache->retention.Admit(
+    const std::lock_guard lock(lease_impl.cache->mutex);
+    admitted = lease_impl.cache->retention.Admit(
         retain, [&] { return component->checkpoint; });
   }
   if (!admitted)
     return 0;
   if (retain.purpose == cache::RetentionPurpose::kHistory) {
-    if (impl_->edit_boundary_count == impl_->edit_boundaries.size())
+    if (lease_impl.edit_boundary_count == lease_impl.edit_boundaries.size())
       throw std::logic_error("too many edit boundaries in one turn");
-    impl_->edit_boundaries[impl_->edit_boundary_count++] =
+    lease_impl.edit_boundaries[lease_impl.edit_boundary_count++] =
         component->checkpoint->Id();
   }
-  try {
-    const auto started = Clock::now();
-    impl_->metrics.disk_queued_bytes +=
-        impl_->cache->Persist(component->checkpoint);
-    impl_->metrics.disk_enqueue_ms +=
-        std::chrono::duration<double, std::milli>(Clock::now() - started)
-            .count();
-  } catch (const std::exception& error) {
-    Logger::Info("cache", std::string("event=persistence_refused reason=") +
-                              error.what());
+  if (persist) {
+    try {
+      const auto started = Clock::now();
+      lease_impl.metrics.disk_queued_bytes +=
+          lease_impl.cache->Persist(component->checkpoint);
+      lease_impl.metrics.disk_enqueue_ms +=
+          std::chrono::duration<double, std::milli>(Clock::now() - started)
+              .count();
+    } catch (const std::exception& error) {
+      Logger::Info("cache", std::string("event=persistence_refused reason=") +
+                                error.what());
+    }
   }
   return component->bytes;
+}
+}  // namespace
+std::size_t ComponentTextCache::Lease::PublishSnapshot(
+    std::vector<ContinuationToken> tokens,
+    std::shared_ptr<const ContinuationSnapshot> snapshot, bool preserve) {
+  return PublishComponentSnapshot(*impl_, std::move(tokens),
+                                  std::move(snapshot), preserve, true);
 }
 std::size_t ComponentTextCache::Lease::Commit(
     std::vector<ContinuationToken> tokens,
     std::shared_ptr<const ContinuationSnapshot> snapshot,
     std::vector<ContinuationToken> live) {
-  const auto bytes =
+  auto bytes =
       snapshot ? PublishSnapshot(std::move(tokens), std::move(snapshot), true)
                : 0;
   if (live.empty()) {
     Invalidate();
     return bytes;
+  }
+  if (live.size() > impl_->prompt.size() && impl_->cache->budget > 0 &&
+      !HasSnapshotFor(live)) {
+    try {
+      const auto reply_bytes = CaptureBytes();
+      const auto single_slot_cap = impl_->cache->budget / 2;
+      if (reply_bytes > 0 && reply_bytes <= single_slot_cap) {
+        impl_->capture_tokens = live;
+        impl_->capture_boundary = live.size();
+        impl_->preserve_source = false;
+        impl_->purpose = SnapshotPurpose::kContinuation;
+        impl_->ram_only_capture = true;
+        auto reply_snapshot = Capture();
+        impl_->ram_only_capture = false;
+        if (reply_snapshot) {
+          const auto admitted_bytes = PublishComponentSnapshot(
+              *impl_, live, std::move(reply_snapshot), false, false);
+          if (admitted_bytes > 0) {
+            impl_->metrics.end_of_reply_captured = true;
+            impl_->metrics.end_of_reply_bytes = admitted_bytes;
+            bytes += admitted_bytes;
+          }
+        }
+      }
+    } catch (...) {
+      impl_->ram_only_capture = false;
+    }
   }
   auto positions =
       impl_->cache->resources->adapter->Positions(impl_->slot.Execution());
