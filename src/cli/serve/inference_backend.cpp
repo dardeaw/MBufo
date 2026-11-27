@@ -5029,9 +5029,9 @@ const GlimmerTextRunnerState& RequireGlimmerState(
 
 class GlimmerTextRunner final : public HipTextModelRunner {
  public:
-  // Batch contract (see TextModelRunner): serial AdvanceBatch; native DecodeBatch below; no merged prefill+decode.
-  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
-  MBUFO_RUNNER_NO_MIXED_BATCH();
+  // Batch contract (see TextModelRunner): native DecodeBatch / AdvanceBatch / AdvanceBatchWithPrefillChunk (all
+  // without a shared draft; with one they fall back to serial or refuse); the multi-token merged entry point is an
+  // explicit refusal because the DFlash verify path is per-session.
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kAtem;
   }
@@ -5067,6 +5067,7 @@ class GlimmerTextRunner final : public HipTextModelRunner {
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0,
                 .prefix_reuse = false,
+                .mixed_prefill_decode = shared_draft_ == nullptr,
             },
         .persistence = std::nullopt,
     };
@@ -5379,6 +5380,110 @@ class GlimmerTextRunner final : public HipTextModelRunner {
     return steps;
   }
 
+  // Plain-token advance for every lane through one layer-synchronous engine pass (StepBatchExact: per-item
+  // arithmetic bit-identical to Advance). The engine validates before mutating, so a refusal reruns serially with
+  // nothing half-applied. A shared draft keeps the serial path (Advance there also feeds the speculative
+  // bookkeeping).
+  void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const override {
+    if (advances.size() < 2 || shared_draft_ != nullptr || advances.size() > kGlimmerMaxBatchLanes) {
+      return SerialAdvanceBatch(advances);
+    }
+    std::vector<std::int32_t> tokens(advances.size());
+    std::vector<GlimmerSession::BatchItem> items;
+    items.reserve(advances.size());
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      if (advances[i].token > static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max())) {
+        return SerialAdvanceBatch(advances);  // serial path reports the per-lane error
+      }
+      tokens[i] = static_cast<std::int32_t>(advances[i].token);
+      auto& glimmer = RequireGlimmerState(advances[i].state.get());
+      for (std::size_t j = 0; j < i; ++j) {
+        if (&advances[j].state.get() == &advances[i].state.get()) return SerialAdvanceBatch(advances);
+      }
+      items.push_back({&glimmer.session(), std::span<const std::int32_t>(&tokens[i], 1)});
+    }
+    std::string error;
+    if (!GlimmerSession::StepBatchExact(items, &error)) {
+      return SerialAdvanceBatch(advances);
+    }
+    for (const auto& advance : advances) {
+      auto& glimmer = RequireGlimmerState(advance.state.get());
+      glimmer.set_position(glimmer.position() + 1);
+    }
+  }
+
+  // Merged plain-advance + prefill chunk: the chunk rows ride the same layer-synchronous engine pass as the
+  // single-token advances. Bit-identical to Prefill (Sync of the same delta) followed by AdvanceBatch; the chunk is
+  // capped at the engine's 512-row step, which only matters when the scheduler budget exceeds it (the remainder
+  // goes through the next call). Refuses with nothing mutated for shapes the engine step cannot host.
+  [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
+      std::span<const TextRunnerAdvance> advances, std::span<std::exception_ptr> advance_failures,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt, std::size_t offset,
+      std::size_t max_input_tokens, TextPrefillStep& chunk_step) const override {
+    static const bool trace = std::getenv("MBUFO_GLIMMER_MIXED_TRACE") != nullptr;
+    const auto refuse = [&](const std::string& why) {
+      if (trace) std::fprintf(stderr, "[glimmer-mixed] refused: %s\n", why.c_str());
+      throw MixedBatchRefused(why);
+    };
+    auto& chunk_state = RequireGlimmerState(prefill_state);
+    if (trace) std::fprintf(stderr, "[glimmer-mixed] enter lanes=%zu offset=%zu pos=%zu\n", advances.size(), offset, chunk_state.position());
+    if (shared_draft_ != nullptr || advances.empty() || advances.size() + 1 > kGlimmerMaxBatchLanes ||
+        offset != chunk_state.position() || offset >= prompt.size() || max_input_tokens == 0) {
+      refuse("glimmer mixed batch preconditions unmet");
+    }
+    const std::size_t consumed = std::min({max_input_tokens, prompt.size() - offset, kGlimmerMaxChunkRows});
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_) refuse("glimmer mixed chunk exceeds the served context");
+    std::vector<std::int32_t> tokens(advances.size());
+    std::vector<GlimmerSession::BatchItem> items;
+    items.reserve(advances.size());
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      if (advances[i].token > static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max())) {
+        refuse("glimmer mixed token exceeds engine range");
+      }
+      tokens[i] = static_cast<std::int32_t>(advances[i].token);
+      auto* lane = &RequireGlimmerState(advances[i].state.get());
+      if (lane == &chunk_state) refuse("glimmer mixed batch lane is the prefill state");
+      for (std::size_t j = 0; j < i; ++j) {
+        if (&advances[j].state.get() == &advances[i].state.get())
+          refuse("glimmer mixed batch has a duplicate lane");
+      }
+      items.push_back({&lane->session(), std::span<const std::int32_t>(&tokens[i], 1)});
+    }
+    const auto prefix = GlimmerEngineTokens(prompt.first(next_position));
+    GlimmerSession::ChunkItem chunk{&chunk_state.session(), std::span<const std::int32_t>(prefix), offset};
+    std::string error;
+    bool refused = false;
+    if (!GlimmerSession::DecodeBatchWithChunk(items, chunk, &error, &refused)) {
+      if (refused) refuse("glimmer mixed batch refused: " + error);
+      // The engine validated up front, so a failure here is mid-pass: no lane can be trusted to have advanced.
+      chunk_state.set_position(0);
+      for (std::size_t i = 0; i < advances.size(); ++i) {
+        advance_failures[i] =
+            std::make_exception_ptr(std::runtime_error("Glimmer mixed advance failed: " + error));
+      }
+      return false;
+    }
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      advance_failures[i] = nullptr;
+      auto& lane = RequireGlimmerState(advances[i].state.get());
+      lane.set_position(lane.position() + 1);
+    }
+    chunk_state.set_position(next_position);
+    chunk_step = {.consumed_tokens = consumed, .decode_ready = next_position == prompt.size()};
+    if (trace) {
+      std::fprintf(stderr, "[glimmer-mixed] lanes=%zu chunk=%zu offset=%zu\n", advances.size(), consumed, offset);
+    }
+    return true;
+  }
+
+  // The DFlash verify path is per-session (draft rounds are sequential per lane), so it cannot host a chunk.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchWithPrefillChunk(
+      std::span<const TextRunnerDecode>, TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+      std::size_t, TextPrefillStep&) const override {
+    RefuseMixedBatch("glimmer has no merged multi-token decode");
+  }
+
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     return SelectNext(state, sampler);
@@ -5390,6 +5495,8 @@ class GlimmerTextRunner final : public HipTextModelRunner {
   }
 
  private:
+  static constexpr std::size_t kGlimmerMaxBatchLanes = 32;   ///< engine mixed-batch block limit
+  static constexpr std::size_t kGlimmerMaxChunkRows = 512;   ///< engine per-step row limit
   std::shared_ptr<GlimmerModel> model_;
   std::uint32_t max_context_;
   std::shared_ptr<GlimmerTextRunnerState::SharedDraft> shared_draft_;  ///< non-null: DFlash speculative decode

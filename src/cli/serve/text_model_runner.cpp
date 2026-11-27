@@ -1702,8 +1702,16 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
   // Vanilla-only gate (read-only): anything the legacy wrapper would treat
   // specially (snapshots, checkpoints, boundaries, disk, cancellation)
   // refuses into the legacy pair. Pinning below is idempotent.
+  // snapshot_tokens is pre-filled with the prompt by the request constructor
+  // even when the runner cannot snapshot (the snapshot machinery then never
+  // fires), so it only counts as pending snapshot work for runners that can
+  // capture and fork.
+  const auto mixed_caps = impl_->runner->Descriptor().capabilities;
+  const bool snapshot_inert =
+      !mixed_caps.snapshot || !mixed_caps.fork || !mixed_caps.prefix_reuse;
   if (impl_->prompt_snapshot_attempted || !impl_->boundaries.empty() ||
-      !impl_->checkpoints.empty() || !impl_->snapshot_tokens.empty() ||
+      !impl_->checkpoints.empty() ||
+      (!snapshot_inert && !impl_->snapshot_tokens.empty()) ||
       impl_->disk_store || (impl_->cancelled && impl_->cancelled())) {
     return std::nullopt;
   }

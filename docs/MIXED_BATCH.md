@@ -227,8 +227,30 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 | Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes) | no |
 | DeepSeek V4 Flash | native (serial in some conditions) | native | no |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
-| Muse Glimmer | native without a shared draft, serial otherwise | serial | no |
+| Muse Glimmer | native without a shared draft, serial otherwise | native without a shared draft (bit-identical to serial), serial otherwise | **yes** without a shared draft (`AdvanceBatchWithPrefillChunk`); `DecodeBatchWithPrefillChunk` refuses (DFlash verify is per-session) |
 | GPT-OSS, Laguna, Inkling, Llama, Gemma 4 | serial | serial | no |
 
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
+
+### Muse Glimmer notes
+
+- Engine entry points: `Session::StepBatchExact` (advance lanes) and
+  `Session::DecodeBatchWithChunk` (lanes plus one prefill chunk). Both run a
+  layer-synchronous pass whose per-item arithmetic is the same per-session
+  core `Evaluate` / `Sync` use (FlashSinkDecode for one row, WMMA flash for a
+  chunk). The unified varlen launcher used by `Session::DecodeBatch` is *not*
+  bit-identical to those cores, so the exact entry points do not use it.
+- Verified bit-identical (completion SHA and per-step logits checksum at every
+  position) against `MBUFO_MIXED_BATCH=0` with a 6.5k-token prompt prefilling
+  while 3 to 4 streams decode on `muse-glimmer-30b`.
+- No speedup claim: Glimmer's GEMMs still run per session, so a merged pass
+  shares no weight reads between lanes (decode is weight-bandwidth bound).
+  Sharing weights needs lane-stacked GEMM rows in `ForwardLayerPre/Post`.
+- The chunk is capped at 512 rows per step (engine limit); the scheduler budget
+  is usually below that. A request whose engine session does not continue the
+  retained prefix at the chunk offset is refused cleanly (legacy pair runs).
+- `MBUFO_GLIMMER_MIXED_TRACE=1` prints one stderr line per merged step.
+- `TextRunnerPool::Request::PrefillWithCoworkers` no longer treats the
+  pre-filled `snapshot_tokens` as pending snapshot work for runners that cannot
+  snapshot/fork/prefix-reuse (it refused every such request before).
