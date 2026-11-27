@@ -4598,10 +4598,11 @@ class InklingTextRunner final : public HipTextModelRunner {
   [[nodiscard]] TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
+    const bool greedy = sampler.config().can_use_unmodified_argmax();
     if (!use_dspark() || max_tokens <= 1 ||
         sampler.ForcedToken().has_value() ||
-        !sampler.config().can_use_unmodified_argmax() ||
         sampler.config().constraint != nullptr ||
+        sampler.config().reasoning_budget != nullptr ||
         sampler.NeedsConstraintMask()) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
@@ -4611,13 +4612,24 @@ class InklingTextRunner final : public HipTextModelRunner {
         std::min<std::size_t>(max_draft_tokens_, max_tokens - 1));
     std::vector<std::int32_t> block;
     std::string error;
-    if (!st.session().SpeculativeRound(n_draft, &block, &error) ||
-        block.empty()) {
+    bool round_ok = false;
+    if (greedy) {
+      round_ok = st.session().SpeculativeRound(n_draft, &block, &error);
+    } else {
+      // Sampled requests: lossless speculative sampling against a working
+      // copy of the sampler; publish only the RNG / deferred residual draw.
+      sampling::SamplerState working = sampler;
+      round_ok = st.session().SpeculativeRoundSampled(n_draft, working, &block,
+                                                      &error);
+      sampler.CopyDrawStateFrom(working);
+    }
+    if (!round_ok || block.empty()) {
       throw std::runtime_error("Inkling speculative decode failed: " + error);
     }
     TextDecodeStep step;
-    step.draft_rounds = 1;
-    step.draft_tokens = n_draft;
+    const std::uint32_t drafted = st.session().LastDraftCount();
+    step.draft_rounds = drafted > 0 ? 1 : 0;
+    step.draft_tokens = drafted;
     step.draft_accepted_tokens = block.size() - 1;
     bool stop = false;
     step.selections.reserve(block.size());
