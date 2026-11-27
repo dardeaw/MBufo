@@ -210,24 +210,56 @@ class QwenEmbeddingRunner final : public EmbeddingRunner {
         model_id_(std::move(model_id)),
         tokenize_(std::move(tokenize)) {}
   std::string_view Kind() const noexcept override { return "qwen-embedding"; }
-  bool NativeBatch() const noexcept override { return false; }
+  // Fused only where ForwardPromptSegments serves the model (dense head_dim
+  // 128 Qwen, F16 KV); otherwise the explicit serial fallback below.
+  bool NativeBatch() const noexcept override {
+    return hip::QwenGpuExecutor::SupportsPromptSegments(model_->GetConfig(),
+                                                        policy_);
+  }
 
   std::optional<std::vector<EmbeddingResult>> EmbedBatch(
       const std::vector<std::string>& texts, std::string* error) override {
     const std::lock_guard<std::mutex> lock(mutex_);
-    return SerialEmbedBatch(
-        texts, error, [this](const std::string& text, std::string* err) {
-          return EmbedOne(text, err);
-        });
+    if (texts.size() < 2 || !NativeBatch()) {
+      return SerialEmbedBatch(
+          texts, error, [this](const std::string& text, std::string* err) {
+            return EmbedOne(text, err);
+          });
+    }
+    std::vector<std::vector<std::uint32_t>> all_ids;
+    all_ids.reserve(texts.size());
+    for (const auto& text : texts) {
+      auto ids = PrepareIds(text, error);
+      if (!ids.has_value()) return std::nullopt;
+      all_ids.push_back(std::move(*ids));
+    }
+    const auto pooling = ResolvePooling(error);
+    if (!pooling.has_value()) return std::nullopt;
+    if (!EnsureExecutor(error)) return std::nullopt;
+    auto& executor = *executor_;
+    const std::size_t row_budget = executor.GetMaxPromptBatch();
+    std::vector<EmbeddingResult> results(texts.size());
+    // Waves of sequences whose rows fit one device batch (arena rows); every
+    // wave is a single fused forward.
+    std::size_t first = 0;
+    while (first < all_ids.size()) {
+      std::size_t last = first;
+      std::size_t rows = 0;
+      while (last < all_ids.size() &&
+             (last == first || rows + all_ids[last].size() <= row_budget)) {
+        rows += all_ids[last].size();
+        ++last;
+      }
+      if (!RunWave(all_ids, first, last, rows, *pooling, results, error))
+        return std::nullopt;
+      first = last;
+    }
+    return results;
   }
 
  private:
-  std::optional<EmbeddingResult> EmbedOne(const std::string& text,
-                                          std::string* error) {
-    auto refuse = [&](const std::string& message) {
-      if (error != nullptr) *error = message;
-      return std::optional<EmbeddingResult>{};
-    };
+  std::optional<core::embedding::PoolingStrategy> ResolvePooling(
+      std::string* error) const {
     // The artifact declares its reduction; an artifact without pooling_type
     // (chat checkpoints) is refused explicitly instead of guessed.
     const std::string arch = model_->GetConfig().architecture;
@@ -235,10 +267,19 @@ class QwenEmbeddingRunner final : public EmbeddingRunner {
         model_->GetReader().GetMetadataUint32(arch + ".pooling_type").value_or(0);
     const auto pooling =
         core::embedding::PoolingStrategyFromGgufType(pooling_type);
-    if (!pooling.has_value()) {
-      return refuse("model '" + model_id_ +
-                    "' declares no GGUF pooling_type; embeddings refused");
+    if (!pooling.has_value() && error != nullptr) {
+      *error = "model '" + model_id_ +
+               "' declares no GGUF pooling_type; embeddings refused";
     }
+    return pooling;
+  }
+
+  std::optional<std::vector<std::uint32_t>> PrepareIds(const std::string& text,
+                                                       std::string* error) const {
+    auto refuse = [&](const std::string& message) {
+      if (error != nullptr) *error = message;
+      return std::optional<std::vector<std::uint32_t>>{};
+    };
     std::vector<std::uint32_t> ids;
     try {
       ids = tokenize_(text);
@@ -260,13 +301,96 @@ class QwenEmbeddingRunner final : public EmbeddingRunner {
       return refuse("embedding input of " + std::to_string(ids.size()) +
                     " tokens exceeds the 4096-token leg-1 window");
     }
-    if (executor_ == nullptr) {
-      std::string exec_error;
-      executor_ = hip::QwenGpuExecutor::Create(model_, &exec_error,
-                                               embed_context_, policy_);
-      if (executor_ == nullptr)
-        return refuse("embedding executor init failed: " + exec_error);
+    return ids;
+  }
+
+  bool EnsureExecutor(std::string* error) {
+    if (executor_ != nullptr) return true;
+    std::string exec_error;
+    executor_ = hip::QwenGpuExecutor::Create(model_, &exec_error,
+                                             embed_context_, policy_);
+    if (executor_ == nullptr && error != nullptr)
+      *error = "embedding executor init failed: " + exec_error;
+    return executor_ != nullptr;
+  }
+
+  // Final RMSNorm (host, exact F32) + L2 on a pooled vector, in place.
+  bool FinishVector(std::vector<float>& values, std::string* error) const {
+    const std::size_t dim = values.size();
+    std::vector<float> normed(dim);
+    models::ForwardRMSNorm(values, model_->GetWeights().output_norm, 1e-6F,
+                           normed);
+    values.swap(normed);
+    if (!(core::embedding::L2Normalize(values) > 0.0)) {
+      if (error != nullptr) *error = "embedding has zero norm; refused";
+      return false;
     }
+    return true;
+  }
+
+  // One fused forward over sequences [first, last): concatenated rows, shared
+  // projections, per-sequence attention, then per-sequence host pooling.
+  bool RunWave(const std::vector<std::vector<std::uint32_t>>& all_ids,
+               std::size_t first, std::size_t last, std::size_t rows,
+               core::embedding::PoolingStrategy pooling,
+               std::vector<EmbeddingResult>& results, std::string* error) {
+    auto& executor = *executor_;
+    const std::size_t dim = model_->GetConfig().hidden_size;
+    std::vector<tokenization::TokenId> tokens;
+    std::vector<std::uint32_t> lengths;
+    tokens.reserve(rows);
+    for (std::size_t i = first; i < last; ++i) {
+      tokens.insert(tokens.end(), all_ids[i].begin(), all_ids[i].end());
+      lengths.push_back(static_cast<std::uint32_t>(all_ids[i].size()));
+    }
+    executor.Reset();
+    executor.SetPromptHiddenCapture(true);
+    const auto start = std::chrono::steady_clock::now();
+    try {
+      executor.ForwardPromptSegments(tokens, lengths);
+    } catch (const std::exception& exception) {
+      if (error != nullptr)
+        *error = std::string("embedding batch prefill failed: ") + exception.what();
+      return false;
+    }
+    const double wave_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - start).count();
+    const std::span<const float> hidden = executor.GetPromptHiddenStates();
+    if (dim == 0 || hidden.size() != rows * dim) {
+      if (error != nullptr) *error = "embedding hidden capture size mismatch";
+      return false;
+    }
+    std::size_t row = 0;
+    for (std::size_t i = first; i < last; ++i) {
+      const std::size_t length = all_ids[i].size();
+      EmbeddingResult& result = results[i];
+      result.values.assign(dim, 0.0F);
+      result.prompt_tokens = length;
+      result.prefill_ms = wave_ms * static_cast<double>(length) /
+                          static_cast<double>(rows);
+      if (!core::embedding::ApplyPooling(hidden.subspan(row * dim, length * dim),
+                                         length, dim, pooling, result.values)) {
+        if (error != nullptr) *error = "embedding pooling shape mismatch";
+        return false;
+      }
+      if (!FinishVector(result.values, error)) return false;
+      row += length;
+    }
+    return true;
+  }
+
+  std::optional<EmbeddingResult> EmbedOne(const std::string& text,
+                                          std::string* error) {
+    auto refuse = [&](const std::string& message) {
+      if (error != nullptr) *error = message;
+      return std::optional<EmbeddingResult>{};
+    };
+    const auto pooling = ResolvePooling(error);
+    if (!pooling.has_value()) return std::nullopt;
+    auto prepared = PrepareIds(text, error);
+    if (!prepared.has_value()) return std::nullopt;
+    const std::vector<std::uint32_t> ids = std::move(*prepared);
+    if (!EnsureExecutor(error)) return std::nullopt;
     auto& executor = *executor_;
     executor.Reset();
     const std::size_t dim = model_->GetConfig().hidden_size;

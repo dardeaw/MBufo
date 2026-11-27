@@ -664,6 +664,25 @@ public:
   [[nodiscard]] static std::vector<tokenization::TokenId> ForwardPromptBatchMulti(
       std::span<const QwenPromptBatchItem> items);
 
+  /// True when ForwardPromptSegments can serve this model: dense (all full
+  /// attention) Qwen with head_dim 128, F16 attention KV and the fused
+  /// QK-norm/RoPE/KV-write plus WMMA flash attention routes. Static so a
+  /// runner can answer before it owns an executor.
+  [[nodiscard]] static bool SupportsPromptSegments(
+      const core::ModelConfig& config, const QwenExecutionPolicy& policy);
+
+  /// Runs several independent sequences (concatenated in `tokens`, lengths in
+  /// `lengths`) as ONE prefill: every projection, norm and FFN runs once over
+  /// all rows (one weight read), while attention is launched per sequence over
+  /// that sequence's own rows with positions restarting at 0, so each
+  /// sequence's arithmetic equals its stand-alone ForwardPromptBatch. No
+  /// logits; the KV plane is scratch afterwards (callers Reset()). Needs
+  /// SupportsPromptSegments and sum(lengths) <= GetMaxPromptBatch. With
+  /// SetPromptHiddenCapture(true) the concatenated [sum(lengths), hidden]
+  /// block is available from GetPromptHiddenStates.
+  void ForwardPromptSegments(std::span<const tokenization::TokenId> tokens,
+                             std::span<const std::uint32_t> lengths);
+
   /// Runs batched prompt prefill on GPU, returning the first predicted token
   /// ID.
   [[nodiscard]] tokenization::TokenId ForwardPromptBatch(
@@ -860,6 +879,8 @@ private:
   GpuSamplingWorkspace sampling_workspace_;
   std::optional<tokenization::TokenId> next_token_;
   bool capture_prompt_hidden_{false};
+  // Non-empty only inside ForwardPromptSegments: per-sequence row counts.
+  std::span<const std::uint32_t> prompt_segments_{};
   bool replaying_ssm_state_{false};
 };
 
