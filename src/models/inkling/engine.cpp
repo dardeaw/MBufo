@@ -15,6 +15,7 @@
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/inkling/kernels/kernels.hpp"
+#include "src/models/inkling/stream_wait.hpp"
 #include "src/core/compute/attention/blocked_kv.hpp"
 
 namespace blocked_kv = ::mbufo::core::compute::blocked_kv;
@@ -2957,6 +2958,7 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
     }
   }
 
+  WaitStream(stream_);
   if (!Check(hipMemcpyAsync(host_logits_.data(), d_logits_,
                             static_cast<std::size_t>(vocab_rows_) *
                                 sizeof(float),
@@ -3124,6 +3126,7 @@ bool Session::ForwardWithAllLogits(std::span<const std::int32_t> tokens,
       static_cast<gemm::ArgmaxCandidate*>(d_argmax_scratch_);
   gemm::Argmax(d_all_logits_, scratch, d_all_argmax_, n, vocab_rows_, stream_);
   out_argmax->resize(n);
+  WaitStream(stream_);
   if (!Check(hipMemcpyAsync(out_argmax->data(), d_all_argmax_,
                             static_cast<std::size_t>(n) * sizeof(std::int32_t),
                             hipMemcpyDeviceToHost, stream_),
