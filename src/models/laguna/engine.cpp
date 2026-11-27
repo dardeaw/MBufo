@@ -586,8 +586,9 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
   return true;
 }
 
-bool Session::ForwardTokens(std::span<const std::int32_t> tokens,
-                            std::uint32_t start_pos, std::string* error_msg) {
+bool Session::EnqueueForward(std::span<const std::int32_t> tokens,
+                             std::uint32_t start_pos, hipStream_t stream,
+                             std::string* error_msg) {
   namespace gemm = core::compute::gemm;
   const auto& w = *model_->weights_;
   const auto& cfg = w.config;
@@ -595,13 +596,13 @@ bool Session::ForwardTokens(std::span<const std::int32_t> tokens,
   const std::uint32_t h = cfg.hidden_size;
 
   if (!Check(hipMemcpyAsync(d_tokens_, tokens.data(), n * sizeof(std::int32_t),
-                            hipMemcpyHostToDevice, stream_),
+                            hipMemcpyHostToDevice, stream),
              error_msg, "copy tokens")) {
     return false;
   }
 
   gemm::EmbedGather(w.token_embd.device, static_cast<int>(w.token_embd.type),
-                    d_tokens_, d_hidden_, n, h, stream_);
+                    d_tokens_, d_hidden_, n, h, stream);
 
   const float attn_scale = 1.0F / std::sqrt(static_cast<float>(cfg.head_dim));
 
@@ -612,18 +613,18 @@ bool Session::ForwardTokens(std::span<const std::int32_t> tokens,
     const std::uint32_t kv_dim = cfg.num_kv_heads * cfg.head_dim;
 
     kernels::RmsNorm(d_hidden_, static_cast<const float*>(lw.attn_norm.device),
-                     d_normed_, n, h, cfg.rms_norm_eps, stream_);
+                     d_normed_, n, h, cfg.rms_norm_eps, stream);
 
-    LagunaGemm(lw.wq, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_q_, n, q_dim, h, stream_);
-    LagunaGemm(lw.wk, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_k_, n, kv_dim, h, stream_);
-    LagunaGemm(lw.wv, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_v_, n, kv_dim, h, stream_);
-    LagunaGemm(lw.attn_gate, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_gate_logits_, n, q_heads, h, stream_);
+    LagunaGemm(lw.wq, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_q_, n, q_dim, h, stream);
+    LagunaGemm(lw.wk, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_k_, n, kv_dim, h, stream);
+    LagunaGemm(lw.wv, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_v_, n, kv_dim, h, stream);
+    LagunaGemm(lw.attn_gate, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_gate_logits_, n, q_heads, h, stream);
 
     kernels::HeadRmsNorm(d_q_, static_cast<const float*>(lw.attn_q_norm.device),
-                         n, q_heads, cfg.head_dim, cfg.rms_norm_eps, stream_);
+                         n, q_heads, cfg.head_dim, cfg.rms_norm_eps, stream);
     kernels::HeadRmsNorm(d_k_, static_cast<const float*>(lw.attn_k_norm.device),
                          n, cfg.num_kv_heads, cfg.head_dim, cfg.rms_norm_eps,
-                         stream_);
+                         stream);
 
     const std::uint32_t rot_dim = lw.is_swa ? cfg.rotary_dim_swa : cfg.rotary_dim;
     const float theta = lw.is_swa ? cfg.rope_theta_swa : cfg.rope_theta;
@@ -631,22 +632,22 @@ bool Session::ForwardTokens(std::span<const std::int32_t> tokens,
                            cfg.head_dim, rot_dim, theta, lw.is_swa,
                            cfg.yarn_factor, cfg.yarn_orig_ctx,
                            cfg.yarn_beta_fast, cfg.yarn_beta_slow,
-                           cfg.yarn_attn_factor, stream_);
+                           cfg.yarn_attn_factor, stream);
 
     auto* kc = static_cast<__half*>(k_cache_[l]);
     auto* vc = static_cast<__half*>(v_cache_[l]);
     kernels::StoreKvF16(d_k_, d_v_, kc, vc, n, start_pos, cfg.num_kv_heads,
-                        cfg.head_dim, stream_);
+                        cfg.head_dim, stream);
 
     const std::uint32_t swa = lw.is_swa ? cfg.sliding_window : 0U;
     if (n == 1) {
       if (!core::compute::flash_sink::FlashSinkDecode(
               d_q_, kc, vc, /*sinks=*/nullptr, d_attn_out_, 1, start_pos,
               start_pos + 1, q_heads, cfg.num_kv_heads, cfg.head_dim, swa,
-              attn_scale, stream_, d_attn_partials_, attn_partials_bytes_)) {
+              attn_scale, stream, d_attn_partials_, attn_partials_bytes_)) {
         kernels::F16AttentionDecode(d_q_, kc, vc, d_attn_out_, start_pos + 1,
                                     swa, q_heads, cfg.num_kv_heads,
-                                    cfg.head_dim, attn_scale, stream_);
+                                    cfg.head_dim, attn_scale, stream);
       }
     } else {
       const bool wmma_ok =
@@ -656,46 +657,46 @@ bool Session::ForwardTokens(std::span<const std::int32_t> tokens,
           core::compute::flash_wmma_gqa::FlashWmmaPrefill(
               d_q_, kc, vc, /*sinks=*/nullptr, d_attn_out_, n, start_pos,
               q_heads, cfg.num_kv_heads, cfg.head_dim, swa, attn_scale,
-              stream_);
+              stream);
       if (!wmma_ok) {
         kernels::F16AttentionPrefill(d_q_, kc, vc, d_attn_out_, n, start_pos,
                                      swa, q_heads, cfg.num_kv_heads,
-                                     cfg.head_dim, attn_scale, stream_);
+                                     cfg.head_dim, attn_scale, stream);
       }
     }
 
     kernels::SoftplusPerHeadGateMul(d_attn_out_, d_gate_logits_, n, q_heads,
-                                    cfg.head_dim, stream_);
-    LagunaGemm(lw.wo, d_attn_out_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_proj_out_, n, h, q_dim, stream_);
+                                    cfg.head_dim, stream);
+    LagunaGemm(lw.wo, d_attn_out_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_proj_out_, n, h, q_dim, stream);
       kernels::AddResidual(d_hidden_, d_proj_out_,
-                         static_cast<std::size_t>(n) * h, stream_);
+                         static_cast<std::size_t>(n) * h, stream);
 
     kernels::RmsNorm(d_hidden_, static_cast<const float*>(lw.ffn_norm.device),
-                     d_normed_, n, h, cfg.rms_norm_eps, stream_);
+                     d_normed_, n, h, cfg.rms_norm_eps, stream);
 
     if (!lw.is_moe) {
       const std::uint32_t ff = cfg.intermediate_size;
-      LagunaGemm(lw.ffn_gate, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_gate_, n, ff, h, stream_);
-      LagunaGemm(lw.ffn_up, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_up_, n, ff, h, stream_);
+      LagunaGemm(lw.ffn_gate, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_gate_, n, ff, h, stream);
+      LagunaGemm(lw.ffn_up, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_up_, n, ff, h, stream);
       kernels::SiluMul(d_mlp_gate_, d_mlp_up_, d_mlp_gate_,
-                       static_cast<std::size_t>(n) * ff, stream_);
-      LagunaGemm(lw.ffn_down, d_mlp_gate_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_out_, n, h, ff, stream_);
+                       static_cast<std::size_t>(n) * ff, stream);
+      LagunaGemm(lw.ffn_down, d_mlp_gate_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_out_, n, h, ff, stream);
           kernels::AddResidual(d_hidden_, d_mlp_out_,
-                           static_cast<std::size_t>(n) * h, stream_);
+                           static_cast<std::size_t>(n) * h, stream);
     } else {
       const std::uint32_t sff = cfg.shared_expert_ffn_size;
-      LagunaGemm(lw.ffn_gate_shexp, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_gate_, n, sff, h, stream_);
-      LagunaGemm(lw.ffn_up_shexp, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_up_, n, sff, h, stream_);
+      LagunaGemm(lw.ffn_gate_shexp, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_gate_, n, sff, h, stream);
+      LagunaGemm(lw.ffn_up_shexp, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_mlp_up_, n, sff, h, stream);
       kernels::SiluMul(d_mlp_gate_, d_mlp_up_, d_mlp_gate_,
-                       static_cast<std::size_t>(n) * sff, stream_);
-      LagunaGemm(lw.ffn_down_shexp, d_mlp_gate_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_shared_out_, n, h, sff, stream_);
+                       static_cast<std::size_t>(n) * sff, stream);
+      LagunaGemm(lw.ffn_down_shexp, d_mlp_gate_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_shared_out_, n, h, sff, stream);
 
-      LagunaGemm(lw.ffn_gate_inp, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_router_logits_, n, cfg.expert_count, h, stream_);
+      LagunaGemm(lw.ffn_gate_inp, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_router_logits_, n, cfg.expert_count, h, stream);
       kernels::SigmoidBiasTopKRouter(
           d_router_logits_, static_cast<const float*>(lw.exp_probs_b.device),
           d_exp_ids_, d_exp_weights_, n, cfg.expert_count,
           cfg.expert_used_count, cfg.expert_weights_norm,
-          cfg.expert_weights_scale, stream_);
+          cfg.expert_weights_scale, stream);
 
       const bool decode_moe_ok =
           (n <= 8) &&
@@ -704,19 +705,19 @@ bool Session::ForwardTokens(std::span<const std::int32_t> tokens,
               lw.ffn_up_exps.device, lw.ffn_down_exps.device,
               ToWeightType(lw.ffn_down_exps.type), d_normed_, d_exp_ids_,
               d_act_scratch_, d_down_e_, n, cfg.expert_used_count, h,
-              cfg.expert_ffn_size, stream_);
+              cfg.expert_ffn_size, stream);
 
       if (decode_moe_ok) {
         gemm::MoeEpilogue(d_down_e_, d_exp_weights_, d_mlp_out_, n,
-                          cfg.expert_used_count, h, stream_);
+                          cfg.expert_used_count, h, stream);
       } else {
         const std::size_t slots =
             static_cast<std::size_t>(n) * cfg.expert_used_count;
         gemm::ExpertCounts(d_exp_ids_, d_exp_counts_, n, cfg.expert_count,
-                           cfg.expert_used_count, stream_);
+                           cfg.expert_used_count, stream);
         gemm::RoutedCompact(d_exp_ids_, d_exp_counts_, d_pad_bounds_,
                             d_cursors_, d_rows_token_, d_rows_slot_, n,
-                            cfg.expert_used_count, cfg.expert_count, stream_);
+                            cfg.expert_used_count, cfg.expert_count, stream);
         const bool small_batch = (n <= 8);
         const std::uint32_t tile_rows =
             small_batch ? 48U
@@ -725,66 +726,137 @@ bool Session::ForwardTokens(std::span<const std::int32_t> tokens,
                                : 16U);
         std::uint32_t n_tiles_host = 0;
         if (small_batch) {
-          kernels::FillSlotTiles(d_exp_ids_, d_tiles_, slots, stream_);
+          kernels::FillSlotTiles(d_exp_ids_, d_tiles_, slots, stream);
           n_tiles_host = static_cast<std::uint32_t>(2 * slots);
         } else {
           if (!Check(hipMemsetAsync(d_n_tiles_, 0, sizeof(std::uint32_t),
-                                    stream_),
+                                    stream),
                      error_msg, "zero n_tiles")) {
             return false;
           }
           kernels::BuildRoutedTiles(d_exp_counts_, cfg.expert_count, tile_rows,
-                                    d_tiles_, d_n_tiles_, stream_);
+                                    d_tiles_, d_n_tiles_, stream);
           if (!Check(hipMemcpyAsync(&n_tiles_host, d_n_tiles_,
                                     sizeof(std::uint32_t),
-                                    hipMemcpyDeviceToHost, stream_),
+                                    hipMemcpyDeviceToHost, stream),
                      error_msg, "copy n_tiles") ||
-              !Check(hipStreamSynchronize(stream_), error_msg, "sync n_tiles")) {
+              !Check(hipStreamSynchronize(stream), error_msg, "sync n_tiles")) {
             return false;
           }
         }
         const std::uint32_t eff = cfg.expert_ffn_size;
         gemm::ConvertF32ToF16(d_normed_, d_x16_,
-                              static_cast<std::size_t>(n) * h, stream_);
+                              static_cast<std::size_t>(n) * h, stream);
         gemm::RoutedF16Gemm(
             lw.ffn_gate_exps.device, ToWeightType(lw.ffn_gate_exps.type),
             d_x16_, d_tiles_, n_tiles_host, tile_rows, d_pad_bounds_,
             d_rows_token_, d_rows_slot_, nullptr, d_act_scratch_, nullptr,
-            eff, h, stream_);
+            eff, h, stream);
         gemm::RoutedF16Gemm(
             lw.ffn_up_exps.device, ToWeightType(lw.ffn_up_exps.type),
             d_x16_, d_tiles_, n_tiles_host, tile_rows, d_pad_bounds_,
             d_rows_token_, d_rows_slot_, d_act_scratch_, nullptr,
-            d_routed_act16_, eff, h, stream_);
+            d_routed_act16_, eff, h, stream);
         gemm::RoutedF16Gemm(
             lw.ffn_down_exps.device, ToWeightType(lw.ffn_down_exps.type),
             d_routed_act16_, d_tiles_, n_tiles_host, tile_rows, d_pad_bounds_,
             d_rows_slot_, d_rows_slot_, nullptr, d_down_e_, nullptr, h, eff,
-            stream_);
+            stream);
         gemm::MoeEpilogue(d_down_e_, d_exp_weights_, d_mlp_out_, n,
-                          cfg.expert_used_count, h, stream_);
+                          cfg.expert_used_count, h, stream);
       }
 
           kernels::AddResidual(d_mlp_out_, d_shared_out_,
-                           static_cast<std::size_t>(n) * h, stream_);
+                           static_cast<std::size_t>(n) * h, stream);
       kernels::AddResidual(d_hidden_, d_mlp_out_,
-                           static_cast<std::size_t>(n) * h, stream_);
+                           static_cast<std::size_t>(n) * h, stream);
     }
   }
 
   const float* last_hidden = d_hidden_ + static_cast<std::size_t>(n - 1) * h;
   kernels::RmsNorm(last_hidden,
                    static_cast<const float*>(w.output_norm.device), d_normed_,
-                   1, h, cfg.rms_norm_eps, stream_);
-  LagunaGemm(w.output, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_logits_, 1, cfg.vocab_size, h, stream_);
+                   1, h, cfg.rms_norm_eps, stream);
+  LagunaGemm(w.output, d_normed_, d_x16_, d_wdq_scratch_, wdq_scratch_bytes_, d_preq_scratch_, preq_scratch_bytes_, d_logits_, 1, cfg.vocab_size, h, stream);
 
-  if (!Check(hipMemcpyAsync(host_logits_.data(), d_logits_,
-                            cfg.vocab_size * sizeof(float),
-                            hipMemcpyDeviceToHost, stream_),
-             error_msg, "copy logits") ||
+  return true;
+}
+
+bool Session::EnqueueLogitsCopy(hipStream_t stream, std::string* error_msg) {
+  const auto& cfg = model_->weights_->config;
+  return Check(hipMemcpyAsync(host_logits_.data(), d_logits_,
+                              cfg.vocab_size * sizeof(float),
+                              hipMemcpyDeviceToHost, stream),
+               error_msg, "copy logits");
+}
+
+bool Session::ForwardTokens(std::span<const std::int32_t> tokens,
+                            std::uint32_t start_pos, std::string* error_msg) {
+  if (!EnqueueForward(tokens, start_pos, stream_, error_msg) ||
+      !EnqueueLogitsCopy(stream_, error_msg) ||
       !Check(hipStreamSynchronize(stream_), error_msg, "sync forward")) {
     return false;
   }
+  return true;
+}
+
+static_assert(kMaxChunk == 512, "Session::MaxChunkTokens() must match kMaxChunk");
+
+bool Session::AdvanceBatchWithChunk(
+    std::span<Session* const> lanes, std::span<const std::int32_t> tokens,
+    Session* chunk, std::span<const std::int32_t> prefix, std::size_t offset,
+    std::string* error_msg, bool* refused) {
+  const auto refuse = [&](const char* why) {
+    if (refused != nullptr) *refused = true;
+    if (error_msg != nullptr) *error_msg = std::string("laguna batch refused: ") + why;
+    return false;
+  };
+  if (lanes.size() != tokens.size()) return refuse("lane/token count mismatch");
+  if (lanes.empty() && chunk == nullptr) return refuse("nothing to run");
+  const Model* model = chunk != nullptr ? chunk->model_.get() : lanes.front()->model_.get();
+  for (std::size_t i = 0; i < lanes.size(); ++i) {
+    Session* lane = lanes[i];
+    if (lane == nullptr || lane == chunk || lane->model_.get() != model)
+      return refuse("invalid lane");
+    for (std::size_t j = 0; j < i; ++j) {
+      if (lanes[j] == lane) return refuse("duplicate lane");
+    }
+    if (lane->history_.empty() || lane->history_.size() + 1 > model->MaxContext())
+      return refuse("lane has no retained prefix or would overflow the context");
+  }
+  if (chunk != nullptr) {
+    if (prefix.size() <= offset || prefix.size() - offset > kMaxChunk ||
+        prefix.size() > model->MaxContext() || chunk->history_.size() != offset ||
+        !std::equal(chunk->history_.begin(), chunk->history_.end(), prefix.begin())) {
+      return refuse("chunk does not continue the retained prefix");
+    }
+  }
+
+  hipStream_t stream = chunk != nullptr ? chunk->stream_ : lanes.front()->stream_;
+  const auto fail = [&]() {
+    (void)hipStreamSynchronize(stream);
+    return false;
+  };
+  for (std::size_t i = 0; i < lanes.size(); ++i) {
+    if (!lanes[i]->EnqueueForward(tokens.subspan(i, 1),
+                                  static_cast<std::uint32_t>(lanes[i]->history_.size()),
+                                  stream, error_msg)) {
+      return fail();
+    }
+  }
+  if (chunk != nullptr &&
+      !chunk->EnqueueForward(prefix.subspan(offset), static_cast<std::uint32_t>(offset),
+                             stream, error_msg)) {
+    return fail();
+  }
+  for (Session* lane : lanes) {
+    if (!lane->EnqueueLogitsCopy(stream, error_msg)) return fail();
+  }
+  if (chunk != nullptr && !chunk->EnqueueLogitsCopy(stream, error_msg)) return fail();
+  if (!Check(hipStreamSynchronize(stream), error_msg, "sync batch forward")) return false;
+
+  for (std::size_t i = 0; i < lanes.size(); ++i) lanes[i]->history_.push_back(tokens[i]);
+  if (chunk != nullptr) chunk->history_.assign(prefix.begin(), prefix.end());
   return true;
 }
 

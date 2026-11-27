@@ -228,7 +228,23 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 | DeepSeek V4 Flash | native (serial in some conditions) | native | no |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
 | Muse Glimmer | native without a shared draft, serial otherwise | serial | no |
-| GPT-OSS, Laguna, Inkling, Llama, Gemma 4 | serial | serial | no |
+| Laguna 2.1 | serial (no multi-token decode) | native (`Session::AdvanceBatchWithChunk`, one in-order stream, per-lane decode core) | **yes** plain advances (`AdvanceBatchWithPrefillChunk`; `DecodeBatchWithPrefillChunk` refuses) |
+| GPT-OSS, Inkling, Llama, Gemma 4 | serial | serial | no |
 
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
+
+### Laguna notes
+
+- Bit-identity design: every decode lane runs its own unchanged n == 1 forward and the chunk runs its unchanged
+  prefill forward, all enqueued back to back on the chunk session's stream with one host sync. No weight sharing
+  between lanes: a shared GEMM changes the kernel/reduction route and is not bit-identical.
+- One stream, not one per session: the decode GEMV/MoE kernels use process-global device scratch
+  (`g_moe_u_*` in `moe_fused.hip`, `g_gemv_q8_scratch`), so concurrent streams would race.
+- Chunk capped at `Session::MaxChunkTokens()` (512), the engine's own step size, so the chunk boundaries equal the
+  separate `Sync` path. Validation (distinct lanes, chunk continues the retained prefix, context fits) happens before
+  any state moves; a failure there is `MixedBatchRefused` / serial fallback.
+- Verified on laguna-2.1-xs Q4_K_M: ~6k-token prompt prefilling while 4 streams decode (600 tokens each), greedy:
+  combined completion SHA identical between `MBUFO_MIXED_BATCH=1` (18 merged chunks, up to 4 lanes) and `=0`.
+- Pre-existing, unrelated: a prompt shorter than about 512 tokens (a single chunk starting at position 0) yields
+  "logit distribution contains no finite values" on the base branch too. Test prompts were therefore >= 650 tokens.

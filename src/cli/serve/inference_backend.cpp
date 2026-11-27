@@ -3776,10 +3776,100 @@ class LagunaTextRunnerState final : public TextRunnerState {
 
 class LagunaTextRunner final : public HipTextModelRunner {
  public:
-  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  // Batch contract (see TextModelRunner): DecodeBatch is serial (no multi-token decode); AdvanceBatch and the
+  // merged plain-advance + prefill chunk are native. Native means one in-order engine pass with a single host
+  // sync in which every lane keeps the exact single-session decode core and the chunk keeps the prefill core
+  // (bit-identical to Evaluate / Sync; a fused weight-sharing GEMM is not). The multi-token merged entry point
+  // is an explicit refusal.
   MBUFO_RUNNER_SERIAL_DECODE_BATCH();
-  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
-  MBUFO_RUNNER_NO_MIXED_BATCH();
+  static constexpr std::size_t kMaxBatchLanes = 16;
+
+  void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const override {
+    if (advances.size() < 2 || advances.size() > kMaxBatchLanes) return SerialAdvanceBatch(advances);
+    std::vector<LagunaSession*> lanes;
+    std::vector<std::int32_t> tokens;
+    lanes.reserve(advances.size());
+    tokens.reserve(advances.size());
+    for (const auto& advance : advances) {
+      if (advance.token > static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max()))
+        return SerialAdvanceBatch(advances);  // the serial path reports the per-lane error
+      lanes.push_back(&dynamic_cast<LagunaTextRunnerState&>(advance.state.get()).session());
+      tokens.push_back(static_cast<std::int32_t>(advance.token));
+    }
+    std::string error;
+    bool refused = false;
+    if (!LagunaSession::AdvanceBatchWithChunk(lanes, tokens, nullptr, {}, 0, &error, &refused)) {
+      if (refused) return SerialAdvanceBatch(advances);  // validated before any state moved
+      const auto failure = std::make_exception_ptr(std::runtime_error("Laguna batch decode failed: " + error));
+      for (const auto& advance : advances) {
+        if (!advance.failure) std::rethrow_exception(failure);
+        *advance.failure = failure;
+      }
+      return;
+    }
+    for (const auto& advance : advances) {
+      auto& st = dynamic_cast<LagunaTextRunnerState&>(advance.state.get());
+      st.set_position(st.position() + 1);
+    }
+  }
+
+  [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
+      std::span<const TextRunnerAdvance> advances, std::span<std::exception_ptr> advance_failures,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt, std::size_t offset,
+      std::size_t max_input_tokens, TextPrefillStep& chunk_step) const override {
+    auto& chunk = dynamic_cast<LagunaTextRunnerState&>(prefill_state);
+    if (advances.empty() || advances.size() > kMaxBatchLanes || offset != chunk.position() ||
+        offset >= prompt.size() || max_input_tokens == 0)
+      throw MixedBatchRefused("laguna mixed batch preconditions unmet");
+    const std::size_t consumed =
+        std::min<std::size_t>({max_input_tokens, prompt.size() - offset, LagunaSession::MaxChunkTokens()});
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_) throw MixedBatchRefused("laguna mixed batch prompt exceeds context");
+    std::vector<LagunaSession*> lanes;
+    std::vector<std::int32_t> tokens;
+    lanes.reserve(advances.size());
+    tokens.reserve(advances.size());
+    for (const auto& advance : advances) {
+      if (advance.token > static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max()))
+        throw MixedBatchRefused("laguna mixed batch token exceeds range");
+      auto& lane = dynamic_cast<LagunaTextRunnerState&>(advance.state.get());
+      if (&lane == &chunk) throw MixedBatchRefused("laguna mixed batch lane is the chunk state");
+      lanes.push_back(&lane.session());
+      tokens.push_back(static_cast<std::int32_t>(advance.token));
+    }
+    std::vector<std::int32_t> prefix;
+    prefix.reserve(next_position);
+    for (std::size_t i = 0; i < next_position; ++i) prefix.push_back(static_cast<std::int32_t>(prompt[i]));
+    std::string error;
+    bool refused = false;
+    if (!LagunaSession::AdvanceBatchWithChunk(lanes, tokens, &chunk.session(), prefix, offset, &error, &refused)) {
+      if (refused) throw MixedBatchRefused("laguna mixed batch refused cleanly: " + error);
+      // Mid-pass: no lane or chunk can be trusted; mirror a failed Prefill / Advance.
+      chunk.set_position(0);
+      const auto failure = std::make_exception_ptr(std::runtime_error("Laguna mixed advance failed: " + error));
+      for (std::size_t i = 0; i < advances.size(); ++i) {
+        if (i < advance_failures.size()) advance_failures[i] = failure;
+      }
+      return false;
+    }
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      if (i < advance_failures.size()) advance_failures[i] = nullptr;
+      auto& lane = dynamic_cast<LagunaTextRunnerState&>(advances[i].state.get());
+      lane.set_position(lane.position() + 1);
+    }
+    chunk.set_position(next_position);
+    chunk_step = {.consumed_tokens = consumed, .decode_ready = next_position == prompt.size()};
+    static const bool trace = std::getenv("MBUFO_LAGUNA_MIXED_TRACE") != nullptr;
+    if (trace) std::fprintf(stderr, "[laguna-mixed] lanes=%zu chunk=%zu offset=%zu\n", advances.size(), consumed, offset);
+    return true;
+  }
+
+  // Laguna has no multi-token decode, so there is no verify pass a chunk could ride: explicit refusal.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchWithPrefillChunk(
+      std::span<const TextRunnerDecode>, TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+      std::size_t, TextPrefillStep&) const override {
+    RefuseMixedBatch("laguna has no merged multi-token decode");
+  }
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
@@ -3807,6 +3897,7 @@ class LagunaTextRunner final : public HipTextModelRunner {
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0,
                 .prefix_reuse = false,
+                .mixed_prefill_decode = true,
             },
         .persistence = std::nullopt,
     };
@@ -3826,7 +3917,13 @@ class LagunaTextRunner final : public HipTextModelRunner {
     };
   }
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
-    return {{.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    // Advertise batched widths so the scheduler routes plain decodes through the native AdvanceBatch
+    // (DecodeBatch itself stays serial).
+    std::vector<TextExecutionPlan> plans{{.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    for (std::size_t width = 2; width <= 8; ++width) {
+      plans.push_back({.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+    }
+    return plans;
   }
   [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary> BuildConstraintVocabulary() const override {
     return std::make_shared<const sampling::ConstraintVocabulary>(
