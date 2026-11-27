@@ -5800,10 +5800,70 @@ const Gemma4TextRunnerState& RequireGemma4State(const TextRunnerState& state) {
 
 class Gemma4TextRunner final : public HipTextModelRunner {
  public:
-  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  // Batch contract (see TextModelRunner): serial DecodeBatch/AdvanceBatch;
+  // native merged plain-advance + prefill chunk (one layer pass carries the
+  // decode lanes and the chunk); MTP multi-token decode refuses the merge.
   MBUFO_RUNNER_SERIAL_DECODE_BATCH();
   MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
-  MBUFO_RUNNER_NO_MIXED_BATCH();
+
+  // Merged plain-advance + prefill chunk. Output equals Prefill (Sync) of the
+  // chunk followed by the serial Advance of every lane. Any engine refusal
+  // happens before state is touched, so it surfaces as MixedBatchRefused and
+  // the scheduler runs the legacy pair. MTP sessions are refused by the engine.
+  [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
+      std::span<const TextRunnerAdvance> advances,
+      std::span<std::exception_ptr> advance_failures,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens,
+      TextPrefillStep& chunk_step) const override {
+    auto& chunk = RequireGemma4State(prefill_state);
+    if (use_mtp() || advances.empty() || offset != chunk.position() ||
+        offset >= prompt.size() || max_input_tokens == 0)
+      throw MixedBatchRefused("gemma4 mixed batch preconditions unmet");
+    const std::size_t consumed = std::min<std::size_t>(
+        {max_input_tokens, prompt.size() - offset,
+         Gemma4Session::MaxChunkTokens()});
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_)
+      throw MixedBatchRefused("gemma4 mixed batch prompt exceeds context");
+    std::vector<Gemma4Session*> lanes;
+    std::vector<std::int32_t> tokens;
+    lanes.reserve(advances.size());
+    tokens.reserve(advances.size());
+    for (const auto& advance : advances) {
+      if (advance.token > static_cast<TextRunnerToken>(
+                              std::numeric_limits<std::int32_t>::max()))
+        throw MixedBatchRefused("gemma4 mixed batch token exceeds range");
+      auto& lane = RequireGemma4State(advance.state.get());
+      if (&lane == &chunk)
+        throw MixedBatchRefused("gemma4 mixed batch lane is the chunk state");
+      lanes.push_back(&lane.session());
+      tokens.push_back(static_cast<std::int32_t>(advance.token));
+    }
+    const auto prefix = Gemma4EngineTokens(prompt.first(next_position));
+    std::string error;
+    if (!Gemma4Session::DecodeBatchWithChunk(lanes, tokens, &chunk.session(),
+                                             prefix, offset, &error)) {
+      throw MixedBatchRefused("gemma4 mixed batch refused cleanly: " + error);
+    }
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      if (i < advance_failures.size()) advance_failures[i] = nullptr;
+      auto& lane = RequireGemma4State(advances[i].state.get());
+      lane.set_position(lane.position() + 1);
+    }
+    chunk.set_position(next_position);
+    chunk_step = {.consumed_tokens = consumed,
+                  .decode_ready = next_position == prompt.size()};
+    return true;
+  }
+
+  // The engine has no MTP verify pass the chunk can ride: explicit refusal.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchWithPrefillChunk(
+      std::span<const TextRunnerDecode>, TextRunnerState&,
+      std::span<const TextRunnerToken>, std::size_t, std::size_t,
+      TextPrefillStep&) const override {
+    RefuseMixedBatch("gemma4 has no merged multi-token decode");
+  }
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kGemma;
   }
@@ -5838,6 +5898,7 @@ class Gemma4TextRunner final : public HipTextModelRunner {
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0,
                 .prefix_reuse = false,
+                .mixed_prefill_decode = !use_mtp(),
             },
         .persistence = std::nullopt,
     };

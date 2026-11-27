@@ -228,7 +228,8 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 | DeepSeek V4 Flash | native (serial in some conditions) | native | no |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
 | Muse Glimmer | native without a shared draft, serial otherwise | serial | no |
-| GPT-OSS, Laguna, Inkling, Llama, Gemma 4 | serial | serial | no |
+| Gemma 4 | serial | serial | **yes, plain advances** (`AdvanceBatchWithPrefillChunk` via `Session::DecodeBatchWithChunk`: decode lanes and one prefill chunk share one layer pass, lanes on the unified mixed-batch attention launch); `DecodeBatchWithPrefillChunk` refuses explicitly (no MTP verify pass to ride); MTP-enabled runners advertise `mixed_prefill_decode = false` |
+| GPT-OSS, Laguna, Inkling, Llama | serial | serial | no |
 
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
