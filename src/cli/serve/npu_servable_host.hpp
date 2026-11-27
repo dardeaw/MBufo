@@ -30,17 +30,20 @@ class NpuServableHost {
 public:
   /// Open weights for `id` (asr thinker / tts stack / flux / zimage) and warm
   /// them through the INpuServable lifecycle. Idempotent: an already-Ready
-  /// servable is success. Mode "q8" (default) or "q4". A failed warmup is
+  /// servable is success. Q8 only. A failed warmup is
   /// best-effort (Ready, warm=false); a failed open returns false.
   bool Load(const std::string& id, const std::string& artifact,
             const std::string& quant, std::string* error) {
     namespace npu = mbufo::core::npu;
-    npu::NpuQuantMode mode = npu::NpuQuantMode::kQ8Bfp16;
-    if (quant == "q4" || quant == "Q4") {
-      mode = npu::NpuQuantMode::kQ4Q4nx;
-    } else if (!quant.empty() && quant != "q8" && quant != "Q8") {
-      if (error != nullptr)
-        *error = "npu_quant must be q8 or q4";
+    // Q8 (bfp16ebs8) only: measured Q4 (q4nx) drift vs the reference is too
+    // large for these models (FLUX 0.853, Z-Image 0.975, ASR 0.968,
+    // TTS 0.981 cosine; docs/NPU_LANES.md "Q4 policy").
+    const npu::NpuQuantMode mode = npu::NpuQuantMode::kQ8Bfp16;
+    if (!quant.empty() && quant != "q8" && quant != "Q8") {
+      if (error != nullptr) {
+        *error = "npu_quant must be q8 for " + id +
+                 " (q4 is not allowed: accuracy drift too large)";
+      }
       return false;
     }
     if (!KnownId(id)) {

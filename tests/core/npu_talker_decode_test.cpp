@@ -3,7 +3,7 @@
 // Path A (servable): Prefill(T=4) then DecodeStep(5th row) through the KV
 // cache. Path B (reference): Prefill(T=5) full sequence. Both run ALL 28
 // talker layers on NPU silicon via TalkerNpuDecoder.
-// Gate: cosine(codec_logits_A, codec_logits_B) >= Q8 0.998 / Q4 0.965 +
+// Gate: cosine(codec_logits_A, codec_logits_B) >= Q8 0.998 +
 // top-1 agreement over the 3072-entry codec head.
 
 #include <cassert>
@@ -95,7 +95,6 @@ int main() {
     return 1;
   }
   TestTalkerConsistency(engine, mbufo::core::npu::NpuQuantMode::kQ8Bfp16);
-  TestTalkerConsistency(engine, mbufo::core::npu::NpuQuantMode::kQ4Q4nx);
   std::puts("TALKER_DECODE_CONSISTENCY_PASS");
   return 0;
 }

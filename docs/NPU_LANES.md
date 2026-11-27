@@ -43,10 +43,10 @@ starting with `npu` counts as NPU-capable (`mappingSupportsNpu`).
 
 | id | task | supported_backends |
 |---|---|---|
-| qwen3-asr-1.7b | asr | gpu_hip, npu_q8_bfp16, npu_q4_q4nx (dual) |
-| qwen3-tts-12hz-1.7b | tts | gpu_hip, npu_q8_bfp16, npu_q4_q4nx (dual) |
-| flux2-klein-4b | image_generation | npu_q8_bfp16, npu_q4_q4nx (NPU-only) |
-| z-image-turbo | image_generation | npu_q8_bfp16, npu_q4_q4nx (NPU-only) |
+| qwen3-asr-1.7b | asr | gpu_hip, npu_q8_bfp16 (dual) |
+| qwen3-tts-12hz-1.7b | tts | gpu_hip, npu_q8_bfp16 (dual) |
+| flux2-klein-4b | image_generation | npu_q8_bfp16 (NPU-only) |
+| z-image-turbo | image_generation | npu_q8_bfp16 (NPU-only) |
 
 (Sidecars, for contrast: `d3-decide` / `whisper-v3-turbo` =
 `npu_flm_sidecar`, ports 8766/8764; TTS sidecar :8765.)
@@ -224,3 +224,19 @@ NPU load: the shared engine/HRX session stays resident by design).
   `warm=true`, RSS back to ~242 MB after every eject, no allocation failures.
 - Gate: ctest `npu_graph_bge_m3_test` (bge-m3 engine path vs CPU F32 forward, cos >= 0.998,
   and RunNpuCls must fail after `UnloadNpuWeights`).
+
+
+### Q4 policy (measured 2026-11-27, Q8 vs Q4 against the reference, hardware)
+
+| Model | Q8 | Q4 | Decision |
+|---|---|---|---|
+| FLUX.2-klein DiT (4 steps, q8-vs-q4 final latent) | 0.9995 shell | 0.853 | Q4 banned |
+| Z-Image-Turbo DiT (8 steps, q8-vs-q4 final latent) | 0.99999 shell | 0.975 | Q4 banned |
+| Qwen3-ASR (thinker / logits) | 0.9993 / 0.9994 | 0.968 / 0.969 | Q4 banned |
+| Qwen3-TTS (talker / predictor / decoder) | 0.9994 / 0.9987 / 0.9996 | 0.981 / 0.981 / 0.988 | Q4 banned |
+| EmbeddingGemma 2 (vs BF16) | 0.9996 | 0.9931 | Q4 still allowed (legacy runtime, `MBUFO_NPU_QUANT=q4`) |
+
+Cut-off: Q4 must stay >= 0.99 cosine against the reference. `NpuServableHost` (ASR, TTS,
+FLUX, Z-Image) and `/admin/load` reject `npu_quant` other than `q8` for those models
+(HTTP 400 `invalid_npu_quant`), `model_mapping.json` no longer lists `npu_q4_q4nx` for
+them, and the hardware tests run Q8 only for them.

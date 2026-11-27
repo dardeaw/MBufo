@@ -3,7 +3,7 @@
 //
 // Path A (incremental math check): Prefill(T=4) then DecodeStep(5th row).
 // Path B (reference): Prefill(T=5). Both run ALL 36 TE layers on NPU.
-// Gate: cosine(A, B) >= Q8 0.998 / Q4 0.965.
+// Gate: cosine(A, B) >= Q8 0.998.
 // Plus: Encode() determinism + shape/finite check on the real TE dir.
 
 #include <cassert>
@@ -100,7 +100,6 @@ int main() {
     return 1;
   }
   TestTe(engine, mbufo::core::npu::NpuQuantMode::kQ8Bfp16);
-  TestTe(engine, mbufo::core::npu::NpuQuantMode::kQ4Q4nx);
   std::puts("TE_DECODE_CONSISTENCY_PASS");
   return 0;
 }
