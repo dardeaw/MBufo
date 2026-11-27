@@ -646,6 +646,17 @@ if (BUILD_TESTING)
 
     add_executable(npu_graph_models_test tests/core/npu_graph_models_test.cpp)
     target_link_libraries(npu_graph_models_test PRIVATE mbufo_core mbufo_npu)
+    # Hardware accuracy gates for the op-graph Qwen3 models; skipped (77) when
+    # the weights are not present on the machine.
+    add_test(NAME npu_graph_qwen3_embedding_test
+      COMMAND npu_graph_models_test qwen-emb
+        /mnt/nvme-data/mbufo-models/qwen3-embedding/Qwen3-Embedding-0.6B-Q8_0.gguf)
+    add_test(NAME npu_graph_qwen3_reranker_test
+      COMMAND npu_graph_models_test qwen-rerank
+        /mnt/nvme-data/mbufo-models/qwen3-reranker/Qwen3-Reranker-0.6B-Q8_0.gguf)
+    set_tests_properties(npu_graph_qwen3_embedding_test npu_graph_qwen3_reranker_test
+      PROPERTIES LABELS "npu;hardware;embedding;rerank"
+      RESOURCE_LOCK npu SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     add_executable(npu_quant_models_test tests/core/npu_quant_models_test.cpp)
     target_link_libraries(npu_quant_models_test PRIVATE mbufo_core mbufo_npu)

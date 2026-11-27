@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -265,6 +266,10 @@ int QwenEmb(const std::string& gguf, const std::string& out_path,
     }
   }
   if (npu) std::printf("WORST cos(npu,host)=%.5f\n", worst);
+  if (npu && worst < 0.998) {
+    std::cerr << "FAIL: worst cos " << worst << " < 0.998\n";
+    return 1;
+  }
   if (!out_path.empty()) WriteVecs(out_path, out);
   return 0;
 }
@@ -325,6 +330,10 @@ int QwenRerank(const std::string& gguf, bool host_only) {
     }
   }
   if (npu) std::printf("MAX |score_npu - score_host|=%.5f\n", worst);
+  if (npu && worst > 0.01) {
+    std::cerr << "FAIL: max score diff " << worst << " > 0.01\n";
+    return 1;
+  }
   return 0;
 }
 
@@ -337,6 +346,11 @@ int main(int argc, char** argv) {
   }
   const std::string mode = argv[1];
   const std::string a = argv[2];
+  // CTest: weights absent on this machine => skip (SKIP_RETURN_CODE 77).
+  if (mode.rfind("qwen-", 0) == 0 && !std::filesystem::exists(a)) {
+    std::cout << "SKIP: weights not found: " << a << "\n";
+    return 77;
+  }
   auto has = [&](const char* f) {
     for (int i = 3; i < argc; ++i) {
       if (std::string(argv[i]) == f) return true;
