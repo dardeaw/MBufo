@@ -79,8 +79,10 @@ constexpr int kVerifyRoleBase = 32;
 // INT8-activation kernel) and use the exact FP32-activation shared kernel,
 // which is what solo decode's fused QKV / SSM-input / gate-up kernels compute.
 // MBUFO_QWEN_BATCH_Q8_FLOAT: hex mask over ProjectionRole for ForwardTokenBatch
-// (default 0x70: the three SSM input projections, the roles that made a batched
-// Qwen3.5-9B lane differ from solo decode).
+// (default 0x177: every role solo decode computes in a fused FP32-activation
+// kernel: attention q/k/v, the three SSM input projections, FFN gate/up; the
+// SSM control role alone made a batched Qwen3.5-9B lane differ from solo, and
+// attention q/k/v is what a batched Qwen3.8-27B lane needed).
 // MBUFO_QWEN_VERIFY_Q8_FLOAT: same for ForwardVerificationBatch (default 0, the
 // DFlash verify arithmetic is unchanged unless asked).
 [[nodiscard]] bool Q8FloatRole(int role) {
@@ -89,7 +91,7 @@ constexpr int kVerifyRoleBase = 32;
     return e != nullptr ? static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16))
                         : fallback;
   };
-  static const std::uint32_t decode_mask = parse("MBUFO_QWEN_BATCH_Q8_FLOAT", 0x70U);
+  static const std::uint32_t decode_mask = parse("MBUFO_QWEN_BATCH_Q8_FLOAT", 0x177U);
   static const std::uint32_t verify_mask = parse("MBUFO_QWEN_VERIFY_Q8_FLOAT", 0U);
   if (role < 0) return false;
   return role >= kVerifyRoleBase ? ((verify_mask >> (role - kVerifyRoleBase)) & 1U) != 0
