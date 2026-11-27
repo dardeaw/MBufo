@@ -136,3 +136,37 @@ in-process track (§1).
 - Measured on the XDNA2 host (11/27): bge-m3 410 ms, bge-reranker 223 ms, EmbeddingGemma2 90 ms,
   Qwen3-ASR servable 153 ms. Loading all three embedding models plus ASR at once exhausts NPU BOs
   (hrx_buffer_allocate failed), so eject before loading the next.
+
+## Op-graph executor and Qwen3 embedding/reranker (11/27)
+
+- src/core/compute/npu/npu_op_graph.{hpp,cpp}: declarative op list over named
+  row-major buffers (Embed, LayerNorm, RmsNorm, Linear, Attention [bidirectional or
+  causal, GQA, optional QK-norm + NEOX RoPE], Gelu, SwiGlu, Residual, Pool
+  [cls/mean/last], L2Norm, RowDot). `Linear` runs on the shared NpuQuantGemmEngine
+  (Q8 bfp16ebs8, weights resident in BOs, one process-wide engine via
+  `SharedQuantEngine`); every other op runs on the host. `LinearBackend::kHostF32`
+  runs Linear on the host in fp32 for hardware-free reference checks.
+- Weight prep: the engine packer floors mantissas (floor(v/Q) per 8-value block).
+  The executor pre-rounds each weight to the nearest bfp16ebs8 grid value so the
+  packer reproduces it exactly (halves the error, removes the bias). bge-m3 CLS
+  cosine vs the BF16 path: 0.973 floored -> 0.9990 rounded.
+  MBUFO_NPU_GRAPH_FLOOR=1 disables the rounding (debug only).
+- src/core/compute/npu/npu_graph_models.{hpp,cpp}: `NpuGraphBgeRuntime`
+  (bge-m3 / bge-reranker, 24L post-norm BERT) and `NpuQwen3Encoder`
+  (Qwen3-Embedding-0.6B and Qwen3-Reranker-0.6B, 28L causal GQA, last-token pool;
+  the reranker reads the yes/no logits through the tied lm-head).
+- Serve: `--device npu` / `/admin/load {"device":"npu"}` on a qwen3 GGUF with a
+  declared pooling_type loads the embedding model; one whose name contains
+  "rerank" loads the reranker (id qwen3-embedding / qwen3-reranker, through
+  LoadNpuServable + warmup, Q8 only). /v1/embeddings and /v1/reranking dispatch to
+  them. bge-m3 / bge-reranker keep the dedicated BF16 runtime by default;
+  MBUFO_NPU_BGE_RUNTIME=graph selects the graph runtime.
+- EmbeddingGemma2 stays on its own runtime (it needs local/global attention and
+  PLE ops that are not in the graph yet).
+- Driver: tests/core/npu_graph_models_test.cpp (modes bge-ref, bge-graph, qwen-emb,
+  qwen-rerank; hardware needed except --host-only).
+- Measured (XDNA2 host, 11/27, NPU only, warm): Qwen3-Embedding-0.6B 43-70 ms for 8-59
+  tokens (cos vs GPU 0.9986-0.9991); Qwen3-Reranker-0.6B ~130 ms per ~90-token pair
+  (P(yes) within 2e-4 of GPU); bge-m3 graph 58-383 ms for 9-86 tokens vs legacy
+  112-344 ms (cos 0.99900-0.99951). NPU BO memory is limited: eject other NPU
+  models before loading.

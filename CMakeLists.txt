@@ -390,7 +390,9 @@ if (MBUFO_ENABLE_NPU)
     src/core/compute/npu/flux_dit_npu.cpp
     src/core/compute/npu/zimage_dit_npu.cpp
     src/core/compute/npu/npu_embgemma2_runtime.cpp
-    src/core/compute/npu/npu_bge_runtime.cpp)
+    src/core/compute/npu/npu_bge_runtime.cpp
+    src/core/compute/npu/npu_op_graph.cpp
+    src/core/compute/npu/npu_graph_models.cpp)
 endif()
 
 add_library(mbufo_llm_cli STATIC
@@ -641,6 +643,9 @@ if (BUILD_TESTING)
     set_tests_properties(npu_e2e_model_test PROPERTIES
       LABELS "npu;hardware;embedding;rerank"
       RESOURCE_LOCK npu)
+
+    add_executable(npu_graph_models_test tests/core/npu_graph_models_test.cpp)
+    target_link_libraries(npu_graph_models_test PRIVATE mbufo_core mbufo_npu)
 
     add_executable(npu_quant_models_test tests/core/npu_quant_models_test.cpp)
     target_link_libraries(npu_quant_models_test PRIVATE mbufo_core mbufo_npu)

@@ -8,6 +8,7 @@
 #include "src/core/compute/npu/npu_scheduler.hpp"
 #ifdef MBUFO_ENABLE_NPU
 #include "src/core/compute/npu/npu_bge_runtime.hpp"
+#include "src/core/compute/npu/npu_graph_models.hpp"
 #endif
 #include "src/core/pooling_norm.hpp"
 
@@ -17,7 +18,11 @@ namespace mbufo::models::bge_m3 {
 
 #ifdef MBUFO_ENABLE_NPU
 struct EngineModel::NpuState {
+  // MBUFO_NPU_BGE_RUNTIME=graph selects the declarative op-graph executor on
+  // the shared Q8 engine; default is the dedicated BF16 gemm_1024x1024 runtime.
+  bool use_graph{false};
   mbufo::core::npu::NpuBgeRuntime runtime;
+  mbufo::core::npu::NpuGraphBgeRuntime graph_runtime;
 };
 #else
 struct EngineModel::NpuState {};
@@ -36,7 +41,15 @@ bool EngineModel::LoadNpuWeights(const std::string& kernel_dir,
     }
   }
   auto state = std::make_shared<NpuState>();
-  if (!state->runtime.Init(f32_, dir, error_msg)) {
+  const char* rt = std::getenv("MBUFO_NPU_BGE_RUNTIME");
+  state->use_graph = rt != nullptr && std::string(rt) == "graph";
+  const bool init_ok =
+      state->use_graph
+          ? state->graph_runtime.Init(
+                f32_, mbufo::core::npu::graph::LinearBackend::kNpuQ8,
+                error_msg)
+          : state->runtime.Init(f32_, dir, error_msg);
+  if (!init_ok) {
     npu_.reset();
     npu_weights_resident_ = false;
     return false;
@@ -60,6 +73,9 @@ bool EngineModel::RunNpuCls(std::span<const std::uint32_t> ids,
   if (!npu_weights_resident_ || npu_ == nullptr) {
     if (error_msg != nullptr) *error_msg = "bge-m3 NPU weights not loaded";
     return false;
+  }
+  if (npu_->use_graph) {
+    return npu_->graph_runtime.ForwardCls(ids, cls_out, prefill_ms, error_msg);
   }
   return npu_->runtime.ForwardCls(ids, f32_, cls_out, prefill_ms, error_msg);
 #else

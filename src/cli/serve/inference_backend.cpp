@@ -75,6 +75,9 @@
 #include "src/models/qwen_reranker/engine.hpp"
 #include "src/core/compute/npu/npu_scheduler.hpp"
 #include "src/core/compute/npu/npu_lane.hpp"
+#ifdef MBUFO_ENABLE_NPU
+#include "src/core/compute/npu/npu_graph_models.hpp"
+#endif
 #endif
 
 // Process-wide NPU scheduler shared by every dual-capable encoder model.
@@ -5652,6 +5655,11 @@ struct InferenceBackend::Impl {
   std::unique_ptr<models::bge_m3::EngineModel> bge_embed_model;
   std::unique_ptr<models::bge_m3::EngineSession> bge_embed_session;
   std::unique_ptr<models::embeddinggemma2::EngineModel> eg2_embed_model;
+#ifdef MBUFO_ENABLE_NPU
+  // Qwen3-Embedding / Qwen3-Reranker on the NPU op-graph executor.
+  std::unique_ptr<mbufo::core::npu::NpuQwen3Encoder> npu_qwen_embed;
+  std::unique_ptr<mbufo::core::npu::NpuQwen3Encoder> npu_qwen_rerank;
+#endif
   // Rerank state: one cached session per loaded reranker kind (sessions are
   // not thread-safe; rerank_mutex serializes use, mirroring embed_mutex).
   mutable std::mutex rerank_mutex;
@@ -5736,10 +5744,11 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   const auto architecture =
       reader->GetMetadataString("general.architecture").value_or("");
   if (target_dev == "npu" && architecture != "embedding_gemma2" &&
-      architecture != "bert") {
+      architecture != "bert" && architecture != "qwen3") {
     SetError(error,
              "NPU device is only supported for bge-m3, bge-reranker-v2-m3, "
-             "and embeddinggemma-2 GGUFs (got architecture '" +
+             "embeddinggemma-2, Qwen3-Embedding and Qwen3-Reranker GGUFs "
+             "(got architecture '" +
                  std::string(architecture) + "')");
     return false;
   }
@@ -5966,6 +5975,94 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
+#ifdef MBUFO_ENABLE_NPU
+  if (target_dev == "npu" && architecture == "qwen3") {
+    if (!vision_model_path.empty()) {
+      SetError(error, "Qwen3 NPU encoders do not support --mmproj");
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config) ||
+        speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error,
+               "Qwen3 NPU encoders: no disk cache or speculative decoding");
+      return false;
+    }
+    if (!npu_quant.empty() && npu_quant != "q8") {
+      SetError(error, "Qwen3 NPU encoders run Q8 (bfp16ebs8) only; got "
+                      "npu_quant='" + npu_quant + "'");
+      return false;
+    }
+    std::string ident(reader->GetMetadataString("general.name").value_or(""));
+    ident += ' ';
+    ident += reader->GetMetadataString("general.basename").value_or("");
+    for (auto& ch : ident) {
+      ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    const bool qwen_is_embed =
+        reader->GetMetadataUint32("qwen3.pooling_type").has_value();
+    const bool qwen_is_rerank =
+        !qwen_is_embed && ident.find("rerank") != std::string::npos;
+    if (!qwen_is_embed && !qwen_is_rerank) {
+      SetError(error,
+               "NPU qwen3 supports only Qwen3-Embedding (pooling_type "
+               "declared) and Qwen3-Reranker GGUFs");
+      return false;
+    }
+    using NpuEnc = mbufo::core::npu::NpuQwen3Encoder;
+    const auto qwen_role = qwen_is_embed ? NpuEnc::Role::kEmbedding
+                                         : NpuEnc::Role::kReranker;
+    const std::string qwen_id =
+        qwen_is_embed ? "qwen3-embedding" : "qwen3-reranker";
+    std::unique_ptr<NpuEnc> enc;
+    std::string npu_err;
+    const bool q_ok = LoadNpuServable(
+        qwen_id,
+        [&](std::string* e) {
+          enc = NpuEnc::Load(model_path, qwen_role,
+                             mbufo::core::npu::graph::LinearBackend::kNpuQ8, e);
+          return enc != nullptr;
+        },
+        [&](std::string* e) {
+          if (qwen_is_embed) {
+            std::vector<float> v;
+            double ms = 0.0;
+            std::size_t toks = 0;
+            return enc->Embed("npu warmup", &v, &toks, &ms, e);
+          }
+          float score = 0.0F;
+          double ms = 0.0;
+          std::size_t toks = 0;
+          return enc->ScorePair("warmup query", "warmup document", "", &score,
+                                &toks, &ms, e);
+        },
+        &npu_err);
+    if (!q_ok) {
+      SetError(error, "Qwen3 NPU load failed: " + npu_err);
+      return false;
+    }
+    Logger::Info("loader", "event=npu_loaded model=" + qwen_id +
+                               " runtime=NpuOpGraph quant=q8");
+    const std::uint32_t qwen_cap = static_cast<std::uint32_t>(enc->max_tokens());
+    if (max_context == 0 || max_context > qwen_cap) max_context = qwen_cap;
+    {
+      auto new_state = std::make_shared<Impl::State>();
+      new_state->model_id = qwen_id;
+      new_state->max_context = max_context;
+      new_state->model_path = model_path;
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    {
+      const std::lock_guard<std::mutex> elock(impl_->embed_mutex);
+      const std::lock_guard<std::mutex> rlock(impl_->rerank_mutex);
+      impl_->npu_qwen_embed.reset();
+      impl_->npu_qwen_rerank.reset();
+      (qwen_is_embed ? impl_->npu_qwen_embed : impl_->npu_qwen_rerank) =
+          std::move(enc);
+    }
+    return true;
+  }
+#endif
   if (architecture == "embedding_gemma2") {
     if (!vision_model_path.empty()) {
       SetError(error, "EmbeddingGemma 2 does not support --mmproj");
@@ -7520,6 +7617,25 @@ std::optional<RerankResult> InferenceBackend::Rerank(
   // BERT cross-encoder path (rerank-only state, no text runner).
   {
     const std::lock_guard<std::mutex> lock(impl_->rerank_mutex);
+#ifdef MBUFO_ENABLE_NPU
+    if (impl_->npu_qwen_rerank != nullptr) {
+      RerankResult result;
+      result.scores.reserve(documents.size());
+      for (const auto& doc : documents) {
+        float score = 0.0F;
+        std::size_t toks = 0;
+        double ms = 0.0;
+        if (!impl_->npu_qwen_rerank->ScorePair(query, doc, "", &score, &toks,
+                                               &ms, error)) {
+          return std::nullopt;
+        }
+        result.scores.push_back(score);
+        result.prompt_tokens += toks;
+        result.prefill_ms += ms;
+      }
+      return result;
+    }
+#endif
     if (impl_->bge_rerank_model != nullptr) {
       if (impl_->bge_rerank_session == nullptr) {
         impl_->bge_rerank_session =
@@ -7604,6 +7720,21 @@ std::optional<EmbeddingResult> InferenceBackend::Embed(
   if (current == nullptr) return refuse("no model is loaded");
   {
     const std::lock_guard<std::mutex> lock(impl_->embed_mutex);
+#ifdef MBUFO_ENABLE_NPU
+    if (impl_->npu_qwen_embed != nullptr) {
+      std::vector<float> values;
+      std::size_t toks = 0;
+      double ms = 0.0;
+      if (!impl_->npu_qwen_embed->Embed(text, &values, &toks, &ms, error)) {
+        return std::nullopt;
+      }
+      EmbeddingResult result;
+      result.values = std::move(values);
+      result.prompt_tokens = toks;
+      result.prefill_ms = ms;
+      return result;
+    }
+#endif
     if (impl_->eg2_embed_model != nullptr) {
       auto& eg = *impl_->eg2_embed_model;
       const auto ids = eg.Encode(text);
