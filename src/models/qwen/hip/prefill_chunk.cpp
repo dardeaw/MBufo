@@ -402,6 +402,44 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       const bool fused_qknorm_rope_kv =
           route_plan.fuse_qk_norm_rope_kv &&
           detail::IsFusedQkNormSupported(config.head_dim);
+      if (!prompt_segments_.empty()) {
+        // Segmented prefill (embedding batch): shared projections above and
+        // below, attention per sequence. Each sequence writes its K/V at
+        // slots 0..len (positions restart), attends, and the next sequence
+        // may overwrite the slots: stream order keeps that race-free and the
+        // plane is scratch for an embedding forward.
+        std::size_t row_offset = 0;
+        for (const std::uint32_t length : prompt_segments_) {
+          LaunchBatchedFusedQKNormRoPEKvWrite(
+              arena_.d_q + row_offset * attention_size,
+              arena_.d_k + row_offset * kv_size,
+              arena_.d_v + row_offset * kv_size,
+              static_cast<const float*>(layer.attn_q_norm.data),
+              static_cast<const float*>(layer.attn_k_norm.data),
+              arena_.d_q + row_offset * attention_size,
+              arena_.d_k + row_offset * kv_size, arena_.d_kv_cache,
+              OffsetIfPresent(arena_.d_kv_cache, total_k),
+              arena_.d_attention_kv_f16,
+              OffsetIfPresent(
+                  static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                  total_k),
+              attn_layer_idx, 0, length, arena_.GetMaxContext(),
+              config.num_attention_heads, config.num_key_value_heads,
+              config.head_dim, config.rotary_dim, config.rope_theta, eps,
+              arena_.stream, vision_input_.rope());
+          if (!TryLaunchFlashWmma128(
+                  arena_.d_q + row_offset * attention_size,
+                  arena_.d_attention_kv_f16, total_k,
+                  arena_.d_ssm_out + row_offset * attention_size, nullptr,
+                  attn_layer_idx, 0, length, arena_.GetMaxContext(),
+                  config.num_attention_heads, config.num_key_value_heads,
+                  config.head_dim, true, arena_.stream)) {
+            throw std::runtime_error(
+                "segmented prefill: WMMA flash attention refused a sequence");
+          }
+          row_offset += length;
+        }
+      } else {
       if (fused_qknorm_rope_kv) {
         LaunchBatchedFusedQKNormRoPEKvWrite(
             arena_.d_q, arena_.d_k, arena_.d_v,
@@ -572,6 +610,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                   : "prefill_tiled: below_threshold");
         }
       }
+
+      }  // !prompt_segments_.empty()
 
       // opt-c172-fp32-quant: the Q8_0 route reads only the quantized
       // activation, so the BF16 staging buffer is dead. Quantizing straight
@@ -914,6 +954,62 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   const auto result = CheckedSampleToken(next_token_id, config.vocab_size);
   write.Commit(start_pos + static_cast<std::uint32_t>(batch_size), true);
   return result;
+}
+
+bool QwenGpuExecutor::SupportsPromptSegments(
+    const core::ModelConfig& config, const QwenExecutionPolicy& policy) {
+  if (!config.IsDenseQwenAttention() || config.head_dim != 128 ||
+      config.full_attention_interval != 1 ||
+      std::getenv("MBUFO_QWEN_NO_WMMA128") != nullptr ||
+      policy.UsesBlockedAttentionKv() || !policy.UsesFp16AttentionKv() ||
+      !mbufo::core::compute::flash_wmma_gqa::IsFlashWmmaSupported(
+          config.num_attention_heads, config.num_key_value_heads,
+          config.head_dim)) {
+    return false;
+  }
+  const auto route = ResolveQwenLayerRouteWithReasons(
+      policy, QwenExecutionMode::kPrefill, /*is_full_attention=*/true);
+  return route.plan.fuse_qk_norm_rope_kv &&
+         detail::IsFusedQkNormSupported(config.head_dim);
+}
+
+void QwenGpuExecutor::ForwardPromptSegments(
+    std::span<const tokenization::TokenId> tokens,
+    std::span<const std::uint32_t> lengths) {
+  CheckReset();
+  CheckPrefillCancellation();
+  if (!SupportsPromptSegments(weights_.config, policy_) ||
+      UseQwen27bFp16Prefill(weights_, tokens.size())) {
+    throw std::logic_error("segmented prefill is not supported by this model");
+  }
+  std::size_t total = 0;
+  for (const std::uint32_t length : lengths) {
+    if (length == 0 || length > arena_.GetMaxContext())
+      throw std::length_error("segmented prefill: bad sequence length");
+    total += length;
+  }
+  if (total != tokens.size() || total == 0 || total > arena_.GetMaxBatch()) {
+    throw std::length_error(
+        "segmented prefill: rows exceed the GPU batch or mismatch lengths");
+  }
+  replaying_ssm_state_ = false;
+  arena_.DisableSsmReplayCapture();
+  if (capture_prompt_hidden_) {
+    h_prompt_hidden_.Clear();
+    const std::size_t captured_layers =
+        std::max<std::size_t>(arena_.GetTargetLayerCapture().size(), 1U);
+    const std::size_t row = captured_layers * weights_.config.hidden_size;
+    h_prompt_hidden_.Reserve(tokens.size() * row,
+                             std::size_t{GetMaxPromptBatch()} * row);
+  }
+  prompt_segments_ = lengths;
+  try {
+    (void)ForwardPromptChunk(tokens, 0, false);
+  } catch (...) {
+    prompt_segments_ = {};
+    throw;
+  }
+  prompt_segments_ = {};
 }
 
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
