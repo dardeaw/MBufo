@@ -13,6 +13,9 @@
 // admin UI and router must gate dispatch on Ready, not on "process is up".
 
 #include <atomic>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -200,9 +203,15 @@ public:
     return true;
   }
 
+  /// Eject. Every servable must implement Close (pure virtual); Unload is the
+  /// only public way to release one, and it always hands the freed heap back
+  /// to the OS so an eject reliably returns RAM.
   void Unload() {
     Close();
     tracker_.Reset();
+#if defined(__GLIBC__)
+    ::malloc_trim(0);
+#endif
   }
 
   [[nodiscard]] NpuServableStatus Status() const { return tracker_.Snapshot(); }
@@ -240,11 +249,27 @@ public:
 
   [[nodiscard]] std::string_view id() const noexcept override { return id_; }
 
+  /// Drop the open/warm hooks once the first Load finished. Callers whose
+  /// hooks capture locals by reference must call this before returning, so a
+  /// later Rewarm fails cleanly instead of touching dead stack objects.
+  void DetachLoadHooks() {
+    open_ = nullptr;
+    warm_ = nullptr;
+    hooks_detached_ = true;
+  }
+
 protected:
   bool Open(const NpuLoadArgs& a, std::string* e) override {
     return open_ ? open_(a, e) : true;
   }
-  bool Warm(std::string* e) override { return warm_ ? warm_(e) : true; }
+  bool Warm(std::string* e) override {
+    if (hooks_detached_) {
+      if (e != nullptr)
+        *e = "warmup hook is no longer available";
+      return false;
+    }
+    return warm_ ? warm_(e) : true;
+  }
   void Close() override {
     if (close_)
       close_();
@@ -255,6 +280,7 @@ private:
   OpenFn open_;
   WarmFn warm_;
   CloseFn close_;
+  bool hooks_detached_{false};
 };
 
 /// Process-wide view of every NPU servable so the admin API can report one

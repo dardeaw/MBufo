@@ -132,6 +132,20 @@ int main() {
     NpuServableRegistry::Global().Remove("fn");
     CHECK(NpuServableRegistry::Global().Snapshot().empty());
   }
+  {  // detached hooks: Rewarm fails cleanly, Unload still runs Close + resets
+    int closed = 0;
+    NpuFnServable s(
+        "det", [](const NpuLoadArgs&, std::string*) { return true; },
+        [](std::string*) { return true; }, [&] { ++closed; });
+    std::string err;
+    CHECK(s.Load({}, &err));
+    s.DetachLoadHooks();
+    CHECK(!s.Rewarm(&err));
+    CHECK(!err.empty());
+    s.Unload();
+    CHECK(closed == 1);
+    CHECK(s.Status().state == NpuServableState::kUnloaded);
+  }
   if (g_failures == 0)
     std::cout << "NPU_SERVABLE_CONTRACT_TESTS_PASS\n";
   return g_failures == 0 ? 0 : 1;

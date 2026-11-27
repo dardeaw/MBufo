@@ -1276,9 +1276,9 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
                           npu_err.empty() ? "npu load failed" : npu_err,
                           "npu_load_failed");
         }
-        std::string warm_err;
-        const bool warmed = npu_holder_.Warm(npu_id, &warm_err);
         const auto warm_info = npu_holder_.GetWarmInfo(npu_id);
+        const bool warmed = warm_info.warmed;
+        const std::string warm_err = warm_info.error;
         npu_registry_->SetReady(npu_id, true);
         json::Value resp = json::Value::object();
         resp["warm"] = warmed && warm_info.warmed;
@@ -1572,9 +1572,6 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
                         "npu_eject_failed");
       }
       npu_registry_->SetReady(id, false);
-#if defined(__GLIBC__)
-      ::malloc_trim(0);  // hand the freed decoder/weight heap back to the OS
-#endif
       json::Value resp = json::Value::object();
       resp["id"] = id;
       resp["status"] = "ejected";

@@ -199,3 +199,14 @@ serve latency 99-215 ms vs 398-444 ms for the dedicated BF16 runtime; inputs up 
 Selection: the graph is the default; an explicit `MBUFO_NPU_QUANT=q4`
 keeps the dedicated runtime (no Q4 path in the graph). Gate: ctest
 `npu_graph_embgemma2_test` (skips when the gguf is absent).
+
+### Every NPU model is an INpuServable (eject contract)
+
+ASR, TTS, FLUX and Z-Image (`NpuServableHost`) now load and eject through the same
+`INpuServable` lifecycle as bge/gemma2/Qwen3: `Close` is pure virtual (an eject
+implementation is mandatory), `Unload()` is the only public release path and always
+trims the heap, and each model is published in `NpuServableRegistry`, so
+`GET /admin/models` reports all of them in `npu_servables`. Verified on hardware
+(9 models, 13 load/eject rounds): eject removes the model from `models` and
+`npu_servables`, and RSS returns to the process baseline (~290 MB after the first
+NPU load: the shared engine/HRX session stays resident by design).

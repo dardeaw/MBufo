@@ -69,6 +69,7 @@ inline bool LoadNpuServable(const std::string& id,
   args.warmup_policy = npu::NpuWarmupPolicy::kBestEffort;
   if (!s->Load(args, error))
     return false;
+  s->DetachLoadHooks();  // hooks capture the caller's locals by reference
   const auto st = s->Status();
   Logger::Info("loader",
                "event=npu_servable model=" + id +
