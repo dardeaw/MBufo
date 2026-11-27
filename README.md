@@ -249,8 +249,8 @@ Which quantization formats each engine loads: [docs/QUANT_FORMATS.md](docs/QUANT
 | **bge-reranker-v2-m3** | Cross-Encoder | Q8 / Q4 | `/v1/reranking` (NPU lane) | 🧪 Runtime verified (score diff ~1e-5) |
 | **Qwen3-ASR 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions` (served via GPU sidecar) | 🧪 NPU runtime verified (cos > 0.967, top-1 match) |
 | **Qwen3-TTS 12Hz 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/speech` (served via GPU sidecar) | 🧪 NPU runtime verified (wav produced, cos > 0.98) |
-| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
-| **Z-Image-Turbo** | DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (cos > 0.997; no HTTP serving yet) |
+| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (E2E cos(pipe)=0.9485 q8; per-step v 0.978-0.999; no HTTP serving yet) |
+| **Z-Image-Turbo** | DiT | Q8 / Q4 | test harness (PNG out) | 🧪 Runtime verified (E2E cos(pipe)=0.9918 q8, q8q4=0.985; no HTTP serving yet) |
 
 ### Supported Quantization Formats
 
@@ -456,7 +456,7 @@ For container configurations and system tuning, refer to the [upstream build gui
 
 ---
 
-## License & Credits
+readme-en-ptr## License & Credits
 
 Upstream gufo is licensed under the MIT License. Notices for adapted code and dependencies are maintained in [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and `licenses/`.
 

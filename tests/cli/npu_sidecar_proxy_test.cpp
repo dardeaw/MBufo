@@ -293,11 +293,91 @@ void TestModelCapabilityClassification() {
   assert(saw_d3);
 }
 
+// One-shot listener on the sidecar's fixed port: captures the warmup request
+// and answers 200. Returns false when the port is busy (test then skips).
+bool CaptureWarmup(const std::string& id, std::string* captured, bool* warmed) {
+  const SidecarLaunchSpec* spec = FindSidecarSpec(id);
+  assert(spec != nullptr);
+  mbufo::net::EnsureSocketRuntimeStarted();
+  const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+  int yes = 1;
+  ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons(static_cast<uint16_t>(spec->port));
+  if (::bind(lfd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0 ||
+      ::listen(lfd, 4) != 0) {
+    mbufo::net::CloseSocket(lfd);
+    return false;
+  }
+  std::jthread server([&](std::stop_token) {
+    const int cfd = ::accept(lfd, nullptr, nullptr);
+    if (cfd < 0) return;
+    mbufo::net::SetSocketTimeouts(cfd, 3000);
+    std::string raw;
+    char buf[4096];
+    for (;;) {
+      const ssize_t n = ::read(cfd, buf, sizeof(buf));
+      if (n <= 0) break;
+      raw.append(buf, static_cast<std::size_t>(n));
+      const auto he = raw.find("\r\n\r\n");
+      if (he == std::string::npos) continue;
+      const auto cl = raw.find("Content-Length: ");
+      if (cl == std::string::npos) break;
+      const std::size_t want =
+          static_cast<std::size_t>(std::stoul(raw.substr(cl + 16)));
+      if (raw.size() >= he + 4 + want) break;
+    }
+    *captured = raw;
+    const std::string resp =
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+    (void)mbufo::net::SendNoSignal(cfd, resp.data(), resp.size());
+    mbufo::net::CloseSocket(cfd);
+  });
+  SidecarManager mgr;
+  std::string err;
+  *warmed = mgr.Warmup(id, &err);
+  ::shutdown(lfd, SHUT_RDWR);
+  mbufo::net::CloseSocket(lfd);
+  return true;
+}
+
+void TestSidecarWarmup() {
+  // Payload shapes per kind; image sidecars send nothing.
+  for (const auto& s : KnownSidecars()) {
+    const auto r = WarmupRequestFor(s);
+    if (s.task == "image_generation") {
+      assert(r.path.empty());
+    } else {
+      assert(r.path == s.endpoint);
+      assert(!r.body.empty());
+    }
+    if (s.task == "asr") {
+      assert(r.content_type.starts_with("multipart/form-data; boundary="));
+      assert(r.body.find("RIFF") != std::string::npos);
+    }
+    if (s.task == "decide") assert(r.body.find("questions") != std::string::npos);
+  }
+  // Wire check: the request really reaches the sidecar port.
+  for (const char* id : {"d3-lite-npu"}) {
+    std::string captured;
+    bool warmed = false;
+    if (!CaptureWarmup(id, &captured, &warmed)) {
+      std::cout << "SKIP warmup wire check (port busy): " << id << "\n";
+      continue;
+    }
+    assert(warmed);
+    assert(captured.starts_with("POST /v1/systemone "));
+    assert(captured.find("application/json") != std::string::npos);
+  }
+}
 }  // namespace
 
 int main() {
   TestSidecarProxyAndProbe();
   TestModelCapabilityClassification();
+  TestSidecarWarmup();
   std::cout << "NPU_SIDECAR_PROXY_AND_ADMIN_TESTS_PASS\n";
   return 0;
 }

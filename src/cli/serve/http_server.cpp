@@ -43,6 +43,7 @@
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/model_admin_api.hpp"
+#include "src/cli/serve/npu_serve_wire.hpp"
 #include "src/cli/serve/npu_sidecar_proxy.hpp"
 #include "src/cli/serve/npu_sidecar_routes.hpp"
 #include "src/cli/serve/openai_chat.hpp"
@@ -2064,12 +2065,15 @@ HttpServer::HttpServer(std::string host, int port,
                        HttpServerOptions options,
                        std::shared_ptr<ImageService> images,
                        std::shared_ptr<ModelRegistry> registry,
-                       std::shared_ptr<ModelAdminService> admin)
+                       std::shared_ptr<ModelAdminService> admin,
+                       std::shared_ptr<mbufo::core::npu::NpuModelRegistry>
+                           npu_registry)
     : host_(std::move(host)),
       port_(port),
       backend_(std::move(backend)),
       registry_(std::move(registry)),
       admin_(std::move(admin)),
+      npu_registry_(std::move(npu_registry)),
       video_jobs_(std::move(video_jobs)),
       tts_(std::move(tts)),
       asr_(std::move(asr)),
@@ -2330,6 +2334,15 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     auto response = Err(401, "Unauthorized", "missing or invalid API key",
                         "authentication_error", "invalid_api_key");
     response.headers.emplace_back("WWW-Authenticate", "Bearer");
+    return response;
+  }
+  if (req.method == "GET" && req.path == "/admin/npu/status" &&
+      npu_registry_ != nullptr) {
+    HttpResponse response;
+    response.status = 200;
+    response.reason = "OK";
+    response.headers.emplace_back("Content-Type", "application/json");
+    response.body = npu_wire::NpuStatusJson(npu_registry_.get());
     return response;
   }
   const bool is_admin_path =

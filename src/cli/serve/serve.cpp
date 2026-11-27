@@ -33,6 +33,7 @@
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/model_admin_api.hpp"
+#include "src/cli/serve/npu_serve_wire.hpp"
 #include "src/cli/serve/model_registry.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
@@ -1893,6 +1894,14 @@ int RunServe(std::span<const char* const> args) {
           !api_key.empty());
       admin =
           std::make_shared<server::ModelAdminService>(registry, loader, probe);
+      {
+        // M6 status plane: NPU descriptors only, no weights loaded.
+        auto npu_reg_llm =
+            std::make_shared<mbufo::core::npu::NpuModelRegistry>();
+        server::npu_wire::PopulateNpuRegistry(npu_reg_llm.get(), nullptr);
+        server::npu_wire::RefreshNpuReady(npu_reg_llm.get());
+        admin->SetNpuRegistry(std::move(npu_reg_llm));
+      }
       for (const auto& extra : extra_startup_models) {
         if (extra.sidecar || server::FindSidecarSpec(extra.id) != nullptr) {
           std::string sc_err;
@@ -1967,6 +1976,20 @@ int RunServe(std::span<const char* const> args) {
     }
   }
 
+  // M6 status plane (all subcommands): NPU descriptors only, no weights.
+  auto npu_reg =
+      std::make_shared<mbufo::core::npu::NpuModelRegistry>();
+  server::npu_wire::PopulateNpuRegistry(npu_reg.get(), nullptr);
+  server::npu_wire::RefreshNpuReady(npu_reg.get());
+  if (admin == nullptr) {
+    // asr/tts/image/video: read-only admin (catalog + mapping +
+    // NPU status + NPU load/eject). No GPU registry/loader here.
+    admin = std::make_shared<server::ModelAdminService>(
+        nullptr, nullptr, nullptr);
+  }
+  // NOTE: overwrites the llm-block registry with an identical fresh
+  // copy; both are populated + probed, no loads yet at this point.
+  admin->SetNpuRegistry(npu_reg);
   // run() joins every request thread, so no hook call outlives it.
   std::atomic<bool> device_lost{false};
   server::HttpServer server(
@@ -1983,7 +2006,7 @@ int RunServe(std::span<const char* const> args) {
           .sidecar_proxy =
               server::SidecarProxyConfig::FromEnvironment(subcommand == "llm"),
       },
-      images, registry, admin);
+      images, registry, admin, npu_reg);
   std::string err;
   if (!server.start(&err)) {
     std::cerr << "Error starting HTTP server: " << err << "\n";

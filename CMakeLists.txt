@@ -384,8 +384,16 @@ if (MBUFO_ENABLE_NPU)
   target_sources(mbufo_core PRIVATE
     src/core/compute/npu/npu_quant_gemm.cpp
     src/core/compute/npu/npu_quant_models.cpp
+    src/core/compute/npu/npu_thinker_decode.cpp
+    src/core/compute/npu/qwen3_talker_decode.cpp
+    src/core/compute/npu/qwen3_predictor_decode.cpp
+    src/core/compute/npu/qwen3_te_decode.cpp
+    src/core/compute/npu/flux_dit_npu.cpp
+    src/core/compute/npu/zimage_dit_npu.cpp
     src/core/compute/npu/npu_embgemma2_runtime.cpp
-    src/core/compute/npu/npu_bge_runtime.cpp)
+    src/core/compute/npu/npu_bge_runtime.cpp
+    src/core/compute/npu/npu_op_graph.cpp
+    src/core/compute/npu/npu_graph_models.cpp)
 endif()
 
 add_library(mbufo_llm_cli STATIC
@@ -617,6 +625,11 @@ if (BUILD_TESTING)
   add_test(NAME npu_core_test COMMAND npu_core_test)
   set_tests_properties(npu_core_test PROPERTIES LABELS "cpu;core;npu")
 
+  add_executable(npu_servable_contract_test tests/core/npu_servable_contract_test.cpp)
+  target_link_libraries(npu_servable_contract_test PRIVATE mbufo_core)
+  add_test(NAME npu_servable_contract_test COMMAND npu_servable_contract_test)
+  set_tests_properties(npu_servable_contract_test PROPERTIES LABELS "cpu;core;npu")
+
   if (MBUFO_ENABLE_NPU)
     add_executable(npu_hrx_probe_test tests/core/npu_hrx_probe_test.cpp)
     target_link_libraries(npu_hrx_probe_test PRIVATE mbufo_core mbufo_npu)
@@ -632,10 +645,62 @@ if (BUILD_TESTING)
       LABELS "npu;hardware;embedding;rerank"
       RESOURCE_LOCK npu)
 
+    add_executable(npu_graph_models_test tests/core/npu_graph_models_test.cpp)
+    target_link_libraries(npu_graph_models_test PRIVATE mbufo_core mbufo_npu)
+
     add_executable(npu_quant_models_test tests/core/npu_quant_models_test.cpp)
     target_link_libraries(npu_quant_models_test PRIVATE mbufo_core mbufo_npu)
     add_test(NAME npu_quant_models_test COMMAND npu_quant_models_test)
     set_tests_properties(npu_quant_models_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_thinker_decode_test tests/core/npu_thinker_decode_test.cpp)
+    target_link_libraries(npu_thinker_decode_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_thinker_decode_test COMMAND npu_thinker_decode_test)
+    set_tests_properties(npu_thinker_decode_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_talker_decode_test tests/core/npu_talker_decode_test.cpp)
+    target_link_libraries(npu_talker_decode_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_talker_decode_test COMMAND npu_talker_decode_test)
+    set_tests_properties(npu_talker_decode_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_predictor_decode_test tests/core/npu_predictor_decode_test.cpp)
+    target_link_libraries(npu_predictor_decode_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_predictor_decode_test COMMAND npu_predictor_decode_test)
+    set_tests_properties(npu_predictor_decode_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_tts_frame_test tests/core/npu_tts_frame_test.cpp)
+    target_link_libraries(npu_tts_frame_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_tts_frame_test COMMAND npu_tts_frame_test)
+    set_tests_properties(npu_tts_frame_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    add_executable(npu_te_decode_test tests/core/npu_te_decode_test.cpp)
+    add_executable(npu_flux_dit_test tests/core/npu_flux_dit_test.cpp)
+    add_executable(npu_zimage_dit_test tests/core/npu_zimage_dit_test.cpp)
+    target_link_libraries(npu_zimage_dit_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_zimage_dit_test COMMAND npu_zimage_dit_test)
+    set_tests_properties(npu_zimage_dit_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    target_link_libraries(npu_flux_dit_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_flux_dit_test COMMAND npu_flux_dit_test)
+    set_tests_properties(npu_flux_dit_test PROPERTIES
+      LABELS "npu;hardware;quant"
+      RESOURCE_LOCK npu)
+
+    target_link_libraries(npu_te_decode_test PRIVATE mbufo_core mbufo_npu)
+    add_test(NAME npu_te_decode_test COMMAND npu_te_decode_test)
+    set_tests_properties(npu_te_decode_test PROPERTIES
       LABELS "npu;hardware;quant"
       RESOURCE_LOCK npu)
   endif()
@@ -687,7 +752,12 @@ if (BUILD_TESTING)
   add_test(NAME trace_test COMMAND trace_test)
   set_tests_properties(trace_test PROPERTIES LABELS "cpu;server;trace")
 
-  add_executable(http_server_test tests/cli/http_server_test.cpp)
+  # HttpServer references ModelRegistry/ModelAdminService, which are compiled into
+  # the mbufo executable rather than mbufo_http, so the test compiles them itself.
+  add_executable(http_server_test
+    tests/cli/http_server_test.cpp
+    src/cli/serve/model_admin_api.cpp
+    src/cli/serve/model_registry.cpp)
   target_link_libraries(http_server_test PRIVATE mbufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)

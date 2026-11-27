@@ -247,8 +247,8 @@ Embedding 与重排序（经由 HTTP 服务端的单次请求，长度单位为 
 | **bge-reranker-v2-m3** | Cross-Encoder | Q8 / Q4 | `/v1/reranking`（NPU lane） | 🧪 运行时已验证（评分差约 1e-5） |
 | **Qwen3-ASR 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/transcriptions`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（cos > 0.967，top-1 吻合） |
 | **Qwen3-TTS 12Hz 1.7B** | 1.7B | Q8 / Q4 | `/v1/audio/speech`（现由 GPU sidecar 提供） | 🧪 NPU 运行时已验证（已产出 wav，cos > 0.98） |
-| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
-| **Z-Image-Turbo** | DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（cos > 0.997；尚无 HTTP 服务） |
+| **FLUX.2-klein-4B** | 4B DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（E2E cos(pipe)=0.9485 q8；单步 v 0.978-0.999；尚无 HTTP 服务） |
+| **Z-Image-Turbo** | DiT | Q8 / Q4 | 测试线束（输出 PNG） | 🧪 运行时已验证（E2E cos(pipe)=0.9918 q8，q8q4=0.985；尚无 HTTP 服务） |
 
 ### 支持的量化格式
 
@@ -453,7 +453,7 @@ cmake --build --preset release --parallel 4
 
 ---
 
-## 授权与致谢
+readme-cn-ptr## 授权与致谢
 
 上游 gufo 采用 MIT 授权条款；第三方依赖库授权声明详见 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 `licenses/`。模型权重文件依其各原始发布者之许可协议规范。
 
