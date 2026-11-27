@@ -1572,6 +1572,9 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
                         "npu_eject_failed");
       }
       npu_registry_->SetReady(id, false);
+#if defined(__GLIBC__)
+      ::malloc_trim(0);  // hand the freed decoder/weight heap back to the OS
+#endif
       json::Value resp = json::Value::object();
       resp["id"] = id;
       resp["status"] = "ejected";
