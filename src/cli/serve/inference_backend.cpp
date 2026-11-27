@@ -1660,7 +1660,23 @@ public:
     }
     std::vector<TextDecodeStep> steps;
     std::exception_ptr lane_failure;
+    using TraceClock = std::chrono::steady_clock;
+    double lanes_ms = 0.0, chunk_ms = 0.0;
+    const auto elapsed_ms = [](TraceClock::time_point from) {
+      return std::chrono::duration<double, std::milli>(TraceClock::now() - from)
+          .count();
+    };
     const auto run_lanes = [&] {
+      const auto began = TraceClock::now();
+      struct Stamp {
+        double& out;
+        TraceClock::time_point from;
+        ~Stamp() {
+          out = std::chrono::duration<double, std::milli>(TraceClock::now() -
+                                                         from)
+                    .count();
+        }
+      } stamp{lanes_ms, began};
       try {
         if (decodes.size() == 1) {
           steps.emplace_back(RequireQwenState(decodes[0].state.get())
@@ -1676,25 +1692,21 @@ public:
     TextPrefillStep step;
     std::exception_ptr chunk_failure;
     const auto run_chunk = [&] {
+      const auto began = TraceClock::now();
       try {
         step = Prefill(prefill_state, prompt, offset, max_input_tokens);
       } catch (...) {
         chunk_failure = std::current_exception();
       }
+      chunk_ms = elapsed_ms(began);
     };
-    static const bool overlap = [] {
-      const char* e = std::getenv("MBUFO_QWEN_MIXED_OVERLAP");
-      return e != nullptr && e[0] != '\0' && e[0] != '0';
-    }();
-    if (overlap) {
-      // Lanes and chunk use different executors, arenas and streams.
-      std::thread lanes(run_lanes);
-      run_chunk();
-      lanes.join();
-    } else {
-      run_lanes();
-      run_chunk();
-    }
+    const auto step_began = TraceClock::now();
+    // Lanes then chunk, back to back. Running the lane step on a helper thread
+    // next to the chunk (own executors, arenas and streams) measured no gain on
+    // gfx1151 even with the lane streams at the highest HIP priority; see
+    // docs/MIXED_BATCH.md.
+    run_lanes();
+    run_chunk();
     if (lane_failure) {
       // A failed shared pass poisons every lane of it; the chunk is independent.
       steps.assign(decodes.size(), {});
@@ -1721,7 +1733,8 @@ public:
     if (trace)
       std::cerr << "[qwen-mixed] dflash lanes=" << decodes.size()
                 << " chunk=" << step.consumed_tokens << " offset=" << offset
-                << '\n';
+                << " lanes_ms=" << lanes_ms << " chunk_ms=" << chunk_ms
+                << " step_ms=" << elapsed_ms(step_began) << '\n';
     chunk_step = step;
     return steps;
   }
@@ -7991,6 +8004,11 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
   // QwenGpuModel::CreateFromGguf needs no policy parameter: the policy
   // applies at executor/adapter level, not weight loading.
   auto qwen_policy = hip::QwenExecutionPolicy::Production();
+  // Diagnostic: run the unfused QK-norm / RoPE / KV-write chain in decode and
+  // prefill instead of the fused kernel (the chain ForwardTokenBatch always uses).
+  if (const char* e = std::getenv("MBUFO_QWEN_NO_FUSE_QKROPE");
+      e != nullptr && e[0] != '\0' && e[0] != '0')
+    qwen_policy.fuse_qk_norm_rope_kv = false;
   std::string qwen_kv_quant = "f16";
   const char* qwen_kv_source = "default";
   if (kv_cache_quant_supplied) {
