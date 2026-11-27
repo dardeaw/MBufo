@@ -1699,35 +1699,56 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
         .failure = &coworker_failures[index],
     });
   }
-  // Vanilla-only gate (read-only): anything the legacy wrapper would treat
-  // specially (snapshots, checkpoints, boundaries, disk, cancellation)
-  // refuses into the legacy pair. Pinning below is idempotent.
-  if (impl_->prompt_snapshot_attempted || !impl_->boundaries.empty() ||
-      !impl_->checkpoints.empty() || !impl_->snapshot_tokens.empty() ||
-      impl_->disk_store || (impl_->cancelled && impl_->cancelled())) {
+  // Refusals that stay: the on-disk continuation store and cancellation.
+  // Snapshots, checkpoints and boundaries no longer refuse; like
+  // PrefillWithDecoders the chunk is cut at the next of them (see below), so a
+  // long prompt on a snapshot-capable runner still merges with plain decodes.
+  if (impl_->disk_store || (impl_->cancelled && impl_->cancelled())) {
     return std::nullopt;
   }
-  const std::size_t remaining = impl_->prompt.size() - impl_->prefill_offset;
-  if (remaining >= 512)
-    impl_->lease.PreparePrefill(std::min(remaining, max_input_tokens));
+  // Prefill's frontier logic with in_pass == false (mirrors
+  // PrefillWithDecoders): the budget stops at the next boundary, checkpoint or
+  // prompt-snapshot position, and the captures Prefill takes after its step
+  // are taken here too.
+  const std::size_t unbounded_remaining =
+      impl_->prompt.size() - impl_->prefill_offset;
+  if (unbounded_remaining >= 512)
+    impl_->lease.PreparePrefill(std::min(unbounded_remaining, max_input_tokens));
   impl_->CapturePromptSnapshot();
   const auto snapshot_position = impl_->snapshot_tokens.size();
-  // Re-check after capture: a live capture or fresh boundary refuses.
-  if (impl_->prompt_snapshot_attempted ||
-      impl_->snapshot_tokens.size() != snapshot_position) {
-    return std::nullopt;
+  while (!impl_->boundaries.empty() &&
+         impl_->boundaries.front() <= impl_->prefill_offset) {
+    impl_->boundaries.erase(impl_->boundaries.begin());
   }
+  if (!impl_->boundaries.empty()) {
+    max_input_tokens = std::min(
+        max_input_tokens, impl_->boundaries.front() - impl_->prefill_offset);
+  }
+  while (!impl_->checkpoints.empty() &&
+         impl_->checkpoints.front() <= impl_->prefill_offset)
+    impl_->checkpoints.erase(impl_->checkpoints.begin());
+  if (!impl_->checkpoints.empty())
+    max_input_tokens = std::min(
+        max_input_tokens, impl_->checkpoints.front() - impl_->prefill_offset);
+  if (impl_->prefill_offset < snapshot_position)
+    max_input_tokens =
+        std::min(max_input_tokens, snapshot_position - impl_->prefill_offset);
+  const std::size_t remaining = impl_->prompt.size() - impl_->prefill_offset;
+  auto frontier = impl_->prefill_offset < snapshot_position
+                      ? snapshot_position
+                      : impl_->prompt.size();
+  if (!impl_->checkpoints.empty())
+    frontier = std::min(frontier, impl_->checkpoints.front());
+  if (!impl_->boundaries.empty())
+    frontier = std::min(frontier, impl_->boundaries.front());
+  const auto model_prompt =
+      std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
   if (impl_->cancelled && impl_->cancelled())
     throw std::runtime_error("generation cancelled");
-  impl_->state_reusable = false;
-  for (auto* coworker : coworkers) {
-    coworker->CapturePromptSnapshot();
-    coworker->impl_->state_reusable = false;
-  }
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
-  const bool finish_step =
-      impl_->runner->Descriptor().capabilities.partial_prefill_retention &&
-      impl_->cancelled;
+  const auto capabilities = impl_->runner->Descriptor().capabilities;
+  const bool finish_step = capabilities.partial_prefill_retention &&
+                           !capabilities.prefill_rollback && impl_->cancelled;
   struct Rearm {
     TextRunnerState* state;
     const CancellationCheck* check;
@@ -1738,13 +1759,37 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
   } rearm{finish_step ? &state : nullptr, &impl_->cancelled};
   if (finish_step)
     state.SetCancellationCheck({});
+  auto lookahead_end = impl_->prompt.size();
+  for (const auto point : impl_->checkpoints)
+    if (point > frontier)
+      lookahead_end = std::min(lookahead_end, point);
+  for (const auto point : impl_->boundaries)
+    if (point > frontier)
+      lookahead_end = std::min(lookahead_end, point);
+  if (snapshot_position > frontier)
+    lookahead_end = std::min(lookahead_end, snapshot_position);
+  struct ClearLookahead {
+    TextRunnerState& state;
+    ~ClearLookahead() { state.SetPrefillLookahead({}); }
+  } clear_lookahead{state};
+  state.SetPrefillLookahead(std::span<const TextRunnerToken>(impl_->prompt)
+                                .subspan(frontier, lookahead_end - frontier));
+  impl_->state_reusable = false;
+  for (auto* coworker : coworkers) {
+    coworker->CapturePromptSnapshot();
+    coworker->impl_->state_reusable = false;
+  }
   TextPrefillStep step;
   bool merged = false;
   try {
     merged = impl_->runner->AdvanceBatchWithPrefillChunk(
-        advances, coworker_failures, state, impl_->prompt,
+        advances, coworker_failures, state, model_prompt,
         impl_->prefill_offset, max_input_tokens, step);
   } catch (const MixedBatchRefused&) {
+    // Refusal mutates nothing: the legacy pair runs on the same request.
+    impl_->state_reusable = true;
+    for (auto* coworker : coworkers)
+      coworker->impl_->state_reusable = true;
     return std::nullopt;
   }
   for (std::size_t i = 0; i < coworkers.size(); ++i) {
@@ -1764,13 +1809,33 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
   }
   impl_->prefill_offset += step.consumed_tokens;
   const bool reached_frontier = impl_->prefill_offset == impl_->prompt.size();
-  if (step.decode_ready != (impl_->prefill_offset == impl_->prompt.size())) {
+  if (step.decode_ready != (impl_->prefill_offset == model_prompt.size())) {
     throw std::runtime_error(
         "text runner returned an inconsistent prefill boundary");
   }
   impl_->decode_ready = reached_frontier;
   step.decode_ready = reached_frontier;
   impl_->state_reusable = true;
+  // Prefill's post-step captures.
+  if (!reached_frontier && impl_->prefill_offset == snapshot_position)
+    impl_->CapturePromptSnapshot(false);
+  const bool history = !impl_->checkpoints.empty() &&
+                       impl_->checkpoints.front() == impl_->prefill_offset;
+  const bool shared = !impl_->boundaries.empty() &&
+                      impl_->boundaries.front() == impl_->prefill_offset;
+  if (history)
+    impl_->checkpoints.erase(impl_->checkpoints.begin());
+  if (shared)
+    impl_->boundaries.erase(impl_->boundaries.begin());
+  const bool shared_with_peers =
+      history &&
+      std::ranges::find(impl_->shared_checkpoints, impl_->prefill_offset) !=
+          impl_->shared_checkpoints.end();
+  if ((history || shared) && impl_->prefill_offset != snapshot_position)
+    impl_->CaptureBoundarySnapshot(impl_->prefill_offset, history, shared,
+                                   shared_with_peers
+                                       ? SnapshotPurpose::kBranchPoint
+                                       : SnapshotPurpose::kHistory);
   return step;
 }
 
