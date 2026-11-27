@@ -128,8 +128,12 @@ in-process track (§1).
 - src/cli/serve/npu_warmup.hpp: RunNpuWarmup, soft-fail, logs event=npu_warmup.
   MBUFO_NPU_WARMUP=0 disables all NPU warmups; MBUFO_SIDECAR_WARMUP=0 disables sidecar warmups.
 - In-process warmups run right after weights are resident: bge-m3 (5 and 70 tokens, spans two 64-row chunks),
-  bge-reranker, EmbeddingGemma2 (8 tokens), and NpuServableHost::Warm (engine-level M=1 GEMM per quant shape).
-  Per-model dummy decode steps for the ASR/TTS/DiT decoders are a follow-up.
+  bge-reranker, EmbeddingGemma2 (8 tokens), and NpuServableHost::Warm (engine-level M=1 GEMM per quant shape,
+  plus a real dummy decode for ASR/TTS and a reduced Euler step for FLUX/Z-Image).
+- Status note: ASR/TTS/FLUX/Z-Image servables are loaded and warmed in-process, but serve does not yet route
+  /v1/audio or /v1/images requests to them (no caller of their inference outside tests); the kernel-level
+  tests (npu_zimage_dit_test, npu_flux_dit_test, npu_te_decode_test, npu_quant_models_test) are the
+  verification of their numerics.
 - Sidecars: SidecarManager::Warmup posts a dummy request after a fresh spawn
   (decide: /v1/systemone, asr: 0.5 s silent wav, tts: short text; image sidecars are skipped).
   Adopted externals are never poked. /admin/load and /admin/models report warm, warmup_ms, warmup_error.
