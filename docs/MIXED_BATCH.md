@@ -224,7 +224,7 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 
 | Runner | `DecodeBatch` | `AdvanceBatch` | Merged prefill + decode |
 | --- | --- | --- | --- |
-| Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes) | no |
+| Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes) | no (investigated 2026-11-27: `ForwardPromptBatchMulti` decode lanes run prefill arithmetic and are not bit-identical to `ForwardTokenBatch`/decode; see Qwen mixed batch below) |
 | DeepSeek V4 Flash | native (serial in some conditions) | native | no |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
 | Muse Glimmer | native without a shared draft, serial otherwise | serial | no |
@@ -232,3 +232,25 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
+
+## Qwen mixed batch (investigated, not enabled)
+
+`QwenTextRunner` keeps `MBUFO_RUNNER_NO_MIXED_BATCH()`. A prototype ran each
+decode lane as a one-token item of `QwenGpuExecutor::ForwardPromptBatchMulti`
+next to the prefill chunk (F16 KV, Qwen3.5-9B Q4_K_M, 3 decoding streams plus a
+~14k-token prefill, greedy). The merge fired (`lanes=3 chunk=512`) but every
+completion differed from `MBUFO_MIXED_BATCH=0` (different SHA on all four
+streams) and wall time was ~5x worse. A one-token prefill row uses the GEMM
+route and recurrent-state arithmetic of prefill, not the decode kernels
+(`ResumeGeneratedToken` documents the same effect), so it cannot meet the
+"equal to separate prefill + advance" bar. A correct merge needs a layer pass
+that runs the lanes through the decode kernels (as `ForwardTokenBatch` does)
+and the chunk through prefill kernels around one shared attention launch.
+Blocked-Q8 KV (`--kv-quant q8`, the production default for head_dim 256) is
+refused by both `ForwardTokenBatch` and `ForwardPromptBatchMulti`, so it would
+additionally need blocked-cache dual writes and a decode-exact Q8 read.
+
+Separate finding: `TextRunnerPool::Request::PrefillWithCoworkers` refuses
+whenever `snapshot_tokens`, `checkpoints` or `boundaries` is non-empty, which
+is the case for every long prompt on snapshot-capable runners, so merged
+prefill+decode never fires there regardless of the runner.
