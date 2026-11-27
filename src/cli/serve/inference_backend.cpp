@@ -3380,10 +3380,99 @@ const GptOssTextRunnerState& RequireGptOssState(const TextRunnerState& state) {
 
 class GptOssTextRunner final : public HipTextModelRunner {
  public:
-  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  // Batch contract (see TextModelRunner): serial DecodeBatch (no multi-token
+  // decode); native AdvanceBatch and AdvanceBatchWithPrefillChunk (one
+  // layer-synchronous engine pass, every lane on its own single-token decode
+  // core, bit-identical to serial); DecodeBatchWithPrefillChunk refuses.
   MBUFO_RUNNER_SERIAL_DECODE_BATCH();
-  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
-  MBUFO_RUNNER_NO_MIXED_BATCH();
+
+  // Plain advance of every lane in one layer-synchronous engine pass. The
+  // engine validates before touching state, so a refusal reruns serially.
+  void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const override {
+    if (advances.size() < 2) return SerialAdvanceBatch(advances);
+    std::vector<GptOssSession*> lanes;
+    std::vector<std::int32_t> tokens;
+    lanes.reserve(advances.size());
+    tokens.reserve(advances.size());
+    for (const auto& advance : advances) {
+      if (advance.token > static_cast<TextRunnerToken>(
+                              std::numeric_limits<std::int32_t>::max()))
+        return SerialAdvanceBatch(advances);  // serial path reports the lane error
+      lanes.push_back(&RequireGptOssState(advance.state.get()).session());
+      tokens.push_back(static_cast<std::int32_t>(advance.token));
+    }
+    std::string error;
+    if (!GptOssSession::EvaluateBatch(lanes, tokens, &error))
+      return SerialAdvanceBatch(advances);
+    for (const auto& advance : advances) {
+      auto& lane = RequireGptOssState(advance.state.get());
+      lane.set_position(lane.position() + 1);
+    }
+  }
+
+  // Merged plain-advance + prefill chunk. Output equals Prefill (Sync) of the
+  // chunk followed by the serial Advance of every lane. The chunk stays
+  // inside one engine prefill block (Sync cuts blocks at multiples of the
+  // chunk size from 0), so it may consume fewer tokens than budgeted. An
+  // engine refusal happens before any state is touched.
+  [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
+      std::span<const TextRunnerAdvance> advances,
+      std::span<std::exception_ptr> advance_failures,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens,
+      TextPrefillStep& chunk_step) const override {
+    auto& chunk = RequireGptOssState(prefill_state);
+    if (advances.empty() || offset != chunk.position() ||
+        offset >= prompt.size() || max_input_tokens == 0)
+      throw MixedBatchRefused("gptoss mixed batch preconditions unmet");
+    const std::size_t consumed = std::min<std::size_t>(
+        {max_input_tokens, prompt.size() - offset,
+         GptOssSession::MixedChunkEnd(offset) - offset});
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_)
+      throw MixedBatchRefused("gptoss mixed batch prompt exceeds context");
+    std::vector<GptOssSession*> lanes;
+    std::vector<std::int32_t> tokens;
+    lanes.reserve(advances.size());
+    tokens.reserve(advances.size());
+    for (const auto& advance : advances) {
+      if (advance.token > static_cast<TextRunnerToken>(
+                              std::numeric_limits<std::int32_t>::max()))
+        throw MixedBatchRefused("gptoss mixed batch token exceeds range");
+      auto& lane = RequireGptOssState(advance.state.get());
+      if (&lane == &chunk)
+        throw MixedBatchRefused("gptoss mixed batch lane is the chunk state");
+      lanes.push_back(&lane.session());
+      tokens.push_back(static_cast<std::int32_t>(advance.token));
+    }
+    const auto prefix = GptOssEngineTokens(prompt.first(next_position));
+    std::string error;
+    if (!GptOssSession::EvaluateBatchWithChunk(lanes, tokens, &chunk.session(),
+                                               prefix, offset, &error)) {
+      throw MixedBatchRefused("gptoss mixed batch refused cleanly: " + error);
+    }
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      if (i < advance_failures.size()) advance_failures[i] = nullptr;
+      auto& lane = RequireGptOssState(advances[i].state.get());
+      lane.set_position(lane.position() + 1);
+    }
+    chunk.set_position(next_position);
+    chunk_step = {.consumed_tokens = consumed,
+                  .decode_ready = next_position == prompt.size()};
+    static const bool trace = std::getenv("MBUFO_GPTOSS_MIXED_TRACE") != nullptr;
+    if (trace)
+      std::fprintf(stderr, "[gptoss-mixed] lanes=%zu chunk=%zu offset=%zu\n",
+                   advances.size(), consumed, offset);
+    return true;
+  }
+
+  // GPT-OSS has no multi-token decode, so there is no verify pass to ride.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchWithPrefillChunk(
+      std::span<const TextRunnerDecode>, TextRunnerState&,
+      std::span<const TextRunnerToken>, std::size_t, std::size_t,
+      TextPrefillStep&) const override {
+    RefuseMixedBatch("gptoss has no merged multi-token decode");
+  }
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kJson;
   }
@@ -3416,6 +3505,7 @@ class GptOssTextRunner final : public HipTextModelRunner {
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0,
                 .prefix_reuse = false,
+                .mixed_prefill_decode = true,
             },
         .persistence = std::nullopt,
     };
