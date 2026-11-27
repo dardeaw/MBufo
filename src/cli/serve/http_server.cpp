@@ -1234,13 +1234,15 @@ HttpResponse HandleOpenAiEmbeddings(const HttpRequest& req,
 
   json::Value data = json::Value::array();
   std::size_t prompt_tokens = 0;
+  std::string embed_error;
+  auto embeddings = b.EmbedBatch(inputs, &embed_error);
+  if (!embeddings.has_value() || embeddings->size() != inputs.size()) {
+    return Err(400, "Bad Request",
+               embed_error.empty() ? "embedding failed" : embed_error.c_str(),
+               "invalid_request_error", "embedding_failed");
+  }
   for (std::size_t i = 0; i < inputs.size(); ++i) {
-    std::string embed_error;
-    auto embedding = b.Embed(inputs[i], &embed_error);
-    if (!embedding.has_value()) {
-      return Err(400, "Bad Request", embed_error.c_str(),
-                 "invalid_request_error", "embedding_failed");
-    }
+    const auto* embedding = &(*embeddings)[i];
     json::Value item = json::Value::object();
     item["object"] = "embedding";
     json::Value values = json::Value::array();

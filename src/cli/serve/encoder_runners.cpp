@@ -1,0 +1,428 @@
+// Encoder runner implementations (see encoder_runner.hpp). The bodies are the
+// former InferenceBackend::Embed / Rerank branches, one class per model kind.
+#include "src/cli/serve/encoder_runner.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <mutex>
+#include <span>
+#include <stdexcept>
+#include <utility>
+
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/core/pooling_norm.hpp"
+#include "src/models/bge_m3/engine.hpp"
+#include "src/models/bge_reranker/engine.hpp"
+#include "src/models/embeddinggemma2/engine.hpp"
+#include "src/models/qwen/forward.hpp"
+#include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen_reranker/engine.hpp"
+#endif
+
+namespace mbufo::server {
+
+std::optional<std::vector<EmbeddingResult>> EmbeddingRunner::SerialEmbedBatch(
+    const std::vector<std::string>& texts, std::string* error,
+    const std::function<std::optional<EmbeddingResult>(const std::string&,
+                                                       std::string*)>& one) {
+  std::vector<EmbeddingResult> results;
+  results.reserve(texts.size());
+  for (const auto& text : texts) {
+    auto result = one(text, error);
+    if (!result.has_value()) return std::nullopt;
+    results.push_back(std::move(*result));
+  }
+  return results;
+}
+
+#if defined(ENGINE_ENABLE_HIP)
+namespace {
+
+std::optional<std::vector<EmbeddingResult>> Refuse(std::string* error,
+                                                   const std::string& message) {
+  if (error != nullptr) *error = message;
+  return std::nullopt;
+}
+
+// ---------------------------------------------------------------- Gemma 2
+class Gemma2EmbeddingRunner final : public EmbeddingRunner {
+ public:
+  explicit Gemma2EmbeddingRunner(
+      std::unique_ptr<models::embeddinggemma2::EngineModel> model)
+      : model_(std::move(model)) {}
+  std::string_view Kind() const noexcept override { return "embeddinggemma2"; }
+  bool NativeBatch() const noexcept override { return true; }
+
+  std::optional<std::vector<EmbeddingResult>> EmbedBatch(
+      const std::vector<std::string>& texts, std::string* error) override {
+    std::vector<std::vector<std::uint32_t>> ids;
+    ids.reserve(texts.size());
+    for (const auto& text : texts) {
+      ids.push_back(model_->Encode(text));
+      if (ids.back().size() <= 2)
+        return Refuse(error, "embedding input tokenizes to zero tokens");
+      if (ids.back().size() > models::embeddinggemma2::kMaxTokens)
+        return Refuse(error, "EmbeddingGemma 2 input exceeds the context window");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    auto batch = model_->EmbedBatch(ids, error);
+    if (!batch.has_value()) return std::nullopt;
+    std::vector<EmbeddingResult> results(batch->size());
+    for (std::size_t i = 0; i < batch->size(); ++i) {
+      results[i].values = std::move((*batch)[i].values);
+      results[i].prompt_tokens = ids[i].size();
+      results[i].prefill_ms = (*batch)[i].prefill_ms;
+    }
+    return results;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::unique_ptr<models::embeddinggemma2::EngineModel> model_;
+};
+
+// ---------------------------------------------------------------- bge-m3
+class BgeM3EmbeddingRunner final : public EmbeddingRunner {
+ public:
+  BgeM3EmbeddingRunner(
+      std::unique_ptr<models::bge_m3::EngineModel> model, bool serial_only,
+      std::function<void(models::bge_m3::EngineSession&)> configure)
+      : model_(std::move(model)),
+        serial_only_(serial_only),
+        configure_(std::move(configure)) {}
+  std::string_view Kind() const noexcept override { return "bge-m3"; }
+  bool NativeBatch() const noexcept override { return !serial_only_; }
+
+  std::optional<std::vector<EmbeddingResult>> EmbedBatch(
+      const std::vector<std::string>& texts, std::string* error) override {
+    std::vector<std::vector<std::uint32_t>> ids;
+    ids.reserve(texts.size());
+    for (const auto& text : texts) {
+      auto encoded = model_->Tokenizer().Encode(
+          text, models::bge_m3::kBgeM3HipMaxTokens);
+      if (!encoded.has_value())
+        return Refuse(error,
+                      "bge-m3 tokenize failed or input exceeds context window");
+      ids.push_back(std::move(*encoded));
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (serial_only_) return SerialSync(ids, error);
+    return Batched(ids, error);
+  }
+
+ private:
+  models::bge_m3::EngineSession& Session() {
+    if (session_ == nullptr) {
+      session_ = std::make_unique<models::bge_m3::EngineSession>(model_.get());
+      if (configure_) configure_(*session_);
+    }
+    return *session_;
+  }
+
+  // NPU lane (per-sequence) and any batch the device path refuses.
+  std::optional<std::vector<EmbeddingResult>> SerialSync(
+      const std::vector<std::vector<std::uint32_t>>& ids, std::string* error) {
+    std::vector<EmbeddingResult> results;
+    results.reserve(ids.size());
+    for (const auto& one : ids) {
+      auto sync = Session().Sync(one, true, error);
+      if (!sync.has_value()) return std::nullopt;
+      EmbeddingResult result;
+      result.values = std::move(sync->values);
+      result.prompt_tokens = one.size();
+      result.prefill_ms = sync->prefill_ms;
+      results.push_back(std::move(result));
+    }
+    return results;
+  }
+
+  // Length-sorted chunks whose padded shape fits the device arena (the same
+  // grouping as bge-reranker ScoreBatch); the CLS row of each sequence is
+  // L2-normalized, which is exactly what the single-sequence Sync returns.
+  std::optional<std::vector<EmbeddingResult>> Batched(
+      const std::vector<std::vector<std::uint32_t>>& ids, std::string* error) {
+    std::vector<std::size_t> order(ids.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+      return ids[a].size() < ids[b].size();
+    });
+    std::vector<EmbeddingResult> results(ids.size());
+    std::size_t pos = 0;
+    while (pos < order.size()) {
+      std::size_t end = pos;
+      std::size_t chunk_lmax = 0;
+      while (end < order.size()) {
+        const std::size_t l = std::max(chunk_lmax, ids[order[end]].size());
+        const std::size_t count = end - pos + 1;
+        if (count > 128 ||
+            models::bge_m3::BgeBatchBpad(count) * models::bge_m3::BgeBatchLpad(l) >
+                models::bge_m3::kBgeM3HipMaxRows) {
+          break;
+        }
+        chunk_lmax = l;
+        ++end;
+      }
+      if (end == pos) end = pos + 1;
+      std::vector<std::vector<std::uint32_t>> chunk;
+      chunk.reserve(end - pos);
+      std::size_t chunk_tokens = 0;
+      for (std::size_t i = pos; i < end; ++i) {
+        chunk.push_back(ids[order[i]]);
+        chunk_tokens += ids[order[i]].size();
+      }
+      auto cls = models::bge_m3::HipClsHiddenBatch(
+          *model_, chunk, model_->Config().pad_token_id, error);
+      if (!cls.has_value()) return std::nullopt;
+      if (cls->cls.size() != chunk.size())
+        return Refuse(error, "bge-m3 batch CLS count mismatch");
+      for (std::size_t i = 0; i < chunk.size(); ++i) {
+        EmbeddingResult& result = results[order[pos + i]];
+        result.values = std::move(cls->cls[i]);
+        if (!(core::embedding::L2Normalize(result.values) > 0.0))
+          return Refuse(error, "bge-m3 zero-norm embedding refused");
+        result.prompt_tokens = chunk[i].size();
+        result.prefill_ms = cls->prefill_ms * static_cast<double>(chunk[i].size()) /
+                            static_cast<double>(chunk_tokens);
+      }
+      pos = end;
+    }
+    return results;
+  }
+
+  std::mutex mutex_;
+  std::unique_ptr<models::bge_m3::EngineModel> model_;
+  std::unique_ptr<models::bge_m3::EngineSession> session_;
+  bool serial_only_;
+  std::function<void(models::bge_m3::EngineSession&)> configure_;
+};
+
+// ------------------------------------------------------------ Qwen3-Embedding
+class QwenEmbeddingRunner final : public EmbeddingRunner {
+ public:
+  QwenEmbeddingRunner(std::shared_ptr<const hip::QwenGpuModel> model,
+                      hip::QwenExecutionPolicy policy,
+                      std::uint32_t embed_context, std::string model_id,
+                      TokenizeFn tokenize)
+      : model_(std::move(model)),
+        policy_(policy),
+        embed_context_(embed_context),
+        model_id_(std::move(model_id)),
+        tokenize_(std::move(tokenize)) {}
+  std::string_view Kind() const noexcept override { return "qwen-embedding"; }
+  bool NativeBatch() const noexcept override { return false; }
+
+  std::optional<std::vector<EmbeddingResult>> EmbedBatch(
+      const std::vector<std::string>& texts, std::string* error) override {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return SerialEmbedBatch(
+        texts, error, [this](const std::string& text, std::string* err) {
+          return EmbedOne(text, err);
+        });
+  }
+
+ private:
+  std::optional<EmbeddingResult> EmbedOne(const std::string& text,
+                                          std::string* error) {
+    auto refuse = [&](const std::string& message) {
+      if (error != nullptr) *error = message;
+      return std::optional<EmbeddingResult>{};
+    };
+    // The artifact declares its reduction; an artifact without pooling_type
+    // (chat checkpoints) is refused explicitly instead of guessed.
+    const std::string arch = model_->GetConfig().architecture;
+    const std::uint32_t pooling_type =
+        model_->GetReader().GetMetadataUint32(arch + ".pooling_type").value_or(0);
+    const auto pooling =
+        core::embedding::PoolingStrategyFromGgufType(pooling_type);
+    if (!pooling.has_value()) {
+      return refuse("model '" + model_id_ +
+                    "' declares no GGUF pooling_type; embeddings refused");
+    }
+    std::vector<std::uint32_t> ids;
+    try {
+      ids = tokenize_(text);
+    } catch (const std::exception& exception) {
+      return refuse(std::string("embedding tokenize failed: ") + exception.what());
+    }
+    if (ids.empty()) return refuse("embedding input tokenizes to zero tokens");
+    // EOS pooling (GGUF pooling_type 3 = last token): the artifact was trained
+    // with an EOS terminator, so one is appended unless the text already ends
+    // with it. This mirrors the HuggingFace tokenize path exactly.
+    {
+      const auto eos =
+          static_cast<std::uint32_t>(model_->GetTokenizer().GetEosTokenId());
+      if (eos == tokenization::kInvalidTokenId)
+        return refuse("embedding model has no EOS token");
+      if (ids.back() != eos) ids.push_back(eos);
+    }
+    if (ids.size() > embed_context_) {
+      return refuse("embedding input of " + std::to_string(ids.size()) +
+                    " tokens exceeds the 4096-token leg-1 window");
+    }
+    if (executor_ == nullptr) {
+      std::string exec_error;
+      executor_ = hip::QwenGpuExecutor::Create(model_, &exec_error,
+                                               embed_context_, policy_);
+      if (executor_ == nullptr)
+        return refuse("embedding executor init failed: " + exec_error);
+    }
+    auto& executor = *executor_;
+    executor.Reset();
+    const std::size_t dim = model_->GetConfig().hidden_size;
+    executor.SetPromptHiddenCapture(true);
+    const auto start = std::chrono::steady_clock::now();
+    try {
+      // compute_logits=false skips the lm_head matmul; hidden states are what
+      // the pooling reads. An embedding request never decodes.
+      std::vector<tokenization::TokenId> token_ids(ids.begin(), ids.end());
+      (void)executor.ForwardPromptBatch(token_ids, 0, false);
+    } catch (const std::exception& exception) {
+      return refuse(std::string("embedding prefill failed: ") + exception.what());
+    }
+    const double prefill_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - start).count();
+    const std::span<const float> hidden = executor.GetPromptHiddenStates();
+    if (hidden.size() != ids.size() * dim || dim == 0)
+      return refuse("embedding hidden capture size mismatch");
+    EmbeddingResult result;
+    result.values.resize(dim);
+    result.prompt_tokens = ids.size();
+    result.prefill_ms = prefill_ms;
+    if (!core::embedding::ApplyPooling(hidden, ids.size(), dim, *pooling,
+                                       result.values))
+      return refuse("embedding pooling shape mismatch");
+    // The hidden capture is the last block output (pre-final-norm); the
+    // artifact pools the post-norm state, so run the model's output RMSNorm on
+    // the host. Dim-sized with exact F32 weights, bit-deterministic.
+    {
+      std::vector<float> normed(dim);
+      models::ForwardRMSNorm(result.values, model_->GetWeights().output_norm,
+                             1e-6F, normed);
+      result.values.swap(normed);
+    }
+    if (!(core::embedding::L2Normalize(result.values) > 0.0))
+      return refuse("embedding has zero norm; refused");
+    return result;
+  }
+
+  std::mutex mutex_;
+  std::shared_ptr<const hip::QwenGpuModel> model_;
+  hip::QwenExecutionPolicy policy_;
+  std::uint32_t embed_context_;
+  std::string model_id_;
+  TokenizeFn tokenize_;
+  std::unique_ptr<hip::QwenGpuExecutor> executor_;
+};
+
+// ---------------------------------------------------------------- rerankers
+class BgeRerankRunner final : public RerankRunner {
+ public:
+  BgeRerankRunner(std::unique_ptr<models::bge_reranker::EngineModel> model,
+                  std::function<void(models::bge_reranker::EngineSession&)> configure)
+      : model_(std::move(model)), configure_(std::move(configure)) {}
+  std::string_view Kind() const noexcept override { return "bge-reranker"; }
+  bool NativeBatch() const noexcept override { return true; }
+
+  std::optional<RerankResult> RerankBatch(const std::string& query,
+                                          const std::vector<std::string>& documents,
+                                          std::string* error) override {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (session_ == nullptr) {
+      session_ = std::make_unique<models::bge_reranker::EngineSession>(model_.get());
+      if (configure_) configure_(*session_);
+    }
+    double total_ms = 0.0;
+    std::size_t prompt_tokens = 0;
+    auto scores = session_->ScoreBatch(query, documents, true, &total_ms,
+                                       &prompt_tokens, error);
+    if (!scores.has_value()) return std::nullopt;
+    RerankResult result;
+    result.scores = std::move(*scores);
+    result.prompt_tokens = prompt_tokens;
+    result.prefill_ms = total_ms;
+    return result;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::unique_ptr<models::bge_reranker::EngineModel> model_;
+  std::unique_ptr<models::bge_reranker::EngineSession> session_;
+  std::function<void(models::bge_reranker::EngineSession&)> configure_;
+};
+
+class QwenRerankRunner final : public RerankRunner {
+ public:
+  explicit QwenRerankRunner(std::unique_ptr<models::qwen_reranker::EngineModel> model)
+      : model_(std::move(model)),
+        session_(std::make_unique<models::qwen_reranker::EngineSession>(model_.get())) {}
+  std::string_view Kind() const noexcept override { return "qwen-reranker"; }
+  // Pairs share the query framing (prefilled once) but run one after another.
+  bool NativeBatch() const noexcept override { return false; }
+
+  std::optional<RerankResult> RerankBatch(const std::string& query,
+                                          const std::vector<std::string>& documents,
+                                          std::string* error) override {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    double total_ms = 0.0;
+    std::size_t prompt_tokens = 0;
+    auto scores = session_->ScoreBatch(query, documents, std::string_view{},
+                                       &total_ms, &prompt_tokens, error);
+    if (!scores.has_value()) return std::nullopt;
+    RerankResult result;
+    result.scores = std::move(*scores);
+    result.prompt_tokens = prompt_tokens;
+    result.prefill_ms = total_ms;
+    return result;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::unique_ptr<models::qwen_reranker::EngineModel> model_;
+  std::unique_ptr<models::qwen_reranker::EngineSession> session_;
+};
+
+}  // namespace
+
+std::unique_ptr<EmbeddingRunner> MakeEmbeddingGemma2Runner(
+    std::unique_ptr<models::embeddinggemma2::EngineModel> model) {
+  return std::make_unique<Gemma2EmbeddingRunner>(std::move(model));
+}
+
+std::unique_ptr<EmbeddingRunner> MakeBgeM3EmbeddingRunner(
+    std::unique_ptr<models::bge_m3::EngineModel> model, bool serial_only,
+    std::function<void(models::bge_m3::EngineSession&)> configure) {
+  return std::make_unique<BgeM3EmbeddingRunner>(std::move(model), serial_only,
+                                                std::move(configure));
+}
+
+std::unique_ptr<EmbeddingRunner> MakeQwenEmbeddingRunner(
+    std::shared_ptr<const hip::QwenGpuModel> model,
+    hip::QwenExecutionPolicy policy, std::uint32_t embed_context,
+    std::string model_id, TokenizeFn tokenize) {
+  return std::make_unique<QwenEmbeddingRunner>(
+      std::move(model), policy, embed_context, std::move(model_id),
+      std::move(tokenize));
+}
+
+std::unique_ptr<RerankRunner> MakeBgeRerankRunner(
+    std::unique_ptr<models::bge_reranker::EngineModel> model,
+    std::function<void(models::bge_reranker::EngineSession&)> configure) {
+  return std::make_unique<BgeRerankRunner>(std::move(model), std::move(configure));
+}
+
+std::unique_ptr<RerankRunner> MakeQwenRerankRunner(
+    std::shared_ptr<const hip::QwenGpuModel> model,
+    hip::QwenExecutionPolicy policy, std::string* error) {
+  std::string wrap_error;
+  auto wrapped = models::qwen_reranker::EngineModel::Wrap(std::move(model), &wrap_error);
+  if (wrapped == nullptr) {
+    if (error != nullptr) *error = "qwen-reranker wrap failed: " + wrap_error;
+    return nullptr;
+  }
+  wrapped->SetPolicy(policy);
+  return std::make_unique<QwenRerankRunner>(std::move(wrapped));
+}
+#endif  // ENGINE_ENABLE_HIP
+
+}  // namespace mbufo::server

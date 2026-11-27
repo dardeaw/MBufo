@@ -73,6 +73,7 @@
 #include "src/models/embeddinggemma2/engine.hpp"
 #include "src/models/bge_reranker/engine.hpp"
 #include "src/models/qwen_reranker/engine.hpp"
+#include "src/cli/serve/encoder_runner.hpp"
 #include "src/core/compute/npu/npu_scheduler.hpp"
 #include "src/core/compute/npu/npu_lane.hpp"
 #endif
@@ -6195,26 +6196,17 @@ struct InferenceBackend::Impl {
 
   mutable std::mutex state_mutex;
   std::shared_ptr<const State> state;
-  // Persistent single-prefill embedding executor (leg-2): building a
-  // QwenGpuExecutor per request costs a full 4096-context arena plus the
-  // sampling workspace (tens of ms of hipMalloc/stream setup), dwarfing the
-  // encode itself on short prompts. The executor is stateless across Reset()
-  // calls, so one cached instance per loaded model serves every Embed
-  // request; embed_mutex serializes concurrent use.
-  mutable std::mutex embed_mutex;
-  std::shared_ptr<const hip::QwenGpuModel> embed_model;
-  std::unique_ptr<hip::QwenGpuExecutor> embed_executor;
-  std::uint32_t embed_context{0};
-  std::unique_ptr<models::bge_m3::EngineModel> bge_embed_model;
-  std::unique_ptr<models::bge_m3::EngineSession> bge_embed_session;
-  std::unique_ptr<models::embeddinggemma2::EngineModel> eg2_embed_model;
-  // Rerank state: one cached session per loaded reranker kind (sessions are
-  // not thread-safe; rerank_mutex serializes use, mirroring embed_mutex).
-  mutable std::mutex rerank_mutex;
-  std::unique_ptr<models::bge_reranker::EngineModel> bge_rerank_model;
-  std::unique_ptr<models::bge_reranker::EngineSession> bge_rerank_session;
-  std::unique_ptr<models::qwen_reranker::EngineModel> qwen_rerank_model;
-  std::unique_ptr<models::qwen_reranker::EngineSession> qwen_rerank_session;
+  // Encoder runners (encoder_runner.hpp). A dedicated encoder artifact
+  // (EmbeddingGemma 2, bge-m3, bge-reranker) installs its runner at load with
+  // a null key; Qwen embedding / reranking runners are built lazily on the
+  // shared Qwen weights and keyed by the model identity, so a reload retires
+  // the stale one. encoder_mutex guards the pointers; each runner serializes
+  // its own device use.
+  mutable std::mutex encoder_mutex;
+  std::unique_ptr<EmbeddingRunner> embedder;
+  const void* embedder_key{nullptr};
+  std::unique_ptr<RerankRunner> reranker;
+  const void* reranker_key{nullptr};
   std::string device_target{"gpu"};
 #endif
 };
@@ -6582,10 +6574,11 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       impl_->state = std::move(new_state);
     }
     {
-      const std::lock_guard<std::mutex> lock(impl_->embed_mutex);
-      impl_->eg2_embed_model = std::move(eg_model);
-      impl_->bge_embed_model.reset();
-      impl_->bge_embed_session.reset();
+      const std::lock_guard<std::mutex> lock(impl_->encoder_mutex);
+      impl_->embedder = MakeEmbeddingGemma2Runner(std::move(eg_model));
+      impl_->embedder_key = nullptr;
+      impl_->reranker.reset();
+      impl_->reranker_key = nullptr;
     }
     return true;
   }
@@ -6650,9 +6643,22 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         impl_->state = std::move(new_state);
       }
       {
-        const std::lock_guard<std::mutex> lock(impl_->embed_mutex);
-        impl_->bge_embed_model = std::move(bge_model);
-        impl_->bge_embed_session.reset();
+        std::function<void(models::bge_m3::EngineSession&)> configure;
+#ifdef MBUFO_ENABLE_NPU
+        if (target_dev == "npu") {
+          configure = [](models::bge_m3::EngineSession& session) {
+            session.SetNpuScheduler(&GlobalNpuScheduler());
+            session.SetNpuLaneConfig(NpuLaneConfigForDevice("npu"));
+          };
+        }
+#endif
+        const std::lock_guard<std::mutex> lock(impl_->encoder_mutex);
+        impl_->embedder = MakeBgeM3EmbeddingRunner(
+            std::move(bge_model), /*serial_only=*/target_dev == "npu",
+            std::move(configure));
+        impl_->embedder_key = nullptr;
+        impl_->reranker.reset();
+        impl_->reranker_key = nullptr;
       }
       return true;
     }
@@ -6703,9 +6709,21 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       impl_->state = std::move(new_state);
     }
     {
-      const std::lock_guard<std::mutex> lock(impl_->rerank_mutex);
-      impl_->bge_rerank_model = std::move(rerank_model);
-      impl_->bge_rerank_session.reset();
+      std::function<void(models::bge_reranker::EngineSession&)> configure;
+#ifdef MBUFO_ENABLE_NPU
+      if (target_dev == "npu") {
+        configure = [](models::bge_reranker::EngineSession& session) {
+          session.SetNpuScheduler(&GlobalNpuScheduler());
+          session.SetNpuLaneConfig(NpuLaneConfigForDevice("npu"));
+        };
+      }
+#endif
+      const std::lock_guard<std::mutex> lock(impl_->encoder_mutex);
+      impl_->reranker = MakeBgeRerankRunner(std::move(rerank_model),
+                                            std::move(configure));
+      impl_->reranker_key = nullptr;
+      impl_->embedder.reset();
+      impl_->embedder_key = nullptr;
     }
     return true;
   }
@@ -8146,71 +8164,36 @@ std::optional<RerankResult> InferenceBackend::Rerank(
   if (current == nullptr) return refuse("no model is loaded");
   if (query.empty()) return refuse("rerank query must not be empty");
   if (documents.empty()) return refuse("rerank documents must not be empty");
-  // BERT cross-encoder path (rerank-only state, no text runner).
-  {
-    const std::lock_guard<std::mutex> lock(impl_->rerank_mutex);
-    if (impl_->bge_rerank_model != nullptr) {
-      if (impl_->bge_rerank_session == nullptr) {
-        impl_->bge_rerank_session =
-            std::make_unique<models::bge_reranker::EngineSession>(
-                impl_->bge_rerank_model.get());
-#ifdef MBUFO_ENABLE_NPU
-        if (impl_->device_target == "npu") {
-          impl_->bge_rerank_session->SetNpuScheduler(&GlobalNpuScheduler());
-          impl_->bge_rerank_session->SetNpuLaneConfig(
-              NpuLaneConfigForDevice("npu"));
-        }
-#endif
-      }
-      double total_ms = 0.0;
-      std::size_t prompt_tokens = 0;
-      auto scores = impl_->bge_rerank_session->ScoreBatch(
-          query, documents, true, &total_ms, &prompt_tokens, error);
-      if (!scores.has_value()) return std::nullopt;
-      RerankResult result;
-      result.scores = std::move(*scores);
-      result.prompt_tokens = prompt_tokens;
-      result.prefill_ms = total_ms;
-      return result;
+  const std::lock_guard<std::mutex> lock(impl_->encoder_mutex);
+  // A dedicated reranker (bge-reranker) was installed at load with a null key.
+  // Otherwise the Qwen yes/no head shares the loaded Qwen weights and is
+  // (re)built whenever the model identity changes.
+  if (impl_->reranker == nullptr || impl_->reranker_key != nullptr) {
+    if (current->scheduler == nullptr) {
+      impl_->reranker.reset();
+      impl_->reranker_key = nullptr;
+      return refuse("rerank is not supported by this model");
+    }
+    const auto* qwen =
+        dynamic_cast<const QwenTextRunner*>(&current->scheduler->runner());
+    if (qwen == nullptr) {
+      impl_->reranker.reset();
+      impl_->reranker_key = nullptr;
+      return refuse(
+          "rerank requires a Qwen dense or BERT reranker model; this backend "
+          "serves a different model kind");
+    }
+    const void* key = qwen->QwenModel().get();
+    if (impl_->reranker == nullptr || impl_->reranker_key != key) {
+      std::string wrap_error;
+      auto runner = MakeQwenRerankRunner(qwen->QwenModel(),
+                                         qwen->ExecutionPolicy(), &wrap_error);
+      if (runner == nullptr) return refuse(wrap_error);
+      impl_->reranker = std::move(runner);
+      impl_->reranker_key = key;
     }
   }
-  // Qwen yes/no path: share the loaded Qwen weights, add only the readout.
-  if (current->scheduler == nullptr) {
-    return refuse("rerank is not supported by this model");
-  }
-  const auto* qwen = dynamic_cast<const QwenTextRunner*>(
-      &current->scheduler->runner());
-  if (qwen == nullptr) {
-    return refuse(
-        "rerank requires a Qwen dense or BERT reranker model; this backend "
-        "serves a different model kind");
-  }
-  const std::lock_guard<std::mutex> lock(impl_->rerank_mutex);
-  if (impl_->qwen_rerank_model == nullptr) {
-    std::string wrap_error;
-    impl_->qwen_rerank_model =
-        models::qwen_reranker::EngineModel::Wrap(qwen->QwenModel(),
-                                                 &wrap_error);
-    if (impl_->qwen_rerank_model == nullptr) {
-      return refuse("qwen-reranker wrap failed: " + wrap_error);
-    }
-    impl_->qwen_rerank_model->SetPolicy(qwen->ExecutionPolicy());
-  }
-  if (impl_->qwen_rerank_session == nullptr) {
-    impl_->qwen_rerank_session =
-        std::make_unique<models::qwen_reranker::EngineSession>(
-            impl_->qwen_rerank_model.get());
-  }
-  double total_ms = 0.0;
-  std::size_t prompt_tokens = 0;
-  auto scores = impl_->qwen_rerank_session->ScoreBatch(
-      query, documents, std::string_view{}, &total_ms, &prompt_tokens, error);
-  if (!scores.has_value()) return std::nullopt;
-  RerankResult result;
-  result.scores = std::move(*scores);
-  result.prompt_tokens = prompt_tokens;
-  result.prefill_ms = total_ms;
-  return result;
+  return impl_->reranker->RerankBatch(query, documents, error);
 #else
   (void)query;
   (void)documents;
@@ -8218,182 +8201,67 @@ std::optional<RerankResult> InferenceBackend::Rerank(
   return std::nullopt;
 #endif
 }
-// Leg-2 single-prefill embedding: tokenize, run one prefill on the cached
-// executor with hidden capture and no lm_head, pool to one vector,
-// L2-normalize, release. No decode runs; the cached executor is Reset() to a
-// cold state before every prefill.
-std::optional<EmbeddingResult> InferenceBackend::Embed(
-    const std::string& text, std::string* error) {
+
+// Embeddings for POST /v1/embeddings: the loaded model's EmbeddingRunner runs
+// one prefill per text (no decode, no KV retention), fused across the texts
+// when the encoder supports it. Qwen3-Embedding is built lazily on the shared
+// Qwen weights.
+std::optional<std::vector<EmbeddingResult>> InferenceBackend::EmbedBatch(
+    const std::vector<std::string>& texts, std::string* error) {
 #if defined(ENGINE_ENABLE_HIP)
   auto refuse = [&](const std::string& message) {
     if (error != nullptr) *error = message;
-    return std::optional<EmbeddingResult>{};
+    return std::optional<std::vector<EmbeddingResult>>{};
   };
   const auto current = impl_->Snapshot();
   if (current == nullptr) return refuse("no model is loaded");
-  {
-    const std::lock_guard<std::mutex> lock(impl_->embed_mutex);
-    if (impl_->eg2_embed_model != nullptr) {
-      auto& eg = *impl_->eg2_embed_model;
-      const auto ids = eg.Encode(text);
-      if (ids.size() <= 2) return refuse("embedding input tokenizes to zero tokens");
-      if (ids.size() > models::embeddinggemma2::kMaxTokens)
-        return refuse("EmbeddingGemma 2 input exceeds the context window");
-      auto r = eg.Embed(ids, error);
-      if (!r.has_value()) return std::nullopt;
-      EmbeddingResult result;
-      result.values = std::move(r->values);
-      result.prompt_tokens = ids.size();
-      result.prefill_ms = r->prefill_ms;
-      return result;
+  if (texts.empty()) return refuse("embedding input must not be empty");
+  const std::lock_guard<std::mutex> lock(impl_->encoder_mutex);
+  if (impl_->embedder == nullptr || impl_->embedder_key != nullptr) {
+    if (current->scheduler == nullptr) {
+      impl_->embedder.reset();
+      impl_->embedder_key = nullptr;
+      return refuse(
+          "embeddings require a Qwen dense or BGE-M3 model; this backend serves "
+          "a reranker-only model kind");
     }
-    if (impl_->bge_embed_model != nullptr) {
-      if (impl_->bge_embed_session == nullptr) {
-        impl_->bge_embed_session =
-            std::make_unique<models::bge_m3::EngineSession>(
-                impl_->bge_embed_model.get());
-#ifdef MBUFO_ENABLE_NPU
-        if (impl_->device_target == "npu") {
-          impl_->bge_embed_session->SetNpuScheduler(&GlobalNpuScheduler());
-          impl_->bge_embed_session->SetNpuLaneConfig(
-              NpuLaneConfigForDevice("npu"));
-        }
-#endif
-      }
-      auto encoded = impl_->bge_embed_model->Tokenizer().Encode(
-          text, models::bge_m3::kBgeM3HipMaxTokens);
-      if (!encoded.has_value()) {
-        return refuse("bge-m3 tokenize failed or input exceeds context window");
-      }
-      auto sync = impl_->bge_embed_session->Sync(*encoded, true, error);
-      if (!sync.has_value()) return std::nullopt;
-      EmbeddingResult result;
-      result.values = std::move(sync->values);
-      result.prompt_tokens = encoded->size();
-      result.prefill_ms = sync->prefill_ms;
-      return result;
+    const auto* qwen =
+        dynamic_cast<const QwenTextRunner*>(&current->scheduler->runner());
+    if (qwen == nullptr) {
+      impl_->embedder.reset();
+      impl_->embedder_key = nullptr;
+      return refuse(
+          "embeddings require a Qwen dense model; this backend serves a "
+          "different model kind");
+    }
+    const auto model = qwen->QwenModel();
+    if (model == nullptr) return refuse("Qwen model is unavailable");
+    const void* key = model.get();
+    if (impl_->embedder == nullptr || impl_->embedder_key != key) {
+      // Leg-1 window: the cached executor sizes its KV arena to this bound
+      // once, so longer inputs are refused explicitly instead of
+      // oversubscribing.
+      constexpr std::uint32_t kEmbeddingMaxTokens = 4096;
+      const std::uint32_t embed_context =
+          std::min(current->max_context, kEmbeddingMaxTokens);
+      // Weak: a stale runner must not keep a replaced model state alive.
+      std::weak_ptr<const Impl::State> weak = current;
+      TokenizeFn tokenize = [weak](const std::string& text) {
+        const auto state = weak.lock();
+        if (state == nullptr || state->scheduler == nullptr)
+          throw std::runtime_error("the embedding model was replaced");
+        const auto tokens = state->scheduler->runner().Tokenize(text);
+        return std::vector<std::uint32_t>(tokens.begin(), tokens.end());
+      };
+      impl_->embedder = MakeQwenEmbeddingRunner(
+          model, qwen->ExecutionPolicy(), embed_context, current->model_id,
+          std::move(tokenize));
+      impl_->embedder_key = key;
     }
   }
-  if (current->scheduler == nullptr) {
-    return refuse(
-        "embeddings require a Qwen dense or BGE-M3 model; this backend serves a "
-        "reranker-only model kind");
-  }
-  const auto* qwen =
-      dynamic_cast<const QwenTextRunner*>(&current->scheduler->runner());
-  if (qwen == nullptr) {
-    return refuse(
-        "embeddings require a Qwen dense model; this backend serves a "
-        "different model kind");
-  }
-  const auto model = qwen->QwenModel();
-  if (model == nullptr) return refuse("Qwen model is unavailable");
-  // The artifact declares its reduction; an artifact without pooling_type
-  // (chat checkpoints) is refused explicitly instead of guessed.
-  const std::string arch = model->GetConfig().architecture;
-  const std::uint32_t pooling_type =
-      model->GetReader().GetMetadataUint32(arch + ".pooling_type").value_or(0);
-  const auto pooling =
-      core::embedding::PoolingStrategyFromGgufType(pooling_type);
-  if (!pooling.has_value()) {
-    return refuse("model '" + current->model_id +
-                  "' declares no GGUF pooling_type; embeddings refused");
-  }
-  std::vector<TextRunnerToken> prompt_tokens;
-  try {
-    prompt_tokens = current->scheduler->runner().Tokenize(text);
-  } catch (const std::exception& exception) {
-    return refuse(std::string("embedding tokenize failed: ") +
-                  exception.what());
-  }
-  if (prompt_tokens.empty())
-    return refuse("embedding input tokenizes to zero tokens");
-  // EOS pooling (GGUF pooling_type 3 = last token): the artifact was trained
-  // with an EOS terminator, so one is appended unless the text already ends
-  // with it. This mirrors the HuggingFace tokenize path exactly.
-  {
-    const auto eos =
-        static_cast<TextRunnerToken>(model->GetTokenizer().GetEosTokenId());
-    if (eos == static_cast<TextRunnerToken>(tokenization::kInvalidTokenId))
-      return refuse("embedding model has no EOS token");
-    if (prompt_tokens.back() != eos) prompt_tokens.push_back(eos);
-  }
-  // Leg-1 window: the cached executor sizes its KV arena to this bound once,
-  // so longer inputs are refused explicitly instead of oversubscribing.
-  constexpr std::uint32_t kEmbeddingMaxTokens = 4096;
-  const std::uint32_t embed_context =
-      std::min(current->max_context, kEmbeddingMaxTokens);
-  if (prompt_tokens.size() > embed_context) {
-    return refuse("embedding input of " +
-                  std::to_string(prompt_tokens.size()) +
-                  " tokens exceeds the 4096-token leg-1 window");
-  }
-  std::vector<tokenization::TokenId> ids;
-  ids.reserve(prompt_tokens.size());
-  for (const TextRunnerToken token : prompt_tokens)
-    ids.push_back(static_cast<tokenization::TokenId>(token));
-  std::string exec_error;
-  // Reuse the cached embedding executor across requests (see Impl): it is
-  // Reset() to a cold state before every prefill, so prompt lengths and
-  // contents may vary freely. A model reload swaps the shared weights,
-  // which retires the stale executor via the identity check below.
-  std::unique_lock<std::mutex> embed_lock(impl_->embed_mutex);
-  if (impl_->embed_executor == nullptr || impl_->embed_model != model ||
-      impl_->embed_context != embed_context) {
-    impl_->embed_executor = hip::QwenGpuExecutor::Create(
-        model, &exec_error, embed_context, qwen->ExecutionPolicy());
-    if (impl_->embed_executor == nullptr) {
-      impl_->embed_model.reset();
-      impl_->embed_context = 0;
-      return refuse("embedding executor init failed: " + exec_error);
-    }
-    impl_->embed_model = model;
-    impl_->embed_context = embed_context;
-  }
-  auto& executor = *impl_->embed_executor;
-  executor.Reset();
-  const std::size_t dim = model->GetConfig().hidden_size;
-  executor.SetPromptHiddenCapture(true);
-  const auto start = std::chrono::steady_clock::now();
-  try {
-    // compute_logits=false skips the lm_head matmul; hidden states are what
-    // the pooling reads. The predicted token is intentionally unused: an
-    // embedding request never decodes.
-    (void)executor.ForwardPromptBatch(ids, 0, false);
-  } catch (const std::exception& exception) {
-    return refuse(std::string("embedding prefill failed: ") +
-                  exception.what());
-  }
-  const double prefill_ms =
-      std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() - start)
-          .count();
-  const std::span<const float> hidden = executor.GetPromptHiddenStates();
-  if (hidden.size() != ids.size() * dim || dim == 0)
-    return refuse("embedding hidden capture size mismatch");
-  EmbeddingResult result;
-  result.values.resize(dim);
-  result.prompt_tokens = ids.size();
-  result.prefill_ms = prefill_ms;
-  if (!core::embedding::ApplyPooling(hidden, ids.size(), dim, *pooling,
-                                     result.values))
-    return refuse("embedding pooling shape mismatch");
-  // The hidden capture is the last block output (pre-final-norm); the
-  // artifact pools the post-norm state, so run the model's output RMSNorm on
-  // the host. Dim-sized with exact F32 weights, bit-deterministic.
-  {
-    std::vector<float> normed(dim);
-    models::ForwardRMSNorm(result.values, model->GetWeights().output_norm,
-                           1e-6F, normed);
-    result.values.swap(normed);
-  }
-  if (!(core::embedding::L2Normalize(result.values) > 0.0))
-    return refuse("embedding has zero norm; refused");
-  // No decode ran and no KV is retained: the cached executor returns to a
-  // cold prefill state via Reset() on the next Embed call.
-  return result;
+  return impl_->embedder->EmbedBatch(texts, error);
 #else
-  (void)text;
+  (void)texts;
   if (error != nullptr) *error = "embeddings require the HIP backend";
   return std::nullopt;
 #endif

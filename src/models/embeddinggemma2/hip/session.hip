@@ -33,6 +33,8 @@ namespace {
 
 constexpr int kThreads = 256;
 constexpr int kQueryChunk = 1024;
+// Sequences one batched forward accepts (also bounds the pooled-output scratch).
+constexpr std::size_t kMaxSeqs = 64;
 
 #define EG_HIP(call)                                                         \
   do {                                                                       \
@@ -175,7 +177,8 @@ __global__ void GegluKernel(const float* gu, int ffn, std::size_t rows,
 // unweighted RMS norm. One block per (token, head-slot).
 __global__ void QkvPostKernel(const float* qkv, const float* qn, const float* kn,
                               int heads, int kvh, int d, float theta, float eps,
-                              __half* q_out, __half* k_out, __half* v_out) {
+                              __half* q_out, __half* k_out, __half* v_out,
+                              const std::uint32_t* pos) {
   __shared__ float sh[8];
   __shared__ float vals[512];
   const int t = blockIdx.x;
@@ -208,7 +211,7 @@ __global__ void QkvPostKernel(const float* qkv, const float* qn, const float* kn
                            : k_out + static_cast<std::size_t>(t) * kd) + head * d;
   const int half = d / 2;
   for (int i = threadIdx.x; i < half; i += blockDim.x) {
-    const float ang = static_cast<float>(t) * powf(theta, -2.0F * i / d);
+    const float ang = static_cast<float>(pos[t]) * powf(theta, -2.0F * i / d);
     float s, c;
     sincosf(ang, &s, &c);
     const float a = vals[i], b = vals[i + half];
@@ -286,6 +289,7 @@ struct EngineModel::HipState {
   float *ple_norm{}, *final_norm{};
   // Scratch sized for kMaxTokens.
   std::uint32_t* ids{};
+  std::uint32_t* pos_dev{};
   float *h{}, *qkv{}, *gu{}, *y{}, *g{}, *normed{}, *scores{}, *mean{}, *out{};
   __half *emb16{}, *x16{}, *q16{}, *k16{}, *v16{}, *ctx16{}, *act16{}, *probs{};
   std::vector<void*> allocations;
@@ -417,13 +421,13 @@ struct EngineModel::HipState {
       L.scalar = *static_cast<const float*>(sc->data);
     }
     const std::size_t N = kMaxTokens;
-    if (!Alloc(&ids, N, error) || !Alloc(&h, N * H, error) ||
+    if (!Alloc(&ids, N, error) || !Alloc(&pos_dev, N, error) || !Alloc(&h, N * H, error) ||
         !Alloc(&qkv, N * max_qkvd, error) || !Alloc(&gu, N * 2 * F, error) ||
         !Alloc(&y, N * H, error) || !Alloc(&g, N * std::max<std::size_t>(P, H), error) ||
         !Alloc(&normed, N * H, error) ||
         !Alloc(&scores, static_cast<std::size_t>(c.heads) * kQueryChunk * N, error) ||
         !Alloc(&probs, static_cast<std::size_t>(c.heads) * kQueryChunk * N, error) ||
-        !Alloc(&mean, H, error) || !Alloc(&out, c.out_dim, error) ||
+        !Alloc(&mean, H * kMaxSeqs, error) || !Alloc(&out, c.out_dim * kMaxSeqs, error) ||
         !Alloc(&emb16, N * H, error) || !Alloc(&x16, N * H, error) ||
         !Alloc(&q16, N * max_qd, error) || !Alloc(&k16, N * max_kd, error) ||
         !Alloc(&v16, N * max_kd, error) || !Alloc(&ctx16, N * max_qd, error) ||
@@ -443,9 +447,13 @@ struct EngineModel::HipState {
            HIPBLAS_STATUS_SUCCESS;
   }
 
-  bool Attention(const Config& c, bool full, int n, int d, int kvh, std::string* error) {
+  bool Attention(const Config& c, bool full, int n, int d, int kvh, int row0, std::string* error) {
     const int heads = c.heads, group = heads / kvh;
     const int qd = heads * d, kd = kvh * d;
+    const __half* q16r = q16 + static_cast<std::size_t>(row0) * qd;
+    const __half* k16r = k16 + static_cast<std::size_t>(row0) * kd;
+    const __half* v16r = v16 + static_cast<std::size_t>(row0) * kd;
+    __half* ctx16r = ctx16 + static_cast<std::size_t>(row0) * qd;
     const int window = full ? -1 : static_cast<int>(c.sliding_window);
     for (int q0 = 0; q0 < n; q0 += kQueryChunk) {
       const int rows = std::min(kQueryChunk, n - q0);
@@ -458,8 +466,8 @@ struct EngineModel::HipState {
       const float alpha = 1.0F, beta = 0.0F;
       for (int hk = 0; hk < kvh; ++hk) {
         const int h0 = hk * group;
-        const __half* a = k16 + static_cast<std::size_t>(k0) * kd + hk * d;
-        const __half* b = q16 + static_cast<std::size_t>(q0) * qd + h0 * d;
+        const __half* a = k16r + static_cast<std::size_t>(k0) * kd + hk * d;
+        const __half* b = q16r + static_cast<std::size_t>(q0) * qd + h0 * d;
         float* sc = scores + static_cast<std::size_t>(h0) * rows * nk;
         if (hipblasGemmStridedBatchedEx(
                 blas, HIPBLAS_OP_T, HIPBLAS_OP_N, nk, rows, d, &alpha, a,
@@ -474,9 +482,9 @@ struct EngineModel::HipState {
                          scores, rows, nk, q0, k0, window, probs);
       for (int hk = 0; hk < kvh; ++hk) {
         const int h0 = hk * group;
-        const __half* a = v16 + static_cast<std::size_t>(k0) * kd + hk * d;
+        const __half* a = v16r + static_cast<std::size_t>(k0) * kd + hk * d;
         const __half* b = probs + static_cast<std::size_t>(h0) * rows * nk;
-        __half* o = ctx16 + static_cast<std::size_t>(q0) * qd + h0 * d;
+        __half* o = ctx16r + static_cast<std::size_t>(q0) * qd + h0 * d;
         if (hipblasGemmStridedBatchedEx(
                 blas, HIPBLAS_OP_N, HIPBLAS_OP_N, d, rows, nk, &alpha, a,
                 HIPBLAS_R_16F, kd, 0, b, HIPBLAS_R_16F, nk,
@@ -490,9 +498,34 @@ struct EngineModel::HipState {
     return true;
   }
 
+  // One forward over `lens.size()` sequences concatenated in `tokens`. Every
+  // token-wise stage (norms, projections, MLP, per-layer inputs) runs once
+  // over all rows, so the weights are read once per layer for the whole
+  // batch; attention is per sequence (bidirectional, never across sequences)
+  // and RoPE positions restart at each sequence start. `results` receives one
+  // pooled 768-d (pre-L2) vector per sequence.
   bool Forward(const Config& c, std::span<const std::uint32_t> tokens,
-               std::vector<float>* result, std::string* error) {
+               std::span<const std::uint32_t> lens,
+               std::vector<std::vector<float>>* results, std::string* error) {
     const int n = static_cast<int>(tokens.size());
+    if (lens.empty() || lens.size() > kMaxSeqs || tokens.size() > kMaxTokens) {
+      if (error != nullptr) *error = "batch shape outside the device envelope";
+      return false;
+    }
+    {
+      std::vector<std::uint32_t> pos(tokens.size());
+      std::size_t at = 0, total = 0;
+      for (const std::uint32_t len : lens) {
+        for (std::uint32_t i = 0; i < len; ++i) pos[at++] = i;
+        total += len;
+      }
+      if (total != tokens.size()) {
+        if (error != nullptr) *error = "sequence lengths do not cover the batch";
+        return false;
+      }
+      EG_HIP(hipMemcpyAsync(pos_dev, pos.data(), pos.size() * sizeof(std::uint32_t),
+                            hipMemcpyHostToDevice, stream));
+    }
     const int H = static_cast<int>(c.hidden), F = static_cast<int>(c.ffn);
     const int P = static_cast<int>(c.ple_dim);
     EG_HIP(hipMemcpyAsync(ids, tokens.data(), tokens.size() * sizeof(std::uint32_t),
@@ -515,8 +548,12 @@ struct EngineModel::HipState {
       hipLaunchKernelGGL(QkvPostKernel, dim3(n, c.heads + 2 * kvh), dim3(kThreads), 0,
                          stream, qkv, L.q_norm, L.k_norm, static_cast<int>(c.heads),
                          kvh, d, full ? c.rope_full : c.rope_local, c.rms_eps, q16,
-                         k16, v16);
-      if (!Attention(c, full, n, d, kvh, error)) return false;
+                         k16, v16, pos_dev);
+      int row0 = 0;
+      for (const std::uint32_t len : lens) {
+        if (!Attention(c, full, static_cast<int>(len), d, kvh, row0, error)) return false;
+        row0 += static_cast<int>(len);
+      }
       if (!Gemm(L.wo, ctx16, y, HIPBLAS_R_32F, H, n, qd)) {
         if (error != nullptr) *error = "o_proj gemm failed";
         return false;
@@ -566,14 +603,26 @@ struct EngineModel::HipState {
     }
     hipLaunchKernelGGL(RmsNormF32Kernel, dim3(n), dim3(kThreads), 0, stream, h,
                        final_norm, H, c.rms_eps, normed);
-    hipLaunchKernelGGL(ColMeanKernel, dim3((H + kThreads - 1) / kThreads),
-                       dim3(kThreads), 0, stream, normed, n, H, mean);
-    hipLaunchKernelGGL(MatVecKernel, dim3(c.out_dim), dim3(kThreads), 0, stream, mean,
-                       out_proj, H, out);
-    result->resize(c.out_dim);
-    EG_HIP(hipMemcpyAsync(result->data(), out, c.out_dim * sizeof(float),
+    {
+      std::size_t row0 = 0;
+      for (std::size_t si = 0; si < lens.size(); ++si) {
+        hipLaunchKernelGGL(ColMeanKernel, dim3((H + kThreads - 1) / kThreads),
+                           dim3(kThreads), 0, stream,
+                           normed + row0 * static_cast<std::size_t>(H),
+                           static_cast<int>(lens[si]), H, mean + si * H);
+        hipLaunchKernelGGL(MatVecKernel, dim3(c.out_dim), dim3(kThreads), 0, stream,
+                           mean + si * H, out_proj, H, out + si * c.out_dim);
+        row0 += lens[si];
+      }
+    }
+    std::vector<float> flat(lens.size() * c.out_dim);
+    EG_HIP(hipMemcpyAsync(flat.data(), out, flat.size() * sizeof(float),
                           hipMemcpyDeviceToHost, stream));
     EG_HIP(hipStreamSynchronize(stream));
+    results->assign(lens.size(), std::vector<float>());
+    for (std::size_t si = 0; si < lens.size(); ++si)
+      (*results)[si].assign(flat.begin() + si * c.out_dim,
+                            flat.begin() + (si + 1) * c.out_dim);
     EG_HIP(hipGetLastError());
     return true;
   }
@@ -582,41 +631,78 @@ struct EngineModel::HipState {
 EngineModel::EngineModel() = default;
 EngineModel::~EngineModel() = default;
 
-std::optional<EmbedResult> EngineModel::Embed(std::span<const std::uint32_t> ids,
-                                              std::string* error_msg) {
+std::optional<std::vector<EmbedResult>> EngineModel::EmbedBatch(
+    std::span<const std::vector<std::uint32_t>> batch, std::string* error_msg) {
   auto refuse = [&](const std::string& m) {
     if (error_msg != nullptr) *error_msg = m;
-    return std::optional<EmbedResult>{};
+    return std::optional<std::vector<EmbedResult>>{};
   };
-  if (ids.empty()) return refuse("embeddinggemma2: empty id sequence");
-  if (ids.size() > kMaxTokens)
-    return refuse("embeddinggemma2: " + std::to_string(ids.size()) +
-                  " tokens exceeds the " + std::to_string(kMaxTokens) + " window");
-  std::optional<EmbedResult> npu_out;
-  if (TryNpuEmbed(ids, &npu_out, error_msg)) {
-    return npu_out;
+  if (batch.empty()) return refuse("embeddinggemma2: empty batch");
+  for (const auto& ids : batch) {
+    if (ids.empty()) return refuse("embeddinggemma2: empty id sequence");
+    if (ids.size() > kMaxTokens)
+      return refuse("embeddinggemma2: " + std::to_string(ids.size()) +
+                    " tokens exceeds the " + std::to_string(kMaxTokens) + " window");
   }
-  if (hip_ == nullptr) {
+  std::vector<EmbedResult> results(batch.size());
+  std::vector<std::size_t> pending;
+  for (std::size_t i = 0; i < batch.size(); ++i) {
+    std::optional<EmbedResult> npu_out;
+    if (TryNpuEmbed(batch[i], &npu_out, error_msg)) {
+      if (!npu_out.has_value()) return std::nullopt;
+      results[i] = std::move(*npu_out);
+    } else {
+      pending.push_back(i);
+    }
+  }
+  if (!pending.empty() && hip_ == nullptr) {
     auto state = std::make_unique<HipState>();
     std::string error;
     if (!state->Init(*reader_, config_, &error))
       return refuse("embeddinggemma2 device init failed: " + error);
     hip_ = std::move(state);
   }
-  const auto start = std::chrono::steady_clock::now();
-  std::vector<float> values;
-  std::string error;
-  if (!hip_->Forward(config_, ids, &values, &error)) return refuse("embeddinggemma2: " + error);
-  double norm = 0.0;
-  for (float v : values) norm += static_cast<double>(v) * v;
-  norm = std::sqrt(norm);
-  if (!(norm > 0.0)) return refuse("embeddinggemma2: zero-norm embedding");
-  for (float& v : values) v = static_cast<float>(v / norm);
-  EmbedResult r;
-  r.values = std::move(values);
-  r.prefill_ms = std::chrono::duration<double, std::milli>(
-                     std::chrono::steady_clock::now() - start).count();
-  return r;
+  // Greedy groups in input order bounded by the device envelope.
+  for (std::size_t at = 0; at < pending.size();) {
+    std::vector<std::uint32_t> tokens, lens;
+    std::size_t end = at;
+    while (end < pending.size() && lens.size() < kMaxSeqs &&
+           tokens.size() + batch[pending[end]].size() <= kMaxTokens) {
+      const auto& ids = batch[pending[end]];
+      tokens.insert(tokens.end(), ids.begin(), ids.end());
+      lens.push_back(static_cast<std::uint32_t>(ids.size()));
+      ++end;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<std::vector<float>> pooled;
+    std::string error;
+    if (!hip_->Forward(config_, tokens, lens, &pooled, &error))
+      return refuse("embeddinggemma2: " + error);
+    const double group_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - start).count();
+    for (std::size_t k = 0; k < lens.size(); ++k) {
+      auto& values = pooled[k];
+      double norm = 0.0;
+      for (float v : values) norm += static_cast<double>(v) * v;
+      norm = std::sqrt(norm);
+      if (!(norm > 0.0)) return refuse("embeddinggemma2: zero-norm embedding");
+      for (float& v : values) v = static_cast<float>(v / norm);
+      EmbedResult& r = results[pending[at + k]];
+      r.values = std::move(values);
+      r.prefill_ms = group_ms * static_cast<double>(lens[k]) /
+                     static_cast<double>(tokens.size());
+    }
+    at = end;
+  }
+  return results;
+}
+
+std::optional<EmbedResult> EngineModel::Embed(std::span<const std::uint32_t> ids,
+                                              std::string* error_msg) {
+  const std::vector<std::uint32_t> one(ids.begin(), ids.end());
+  auto batch = EmbedBatch(std::span<const std::vector<std::uint32_t>>(&one, 1), error_msg);
+  if (!batch.has_value()) return std::nullopt;
+  return std::move(batch->front());
 }
 
 }  // namespace mbufo::models::embeddinggemma2

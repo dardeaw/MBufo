@@ -79,6 +79,14 @@ class EngineModel {
   [[nodiscard]] std::optional<EmbedResult> Embed(
       std::span<const std::uint32_t> ids, std::string* error_msg = nullptr);
 
+  /// One device forward over many sequences (concatenated rows, per-sequence
+  /// attention and pooling); results are in input order. Groups that exceed the
+  /// envelope (kMaxTokens rows, 64 sequences) are split internally. Not
+  /// thread-safe; the caller serializes.
+  [[nodiscard]] std::optional<std::vector<EmbedResult>> EmbedBatch(
+      std::span<const std::vector<std::uint32_t>> batch,
+      std::string* error_msg = nullptr);
+
   /// Loads exported NPU2 IRON kernels and uploads 24-layer weights into resident
   /// HRX buffers (returns false when MBUFO_ENABLE_NPU=OFF).
   [[nodiscard]] bool LoadNpuWeights(const std::string& kernel_dir = "",

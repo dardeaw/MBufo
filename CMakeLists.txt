@@ -450,6 +450,7 @@ add_executable(mbufo
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
   src/cli/serve/inference_backend.cpp
+  src/cli/serve/encoder_runners.cpp
   src/cli/serve/model_registry.cpp
   src/cli/serve/model_admin_api.cpp
   src/eval/http_client.cpp

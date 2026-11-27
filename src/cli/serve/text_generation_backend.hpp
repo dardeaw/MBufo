@@ -458,16 +458,25 @@ public:
     return std::nullopt;
   }
 
-  /// Embeds one raw text into a fixed-length L2-normalized vector. The
-  /// default refuses explicitly; a model kind opts in by overriding and
-  /// running exactly one prefill (no decode, no KV retention). Returning
-  /// nullopt must always carry a human-readable reason in `error` — never a
-  /// silent fallback vector.
-  [[nodiscard]] virtual std::optional<EmbeddingResult> Embed(
-      const std::string& text, std::string* error) {
-    (void)text;
+  /// Embeds raw texts into fixed-length L2-normalized vectors, one per text in
+  /// input order. The default refuses explicitly; a model kind opts in by
+  /// overriding and running one prefill per text (no decode, no KV retention),
+  /// fused across the texts where its encoder supports it. Returning nullopt
+  /// must always carry a human-readable reason in `error` -- never a silent
+  /// fallback vector.
+  [[nodiscard]] virtual std::optional<std::vector<EmbeddingResult>> EmbedBatch(
+      const std::vector<std::string>& texts, std::string* error) {
+    (void)texts;
     if (error != nullptr) *error = "embedding is not supported by this model";
     return std::nullopt;
+  }
+
+  /// One text; a batch of one.
+  [[nodiscard]] std::optional<EmbeddingResult> Embed(const std::string& text,
+                                                     std::string* error) {
+    auto batch = EmbedBatch(std::vector<std::string>{text}, error);
+    if (!batch.has_value() || batch->size() != 1) return std::nullopt;
+    return std::move(batch->front());
   }
 
   /// Scores each document against the query with a single relevance value.

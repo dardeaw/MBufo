@@ -286,11 +286,11 @@ public:
   [[nodiscard]] std::optional<std::size_t> count_chat_tokens(
       const ChatRequest& request) const override;
 
-  /// Single-prefill embedding for POST /v1/embeddings. Only the Qwen dense
-  /// path with a declared GGUF pooling strategy serves it; every other model
-  /// kind refuses explicitly via `error`.
-  [[nodiscard]] std::optional<EmbeddingResult> Embed(
-      const std::string& text, std::string* error) override;
+  /// Embeddings for POST /v1/embeddings, dispatched to the loaded model's
+  /// EmbeddingRunner (EmbeddingGemma 2, bge-m3, Qwen3-Embedding); every other
+  /// model kind refuses explicitly via `error`.
+  [[nodiscard]] std::optional<std::vector<EmbeddingResult>> EmbedBatch(
+      const std::vector<std::string>& texts, std::string* error) override;
 
   /// Rerank dispatch: the BERT cross-encoder when a bert artifact is
   /// loaded, the Qwen yes/no head for Qwen dense artifacts, an explicit
