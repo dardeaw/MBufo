@@ -2024,7 +2024,9 @@ public:
       return {.selections = {}, .stop = true};
     const auto stats_before = deepseek.session().DsparkStatistics();
     std::optional<models::deepseek_v4_flash::DsparkSamplerBridge> bridge;
-    if (!sampler.config().can_use_unmodified_argmax()) {
+    if (!sampler.config().can_use_unmodified_argmax() ||
+        sampler.config().constraint != nullptr ||
+        sampler.ForcedToken().has_value()) {
       bridge.emplace(sampler);
     }
     std::vector<int> emitted;
@@ -2106,7 +2108,9 @@ public:
       states[index] = &deepseek;
       stats_before[index] = deepseek.session().DsparkStatistics();
       auto& sampler = decodes[index].sampler.get();
-      if (!sampler.config().can_use_unmodified_argmax()) {
+      if (!sampler.config().can_use_unmodified_argmax() ||
+          sampler.config().constraint != nullptr ||
+          sampler.ForcedToken().has_value()) {
         bridges[index].emplace(sampler);
       }
       items[index] = {
@@ -5252,7 +5256,8 @@ class GlimmerTextRunner final : public HipTextModelRunner {
     }
     auto& glimmer = RequireGlimmerState(state);
     const bool speculate = shared_draft_ != nullptr && glimmer.speculative_enabled() && glimmer.speculative_primed() &&
-                           sampler.config().can_use_unmodified_argmax() && !sampler.ForcedToken().has_value();
+                           sampler.config().can_use_unmodified_argmax() && !sampler.ForcedToken().has_value() &&
+                           sampler.config().constraint == nullptr && !sampler.NeedsConstraintMask();
     if (!speculate) return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     TextDecodeStep result;
     if (glimmer.position() >= max_context_) {
@@ -5993,6 +5998,7 @@ class Gemma4TextRunner final : public HipTextModelRunner {
       sampling::SamplerState& sampler) const override {
     if (!use_mtp() || sampler.ForcedToken().has_value() ||
         !sampler.config().can_use_unmodified_argmax() ||
+        sampler.config().constraint != nullptr ||
         sampler.NeedsConstraintMask()) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
