@@ -170,3 +170,16 @@ in-process track (§1).
   (P(yes) within 2e-4 of GPU); bge-m3 graph 58-383 ms for 9-86 tokens vs legacy
   112-344 ms (cos 0.99900-0.99951). NPU BO memory is limited: eject other NPU
   models before loading.
+
+### Servable status and warmup (M2)
+
+- bge-m3, bge-reranker and EmbeddingGemma 2 load through `LoadNpuServable`
+  (`src/cli/serve/npu_warmup.hpp`): `INpuServable` lifecycle, best-effort warmup,
+  `event=npu_servable` log line. Measured: bge-m3 load 1.5 s + warm 0.38 s,
+  reranker 1.4 s + 0.08 s, EmbeddingGemma 2 0.85 s + 0.37 s.
+- `GET /admin/models` returns `npu_servables` (`id` = admin model id, `state`,
+  `ready`, `warm`, `load_ms`, `warmup_ms`, `error`). Entries are created under the
+  admin id during `/admin/load` and removed on `/admin/eject`.
+- ASR (thinker) and TTS (talker) servables warm with a real dummy decode (prefill +
+  step + LM head), measured about 4.5 s each; this is the true decoder cold start
+  that the first request used to pay. FLUX / Z-Image warm at engine level only.

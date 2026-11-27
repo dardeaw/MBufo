@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -40,8 +41,6 @@
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/vision/image_cache.hpp"
-
-#include <ctime>
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/core/hip/committed_backing.hpp"
@@ -5988,8 +5987,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       return false;
     }
     if (!npu_quant.empty() && npu_quant != "q8") {
-      SetError(error, "Qwen3 NPU encoders run Q8 (bfp16ebs8) only; got "
-                      "npu_quant='" + npu_quant + "'");
+      SetError(error,
+               "Qwen3 NPU encoders run Q8 (bfp16ebs8) only; got "
+               "npu_quant='" +
+                   npu_quant + "'");
       return false;
     }
     std::string ident(reader->GetMetadataString("general.name").value_or(""));
@@ -6009,8 +6010,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       return false;
     }
     using NpuEnc = mbufo::core::npu::NpuQwen3Encoder;
-    const auto qwen_role = qwen_is_embed ? NpuEnc::Role::kEmbedding
-                                         : NpuEnc::Role::kReranker;
+    const auto qwen_role =
+        qwen_is_embed ? NpuEnc::Role::kEmbedding : NpuEnc::Role::kReranker;
     const std::string qwen_id =
         qwen_is_embed ? "qwen3-embedding" : "qwen3-reranker";
     std::unique_ptr<NpuEnc> enc;
@@ -6042,8 +6043,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     Logger::Info("loader", "event=npu_loaded model=" + qwen_id +
                                " runtime=NpuOpGraph quant=q8");
-    const std::uint32_t qwen_cap = static_cast<std::uint32_t>(enc->max_tokens());
-    if (max_context == 0 || max_context > qwen_cap) max_context = qwen_cap;
+    const std::uint32_t qwen_cap =
+        static_cast<std::uint32_t>(enc->max_tokens());
+    if (max_context == 0 || max_context > qwen_cap)
+      max_context = qwen_cap;
     {
       auto new_state = std::make_shared<Impl::State>();
       new_state->model_id = qwen_id;
@@ -6096,7 +6099,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       const bool eg_ok = LoadNpuServable(
           "embeddinggemma-2",
           [&](std::string* e) {
-            if (!eg_model->LoadNpuWeights("", e)) return false;
+            if (!eg_model->LoadNpuWeights("", e))
+              return false;
             eg_model->SetNpuScheduler(&GlobalNpuScheduler());
             eg_model->SetNpuLaneConfig(NpuLaneConfigForDevice("npu"));
             return true;
@@ -6176,7 +6180,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
               std::vector<std::uint32_t> ids{0, 6, 4, 5, 2};
               std::vector<float> cls;
               double ms = 0.0;
-              if (!bge_model->RunNpuCls(ids, &cls, &ms, e)) return false;
+              if (!bge_model->RunNpuCls(ids, &cls, &ms, e))
+                return false;
               ids.assign(70, 6);  // spans two 64-row chunks
               ids.front() = 0;
               ids.back() = 2;
