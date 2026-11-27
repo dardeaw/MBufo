@@ -5,7 +5,7 @@
 // norm/rope/activation helpers. Cosine >= 0.998 (Q8).
 // Gate 2 (E2E determinism): full 5-double + 20-single x 4-step Euler run on
 // the shell's 9-token prompt + 8x8 latent grid. Two identical runs must
-// match exactly; final latent finite + nonzero. Q8-vs-Q4 final cosine >= 0.99.
+// match exactly; final latent finite + nonzero. Q8 only (Q4 is banned for FLUX: q8-vs-q4 cos 0.853).
 
 #include <cassert>
 #include <cmath>
@@ -355,7 +355,7 @@ void TestFull(mbufo::core::npu::NpuQuantGemmEngine& engine,
     while (ifs >> v) sigmas.push_back(v);
     assert(sigmas.size() >= 2);
   }
-  double ms8 = 0.0, ms8b = 0.0, ms4 = 0.0;
+  double ms8 = 0.0, ms8b = 0.0;
   std::vector<std::vector<float>> taps8;
   std::vector<float> z8 =
       RunFull(engine, NpuQuantMode::kQ8Bfp16, &ms8, ids, taps, z0, sigmas, 5,
@@ -370,13 +370,8 @@ void TestFull(mbufo::core::npu::NpuQuantGemmEngine& engine,
     energy += (double)v * v;
   }
   assert(energy > 1.0);
-  std::vector<float> z4 = RunFull(engine, NpuQuantMode::kQ4Q4nx, &ms4, ids,
-                                  taps, z0, sigmas, 5, 20, nullptr);
-  const float c84 = CosineSimHost(z8, z4);
-  std::printf(
-      "[flux-full 5dbl+20sgl x4] q8_ms=%.1f deter=1 energy=%.1f q8q4_cos=%.6f "
-      "q4_ms=%.1f\n",
-      ms8, energy, c84, ms4);
+  std::printf("[flux-full 5dbl+20sgl x4] q8_ms=%.1f deter=1 energy=%.1f\n", ms8,
+              energy);
   std::fflush(stdout);
   if (dump_prefix != nullptr) {
     const std::string pre = dump_prefix;
@@ -389,8 +384,6 @@ void TestFull(mbufo::core::npu::NpuQuantGemmEngine& engine,
                 taps8.size(), dump_prefix);
     std::fflush(stdout);
   }
-  // q8-vs-q4 drift on klein (measured 0.8526, 2026-11-24); E2E-vs-pipe bar is 0.94 (measured 0.9485).
-  assert(c84 >= 0.80F);
 }
 
 }  // namespace

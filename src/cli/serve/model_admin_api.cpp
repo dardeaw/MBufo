@@ -1269,6 +1269,12 @@ HttpResponse ModelAdminService::HandleLoad(const HttpRequest& req) {
               mbufo::core::npu::NpuArtifactKind::kNpuInProcess) {
         const std::string quant =
             pre.is_object() ? pre.member_str("npu_quant", "q8") : "q8";
+        if (quant != "q8" && quant != "Q8") {
+          return AdminErr(400, "Bad Request",
+                          "npu_quant must be 'q8' for " + npu_id +
+                              " (q4 is not allowed: accuracy drift too large)",
+                          "invalid_npu_quant");
+        }
         {
           std::lock_guard lock(loading_state_mutex_);
           loading_id_ = npu_id;

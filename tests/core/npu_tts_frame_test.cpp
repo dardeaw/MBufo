@@ -103,7 +103,6 @@ int main() {
     return 1;
   }
   TestFrameLoop(engine, mbufo::core::npu::NpuQuantMode::kQ8Bfp16);
-  TestFrameLoop(engine, mbufo::core::npu::NpuQuantMode::kQ4Q4nx);
   std::puts("TTS_FRAME_LOOP_PASS");
   return 0;
 }

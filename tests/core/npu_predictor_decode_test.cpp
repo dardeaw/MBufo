@@ -3,7 +3,7 @@
 // Path A (servable): prefill [r0, r1] at pos 0/1, then DecodeStep(r2) at
 // pos 2, head-1 logits + top-1. Path B (reference): prefill [r0, r1, r2]
 // full sequence, head-1 logits + top-1. Both run ALL 5 predictor layers on
-// NPU silicon. Gate: cosine >= Q8 0.998 / Q4 0.965 + top-1 agreement.
+// NPU silicon. Gate: cosine >= Q8 0.998 + top-1 agreement.
 // Plus: full PredictFrame runs twice with identical codes (determinism).
 
 #include <cassert>
@@ -120,7 +120,6 @@ int main() {
     return 1;
   }
   TestPredictor(engine, mbufo::core::npu::NpuQuantMode::kQ8Bfp16);
-  TestPredictor(engine, mbufo::core::npu::NpuQuantMode::kQ4Q4nx);
   std::puts("PREDICTOR_DECODE_CONSISTENCY_PASS");
   return 0;
 }

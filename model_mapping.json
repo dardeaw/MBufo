@@ -1387,8 +1387,7 @@
       },
       "supported_backends": [
         "gpu_hip",
-        "npu_q8_bfp16",
-        "npu_q4_q4nx"
+        "npu_q8_bfp16"
       ],
       "recommended_backend": "gpu_hip",
       "npu_spec": {
@@ -1401,7 +1400,7 @@
       ],
       "status": "production_gpu_plus_npu_verified",
       "default_subdir": "qwen3-asr-1.7b",
-      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) / Q4 (q4nx) at load time (no pre-quantized Q4/Q8 HF files needed)."
+      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) at load time (no pre-quantized Q4/Q8 HF files needed)."
     },
     {
       "id": "qwen3-tts-12hz-1.7b",
@@ -1438,8 +1437,7 @@
       },
       "supported_backends": [
         "gpu_hip",
-        "npu_q8_bfp16",
-        "npu_q4_q4nx"
+        "npu_q8_bfp16"
       ],
       "recommended_backend": "gpu_hip",
       "npu_spec": {
@@ -1452,7 +1450,7 @@
       ],
       "status": "production_gpu_plus_npu_verified",
       "default_subdir": "qwen3-tts-1.7b-base",
-      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) / Q4 (q4nx) at load time (no pre-quantized Q4/Q8 HF files needed)."
+      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) at load time (no pre-quantized Q4/Q8 HF files needed)."
     },
     {
       "id": "qwen-image-2.1",
@@ -1635,10 +1633,9 @@
         "recommended": "q4_q4nx"
       },
       "supported_backends": [
-        "npu_q8_bfp16",
-        "npu_q4_q4nx"
+        "npu_q8_bfp16"
       ],
-      "recommended_backend": "npu_q4_q4nx",
+      "recommended_backend": "npu_q8_bfp16",
       "npu_spec": {
         "runtime": "npu_quant_models",
         "kernel_dir_quant": "quant_gemm",
@@ -1648,7 +1645,7 @@
       "http_routes": [],
       "status": "npu_runtime_verified_no_http",
       "default_subdir": "flux2-klein-4b",
-      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) / Q4 (q4nx) at load time (no pre-quantized Q4/Q8 HF files needed)."
+      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) at load time (no pre-quantized Q4/Q8 HF files needed)."
     },
     {
       "id": "z-image-turbo",
@@ -1681,10 +1678,9 @@
         "recommended": "q4_q4nx"
       },
       "supported_backends": [
-        "npu_q8_bfp16",
-        "npu_q4_q4nx"
+        "npu_q8_bfp16"
       ],
-      "recommended_backend": "npu_q4_q4nx",
+      "recommended_backend": "npu_q8_bfp16",
       "npu_spec": {
         "runtime": "npu_quant_models",
         "kernel_dir_quant": "quant_gemm",
@@ -1694,7 +1690,7 @@
       "http_routes": [],
       "status": "npu_runtime_verified_no_http",
       "default_subdir": "z-image-turbo",
-      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) / Q4 (q4nx) at load time (no pre-quantized Q4/Q8 HF files needed)."
+      "note": "Download BF16 safetensors; NPU quantizes weights to Q8 (bfp16ebs8) at load time (no pre-quantized Q4/Q8 HF files needed)."
     }
   ]
 }

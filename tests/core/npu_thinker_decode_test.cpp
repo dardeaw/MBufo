@@ -3,7 +3,7 @@
 // Path A (servable): Prefill(T=4) then DecodeStep(5th row) through the KV
 // cache. Path B (reference): Prefill(T=5) full sequence. Both run ALL 28
 // thinker layers on NPU silicon via ThinkerNpuDecoder (no FP32 dual path).
-// Gate: cosine(A, B) >= Q8 0.998 / Q4 0.965 + top-1 agreement.
+// Gate: cosine(A, B) >= Q8 0.998 + top-1 agreement.
 
 #include <cassert>
 #include <cmath>
@@ -93,7 +93,6 @@ int main() {
     return 1;
   }
   TestDecodeConsistency(engine, mbufo::core::npu::NpuQuantMode::kQ8Bfp16);
-  TestDecodeConsistency(engine, mbufo::core::npu::NpuQuantMode::kQ4Q4nx);
   std::puts("THINKER_DECODE_CONSISTENCY_PASS");
   return 0;
 }
