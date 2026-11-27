@@ -195,6 +195,72 @@ int Bge(bool ref_mode, const std::string& gguf, const std::string& file,
   return 0;
 }
 
+// bge-m3 through the engine's own NPU path (EngineModel::LoadNpuWeights /
+// RunNpuCls) vs the independent CPU F32 forward. Gate: cos >= 0.998.
+int BgeCheck(const std::string& gguf) {
+  std::string err;
+  auto model = mbufo::models::bge_m3::ModelRegistry::Instance().Create(
+      "bge-m3", gguf, &err);
+  if (!model) {
+    std::cerr << "load failed: " << err << "\n";
+    return 2;
+  }
+  const auto& cfg = model->Config();
+  const std::size_t H = cfg.hidden_size;
+  std::vector<std::vector<float>> cpu;
+  std::vector<std::vector<std::uint32_t>> ids;
+  for (const auto& t : kTexts) {
+    auto e = model->Tokenizer().Encode(t, 2040);
+    if (!e) {
+      std::cerr << "tokenize failed\n";
+      return 2;
+    }
+    ids.push_back(*e);
+    auto scratch =
+        mbufo::models::bge_m3::BgeM3Scratch::Create(cfg, ids.back().size());
+    std::vector<float> hid(ids.back().size() * H);
+    if (!mbufo::models::bge_m3::CpuForward(model->F32(), ids.back(), scratch,
+                                           hid)) {
+      std::cerr << "cpu forward failed\n";
+      return 2;
+    }
+    cpu.emplace_back(hid.begin(), hid.begin() + H);
+  }
+  if (!model->LoadNpuWeights("", &err)) {
+    std::cerr << "npu load failed: " << err << "\n";
+    return 2;
+  }
+  double worst = 1;
+  for (int rep = 0; rep < 2; ++rep) {
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      std::vector<float> cls;
+      double ms = 0;
+      if (!model->RunNpuCls(ids[i], &cls, &ms, &err)) {
+        std::cerr << "npu run failed: " << err << "\n";
+        return 2;
+      }
+      if (rep == 0)
+        continue;
+      const double c = Cosine(cls, cpu[i]);
+      worst = std::min(worst, c);
+      std::printf("text%zu tokens=%zu ms=%.1f cos(npu,cpu)=%.5f\n", i,
+                  ids[i].size(), ms, c);
+    }
+  }
+  std::printf("WORST cos(npu,cpu)=%.5f\n", worst);
+  model->UnloadNpuWeights();
+  std::string after;
+  if (model->RunNpuCls(ids[0], nullptr, nullptr, &after)) {
+    std::cerr << "FAIL: RunNpuCls succeeded after UnloadNpuWeights\n";
+    return 1;
+  }
+  if (worst < 0.998) {
+    std::cerr << "FAIL: worst cos " << worst << " < 0.998\n";
+    return 1;
+  }
+  return 0;
+}
+
 // --no-host: NPU only (clean latency numbers; no host-fp32 reference).
 int QwenEmbNoHost(const std::string& gguf) {
   std::string err;
@@ -452,7 +518,8 @@ int main(int argc, char** argv) {
   const std::string mode = argv[1];
   const std::string a = argv[2];
   // CTest: weights absent on this machine => skip (SKIP_RETURN_CODE 77).
-  if ((mode.rfind("qwen-", 0) == 0 || mode == "gemma-emb") &&
+  if ((mode.rfind("qwen-", 0) == 0 || mode == "gemma-emb" ||
+       mode == "bge-check") &&
       !std::filesystem::exists(a)) {
     std::cout << "SKIP: weights not found: " << a << "\n";
     return 77;
@@ -478,6 +545,8 @@ int main(int argc, char** argv) {
     return QwenRerank(a, has("--host-only"));
   if (mode == "gemma-emb")
     return GemmaEmb(a, has("--host-only"));
+  if (mode == "bge-check")
+    return BgeCheck(a);
   std::cerr << "unknown mode\n";
   return 2;
 }

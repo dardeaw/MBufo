@@ -63,6 +63,7 @@ bool EngineModel::LoadNpuWeights(const std::string& kernel_dir,
   } else {
     ok = state->runtime.Init(*reader_, config_, dir, error_msg);
   }
+  std::lock_guard<std::mutex> lock(npu_mu_);
   if (!ok) {
     npu_.reset();
     npu_weights_resident_ = false;
@@ -80,20 +81,42 @@ bool EngineModel::LoadNpuWeights(const std::string& kernel_dir,
 #endif
 }
 
+void EngineModel::UnloadNpuWeights() {
+#ifdef MBUFO_ENABLE_NPU
+  std::shared_ptr<NpuState> state;
+  {
+    std::lock_guard<std::mutex> lock(npu_mu_);
+    state = std::move(npu_);
+    npu_weights_resident_ = false;
+  }
+  if (state != nullptr && state->use_graph) {
+    state->graph_runtime.Release();  // waits for an in-flight run
+  }
+  // The dedicated runtime (q4) frees its BOs when the last reference drops.
+#endif
+}
+
 bool EngineModel::TryNpuEmbed(std::span<const std::uint32_t> ids,
                               std::optional<EmbedResult>* out,
                               std::string* error_msg) {
+  std::shared_ptr<NpuState> st;
+  bool resident = false;
+  {
+    std::lock_guard<std::mutex> lock(npu_mu_);
+    resident = npu_weights_resident_;
+    st = npu_;
+  }
   const bool npu_ready =
       npu_scheduler_ != nullptr && !npu_scheduler_->device_lost();
-  if (npu::DecideNpuEmbed(npu_config_, ids.size(), npu_weights_resident_,
-                          npu_ready) != npu::EmbedNpuRoute::kIron ||
-      npu_scheduler_ == nullptr || !npu_weights_resident_ || npu_ == nullptr) {
+  if (npu::DecideNpuEmbed(npu_config_, ids.size(), resident, npu_ready) !=
+          npu::EmbedNpuRoute::kIron ||
+      npu_scheduler_ == nullptr || !resident || st == nullptr) {
     return false;
   }
 #ifdef MBUFO_ENABLE_NPU
   const std::size_t max_ids =
-      npu_->use_graph ? mbufo::core::npu::NpuGraphEmbGemma2::kMaxTokens
-                      : mbufo::core::npu::NpuEmbGemma2Runtime::kFixedSeqLen;
+      st->use_graph ? mbufo::core::npu::NpuGraphEmbGemma2::kMaxTokens
+                    : mbufo::core::npu::NpuEmbGemma2Runtime::kFixedSeqLen;
   if (ids.size() > max_ids) {
     return false;
   }
@@ -109,10 +132,10 @@ bool EngineModel::TryNpuEmbed(std::span<const std::uint32_t> ids,
           .coalesce_key = "embgemma2-s128"},
       [&]() {
         mbufo::core::npu::NpuWorkResult wr;
-        wr.ok = npu_->use_graph ? npu_->graph_runtime.Forward(
-                                      ids, &values, &prefill_ms, &run_err)
-                                : npu_->runtime.Forward(ids, &values,
-                                                        &prefill_ms, &run_err);
+        wr.ok =
+            st->use_graph
+                ? st->graph_runtime.Forward(ids, &values, &prefill_ms, &run_err)
+                : st->runtime.Forward(ids, &values, &prefill_ms, &run_err);
         wr.error = wr.ok ? "ok" : run_err;
         return wr;
       });

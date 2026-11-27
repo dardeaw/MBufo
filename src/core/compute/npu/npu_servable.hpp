@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -241,11 +242,17 @@ public:
   using WarmFn = std::function<bool(std::string*)>;
   using CloseFn = std::function<void()>;
 
-  NpuFnServable(std::string id, OpenFn open, WarmFn warm, CloseFn close = {})
+  NpuFnServable(std::string id, OpenFn open, WarmFn warm, CloseFn close)
       : id_(std::move(id)),
         open_(std::move(open)),
         warm_(std::move(warm)),
-        close_(std::move(close)) {}
+        close_(std::move(close)) {
+    // Eject is mandatory: a servable that cannot release its weights is a bug.
+    if (!close_) {
+      throw std::invalid_argument("NpuFnServable '" + id_ +
+                                  "' requires a Close implementation");
+    }
+  }
 
   [[nodiscard]] std::string_view id() const noexcept override { return id_; }
 
@@ -314,6 +321,20 @@ public:
   void Put(const std::string& id, std::shared_ptr<INpuServable> s) {
     std::lock_guard<std::mutex> lock(mu_);
     map_[id] = std::move(s);
+  }
+  /// Eject by key: runs the servable's Close (+ heap trim) first, then drops
+  /// the entry. Must be called while the model object behind Close is alive.
+  void Unload(const std::string& id) {
+    std::shared_ptr<INpuServable> s;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = map_.find(id);
+      if (it == map_.end())
+        return;
+      s = it->second;
+      map_.erase(it);
+    }
+    s->Unload();
   }
   void Remove(const std::string& id) {
     std::lock_guard<std::mutex> lock(mu_);

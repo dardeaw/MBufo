@@ -11,9 +11,11 @@
 //
 // Compiled only when MBUFO_ENABLE_NPU=ON.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -225,6 +227,10 @@ public:
   /// call, like NpuEmbGemma2Runtime does. Set before Prepare().
   void set_resident_weights(bool v) noexcept { resident_weights_ = v; }
 
+  /// Drops every packed weight / buffer and the engine reference. Waits for an
+  /// in-flight Run (they share one mutex); later Runs fail with "not prepared".
+  void Release();
+
   [[nodiscard]] bool prepared() const noexcept { return prepared_; }
   [[nodiscard]] const Graph& graph() const noexcept { return graph_; }
 
@@ -241,7 +247,8 @@ private:
     return it == bufs_.end() ? nullptr : &it->second;
   }
 
-  bool prepared_{false};
+  mutable std::mutex mu_;
+  std::atomic<bool> prepared_{false};
   bool resident_weights_{true};
   Graph graph_;
   const WeightStore* weights_{nullptr};

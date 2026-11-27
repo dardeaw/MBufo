@@ -1614,9 +1614,11 @@ HttpResponse ModelAdminService::HandleEject(const HttpRequest& req) {
                     "not_loaded");
   const auto mem_before = QueryMemorySnapshot(probe_);
   std::string error;
+  // Release the NPU weights through the servable contract while the backend
+  // (which owns the model) is still alive, then drop the backend.
+  mbufo::core::npu::NpuServableRegistry::Global().Unload(id);
   if (!registry_->Remove(id, &error))
     return AdminErr(409, "Conflict", error, "eject_failed");
-  mbufo::core::npu::NpuServableRegistry::Global().Remove(id);
 #if defined(__GLIBC__)
   ::malloc_trim(0);
 #endif

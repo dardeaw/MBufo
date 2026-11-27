@@ -126,7 +126,7 @@ in-process track (§1).
   AND one dummy inference completed. Warmup policy is kRequired or kBestEffort.
   The state machine has no hardware dependency; tests/core/npu_servable_contract_test.cpp covers it.
 - src/cli/serve/npu_warmup.hpp: RunNpuWarmup, soft-fail, logs event=npu_warmup.
-  MBUFO_NPU_WARMUP=0 disables all NPU warmups; MBUFO_SIDECAR_WARMUP=0 disables sidecar warmups.
+  Warmups always run (no environment switch): a failed warmup is logged and reported as warm=false, never fails the load.
 - In-process warmups run right after weights are resident: bge-m3 (5 and 70 tokens, spans two 64-row chunks),
   bge-reranker, EmbeddingGemma2 (8 tokens), and NpuServableHost::Warm (engine-level M=1 GEMM per quant shape,
   plus a real dummy decode for ASR/TTS and a reduced Euler step for FLUX/Z-Image).
@@ -163,10 +163,9 @@ in-process track (§1).
   declared pooling_type loads the embedding model; one whose name contains
   "rerank" loads the reranker (id qwen3-embedding / qwen3-reranker, through
   LoadNpuServable + warmup, Q8 only). /v1/embeddings and /v1/reranking dispatch to
-  them. bge-m3 / bge-reranker keep the dedicated BF16 runtime by default;
-  MBUFO_NPU_BGE_RUNTIME=graph selects the graph runtime.
-- EmbeddingGemma2 stays on its own runtime (it needs local/global attention and
-  PLE ops that are not in the graph yet).
+  them. The graph runtime is the only bge-m3 / bge-reranker NPU path (the dedicated
+  BF16 NpuBgeRuntime stays in the tree only as a regression reference for tests).
+- EmbeddingGemma2 runs on the graph too (see "EmbeddingGemma 2 on the op graph").
 - Driver: tests/core/npu_graph_models_test.cpp (modes bge-ref, bge-graph, qwen-emb,
   qwen-rerank; hardware needed except --host-only).
 - Measured (XDNA2 host, 11/27, NPU only, warm): Qwen3-Embedding-0.6B 43-70 ms for 8-59
@@ -210,3 +209,18 @@ trims the heap, and each model is published in `NpuServableRegistry`, so
 (9 models, 13 load/eject rounds): eject removes the model from `models` and
 `npu_servables`, and RSS returns to the process baseline (~290 MB after the first
 NPU load: the shared engine/HRX session stays resident by design).
+
+### Eject contract for every model, one shared engine
+
+- `LoadNpuServable` now requires a `close` callback and `NpuFnServable` rejects an empty
+  one: bge-m3, bge-reranker, EmbeddingGemma 2 (`UnloadNpuWeights`) and Qwen3
+  (`NpuQwen3Encoder::Release`) release their NPU weights themselves. `/admin/eject` calls
+  `NpuServableRegistry::Unload(id)` first (while the backend that owns the model is alive),
+  then drops the backend. `GraphExecutor::Release()` waits for an in-flight run.
+- ASR/TTS/FLUX/Z-Image (`NpuServableHost`) use the same process-wide `SharedQuantEngine` as
+  the graph models and drop it when the last one is ejected. Before this, the host kept a
+  private engine alive forever and a later Qwen3 load failed with `hrx_buffer_allocate failed`.
+- Hardware check: 13 interleaved load/eject rounds across all 9 models, every model
+  `warm=true`, RSS back to ~242 MB after every eject, no allocation failures.
+- Gate: ctest `npu_graph_bge_m3_test` (bge-m3 engine path vs CPU F32 forward, cos >= 0.998,
+  and RunNpuCls must fail after `UnloadNpuWeights`).

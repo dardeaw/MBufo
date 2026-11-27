@@ -34,6 +34,8 @@ public:
                                 std::vector<float>* cls_out, double* prefill_ms,
                                 std::string* error);
   [[nodiscard]] bool resident() const noexcept { return exec_.prepared(); }
+  /// Eject: free the packed weights (waits for an in-flight run).
+  void Release() { exec_.Release(); }
   [[nodiscard]] const graph::RunStats& last_stats() const noexcept {
     return stats_;
   }
@@ -76,6 +78,8 @@ public:
                              std::vector<float>* out, double* ms,
                              std::string* error);
   [[nodiscard]] bool resident() const noexcept { return exec_.prepared(); }
+  /// Eject: free the packed weights (waits for an in-flight run).
+  void Release() { exec_.Release(); }
   [[nodiscard]] const graph::RunStats& last_stats() const noexcept {
     return stats_;
   }
@@ -115,6 +119,9 @@ public:
   [[nodiscard]] bool ScoreIds(std::span<const std::uint32_t> ids, float* score,
                               float* logit_yes, float* logit_no, double* ms,
                               std::string* error);
+
+  /// Eject: free the packed weights (waits for an in-flight run).
+  void Release() { exec_.Release(); }
 
   [[nodiscard]] Role role() const noexcept { return role_; }
   [[nodiscard]] std::size_t hidden() const noexcept { return cfg_.hidden; }

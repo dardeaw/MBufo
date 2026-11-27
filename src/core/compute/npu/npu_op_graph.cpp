@@ -467,6 +467,7 @@ Graph BuildEmbGemma2Graph(const EmbGemma2GraphConfig& c) {
 bool GraphExecutor::Prepare(Graph graph, const WeightStore* weights,
                             std::shared_ptr<NpuQuantGemmEngine> engine,
                             LinearBackend backend, std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
   prepared_ = false;
   packed_.clear();
   hostw_.clear();
@@ -570,6 +571,7 @@ bool GraphExecutor::Prepare(Graph graph, const WeightStore* weights,
 bool GraphExecutor::Run(std::span<const std::uint32_t> ids,
                         std::vector<float>* out, RunStats* stats,
                         std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
   if (!prepared_) {
     Fail(error, "graph: not prepared");
     return false;
@@ -1029,6 +1031,21 @@ std::shared_ptr<NpuQuantGemmEngine> SharedQuantEngine(std::string* error) {
 void ReleaseSharedQuantEngine() {
   std::lock_guard<std::mutex> lock(g_engine_mu);
   g_engine.reset();
+}
+
+}  // namespace mbufo::core::npu::graph
+
+namespace mbufo::core::npu::graph {
+
+void GraphExecutor::Release() {
+  std::lock_guard<std::mutex> lock(mu_);
+  prepared_ = false;
+  packed_.clear();
+  hostw_.clear();
+  bias_.clear();
+  small_.clear();
+  bufs_.clear();
+  engine_.reset();
 }
 
 }  // namespace mbufo::core::npu::graph

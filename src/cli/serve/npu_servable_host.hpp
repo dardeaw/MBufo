@@ -15,6 +15,7 @@
 
 #include "src/cli/serve/npu_warmup.hpp"
 #include "src/core/compute/npu/flux_dit_npu.hpp"
+#include "src/core/compute/npu/npu_op_graph.hpp"
 #include "src/core/compute/npu/npu_quant_gemm.hpp"
 #include "src/core/compute/npu/npu_servable.hpp"
 #include "src/core/compute/npu/npu_thinker_decode.hpp"
@@ -53,12 +54,13 @@ public:
       return true;
     }
     mode_ = mode;
-    if (!engine_ready_) {
-      if (!engine_.Init("/mnt/nvme-data/mbufo-models/npu-kernels/quant_gemm",
-                        error)) {
+    // One process-wide quant engine (one HRX session, one scratch-BO set)
+    // shared with the op-graph models; dropped again when the last servable
+    // here is ejected, so it never competes with them for buffer objects.
+    if (engine_ == nullptr) {
+      engine_ = npu::graph::SharedQuantEngine(error);
+      if (engine_ == nullptr)
         return false;
-      }
-      engine_ready_ = true;
     }
     auto s = std::make_shared<npu::NpuFnServable>(
         id,
@@ -70,9 +72,11 @@ public:
     npu::NpuLoadArgs args;
     args.artifact = artifact;
     args.quant = quant;
-    args.warmup = NpuWarmupEnabled();
+    args.warmup = true;
     args.warmup_policy = npu::NpuWarmupPolicy::kBestEffort;
     if (!s->Load(args, error)) {
+      if (servables_.empty())
+        engine_.reset();
       return false;
     }
     const auto st = s->Status();
@@ -103,6 +107,8 @@ public:
     }
     it->second->Unload();
     servables_.erase(it);
+    if (servables_.empty())
+      engine_.reset();  // decoders are closed; release the shared engine
     mbufo::core::npu::NpuServableRegistry::Global().Remove(id);
     return true;
   }
@@ -152,17 +158,17 @@ private:
     namespace npu = mbufo::core::npu;
     if (id == "qwen3-asr-1.7b") {
       auto d = std::make_unique<npu::ThinkerNpuDecoder>();
-      if (!d->Open(artifact, &engine_, mode, {}, error))
+      if (!d->Open(artifact, engine_.get(), mode, {}, error))
         return false;
       asr_ = std::move(d);
       return true;
     }
     if (id == "qwen3-tts-12hz-1.7b") {
       auto t = std::make_unique<npu::TalkerNpuDecoder>();
-      if (!t->Open(artifact, &engine_, mode, {}, error))
+      if (!t->Open(artifact, engine_.get(), mode, {}, error))
         return false;
       auto p = std::make_unique<npu::PredictorNpuDecoder>();
-      if (!p->Open(artifact, &engine_, mode, {}, error))
+      if (!p->Open(artifact, engine_.get(), mode, {}, error))
         return false;
       frame_.Bind(t.get(), p.get());
       talker_ = std::move(t);
@@ -171,13 +177,13 @@ private:
     }
     if (id == "flux2-klein-4b") {
       auto d = std::make_unique<npu::dit::FluxDitNpu>();
-      if (!d->Open(artifact, &engine_, mode, {}, error))
+      if (!d->Open(artifact, engine_.get(), mode, {}, error))
         return false;
       flux_ = std::move(d);
       return true;
     }
     auto d = std::make_unique<npu::dit::ZImageDitNpu>();
-    if (!d->Open(artifact, &engine_, mode, {}, error))
+    if (!d->Open(artifact, engine_.get(), mode, {}, error))
       return false;
     zimg_ = std::move(d);
     return true;
@@ -206,10 +212,10 @@ private:
     for (const std::size_t kn : {std::size_t{256}, std::size_t{1024}}) {
       std::vector<float> w(kn * kn, 0.01f), a(kn, 0.5f), c(kn);
       npu::QuantWeightMatrix mat;
-      if (!engine_.PackMatrixKN(w.data(), kn, kn, mode_, false, &mat, e)) {
+      if (!engine_->PackMatrixKN(w.data(), kn, kn, mode_, false, &mat, e)) {
         return false;
       }
-      if (!engine_.Gemm(a.data(), 1, mat, c.data(), nullptr, nullptr, e)) {
+      if (!engine_->Gemm(a.data(), 1, mat, c.data(), nullptr, nullptr, e)) {
         return false;
       }
     }
@@ -252,8 +258,7 @@ private:
   }
 
   mutable std::mutex mutex_;
-  mbufo::core::npu::NpuQuantGemmEngine engine_;
-  bool engine_ready_ = false;
+  std::shared_ptr<mbufo::core::npu::NpuQuantGemmEngine> engine_;
   mbufo::core::npu::NpuQuantMode mode_ =
       mbufo::core::npu::NpuQuantMode::kQ8Bfp16;
   std::map<std::string, std::shared_ptr<mbufo::core::npu::NpuFnServable>>

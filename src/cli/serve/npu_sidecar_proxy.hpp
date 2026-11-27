@@ -135,7 +135,6 @@ class SidecarManager {
   // Send one dummy inference to a running sidecar so its first real request
   // does not pay the cold-start cost. Safe to call repeatedly. Returns true
   // when the warmup request succeeded (or none is defined for this sidecar).
-  // Disabled globally with MBUFO_SIDECAR_WARMUP=0.
   [[nodiscard]] bool Warmup(const std::string& id, std::string* error);
   [[nodiscard]] bool IsRunning(const std::string& id);
   [[nodiscard]] std::vector<Status> ListRunning();
