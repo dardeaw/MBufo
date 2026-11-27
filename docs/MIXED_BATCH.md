@@ -232,7 +232,7 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 | GPT-OSS | serial (no multi-token decode) | native (`Session::EvaluateBatch`, one layer-synchronous pass, every lane on its own single-token decode core) | **yes, plain advances** (`AdvanceBatchWithPrefillChunk` via `Session::EvaluateBatchWithChunk`: lanes and one prefill block share one layer pass, bit-identical to Sync + Evaluate; the chunk stays inside one 256-row Sync block so it may consume fewer tokens than budgeted, and recomputes the rows of that block already prefilled); `DecodeBatchWithPrefillChunk` refuses explicitly |
 | Laguna 2.1 | serial (no multi-token decode) | native (`Session::AdvanceBatchWithChunk`, one in-order stream, per-lane decode core) | **yes** plain advances (`AdvanceBatchWithPrefillChunk`; `DecodeBatchWithPrefillChunk` refuses) |
 | Llama (Q8_0 weights) | serial | native (packed lanes, up to 8 per pass) | **yes** (`AdvanceBatchWithPrefillChunk`; `DecodeBatchWithPrefillChunk` refuses, no multi-token decode) |
-| Inkling | serial | serial | no (kept `MBUFO_RUNNER_NO_MIXED_BATCH`; blocked, see "Inkling" below) |
+| Inkling | serial | native without a DSpark draft (`Session::AdvanceBatchWithChunk`, one in-order stream, each lane relaunches its own captured decode graph) | **yes** plain advances without a DSpark draft (`AdvanceBatchWithPrefillChunk`; `DecodeBatchWithPrefillChunk` refuses); DSpark runners keep the serial fallbacks and advertise `mixed_prefill_decode = false` |
 
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
@@ -322,33 +322,33 @@ the next snapshot/checkpoint/boundary frontier like `PrefillWithDecoders`, and
   decode, `MBUFO_MIXED_BATCH` 1 vs 0, 13 merged steps, all five completion SHAs identical for f16 and q8 KV).
 
 
-### Inkling: why there is no native batch path yet
+### Inkling notes (native advance + merged advance/prefill)
 
-Inkling sessions each own a HIP stream, a whole-forward decode graph and a
-private arena, and `Session::ForwardLayer` is one monolithic per-session call.
-There is no layer-synchronous multi-session pass to hang lanes and a chunk on,
-and the two cheap substitutes do not work:
+The earlier "blocked" conclusion assumed lanes had to run concurrently or share a layer pass. Neither is needed:
 
-- **Concurrent per-session streams** (launch every lane graph and the chunk
-  without syncing, then collect) would be bit-identical by construction, but
-  core kernels use process-wide single-stream scratch: `g_gemv_q8_scratch`
-  (`gemv_wave32_sdot4.hip`, also reallocated on growth) and the
-  `g_moe_u_*` MoE routing buffers (`moe_fused.hip`). Two sessions in flight
-  at once race on them. They would have to become per-session/per-stream
-  arguments first (16 `QuantizeToQ8Scratch` call sites plus the MoE unique
-  buckets); that touches shared core used by every model.
-- **A layer-synchronous single-stream pass** is safe but gains nothing while
-  every lane keeps its own decode core (no shared weight read), and it loses
-  the decode graph. Sharing the GEMMs instead is not bit-identical to
-  separate decode.
-
-Also note `Session::Sync` restarts from position 0 whenever the prompt is not
-identical to the retained history (the rolling sconv state cannot rewind), so a
-chunked `Prefill` recomputes the whole prefix on each chunk. A merged chunk
-must keep that behaviour to stay bit-identical to the unmixed path; making
-`Sync` continue a pure extension would help both paths but changes chunk
-alignment (and so numerics) versus today.
-
+- Design: `Session::AdvanceBatchWithChunk` runs everything on ONE in-order stream (the chunk session's, else the first
+  lane's) with one host sync. Each lane relaunches its own already captured whole-forward decode graph
+  (`hipGraphLaunch(exec, shared_stream)`: a graph exec is not bound to the stream it was captured on) after copying its
+  token and position into its own `d_tokens_`/`d_pos_`, then its logits copy; the chunk runs its unchanged `Sync(prefix)`.
+  Nothing is in flight concurrently, so the process-wide single-stream scratch (`g_gemv_q8_scratch`, `g_moe_u_*`) is
+  never raced and no core kernel changed. No weight sharing, so lanes are bit-identical to `Evaluate` by construction.
+- A lane whose decode graph is not captured yet (its first decode) takes its normal capturing `Evaluate` before anything
+  is enqueued. Debug/parity/profile env modes and DSpark sessions (the forward also captures draft context) are refused
+  before any state moves and fall back to the serial path.
+- `Sync` is untouched: on a non-extension prompt it still restarts at position 0, so every chunk (merged or not)
+  recomputes the whole prefix `[0, next_position)` in 512-row grid steps. The merged chunk keeps exactly that, so chunk
+  alignment and numerics equal the unmixed run (the state after a Sync depends only on the prefix). Consequence: no speedup
+  for the chunk (still quadratic over a chunked prefill); the gain is one host sync for the lanes. Making `Sync` continue a
+  pure extension would help both paths but changes chunk alignment (and numerics) versus today.
+- `MBUFO_INKLING_MIXED_TRACE=1` prints one stderr line per merged step.
+- Verification (Inkling-2-Mini UD-Q4_K_XL, q8 KV, greedy, ~6k-token prompt prefilling while 4 streams decode 500 tokens
+  each, `MBUFO_MIXED_BATCH` 1 vs 0, 3 runs each): the four decode streams have identical completion SHAs in every run,
+  mixed and unmixed, and equal the pre-change (serial) binary's; the pool trace shows 16 merged steps (up to 4 lanes) and
+  `MBUFO_INKLING_MIXED_TRACE` confirms the native path ran. The prefilling stream's own completion is NOT usable as a
+  bit-identity check: Inkling's prefill is run-to-run non-deterministic on the unmodified base binary (the same 3.3k-token
+  prompt sent alone four times to a pre-change server gave four different completions; MoE scatter-add uses atomics in
+  `kernels.hip.cpp` / `moe_fused.hip`), so any two runs of that stream differ with or without mixing. The chunk code path is
+  the unchanged `Sync`, so mixing cannot change its arithmetic.
 
 ### Why DeepSeek V4 Flash has no merged prefill + decode
 

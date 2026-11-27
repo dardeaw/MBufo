@@ -4388,10 +4388,95 @@ class InklingTextRunnerState final : public TextRunnerState {
 
 class InklingTextRunner final : public HipTextModelRunner {
  public:
-  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  // Batch contract (see TextModelRunner): DecodeBatch is serial; AdvanceBatch and the merged plain-advance +
+  // prefill chunk are native when the runner has no DSpark draft. Native means one in-order engine pass on one
+  // stream with one host sync: every lane relaunches its own captured decode graph (unchanged arithmetic) and the
+  // chunk runs its unchanged Sync (which still restarts at position 0 on a non-extension prompt, exactly like the
+  // unmixed Prefill). No weight sharing and no concurrency (core scratch is process-wide, single-stream). With a
+  // DSpark draft the session captures draft context per forward, so those runners keep the serial fallbacks.
   MBUFO_RUNNER_SERIAL_DECODE_BATCH();
-  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
-  MBUFO_RUNNER_NO_MIXED_BATCH();
+  static constexpr std::size_t kMaxBatchLanes = 16;
+
+  void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const override {
+    if (use_dspark() || advances.size() < 2 || advances.size() > kMaxBatchLanes) return SerialAdvanceBatch(advances);
+    std::vector<InklingSession*> lanes;
+    std::vector<std::int32_t> tokens;
+    for (const auto& advance : advances) {
+      if (advance.token > static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max()))
+        return SerialAdvanceBatch(advances);
+      lanes.push_back(&dynamic_cast<InklingTextRunnerState&>(advance.state.get()).session());
+      tokens.push_back(static_cast<std::int32_t>(advance.token));
+    }
+    std::string error;
+    bool refused = false;
+    if (!InklingSession::AdvanceBatchWithChunk(lanes, tokens, nullptr, {}, &error, &refused)) {
+      if (refused) return SerialAdvanceBatch(advances);
+      const auto failure = std::make_exception_ptr(std::runtime_error("Inkling batch decode failed: " + error));
+      for (const auto& advance : advances) {
+        if (!advance.failure) std::rethrow_exception(failure);
+        *advance.failure = failure;
+      }
+      return;
+    }
+    for (const auto& advance : advances) {
+      auto& st = dynamic_cast<InklingTextRunnerState&>(advance.state.get());
+      st.set_position(st.position() + 1);
+    }
+  }
+
+  [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
+      std::span<const TextRunnerAdvance> advances, std::span<std::exception_ptr> advance_failures,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt, std::size_t offset,
+      std::size_t max_input_tokens, TextPrefillStep& chunk_step) const override {
+    auto& chunk = dynamic_cast<InklingTextRunnerState&>(prefill_state);
+    if (use_dspark() || advances.empty() || advances.size() > kMaxBatchLanes || offset != chunk.position() ||
+        offset >= prompt.size() || max_input_tokens == 0)
+      throw MixedBatchRefused("inkling mixed batch preconditions unmet");
+    const std::size_t consumed = std::min(max_input_tokens, prompt.size() - offset);
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_) throw MixedBatchRefused("inkling mixed batch prompt exceeds context");
+    std::vector<InklingSession*> lanes;
+    std::vector<std::int32_t> tokens;
+    for (const auto& advance : advances) {
+      if (advance.token > static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max()))
+        throw MixedBatchRefused("inkling mixed batch token exceeds range");
+      auto& lane = dynamic_cast<InklingTextRunnerState&>(advance.state.get());
+      if (&lane == &chunk) throw MixedBatchRefused("inkling mixed batch lane is the chunk state");
+      lanes.push_back(&lane.session());
+      tokens.push_back(static_cast<std::int32_t>(advance.token));
+    }
+    std::vector<std::int32_t> prefix;
+    prefix.reserve(next_position);
+    for (std::size_t i = 0; i < next_position; ++i) prefix.push_back(static_cast<std::int32_t>(prompt[i]));
+    std::string error;
+    bool refused = false;
+    if (!InklingSession::AdvanceBatchWithChunk(lanes, tokens, &chunk.session(), prefix, &error, &refused)) {
+      if (refused) throw MixedBatchRefused("inkling mixed batch refused cleanly: " + error);
+      chunk.set_position(0);
+      const auto failure = std::make_exception_ptr(std::runtime_error("Inkling mixed advance failed: " + error));
+      for (std::size_t i = 0; i < advances.size(); ++i) {
+        if (i < advance_failures.size()) advance_failures[i] = failure;
+      }
+      return false;
+    }
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      if (i < advance_failures.size()) advance_failures[i] = nullptr;
+      auto& lane = dynamic_cast<InklingTextRunnerState&>(advances[i].state.get());
+      lane.set_position(lane.position() + 1);
+    }
+    chunk.set_position(next_position);
+    chunk_step = {.consumed_tokens = consumed, .decode_ready = next_position == prompt.size()};
+    static const bool trace = std::getenv("MBUFO_INKLING_MIXED_TRACE") != nullptr;
+    if (trace) std::fprintf(stderr, "[inkling-mixed] lanes=%zu chunk=%zu offset=%zu\n", advances.size(), consumed, offset);
+    return true;
+  }
+
+  // No multi-token merged verify pass for Inkling: explicit refusal.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchWithPrefillChunk(
+      std::span<const TextRunnerDecode>, TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+      std::size_t, TextPrefillStep&) const override {
+    RefuseMixedBatch("inkling has no merged multi-token decode");
+  }
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kInkling;
   }
@@ -4425,6 +4510,7 @@ class InklingTextRunner final : public HipTextModelRunner {
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0,
                 .prefix_reuse = false,
+                .mixed_prefill_decode = !use_dspark(),
             },
         .persistence = std::nullopt,
     };
@@ -4444,7 +4530,13 @@ class InklingTextRunner final : public HipTextModelRunner {
     };
   }
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
-    return {{.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    std::vector<TextExecutionPlan> plans{{.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    if (!use_dspark()) {
+      for (std::size_t width = 2; width <= 8; ++width) {
+        plans.push_back({.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+      }
+    }
+    return plans;
   }
   [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary> BuildConstraintVocabulary() const override {
     return std::make_shared<const sampling::ConstraintVocabulary>(
