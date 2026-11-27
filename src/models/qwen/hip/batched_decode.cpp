@@ -1,4 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
+#include <string>
 #include <cstdlib>
 #include <algorithm>
 #include <array>
@@ -32,16 +33,89 @@ constexpr std::size_t kMaxDecodeBatch = 8;
          type == core::GgmlType::kQ4_0_ROCMFP4_FAST;
 }
 
+// Diagnostic: MBUFO_QWEN_BATCH_GEMV=all (or a comma list of GGML type ids)
+// routes the shared batched projections through the per-row single-token GEMV
+// instead, to bisect which projection makes a batched lane differ from solo.
+[[nodiscard]] bool ForcePerRowGemv(core::GgmlType type) {
+  static const std::string spec = [] {
+    const char* e = std::getenv("MBUFO_QWEN_BATCH_GEMV");
+    return e != nullptr ? std::string(e) : std::string();
+  }();
+  if (spec.empty()) return false;
+  if (spec == "all") return true;
+  std::size_t begin = 0;
+  while (begin <= spec.size()) {
+    const auto end = std::min(spec.find(',', begin), spec.size());
+    if (end > begin &&
+        std::atoi(spec.substr(begin, end - begin).c_str()) ==
+            static_cast<int>(type))
+      return true;
+    begin = end + 1;
+  }
+  return false;
+}
+
+// Projection roles of the single-token decode step. Solo decode runs the
+// float-activation roles through fused kernels (QKV, SSM input, FFN gate/up)
+// and the remaining roles through GEMV with the shared Q8_1 prequant scratch.
+enum ProjectionRole : int {
+  kRoleOther = -1,
+  kRoleAttnQ = 0,
+  kRoleAttnK,
+  kRoleAttnV,
+  kRoleAttnOutput,
+  kRoleSsmQkv,
+  kRoleSsmGate,
+  kRoleSsmControl,
+  kRoleSsmOut,
+  kRoleFfnGateUp,
+  kRoleFfnDown,
+  kRoleLmHead,
+};
+
+constexpr int kVerifyRoleBase = 32;
+
+// Q8_0 projections of a masked role skip the Q8_1 prequant narrow route (an
+// INT8-activation kernel) and use the exact FP32-activation shared kernel,
+// which is what solo decode's fused QKV / SSM-input / gate-up kernels compute.
+// MBUFO_QWEN_BATCH_Q8_FLOAT: hex mask over ProjectionRole for ForwardTokenBatch
+// (default 0x177: every role solo decode computes in a fused FP32-activation
+// kernel: attention q/k/v, the three SSM input projections, FFN gate/up; the
+// SSM control role alone made a batched Qwen3.5-9B lane differ from solo, and
+// attention q/k/v is what a batched Qwen3.8-27B lane needed).
+// MBUFO_QWEN_VERIFY_Q8_FLOAT: same for ForwardVerificationBatch (default 0, the
+// DFlash verify arithmetic is unchanged unless asked).
+[[nodiscard]] bool Q8FloatRole(int role) {
+  static const auto parse = [](const char* name, std::uint32_t fallback) {
+    const char* e = std::getenv(name);
+    return e != nullptr ? static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16))
+                        : fallback;
+  };
+  static const std::uint32_t decode_mask = parse("MBUFO_QWEN_BATCH_Q8_FLOAT", 0x177U);
+  static const std::uint32_t verify_mask = parse("MBUFO_QWEN_VERIFY_Q8_FLOAT", 0U);
+  if (role < 0) return false;
+  return role >= kVerifyRoleBase ? ((verify_mask >> (role - kVerifyRoleBase)) & 1U) != 0
+                                 : ((decode_mask >> role) & 1U) != 0;
+}
+
 void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
                       float* output, std::size_t batch_size,
                       std::size_t output_size, std::size_t input_size,
                       hipStream_t stream,
-                      const QwenGpuScratchView& scratch) {
+                      const QwenGpuScratchView& scratch, int role = kRoleOther) {
+  if (ForcePerRowGemv(weight.type)) {
+    for (std::size_t row = 0; row < batch_size; ++row) {
+      LaunchGEMV(weight.data, weight.type, input + (row * input_size),
+                 output + (row * output_size), output_size, input_size, stream,
+                 nullptr, 0);
+    }
+    return;
+  }
   // preq-q81: Q8_0 narrow batch shapes run shared quantize -> narrow-GEMV
   // on the caller-arena scratch (§4.2); misses keep the exact shared /
   // legacy paths below bit-identical.
   if (weight.type == core::GgmlType::kQ8_0 && batch_size >= 1 &&
-      batch_size <= 8 &&
+      batch_size <= 8 && !Q8FloatRole(role) &&
       core::compute::gemm::DecideNarrowDecodePrequantRoute(
           /*weight_q8_0=*/true, /*gated=*/false, batch_size, input_size,
           output_size) ==
@@ -75,7 +149,9 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
 void LaunchFfnActivation(const models::QwenLayerWeights& layer,
                          const QwenGpuScratchView& scratch,
                          std::size_t batch_size, std::size_t intermediate_size,
-                         std::size_t hidden_size, hipStream_t stream) {
+                         std::size_t hidden_size, hipStream_t stream,
+                         int role_base = -1) {
+  const int role = role_base >= 0 ? kRoleFfnGateUp + role_base : kRoleOther;
   const auto& gate = layer.ffn_gate;
   const auto& up = layer.ffn_up;
   const bool packed_format = gate.type == core::GgmlType::kQ4_K ||
@@ -104,7 +180,8 @@ void LaunchFfnActivation(const models::QwenLayerWeights& layer,
         auto* const packed =
             reinterpret_cast<float*>(scratch.decode.weight_bf16.data());
         LaunchProjection(gate, scratch.decode.normed.data(), packed, batch_size,
-                         2 * intermediate_size, hidden_size, stream, scratch);
+                         2 * intermediate_size, hidden_size, stream, scratch,
+                         role);
         LaunchPackedSwiGLUActivation(packed, scratch.ffn.activation.data(),
                                      batch_size, intermediate_size, stream);
         return;
@@ -112,9 +189,11 @@ void LaunchFfnActivation(const models::QwenLayerWeights& layer,
     }
   }
   LaunchProjection(gate, scratch.decode.normed.data(), scratch.ffn.gate.data(),
-                   batch_size, intermediate_size, hidden_size, stream, scratch);
+                   batch_size, intermediate_size, hidden_size, stream, scratch,
+                   role);
   LaunchProjection(up, scratch.decode.normed.data(), scratch.ffn.up.data(),
-                   batch_size, intermediate_size, hidden_size, stream, scratch);
+                   batch_size, intermediate_size, hidden_size, stream, scratch,
+                   role);
   LaunchBatchedSwiGLUActivation(scratch.ffn.gate.data(), scratch.ffn.up.data(),
                                 scratch.ffn.activation.data(), nullptr,
                                 batch_size * intermediate_size, stream);
@@ -130,7 +209,9 @@ SsmControls LaunchSsmControls(const models::QwenLayerWeights& layer,
                               const QwenGpuScratchView& scratch,
                               std::size_t batch_size,
                               std::size_t time_step_rank,
-                              std::size_t hidden_size, hipStream_t stream) {
+                              std::size_t hidden_size, hipStream_t stream,
+                              int role_base = -1) {
+  const int role = role_base >= 0 ? kRoleSsmControl + role_base : kRoleOther;
   const auto& alpha = layer.ssm_alpha;
   const auto& beta = layer.ssm_beta;
   if (time_step_rank == 48 && hidden_size == 5120 &&
@@ -148,15 +229,16 @@ SsmControls LaunchSsmControls(const models::QwenLayerWeights& layer,
       auto* const packed =
           reinterpret_cast<float*>(scratch.decode.weight_bf16.data());
       LaunchProjection(alpha, scratch.decode.normed.data(), packed, batch_size,
-                       row_stride, hidden_size, stream, scratch);
+                       row_stride, hidden_size, stream, scratch, role);
       return {packed, packed + time_step_rank, row_stride};
     }
   }
   LaunchProjection(alpha, scratch.decode.normed.data(),
                    scratch.ssm.alpha.data(), batch_size, time_step_rank,
-                   hidden_size, stream, scratch);
+                   hidden_size, stream, scratch, role);
   LaunchProjection(beta, scratch.decode.normed.data(), scratch.ssm.beta.data(),
-                   batch_size, time_step_rank, hidden_size, stream, scratch);
+                   batch_size, time_step_rank, hidden_size, stream, scratch,
+                   role);
   return {scratch.ssm.alpha.data(), scratch.ssm.beta.data(), time_step_rank};
 }
 
@@ -297,13 +379,13 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
     if (layer.is_full_attention) {
       LaunchProjection(layer.attn_q, scratch.decode.normed.data(),
                        scratch.ssm.qkv.data(), batch_size, q_projection_size,
-                       hidden_size, arena.stream, scratch);
+                       hidden_size, arena.stream, scratch, kRoleAttnQ);
       LaunchProjection(layer.attn_k, scratch.decode.normed.data(),
                        scratch.attention.k.data(), batch_size, kv_size,
-                       hidden_size, arena.stream, scratch);
+                       hidden_size, arena.stream, scratch, kRoleAttnK);
       LaunchProjection(layer.attn_v, scratch.decode.normed.data(),
                        scratch.attention.v.data(), batch_size, kv_size,
-                       hidden_size, arena.stream, scratch);
+                       hidden_size, arena.stream, scratch, kRoleAttnV);
       LaunchBatchedUnpackQG(scratch.ssm.qkv.data(), scratch.attention.q.data(),
                             scratch.ssm.gate.data(), batch_size,
                             config.num_attention_heads, config.head_dim,
@@ -373,17 +455,17 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       }
       LaunchProjection(layer.attn_output, scratch.ssm.out.data(),
                        scratch.attention.output.data(), batch_size, hidden_size,
-                       attention_size, arena.stream, scratch);
+                       attention_size, arena.stream, scratch, kRoleAttnOutput);
     } else {
       LaunchProjection(layer.attn_qkv, scratch.decode.normed.data(),
                        scratch.ssm.qkv.data(), batch_size, ssm_qkv_size,
-                       hidden_size, arena.stream, scratch);
+                       hidden_size, arena.stream, scratch, kRoleSsmQkv);
       LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
                        scratch.ssm.gate.data(), batch_size, ssm_inner_size,
-                       hidden_size, arena.stream, scratch);
+                       hidden_size, arena.stream, scratch, kRoleSsmGate);
       const auto controls =
           LaunchSsmControls(layer, scratch, batch_size, time_step_rank,
-                            hidden_size, arena.stream);
+                            hidden_size, arena.stream, 0);
 
       LaunchSSMConvRecurrenceBatch(
           scratch.ssm.qkv.data(),
@@ -401,7 +483,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
 
       LaunchProjection(layer.ssm_out, scratch.ssm.out.data(),
                        scratch.attention.output.data(), batch_size, hidden_size,
-                       ssm_inner_size, arena.stream, scratch);
+                       ssm_inner_size, arena.stream, scratch, kRoleSsmOut);
     }
 
     LaunchBatchedResidualAdd(
@@ -426,10 +508,10 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       }
     } else {
       LaunchFfnActivation(layer, scratch, batch_size, intermediate_size,
-                          hidden_size, arena.stream);
+                          hidden_size, arena.stream, 0);
       LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                        scratch.ffn.out.data(), batch_size, hidden_size,
-                       intermediate_size, arena.stream, scratch);
+                       intermediate_size, arena.stream, scratch, kRoleFfnDown);
     }
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.ffn.out.data(),
@@ -455,7 +537,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   coordinator->EnsureVerificationLogits(batch_size);
   LaunchProjection(weights.output, scratch.decode.normed.data(),
                    coordinator->d_verification_logits_, batch_size, vocab_size,
-                   hidden_size, arena.stream, scratch);
+                   hidden_size, arena.stream, scratch, kRoleLmHead);
   LaunchBatchedGPUArgmax(coordinator->d_verification_logits_,
                          scratch.decode.prompt_tokens.data(), batch_size,
                          vocab_size, scratch.ffn.out, arena.stream);
@@ -662,13 +744,13 @@ QwenGpuExecutor::ForwardVerificationBatch(
     if (layer.is_full_attention) {
       LaunchProjection(layer.attn_q, scratch.decode.normed.data(),
                        scratch.ssm.qkv.data(), batch_size, q_projection_size,
-                       hidden_size, arena_.stream, scratch);
+                       hidden_size, arena_.stream, scratch, kVerifyRoleBase + kRoleAttnQ);
       LaunchProjection(layer.attn_k, scratch.decode.normed.data(),
                        scratch.attention.k.data(), batch_size, kv_size,
-                       hidden_size, arena_.stream, scratch);
+                       hidden_size, arena_.stream, scratch, kVerifyRoleBase + kRoleAttnK);
       LaunchProjection(layer.attn_v, scratch.decode.normed.data(),
                        scratch.attention.v.data(), batch_size, kv_size,
-                       hidden_size, arena_.stream, scratch);
+                       hidden_size, arena_.stream, scratch, kVerifyRoleBase + kRoleAttnV);
       LaunchBatchedUnpackQG(scratch.ssm.qkv.data(), scratch.attention.q.data(),
                             scratch.ssm.gate.data(), batch_size,
                             config.num_attention_heads, config.head_dim,
@@ -823,17 +905,17 @@ QwenGpuExecutor::ForwardVerificationBatch(
       }
       LaunchProjection(layer.attn_output, scratch.ssm.out.data(),
                        scratch.attention.output.data(), batch_size, hidden_size,
-                       attention_size, arena_.stream, scratch);
+                       attention_size, arena_.stream, scratch, kVerifyRoleBase + kRoleAttnOutput);
     } else {
       LaunchProjection(layer.attn_qkv, scratch.decode.normed.data(),
                        scratch.ssm.qkv.data(), batch_size, ssm_qkv_size,
-                       hidden_size, arena_.stream, scratch);
+                       hidden_size, arena_.stream, scratch, kVerifyRoleBase + kRoleSsmQkv);
       LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
                        scratch.ssm.gate.data(), batch_size, ssm_inner_size,
-                       hidden_size, arena_.stream, scratch);
+                       hidden_size, arena_.stream, scratch, kVerifyRoleBase + kRoleSsmGate);
       const auto controls =
           LaunchSsmControls(layer, scratch, batch_size, time_step_rank,
-                            hidden_size, arena_.stream);
+                            hidden_size, arena_.stream, kVerifyRoleBase);
       LaunchSSMConvRecurrenceBatch(
           scratch.ssm.qkv.data(),
           static_cast<const float*>(layer.ssm_conv1d.data),
@@ -850,7 +932,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
 
       LaunchProjection(layer.ssm_out, scratch.ssm.out.data(),
                        scratch.attention.output.data(), batch_size, hidden_size,
-                       ssm_inner_size, arena_.stream, scratch);
+                       ssm_inner_size, arena_.stream, scratch, kVerifyRoleBase + kRoleSsmOut);
     }
 
     LaunchBatchedResidualAdd(
@@ -862,10 +944,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
                          hidden_size, 1e-6F, arena_.stream);
 
     LaunchFfnActivation(layer, scratch, batch_size, intermediate_size,
-                        hidden_size, arena_.stream);
+                        hidden_size, arena_.stream, kVerifyRoleBase);
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
-                     intermediate_size, arena_.stream, scratch);
+                     intermediate_size, arena_.stream, scratch, kVerifyRoleBase + kRoleFfnDown);
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.ffn.out.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);
@@ -920,7 +1002,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
                        scratch.decode.normed.data(), nullptr, batch_size,
                        hidden_size, 1e-6F, arena_.stream);
   LaunchProjection(weights_.output, scratch.decode.normed.data(), logits_buffer,
-                   batch_size, vocab_size, hidden_size, arena_.stream, scratch);
+                   batch_size, vocab_size, hidden_size, arena_.stream, scratch, kVerifyRoleBase + kRoleLmHead);
   auto* const d_out_tokens = scratch.decode.prompt_tokens.data();
   LaunchBatchedGPUArgmax(logits_buffer, d_out_tokens, batch_size, vocab_size,
                          scratch.ffn.out, arena_.stream);

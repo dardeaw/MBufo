@@ -1,6 +1,9 @@
 #include "src/core/speculative/speculative_verifier.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
+#include <cstdlib>
+#include <cstdio>
+#include <chrono>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -877,9 +880,19 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
            &sampler});
     }
   }
+  static const bool kTimeVerify = std::getenv("MBUFO_VERIFY_TRACE") != nullptr;
+  const auto trace_start = std::chrono::steady_clock::now();
+  const auto since_ms = [](std::chrono::steady_clock::time_point from) {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now() - from)
+        .count();
+  };
+  double propose_ms = 0.0, verify_ms = 0.0;
+  std::size_t passes = 0, pass_rows = 0;
   if (!draft_requests.empty()) {
     auto proposals =
         draft_requests.front().backend->ProposeBatch(draft_requests);
+    propose_ms = since_ms(trace_start);
     if (proposals.size() != draft_requests.size())
       throw std::runtime_error("draft returned an incomplete proposal batch");
     for (std::size_t index = 0; index < proposals.size(); ++index) {
@@ -923,7 +936,14 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
            step.position + static_cast<std::uint32_t>(step.verified_rows),
            step.capture_hidden, step.capture_logits});
     }
+    const auto pass_start = std::chrono::steady_clock::now();
     auto verification = items.front().executor->ForwardVerificationBatch(items);
+    if (kTimeVerify) {
+      verify_ms += since_ms(pass_start);
+      ++passes;
+      for (const auto& item : items)
+        pass_rows += item.tokens.size();
+    }
     if (verification.chunks.size() != items.size())
       throw std::runtime_error(
           "target returned an incomplete verification batch");
@@ -945,6 +965,12 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
     }
     indices.resize(remaining);
   }
+  if (kTimeVerify)
+    std::fprintf(stderr,
+                 "[verify] lanes=%zu propose_ms=%.1f verify_ms=%.1f passes=%zu "
+                 "rows=%zu total_ms=%.1f\n",
+                 requests.size(), propose_ms, verify_ms, passes, pass_rows,
+                 since_ms(trace_start));
   return result;
 }
 

@@ -224,7 +224,7 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 
 | Runner | `DecodeBatch` | `AdvanceBatch` | Merged prefill + decode |
 | --- | --- | --- | --- |
-| Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes on F16 KV; serial per-session decode cores on blocked-Q8 KV) | **yes, plain advances** without DFlash (`AdvanceBatchWithPrefillChunk`: lanes through the unchanged advance path, the chunk through the unchanged `Prefill`; F16 and Q8 KV); `DecodeBatchWithPrefillChunk` refuses; DFlash runners advertise `mixed_prefill_decode = false` |
+| Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes on F16 KV; serial per-session decode cores on blocked-Q8 KV) | **yes**: plain advances without DFlash (`AdvanceBatchWithPrefillChunk`), and DFlash steps (`DecodeBatchWithPrefillChunk`: lanes through the unchanged `VerifyBatch` step, then the chunk through the unchanged `Prefill`; F16 and Q8 KV). Both are bit-compatible with the unmerged steps and neither is faster (see the Qwen sections) |
 | DeepSeek V4 Flash | native (serial in some conditions) | native | no (`MBUFO_RUNNER_NO_MIXED_BATCH`; see note below) |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
 | Muse Glimmer | native without a shared draft, serial otherwise | native without a shared draft (bit-identical to serial), serial otherwise | **yes** without a shared draft (`AdvanceBatchWithPrefillChunk`); `DecodeBatchWithPrefillChunk` refuses (DFlash verify is per-session) |
@@ -237,7 +237,7 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
 
-## Qwen mixed batch (native, plain advances)
+## Qwen mixed batch (native)
 
 `QwenTextRunner::AdvanceBatchWithPrefillChunk` runs the decode lanes through
 `AdvanceLanes` (two or more lanes on F16 KV: one `ForwardTokenBatch` pass on the
@@ -253,8 +253,8 @@ bit-identical but not faster, so the two run back to back. A chunk that ends
 at a snapshot/checkpoint frontier short of the prompt end is refused by the
 pool as for every runner; the chunk that completes the prompt leaves its
 frontier exactly as `Prefill` does (the next token comes from the retained
-logits). DFlash runners (`mixed_prefill_decode = false`) and
-`DecodeBatchWithPrefillChunk` refuse with `MixedBatchRefused`.
+logits). DFlash sessions refuse here (`MixedBatchRefused`) and take
+`DecodeBatchWithPrefillChunk` instead (next section).
 
 History: a first prototype ran each lane as a one-token item of
 `QwenGpuExecutor::ForwardPromptBatchMulti` next to the chunk. Every completion
@@ -280,10 +280,9 @@ tokens plus a 6819-token prompt that starts 4 s later, `--sessions 5`):
 
 Merging is a trade, not a speedup: the lanes decode noticeably more tokens
 while the prompt prefills (every merged tick advances them), the prompt finishes
-8 to 20% later, and total wall time of the run is unchanged. Decode-lane batching on
-F16 KV is not bit-identical to serial decode in every case (9B F16: 1 of 3 solo
-runs differs from its batched run; 27B F16: all equal); the merged step
-inherits exactly the unmerged step's lane arithmetic.
+8 to 20% later, and total wall time of the run is unchanged. (The earlier note
+that batched F16 decode is not always bit-identical to solo decode is explained
+and fixed below.)
 
 Separate finding, since fixed: `TextRunnerPool::Request::PrefillWithCoworkers`
 used to refuse whenever `snapshot_tokens`, `checkpoints` or `boundaries` was
@@ -291,6 +290,146 @@ non-empty, which is the case for every long prompt on snapshot-capable runners,
 so the plain merged prefill+decode never fired there. It now cuts the chunk at
 the next snapshot/checkpoint/boundary frontier like `PrefillWithDecoders`, and
 `MBUFO_MIXED_TRACE=1` prints one stderr line per merged step.
+
+### Qwen DFlash merged step (`DecodeBatchWithPrefillChunk`)
+
+Implemented in `QwenTextRunner::DecodeBatchWithPrefillChunk`; DFlash runners now
+advertise `mixed_prefill_decode = true` and the scheduler's `TryStepMixedMtp`
+drives it (decode lanes plus one prefill chunk of another request per tick).
+
+- Preconditions (else `MixedBatchRefused`, nothing mutated): DFlash runner, one to
+  `MaximumDecodeBatchWidth()` lanes (clamp(max_context / 8, 1, 8)), every lane a
+  speculative session with a frontier and a nonzero budget, no repeated session,
+  the chunk a different speculative session positioned at `offset`.
+- Lanes: exactly the unmerged step. Two or more lanes run `DecodeSpeculativeLanes`
+  (the body of `DecodeBatch`: per-lane `PrepareSpeculativeDecode`, then
+  `SpeculativeVerifier::VerifyBatch` = DFlash `ProposeBatch`, one shared
+  `ForwardVerificationBatch` pass, per-lane accept, KV rollback and draft
+  feedback); one lane runs `DecodeSpeculative`. Blocked-Q8 and F16 KV both work
+  because verify and `Prefill` already handle both.
+- Chunk: the unchanged `Prefill` (`PrimeSpeculative` / `ExtendSpeculative`,
+  vision, resume tokens, cancellation). A lane failure poisons the lane steps
+  only (the chunk still runs); a chunk exception after the lanes ran is reported
+  as an interrupted chunk step, so the completed lane steps are delivered.
+- The pool still refuses a chunk that would end at a snapshot/checkpoint
+  frontier short of the prompt end (3 of 12 chunks of a 6k prompt).
+- `MBUFO_MIXED_TRACE=1` prints `[qwen-mixed] dflash lanes=N chunk=M ... lanes_ms
+  chunk_ms step_ms` per step; `MBUFO_VERIFY_TRACE=1` prints propose / verify time,
+  passes and rows per `VerifyBatch`.
+
+**The chunk cannot ride the verify GEMMs on Qwen.** Unlike Flash-Next, whose
+verify pass uses prefill kernels, Qwen's `ForwardVerificationBatch`
+(`batched_decode.cpp`) is decode-equivalent by design ("verification must read
+exactly what AR decode reads"): exact FP32-order shared-weight kernels
+(`LaunchBatchedQuantGEMMFp32`, at most 64 rows, 16-row Wave64 groups), decode
+causal attention and the decode SSM recurrence. The chunk runs the INT8-activation
+WMMA blocked GEMMs of prefill. Putting both in one GEMM would change either the
+verify arithmetic (breaking decode equivalence) or the chunk arithmetic (breaking
+the partition equality with the unmerged run), and the exact scalar kernels would
+be far slower on 512 rows. So the chunk is its own call in the same step.
+
+**Why that is a trade, not a speedup, on gfx1151** (27B UD-Q4_K_XL + DFlash2-Q4_K_M,
+q8 KV, 3 lanes plus a 6129-token prompt, 512-token chunks):
+
+| arrangement | lane step | chunk (512 tokens) | tick | prefill of 6129 tokens |
+| --- | --- | --- | --- | --- |
+| unmerged (chunk step, then lane step) | 163 ms | 1160 ms | 1323 ms | 16.55 / 16.86 / 16.61 s (3 fresh runs) |
+| merged, back to back (shipped) | 163 ms (propose 20 ms + one 12-row verify pass 141 ms) | 1140 to 1200 ms | 1300 to 1385 ms | 16.5 s |
+| merged, lane step on a helper thread | 1300 to 1400 ms | 1340 to 1450 ms | 1340 to 1450 ms | 17.1 s |
+| merged, helper thread, lane arena streams at the highest HIP priority | 520 to 650 ms | 1300 to 1380 ms | 1300 to 1380 ms | 16.54 s |
+
+The GPU time is additive: running the lanes next to the chunk (own executors,
+arenas and streams) just stretches both, and stream priority only moves the time
+from the lanes to the chunk. The lane step is 12% of a tick, so a perfect shared
+pass could save at most ~12% of prefill time there (Flash-Next saves more because
+its verify pass is a larger share of its tick). What would be needed for that:
+a fused projection kernel family that streams each quantized weight tile once
+and applies it both to the WMMA INT8 chunk activations and to the exact-FP32
+verify rows (per quant format Q4_K / Q5_K / Q6_K / IQ4_XS / Q8_0 and every
+projection shape, validated bit-exact against both existing routes) plus a
+layer-synchronous merged SSM/attention pass: weeks of kernel work for at most
+12%. Not done.
+
+Measurements (greedy, `--sessions 4 -c 32768`, 3 lanes of 1000 tokens, prompts of
+6129 and 19889 tokens arriving at 6 s and 50 s; unmerged = `MBUFO_MIXED_BATCH=0
+MBUFO_MIXED_MTP=0`):
+
+| 27B + DFlash2, q8 KV | unmerged (3 fresh runs) | merged |
+| --- | --- | --- |
+| prefill of the 6129-token prompt | 16.55 / 16.86 / 16.61 s | 16.5 s |
+| prefill of the 19889-token prompt | 57.84 / 57.64 / 57.14 s | 57.0 s |
+| lane tokens/s while the 6k prompt prefills | 1.45 2.3 2.6 / 1.42 2.25 2.73 / 1.57 2.35 2.59 | 1.64 2.42 2.85 |
+| lane tokens/s while the 20k prompt prefills | 1.43 2.16 1.95 (3 runs within 0.02) | 1.63 2.23 2.02 |
+| lanes finish at | 138.0 / 125.7 / 122.9 s | 134.9 / 124.1 / 121.0 s |
+| single lane + 6k + 20k: prefill 6k / 20k (q8) | 15.96 and 16.26 s / 54.47 and 54.96 s | 16.45 and 16.27 s / 55.44 and 55.49 s |
+| single lane + 6k + 20k: prefill 6k / 20k (f16) | 16.2 and 16.16 s / 55.32 and 55.35 s | 16.05 and 16.42 s / 55.36 and 55.4 s |
+
+So the merged step is the same speed (lanes +2% earlier, prefill within noise);
+the 9B has no DFlash draft, so there is no 9B DFlash number.
+
+Correctness evidence:
+
+- One lane plus the 6k and 20k prompts: the lane completion and both prompts'
+  completions have identical SHA across 2 unmerged and 2 merged runs, for q8
+  (lane 3c08ac71...) and f16 (lane 9ca4d24f...). Prefill completions
+  (c7413dbc..., 10496991...) are identical in every run of every configuration.
+- Three lanes: an unmerged DFlash run is bit-reproducible (3 fresh servers, same
+  SHAs), but a lane's output depends on the verify batch composition, i.e. on
+  start timing. With lane starts staggered by 0 / 0.25 / 0.6 s (400 tokens each,
+  prefill p6k at 6 s): dec1, dec2 and the prefill are identical in all six runs
+  (merged and unmerged); dec0 has exactly two outputs, `cfb11382` (equal to the
+  non-speculative AR output of the same prompt) and `f9c1bfe9` (diverges from AR at
+  char 1193). Unmerged gives cfb / cfb / f9c1 for stagger 0 / 0.25 / 0.6, merged
+  gives f9c1 / cfb / f9c1: every merged outcome is an outcome the unmerged run
+  also produces. The draft_accepted / draft_proposed counters differ slightly by
+  schedule (e.g. 544/1205 vs 530/1217 for dec0) for the same reason.
+- The composition sensitivity is not from the projections: routing every verify
+  projection through the per-row single-token GEMV (`MBUFO_QWEN_BATCH_GEMV=all`) or
+  through the FP32 path for the SSM roles (`MBUFO_QWEN_VERIFY_Q8_FLOAT=70`) does
+  not remove it (it only moves which schedule lands on which output), so some
+  other multi-row verify op (SSM recurrence over rows, causal decode attention)
+  is not bit-identical to AR decode. Left as is; the merged step does not change it.
+
+### Batched decode vs solo decode (Qwen3.5-9B F16 finding)
+
+Cause found and fixed: `ForwardTokenBatch` (2 to 8 lanes, F16 KV) sent the Q8_0
+`ssm_alpha` / `ssm_beta` control projections through the narrow prequant route
+(`LaunchNarrowQ80Prequant`: activations quantised to Q8_1, INT8 dot products)
+while solo decode computes them with FP32 activations inside its fused SSM input
+kernel. On the 9B Q4_K_M (greedy, F16 KV, `--sessions 4`):
+
+| prompt | solo | batched before | batched after the fix |
+| --- | --- | --- | --- |
+| dragon story, 1200 tokens | 5038e990 | 4cf161f5 (diverges at char 260) | 5038e990 |
+| transformer, 1200 tokens | 3c94226b | f501e9e7 (diverges at char 3477) | 3c94226b |
+| ocean facts, 1045 tokens | 4e04e3e7 | 4e04e3e7 | 4e04e3e7 |
+
+Bisect (3 lanes, prompt 0, 200 tokens; solo 2e3e877f, batched before 36aaef70):
+`MBUFO_QWEN_BATCH_GEMV=all` or `=8` (Q8_0 only) restores solo; `=12`, `=14`,
+`=12,13,14`, `=30`, `=0,1` (Q4_K, Q6_K, Q5_K, BF16, F32, F16) do not. By role
+(`MBUFO_QWEN_BATCH_Q8_FLOAT` mask): on the 9B the SSM-control role alone (0x40) restores
+solo; attention q/k/v (0x7), SSM qkv (0x10), SSM gate (0x20), FFN gate/up (0x100)
+and attn_output / ssm_out / ffn_down / lm_head (0x688) do not. The fused QK-norm /
+RoPE kernel is not involved (with `MBUFO_QWEN_NO_FUSE_QKROPE=1` solo and batched
+still differed, 7ab1bc70 vs 1539c557 on 300 tokens).
+
+Qwen3.8-27B UD-Q4_K_XL, F16 KV, no draft (3 lanes, 300 tokens; the earlier
+"27B matches" holds only for some prompts): solo fdd7c332 / 8468ee9f / f04707a9;
+batched before the 9B-only mask: 991b6130 / 3cd6c2c7 / f04707a9 (two lanes
+differ); batched with every Q8_0 batched projection per-row (`=all` or `=8`) or
+with the float roles q/k/v (0x7) or all fused roles (0x177): equal to solo. Single
+roles are weak evidence here (each flips a near tie), so the shipped mask is the
+principled one rather than the smallest one that happens to work.
+
+Fix: `LaunchProjection` takes a role; for the roles solo decode computes in a
+fused FP32-activation kernel (attention q/k/v, SSM qkv / gate / control, FFN
+gate/up; default mask 0x177) a batched Q8_0 projection skips the prequant route
+and uses the exact FP32-activation shared kernel (`MBUFO_QWEN_BATCH_Q8_FLOAT`,
+hex mask, 0 = old behaviour). attn_output, ssm_out, ffn_down and the LM head keep
+the prequant route solo also uses. After the fix, batched = solo for all three 9B
+prompts at 1200 tokens (table above), for the three 27B prompts, and the 9B
+two-batch repeat. `ForwardVerificationBatch` keeps its arithmetic
+(`MBUFO_QWEN_VERIFY_Q8_FLOAT`, default 0): DFlash verify numerics are untouched.
 
 ### Muse Glimmer notes
 

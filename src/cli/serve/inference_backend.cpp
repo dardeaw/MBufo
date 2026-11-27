@@ -1089,7 +1089,7 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
 class QwenTextRunner final : public HipTextModelRunner {
 public:
   // Batch contract (see TextModelRunner): native DecodeBatch/AdvanceBatch; native merged advance + prefill chunk
-  // (non-DFlash); DecodeBatchWithPrefillChunk refuses.
+  // (non-DFlash); native merged DFlash decode + prefill chunk (DecodeBatchWithPrefillChunk, lanes then chunk).
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
@@ -1205,7 +1205,7 @@ public:
                 .prefix_reuse = true,
                 .partial_prefill_retention = true,
                 .prefill_rollback = true,
-                .mixed_prefill_decode = dflash_model_ == nullptr,
+                .mixed_prefill_decode = true,
             },
         .persistence = persistence_,
     };
@@ -1475,6 +1475,14 @@ public:
         decodes.size() > MaximumDecodeBatchWidth()) {
       return SerialDecodeBatch(decodes);
     }
+    return DecodeSpeculativeLanes(decodes);
+  }
+
+  // One DFlash speculative step for every lane (two or more): per-lane draft
+  // and accept logic, one shared verify pass (VerifyBatch). Used unchanged by
+  // DecodeBatch and by the merged step, so both run the same lane arithmetic.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeSpeculativeLanes(
+      std::span<const TextRunnerDecode> decodes) const {
     std::vector<TextDecodeStep> steps(decodes.size());
     std::vector<QwenTextRunnerState*> states;
     std::vector<sampling::SamplerState> samplers;
@@ -1558,7 +1566,7 @@ public:
   // its separate run. Lanes and chunk live in different executors, hence in
   // different arenas and streams, and run back to back (an experiment that
   // submitted the lane pass from a helper thread while the chunk ran changed
-  // neither bits nor speed). DFlash runners advertise no merged step.
+  // neither bits nor speed). DFlash sessions refuse here and use DecodeBatchWithPrefillChunk.
   [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
       std::span<const TextRunnerAdvance> advances,
       std::span<std::exception_ptr> advance_failures,
@@ -1621,13 +1629,114 @@ public:
     return true;
   }
 
-  // The merged multi-token step has no Qwen engine pass to ride (DFlash verify
-  // is per session), so it refuses explicitly with nothing mutated.
+  // Merged DFlash decode + prefill chunk. Every lane runs its DFlash step
+  // (draft, one shared verify pass, per-lane accept and KV rollback) through
+  // the same DecodeSpeculativeLanes the unmerged DecodeBatch runs, and the
+  // chunk runs the unchanged Prefill (blocked-Q8, F16, vision, resume tokens
+  // and cancellation aware), so each half is arithmetically what its unmerged
+  // run is. Refuses (MixedBatchRefused, nothing mutated) for anything but
+  // DFlash lanes plus a DFlash prefilling session.
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchWithPrefillChunk(
-      std::span<const TextRunnerDecode>, TextRunnerState&,
-      std::span<const TextRunnerToken>, std::size_t, std::size_t,
-      TextPrefillStep&) const override {
-    RefuseMixedBatch("Qwen has no merged multi-token decode");
+      std::span<const TextRunnerDecode> decodes,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens,
+      TextPrefillStep& chunk_step) const override {
+    static const bool trace = std::getenv("MBUFO_MIXED_TRACE") != nullptr;
+    if (dflash_model_ == nullptr)
+      throw MixedBatchRefused("Qwen merged multi-token decode needs DFlash");
+    auto& chunk = RequireQwenState(prefill_state);
+    if (decodes.empty() || decodes.size() > MaximumDecodeBatchWidth() ||
+        max_input_tokens == 0 || offset != chunk.position() ||
+        offset >= prompt.size() || !chunk.speculative())
+      throw MixedBatchRefused("Qwen merged DFlash preconditions unmet");
+    for (std::size_t i = 0; i < decodes.size(); ++i) {
+      auto& lane = RequireQwenState(decodes[i].state.get());
+      if (&lane == &chunk || !lane.speculative() ||
+          !lane.frontier().has_value() || decodes[i].max_tokens == 0)
+        throw MixedBatchRefused("Qwen merged DFlash lane unusable");
+      for (std::size_t j = 0; j < i; ++j)
+        if (&RequireQwenState(decodes[j].state.get()) == &lane)
+          throw MixedBatchRefused("Qwen merged DFlash lane repeated");
+    }
+    std::vector<TextDecodeStep> steps;
+    std::exception_ptr lane_failure;
+    using TraceClock = std::chrono::steady_clock;
+    double lanes_ms = 0.0, chunk_ms = 0.0;
+    const auto elapsed_ms = [](TraceClock::time_point from) {
+      return std::chrono::duration<double, std::milli>(TraceClock::now() - from)
+          .count();
+    };
+    const auto run_lanes = [&] {
+      const auto began = TraceClock::now();
+      struct Stamp {
+        double& out;
+        TraceClock::time_point from;
+        ~Stamp() {
+          out = std::chrono::duration<double, std::milli>(TraceClock::now() -
+                                                         from)
+                    .count();
+        }
+      } stamp{lanes_ms, began};
+      try {
+        if (decodes.size() == 1) {
+          steps.emplace_back(RequireQwenState(decodes[0].state.get())
+                                 .DecodeSpeculative(decodes[0].max_tokens,
+                                                    decodes[0].sampler.get()));
+        } else {
+          steps = DecodeSpeculativeLanes(decodes);
+        }
+      } catch (...) {
+        lane_failure = std::current_exception();
+      }
+    };
+    TextPrefillStep step;
+    std::exception_ptr chunk_failure;
+    const auto run_chunk = [&] {
+      const auto began = TraceClock::now();
+      try {
+        step = Prefill(prefill_state, prompt, offset, max_input_tokens);
+      } catch (...) {
+        chunk_failure = std::current_exception();
+      }
+      chunk_ms = elapsed_ms(began);
+    };
+    const auto step_began = TraceClock::now();
+    // Lanes then chunk, back to back. Running the lane step on a helper thread
+    // next to the chunk (own executors, arenas and streams) measured no gain on
+    // gfx1151 even with the lane streams at the highest HIP priority; see
+    // docs/MIXED_BATCH.md.
+    run_lanes();
+    run_chunk();
+    if (lane_failure) {
+      // A failed shared pass poisons every lane of it; the chunk is independent.
+      steps.assign(decodes.size(), {});
+      for (auto& lane : steps)
+        lane.failure = lane_failure;
+    }
+    for (auto& lane : steps)
+      if (!lane.failure && lane.execution_plan.physical_width == 0)
+        lane.execution_plan.physical_width = 1;
+    if (chunk_failure) {
+      if (trace) {
+        try {
+          std::rethrow_exception(chunk_failure);
+        } catch (const std::exception& error) {
+          std::cerr << "[qwen-mixed] chunk failed: " << error.what() << '\n';
+        } catch (...) {
+        }
+      }
+      // Lanes already advanced; only the chunk request is reported failed.
+      chunk_step = {.consumed_tokens = 0, .decode_ready = false,
+                    .interrupted = true};
+      return steps;
+    }
+    if (trace)
+      std::cerr << "[qwen-mixed] dflash lanes=" << decodes.size()
+                << " chunk=" << step.consumed_tokens << " offset=" << offset
+                << " lanes_ms=" << lanes_ms << " chunk_ms=" << chunk_ms
+                << " step_ms=" << elapsed_ms(step_began) << '\n';
+    chunk_step = step;
+    return steps;
   }
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
@@ -7895,6 +8004,11 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
   // QwenGpuModel::CreateFromGguf needs no policy parameter: the policy
   // applies at executor/adapter level, not weight loading.
   auto qwen_policy = hip::QwenExecutionPolicy::Production();
+  // Diagnostic: run the unfused QK-norm / RoPE / KV-write chain in decode and
+  // prefill instead of the fused kernel (the chain ForwardTokenBatch always uses).
+  if (const char* e = std::getenv("MBUFO_QWEN_NO_FUSE_QKROPE");
+      e != nullptr && e[0] != '\0' && e[0] != '0')
+    qwen_policy.fuse_qk_norm_rope_kv = false;
   std::string qwen_kv_quant = "f16";
   const char* qwen_kv_source = "default";
   if (kv_cache_quant_supplied) {
