@@ -121,10 +121,10 @@ class NpuServableHost {
     std::string error;
   };
 
-  /// Engine-level warmup: one M=1 GEMM per quant shape in the loaded mode.
-  /// This instantiates the xclbins / HW context and primes DMA, which is the
-  /// dominant cold-start cost shared by all four servables. A per-model dummy
-  /// decode step is a follow-up (needs each decoder's dims).
+  /// Engine-level warmup (one M=1 GEMM per quant shape: instantiates xclbins
+  /// and the HW context) plus, for ASR and TTS, one dummy prefill + decode
+  /// step + LM-head pass on the real decoder. FLUX / Z-Image stay engine-level
+  /// only: their blocks need rope/joint-attention tables built per request.
   /// Soft-fail: a failed warm never unloads the model.
   bool Warm(const std::string& id, std::string* error) {
     namespace npu = mbufo::core::npu;
@@ -142,6 +142,30 @@ class NpuServableHost {
           return false;
         }
         if (!engine_.Gemm(a.data(), 1, mat, c.data(), nullptr, nullptr, e)) {
+          return false;
+        }
+      }
+      // Per-model dummy decode: drives the real decoder kernels (KV cache,
+      // attention, LM head) so the first request skips their cold start.
+      // The next real Prefill resets the decoder position.
+      if (id == "qwen3-asr-1.7b" && asr_ != nullptr) {
+        const std::size_t h = asr_->config().hidden;
+        const std::vector<float> row(h, 0.01F);
+        std::vector<float> hid, next;
+        std::uint32_t top1 = 0;
+        if (!asr_->Prefill(row, 1, &hid, nullptr, e) ||
+            !asr_->DecodeStep(row, &next, nullptr, e) ||
+            !asr_->LogitsTop1(next, &top1, nullptr, e)) {
+          return false;
+        }
+      } else if (id == "qwen3-tts-12hz-1.7b" && talker_ != nullptr) {
+        const std::size_t h = talker_->config().hidden;
+        const std::vector<float> row(h, 0.01F);
+        std::vector<float> hid, next;
+        std::uint32_t top1 = 0;
+        if (!talker_->Prefill(row, 1, &hid, nullptr, e) ||
+            !talker_->DecodeStep(row, &next, nullptr, e) ||
+            !talker_->CodecTop1(next, &top1, nullptr, e)) {
           return false;
         }
       }
