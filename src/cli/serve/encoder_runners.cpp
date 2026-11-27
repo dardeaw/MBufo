@@ -449,7 +449,6 @@ class BgeRerankRunner final : public RerankRunner {
                   std::function<void(models::bge_reranker::EngineSession&)> configure)
       : model_(std::move(model)), configure_(std::move(configure)) {}
   std::string_view Kind() const noexcept override { return "bge-reranker"; }
-  bool NativeBatch() const noexcept override { return true; }
 
   std::optional<RerankResult> RerankBatch(const std::string& query,
                                           const std::vector<std::string>& documents,
@@ -487,8 +486,6 @@ class QwenRerankRunner final : public RerankRunner {
   // Pairs share the query framing; documents run in lockstep groups of up to
   // eight pooled executors (ForwardPromptBatchMulti), which shares attention
   // launches and overlaps streams but does NOT fuse the GEMMs across documents
-  // (measured only ~6% faster), so this stays declared non-native.
-  bool NativeBatch() const noexcept override { return false; }
 
   std::optional<RerankResult> RerankBatch(const std::string& query,
                                           const std::vector<std::string>& documents,
@@ -549,7 +546,6 @@ class NpuQwenRerankRunner final : public RerankRunner {
   explicit NpuQwenRerankRunner(std::unique_ptr<core::npu::NpuQwen3Encoder> enc)
       : enc_(std::move(enc)) {}
   std::string_view Kind() const noexcept override { return "npu-qwen-reranker"; }
-  bool NativeBatch() const noexcept override { return false; }
   std::optional<RerankResult> RerankBatch(const std::string& query,
                                           const std::vector<std::string>& documents,
                                           std::string* error) override {

@@ -2,7 +2,8 @@
 // TextModelRunner. A model kind that serves /v1/embeddings or /v1/reranking
 // implements one of these; the batch entry point is pure virtual so a new
 // encoder cannot compile until it has chosen between a native batched forward
-// and an explicit serial fallback (SerialEmbedBatch). The serve layer only ever
+// and an explicit serial fallback (SerialEmbedBatch). Rerankers are small models
+// whose concurrency only needs to be fair, so they carry no native/serial label. The serve layer only ever
 // calls the batch form; a single text or a single query is a batch of one.
 #ifndef MBUFO_CLI_SERVE_ENCODER_RUNNER_HPP_
 #define MBUFO_CLI_SERVE_ENCODER_RUNNER_HPP_
@@ -65,7 +66,6 @@ class RerankRunner {
  public:
   virtual ~RerankRunner() = default;
   [[nodiscard]] virtual std::string_view Kind() const noexcept = 0;
-  [[nodiscard]] virtual bool NativeBatch() const noexcept = 0;
   /// One score per document, in input order (one query against N documents is
   /// the batch). nullopt carries a reason in `error`.
   [[nodiscard]] virtual std::optional<RerankResult> RerankBatch(
