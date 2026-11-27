@@ -1703,7 +1703,9 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
   // specially (snapshots, checkpoints, boundaries, disk, cancellation)
   // refuses into the legacy pair. Pinning below is idempotent.
   if (impl_->prompt_snapshot_attempted || !impl_->boundaries.empty() ||
-      !impl_->checkpoints.empty() || !impl_->snapshot_tokens.empty() ||
+      !impl_->checkpoints.empty() ||
+      (!impl_->snapshot_tokens.empty() &&
+       impl_->runner->Descriptor().capabilities.snapshot) ||
       impl_->disk_store || (impl_->cancelled && impl_->cancelled())) {
     return std::nullopt;
   }
