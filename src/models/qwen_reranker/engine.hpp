@@ -83,7 +83,17 @@ public:
 
 private:
   [[nodiscard]] bool EnsureExecutor(std::string* error_msg);
+  // Scores every document suffix (batch[i][prefix:]) by driving up to eight
+  // pooled executors layer-synchronously through ForwardPromptBatchMulti.
+  // Returns false (scores untouched, *fallback set) when the pool path is
+  // not applicable so the caller keeps the single-executor loop.
+  [[nodiscard]] bool ScoreSuffixesMulti(
+      const std::vector<std::vector<tokenization::TokenId>>& batch,
+      std::size_t prefix, std::vector<float>* scores, bool* fallback,
+      std::string* error_msg);
   const EngineModel* model_;
+  std::vector<std::unique_ptr<hip::QwenGpuExecutor>> pool_;
+  std::uint32_t pool_context_{0};
   std::mutex mutex_;
   std::unique_ptr<hip::QwenGpuExecutor> executor_;
   std::uint32_t executor_context_{0};

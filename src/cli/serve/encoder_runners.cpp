@@ -481,7 +481,10 @@ class QwenRerankRunner final : public RerankRunner {
       : model_(std::move(model)),
         session_(std::make_unique<models::qwen_reranker::EngineSession>(model_.get())) {}
   std::string_view Kind() const noexcept override { return "qwen-reranker"; }
-  // Pairs share the query framing (prefilled once) but run one after another.
+  // Pairs share the query framing; documents run in lockstep groups of up to
+  // eight pooled executors (ForwardPromptBatchMulti), which shares attention
+  // launches and overlaps streams but does NOT fuse the GEMMs across documents
+  // (measured only ~6% faster), so this stays declared non-native.
   bool NativeBatch() const noexcept override { return false; }
 
   std::optional<RerankResult> RerankBatch(const std::string& query,
