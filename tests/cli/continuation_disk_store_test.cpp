@@ -155,6 +155,9 @@ const FakeSnapshot& RequireFakeSnapshot(const TextRunnerSnapshot& snapshot) {
 
 class FakeRunner final : public TextModelRunner {
 public:
+  MBUFO_RUNNER_SERIAL_DECODE_BATCH();
+  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   explicit FakeRunner(std::string identity, std::string model_id = "fake-model")
       : identity_(identity.begin(), identity.end()),
         model_id_(std::move(model_id)) {}

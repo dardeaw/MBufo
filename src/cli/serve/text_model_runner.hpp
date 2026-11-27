@@ -462,47 +462,50 @@ public:
   [[nodiscard]] virtual TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const;
+  // Batch execution contract. These four entry points are pure virtual on
+  // purpose: a runner cannot compile until it has decided, for each one,
+  // between a native merged implementation and an explicit fallback. The
+  // fallbacks are the MBUFO_RUNNER_* macros below (serial loop, or a
+  // MixedBatchRefused throw); a new model can no longer silently inherit "no
+  // batching". The scheduler reads TextRunnerCapabilities to know which
+  // entry points are native; the capability flags must match what is declared.
+  //
+  /// One decode step for every lane. Native runners fuse the lanes into one
+  /// weight pass (batched_multi_token_decode when they also verify drafts);
+  /// the fallback is SerialDecodeBatch.
   [[nodiscard]] virtual std::vector<TextDecodeStep> DecodeBatch(
-      std::span<const TextRunnerDecode> decodes) const;
-  virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
-  /// Merged plain-advance + prefill-chunk step. Throws MixedBatchRefused with
-  /// nothing mutated when the backend cannot merge (the default); returns
-  /// true on full merge, or returns false when advances completed/recorded
-  /// failures while the chunk did not run. Plain advances only.
+      std::span<const TextRunnerDecode> decodes) const = 0;
+  /// Plain-token advance for every lane. Fallback: SerialAdvanceBatch.
+  virtual void AdvanceBatch(
+      std::span<const TextRunnerAdvance> advances) const = 0;
+  /// Merged plain-advance + prefill-chunk step. Native runners return true on
+  /// full merge, or false when advances completed/recorded failures while the
+  /// chunk did not run. Runners that cannot merge declare it with
+  /// MBUFO_RUNNER_NO_MIXED_BATCH, which throws MixedBatchRefused with nothing
+  /// mutated. Plain advances only.
   [[nodiscard]] virtual bool AdvanceBatchWithPrefillChunk(
       std::span<const TextRunnerAdvance> advances,
       std::span<std::exception_ptr> advance_failures,
       TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens,
-      TextPrefillStep& chunk_step) const {
-    (void)advances;
-    (void)advance_failures;
-    (void)prefill_state;
-    (void)prompt;
-    (void)offset;
-    (void)max_input_tokens;
-    (void)chunk_step;
-    throw MixedBatchRefused("backend has no merged advance+prefill");
-  }
+      TextPrefillStep& chunk_step) const = 0;
   /// Merged multi-token decode step + prefill chunk: every decode runs one
-  /// MTP step and the chunk rides the same verify pass. Throws
-  /// MixedBatchRefused with nothing mutated when the backend cannot merge
-  /// (the default); otherwise returns one step per decode (failures per lane)
-  /// and fills chunk_step, or throws after partial work.
+  /// MTP step and the chunk rides the same verify pass. Native runners return
+  /// one step per decode (failures per lane) and fill chunk_step, or throw
+  /// after partial work. Runners that cannot merge declare it with
+  /// MBUFO_RUNNER_NO_MIXED_BATCH (throws MixedBatchRefused, nothing mutated).
   [[nodiscard]] virtual std::vector<TextDecodeStep>
   DecodeBatchWithPrefillChunk(std::span<const TextRunnerDecode> decodes,
                               TextRunnerState& prefill_state,
                               std::span<const TextRunnerToken> prompt,
                               std::size_t offset, std::size_t max_input_tokens,
-                              TextPrefillStep& chunk_step) const {
-    (void)decodes;
-    (void)prefill_state;
-    (void)prompt;
-    (void)offset;
-    (void)max_input_tokens;
-    (void)chunk_step;
-    throw MixedBatchRefused("backend has no merged multi-token decode");
-  }
+                              TextPrefillStep& chunk_step) const = 0;
+  /// Explicit fallbacks for runners with no native batch path (see the
+  /// MBUFO_RUNNER_* macros after this class).
+  [[nodiscard]] std::vector<TextDecodeStep> SerialDecodeBatch(
+      std::span<const TextRunnerDecode> decodes) const;
+  void SerialAdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
+  [[noreturn]] static void RefuseMixedBatch(const char* reason);
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
   /// Retain a safe executed frontier when cancellation interrupts publication
@@ -572,6 +575,38 @@ private:
       constraints_;
   mutable std::shared_ptr<const std::vector<bool>> partial_utf8_;
 };
+
+// Explicit "no native batch path" declarations for TextModelRunner subclasses.
+// Use them inside the class body instead of omitting the override: the base
+// entry points are pure virtual, so every runner states its choice.
+#define MBUFO_RUNNER_SERIAL_DECODE_BATCH()                                    \
+  [[nodiscard]] std::vector<::mbufo::server::TextDecodeStep> DecodeBatch(     \
+      std::span<const ::mbufo::server::TextRunnerDecode> decodes_)            \
+      const override {                                                        \
+    return SerialDecodeBatch(decodes_);                                       \
+  }
+#define MBUFO_RUNNER_SERIAL_ADVANCE_BATCH()                                   \
+  void AdvanceBatch(std::span<const ::mbufo::server::TextRunnerAdvance>       \
+                        advances_) const override {                           \
+    SerialAdvanceBatch(advances_);                                            \
+  }
+#define MBUFO_RUNNER_NO_MIXED_BATCH()                                         \
+  [[nodiscard]] bool AdvanceBatchWithPrefillChunk(                            \
+      std::span<const ::mbufo::server::TextRunnerAdvance>,                    \
+      std::span<std::exception_ptr>, ::mbufo::server::TextRunnerState&,       \
+      std::span<const ::mbufo::server::TextRunnerToken>, std::size_t,         \
+      std::size_t, ::mbufo::server::TextPrefillStep&) const override {        \
+    RefuseMixedBatch("runner has no merged advance+prefill");                 \
+  }                                                                           \
+  [[nodiscard]] std::vector<::mbufo::server::TextDecodeStep>                  \
+  DecodeBatchWithPrefillChunk(                                                \
+      std::span<const ::mbufo::server::TextRunnerDecode>,                     \
+      ::mbufo::server::TextRunnerState&,                                      \
+      std::span<const ::mbufo::server::TextRunnerToken>, std::size_t,         \
+      std::size_t, ::mbufo::server::TextPrefillStep&) const override {        \
+    RefuseMixedBatch("runner has no merged multi-token decode");              \
+  }
+
 
 /// Bounded pool of opaque runner states with exact-prefix continuation reuse.
 class TextRunnerPool {

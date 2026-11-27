@@ -255,6 +255,7 @@ const FakeState& RequireFakeState(const TextRunnerState& state) {
 
 class FakeRunner final : public TextModelRunner {
 public:
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   explicit FakeRunner(std::shared_ptr<FakeControl> control)
       : control_(std::move(control)) {}
 
@@ -540,7 +541,7 @@ public:
 
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const mbufo::server::TextRunnerDecode> decodes) const override {
-    auto steps = TextModelRunner::DecodeBatch(decodes);
+    auto steps = SerialDecodeBatch(decodes);
     const auto width = std::min(control_->actual_batch_width, decodes.size());
     for (auto& step : steps) {
       step.execution_plan = {.kind = width > 1 ? TextExecutionPlanKind::kBatched
@@ -561,7 +562,7 @@ public:
       const std::lock_guard<std::mutex> lock(control_->mutex);
       control_->advance_batches.push_back(std::move(labels));
     }
-    TextModelRunner::AdvanceBatch(advances);
+    SerialAdvanceBatch(advances);
   }
 
   [[nodiscard]] std::size_t CheckpointPosition(

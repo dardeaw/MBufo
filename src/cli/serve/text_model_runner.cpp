@@ -542,7 +542,11 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
 
 }  // namespace
 
-void TextModelRunner::AdvanceBatch(
+void TextModelRunner::RefuseMixedBatch(const char* reason) {
+  throw MixedBatchRefused(reason);
+}
+
+void TextModelRunner::SerialAdvanceBatch(
     std::span<const TextRunnerAdvance> advances) const {
   for (const auto& advance : advances) {
     try {
@@ -578,7 +582,7 @@ TextDecodeStep TextModelRunner::DecodeStep(
   };
 }
 
-std::vector<TextDecodeStep> TextModelRunner::DecodeBatch(
+std::vector<TextDecodeStep> TextModelRunner::SerialDecodeBatch(
     std::span<const TextRunnerDecode> decodes) const {
   std::vector<TextDecodeStep> steps;
   steps.reserve(decodes.size());

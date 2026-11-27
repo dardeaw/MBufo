@@ -1084,6 +1084,8 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
 
 class QwenTextRunner final : public HipTextModelRunner {
 public:
+  // Batch contract (see TextModelRunner): native DecodeBatch/AdvanceBatch below; no merged prefill+decode.
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
@@ -1466,7 +1468,7 @@ public:
       std::span<const TextRunnerDecode> decodes) const override {
     if (dflash_model_ == nullptr || decodes.size() < 2 ||
         decodes.size() > MaximumDecodeBatchWidth()) {
-      return TextModelRunner::DecodeBatch(decodes);
+      return SerialDecodeBatch(decodes);
     }
     std::vector<TextDecodeStep> steps(decodes.size());
     std::vector<QwenTextRunnerState*> states;
@@ -1695,6 +1697,8 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
 
 class DeepSeekTextRunner final : public HipTextModelRunner {
 public:
+  // Batch contract (see TextModelRunner): native DecodeBatch/AdvanceBatch below; no merged prefill+decode.
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kDeepSeek;
   }
@@ -2069,7 +2073,7 @@ public:
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const override {
     if (!use_dspark_ || decodes.size() < 2 || decodes.size() > 8) {
-      return TextModelRunner::DecodeBatch(decodes);
+      return SerialDecodeBatch(decodes);
     }
     if (std::any_of(decodes.begin(), decodes.end(), [&](const auto& item) {
           return RequireDeepSeekState(item.state.get()).position() >=
@@ -2133,7 +2137,7 @@ public:
       // Isolate the cancelled row rather than failing every client in its
       // batch. Ordinary cycles retain the shared physical batch.
       if (interrupted)
-        return TextModelRunner::DecodeBatch(decodes);
+        return SerialDecodeBatch(decodes);
       throw std::runtime_error("DeepSeek DSpark batch decode failed: " + error);
     }
 
@@ -2204,7 +2208,7 @@ public:
                 items.data(), item_count),
             &error, &interrupted)) {
       if (interrupted) {
-        TextModelRunner::AdvanceBatch(advances);
+        SerialAdvanceBatch(advances);
         return;
       }
       throw std::runtime_error("DeepSeek batch decode failed: " + error);
@@ -2862,7 +2866,7 @@ public:
   void AdvanceBatch(
       std::span<const TextRunnerAdvance> advances) const override {
     if (advances.size() < 2) {
-      return TextModelRunner::AdvanceBatch(advances);
+      return SerialAdvanceBatch(advances);
     }
     std::vector<QwenFlashNextSession::BatchOutcome> outcomes(advances.size());
     std::vector<QwenFlashNextSession::AdvanceRequest> requests;
@@ -3060,7 +3064,7 @@ public:
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const override {
     if (decodes.size() < 2 || !use_mtp_) {
-      return TextModelRunner::DecodeBatch(decodes);
+      return SerialDecodeBatch(decodes);
     }
     const auto count = decodes.size();
     std::vector<sampling::SamplerState> samplers;
@@ -3375,6 +3379,10 @@ const GptOssTextRunnerState& RequireGptOssState(const TextRunnerState& state) {
 
 class GptOssTextRunner final : public HipTextModelRunner {
  public:
+  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  MBUFO_RUNNER_SERIAL_DECODE_BATCH();
+  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kJson;
   }
@@ -3767,6 +3775,10 @@ class LagunaTextRunnerState final : public TextRunnerState {
 
 class LagunaTextRunner final : public HipTextModelRunner {
  public:
+  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  MBUFO_RUNNER_SERIAL_DECODE_BATCH();
+  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
@@ -4178,6 +4190,10 @@ class InklingTextRunnerState final : public TextRunnerState {
 
 class InklingTextRunner final : public HipTextModelRunner {
  public:
+  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  MBUFO_RUNNER_SERIAL_DECODE_BATCH();
+  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kInkling;
   }
@@ -4485,6 +4501,10 @@ const LlamaTextRunnerState& RequireLlamaState(const TextRunnerState& state) {
 
 class LlamaTextRunner final : public HipTextModelRunner {
  public:
+  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  MBUFO_RUNNER_SERIAL_DECODE_BATCH();
+  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kLlama;
   }
@@ -5008,6 +5028,9 @@ const GlimmerTextRunnerState& RequireGlimmerState(
 
 class GlimmerTextRunner final : public HipTextModelRunner {
  public:
+  // Batch contract (see TextModelRunner): serial AdvanceBatch; native DecodeBatch below; no merged prefill+decode.
+  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kAtem;
   }
@@ -5299,7 +5322,7 @@ class GlimmerTextRunner final : public HipTextModelRunner {
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const override {
     if (decodes.size() < 2 || shared_draft_ != nullptr) {
-      return TextModelRunner::DecodeBatch(decodes);
+      return SerialDecodeBatch(decodes);
     }
     std::vector<std::int32_t> pending;
     pending.reserve(decodes.size());
@@ -5339,7 +5362,7 @@ class GlimmerTextRunner final : public HipTextModelRunner {
       }
       std::string error;
       if (!GlimmerSession::DecodeBatch(items, &error)) {
-        return TextModelRunner::DecodeBatch(decodes);
+        return SerialDecodeBatch(decodes);
       }
       for (std::size_t k = 0; k < active.size(); ++k) {
         const std::size_t lane = active[k];
@@ -5776,6 +5799,10 @@ const Gemma4TextRunnerState& RequireGemma4State(const TextRunnerState& state) {
 
 class Gemma4TextRunner final : public HipTextModelRunner {
  public:
+  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  MBUFO_RUNNER_SERIAL_DECODE_BATCH();
+  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kGemma;
   }

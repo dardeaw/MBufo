@@ -32,6 +32,9 @@ struct State final : TextRunnerState {
 };
 class Runner : public TextModelRunner {
 public:
+  MBUFO_RUNNER_SERIAL_DECODE_BATCH();
+  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   mutable FakeAdapter* adapter{};
   mutable std::size_t captures{};
   bool defer_idle{};

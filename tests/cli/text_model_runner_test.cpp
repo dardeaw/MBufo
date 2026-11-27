@@ -128,6 +128,8 @@ const FakeState& RequireFakeState(const TextRunnerState& state) {
 
 class FakeRunner : public TextModelRunner {
 public:
+  MBUFO_RUNNER_SERIAL_DECODE_BATCH();
+  MBUFO_RUNNER_NO_MIXED_BATCH();
   FakeRunner(std::shared_ptr<FakeStats> stats, std::size_t measured_bytes = 64,
              std::size_t state_capacity_bytes = 256,
              std::size_t retained_snapshot_capacity_bytes = 256)

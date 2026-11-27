@@ -204,3 +204,31 @@ needle/TTFT 驗收 → 上線。B 的 serve 手術開工前需要單獨 review�
   mixed 預設開（無需 env，`MBUFO_MIXED_BATCH=0` 可關）。
 - 上線驗證：單發精確 + 4 路併發全精確 + journal 零錯誤。
 - 開機自啟：沿用既有 `mbufo.service`（enabled），binary 路徑不變。
+
+## Runner batch contract
+
+`TextModelRunner` declares four batch entry points as pure virtual functions:
+`DecodeBatch`, `AdvanceBatch`, `AdvanceBatchWithPrefillChunk` and
+`DecodeBatchWithPrefillChunk`. A runner does not compile until it has chosen,
+for each one, a native implementation or an explicit fallback:
+
+| Fallback macro (`text_model_runner.hpp`) | Meaning |
+| --- | --- |
+| `MBUFO_RUNNER_SERIAL_DECODE_BATCH()` | `DecodeBatch` loops `DecodeStep` over the lanes. |
+| `MBUFO_RUNNER_SERIAL_ADVANCE_BATCH()` | `AdvanceBatch` loops `Advance` over the lanes. |
+| `MBUFO_RUNNER_NO_MIXED_BATCH()` | Both merged prefill+decode entry points throw `MixedBatchRefused` with nothing mutated, so the scheduler runs the chunk and the decodes as separate steps. |
+
+A native implementation must be reflected in `TextRunnerCapabilities`
+(`batched_multi_token_decode`, `mixed_prefill_decode`). Runners that still use a
+fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.cpp`.
+
+| Runner | `DecodeBatch` | `AdvanceBatch` | Merged prefill + decode |
+| --- | --- | --- | --- |
+| Qwen 27B / Qwen3.5-3.6 | native (verify-fused with a DFlash draft, serial otherwise) | native (2 to 8 lanes) | no |
+| DeepSeek V4 Flash | native (serial in some conditions) | native | no |
+| Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
+| Muse Glimmer | native without a shared draft, serial otherwise | serial | no |
+| GPT-OSS, Laguna, Inkling, Llama, Gemma 4 | serial | serial | no |
+
+Adding a model: derive from `HipTextModelRunner` and declare all four; the
+compiler rejects a runner that leaves one out.
