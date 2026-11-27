@@ -1405,6 +1405,121 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
   return Forward({&token, 1}, impl_->length, error_msg);
 }
 
+std::size_t Session::MixedChunkEnd(std::size_t offset) {
+  const std::size_t k = kMaxChunk;
+  return (offset / k + 1) * k;
+}
+
+// One layer-synchronous pass over the decode lanes and an optional prefill
+// chunk. Every session runs the exact single-session Forward kernels on its
+// own buffers (lanes with n == 1, the chunk with n rows), in the same
+// per-session order as Forward; only the layer loop is shared, so the
+// arithmetic of each session is unchanged. Callers have validated.
+bool Session::RunLayerSynchronous(std::span<Session*> lanes,
+                                  std::span<const std::int32_t> tokens,
+                                  Session* chunk,
+                                  std::span<const std::int32_t> chunk_tokens,
+                                  std::uint32_t chunk_start) {
+  Model& model = lanes.empty() ? *chunk->model_ : *lanes[0]->model_;
+  const auto& w = *model.weights_;
+  const std::uint32_t hidden = w.config.hidden_size;
+  hipStream_t stream = 0;
+  const bool q8 = model.options_.kv_cache_quant == "q8";
+  std::vector<std::uint32_t> lane_pos(lanes.size());
+  const auto stage = [&](Session& s, const std::int32_t* toks,
+                         std::uint32_t n, const std::uint32_t* pos) {
+    auto& impl = *s.impl_;
+    if (q8) {
+      (void)hipMemcpyAsync(impl.d_pos, pos, sizeof(*pos),
+                           hipMemcpyHostToDevice, stream);
+    }
+    (void)hipMemcpyAsync(impl.d_tokens, toks, n * sizeof(std::int32_t),
+                         hipMemcpyHostToDevice, stream);
+    kernels::Embed(w.token_embd.device, w.token_embd.type, impl.d_tokens,
+                   impl.hidden, n, hidden, stream);
+  };
+  // d_pos / d_tokens are per session, so staging every session up front
+  // cannot collide; each token/pos source below outlives the final sync.
+  std::vector<std::uint32_t> pos_store(lanes.size() + 1);
+  for (std::size_t i = 0; i < lanes.size(); ++i) {
+    lane_pos[i] = lanes[i]->impl_->length;
+    pos_store[i] = lane_pos[i];
+    stage(*lanes[i], &tokens[i], 1, &pos_store[i]);
+  }
+  const std::uint32_t chunk_n = static_cast<std::uint32_t>(chunk_tokens.size());
+  if (chunk != nullptr) {
+    pos_store[lanes.size()] = chunk_start;
+    stage(*chunk, chunk_tokens.data(), chunk_n, &pos_store[lanes.size()]);
+  }
+  for (std::uint32_t il = 0; il < w.config.num_layers; ++il) {
+    for (std::size_t i = 0; i < lanes.size(); ++i)
+      ForwardLayer(*lanes[i], il, 1, lane_pos[i], stream);
+    if (chunk != nullptr) ForwardLayer(*chunk, il, chunk_n, chunk_start, stream);
+  }
+  for (std::size_t i = 0; i < lanes.size(); ++i)
+    ForwardFinish(*lanes[i], 1, lane_pos[i], stream);
+  if (chunk != nullptr) ForwardFinish(*chunk, chunk_n, chunk_start, stream);
+  (void)hipStreamSynchronize(0);
+  return true;
+}
+
+bool Session::EvaluateBatch(std::span<Session*> lanes,
+                            std::span<const std::int32_t> tokens,
+                            std::string* error_msg) {
+  return EvaluateBatchWithChunk(lanes, tokens, nullptr, {}, 0, error_msg);
+}
+
+bool Session::EvaluateBatchWithChunk(std::span<Session*> lanes,
+                                     std::span<const std::int32_t> tokens,
+                                     Session* chunk,
+                                     std::span<const std::int32_t> chunk_prefix,
+                                     std::size_t chunk_offset,
+                                     std::string* error_msg) {
+  const auto fail = [&](const char* m) {
+    if (error_msg != nullptr && error_msg->empty()) *error_msg = m;
+    return false;
+  };
+  if (lanes.empty() || lanes.size() != tokens.size())
+    return fail("gptoss batch needs one token per lane");
+  Model* model = lanes[0]->model_.get();
+  const std::uint32_t vocab = model->weights_->config.vocab_size;
+  for (std::size_t i = 0; i < lanes.size(); ++i) {
+    Session* s = lanes[i];
+    if (s == nullptr || s->model_.get() != model)
+      return fail("gptoss batch lanes must share the model");
+    if (s == chunk) return fail("gptoss batch chunk session is also a lane");
+    for (std::size_t j = 0; j < i; ++j)
+      if (lanes[j] == s) return fail("gptoss batch has a duplicate lane");
+    if (s->impl_->length + 1 > model->options_.max_context)
+      return fail("gptoss context exhausted");
+    if (tokens[i] < 0 || static_cast<std::uint32_t>(tokens[i]) >= vocab)
+      return fail("gptoss batch token out of range");
+  }
+  std::uint32_t chunk_start = 0;
+  std::span<const std::int32_t> chunk_tokens;
+  if (chunk != nullptr) {
+    if (chunk->model_.get() != model)
+      return fail("gptoss chunk session must share the model");
+    const std::size_t size = chunk_prefix.size();
+    const std::size_t k = kMaxChunk;
+    if (size == 0 || size > model->options_.max_context)
+      return fail("gptoss chunk prefix exceeds KV capacity");
+    const std::size_t block_start = ((size - 1) / k) * k;
+    if (block_start > chunk_offset || chunk_offset >= size)
+      return fail("gptoss chunk does not stay inside one prefill block");
+    // Rows below block_start must already be in the KV (a fresh or reset
+    // session has nothing there; Sync would re-run from 0).
+    if (block_start > 0 && chunk->impl_->length < block_start)
+      return fail("gptoss chunk does not continue the prefilled prefix");
+    chunk_start = static_cast<std::uint32_t>(block_start);
+    chunk_tokens = chunk_prefix.subspan(block_start);
+    for (std::int32_t t : chunk_tokens)
+      if (t < 0 || static_cast<std::uint32_t>(t) >= vocab)
+        return fail("gptoss chunk token out of range");
+  }
+  return RunLayerSynchronous(lanes, tokens, chunk, chunk_tokens, chunk_start);
+}
+
 std::span<const float> Session::Logits() const noexcept {
   return impl_->host_logits;
 }

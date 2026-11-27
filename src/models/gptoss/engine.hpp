@@ -117,12 +117,41 @@ class Session final {
   [[nodiscard]] bool Forward(std::span<const std::int32_t> tokens,
                              std::uint32_t start_pos,
                              std::string* error_msg = nullptr);
+  /// Plain advance of every lane (one token each) in one layer-synchronous
+  /// pass. Each lane runs its own single-token decode core on its own
+  /// buffers, so the result is bit-identical to Evaluate per lane. Returns
+  /// false with nothing mutated when validation fails.
+  [[nodiscard]] static bool EvaluateBatch(std::span<Session*> lanes,
+                                          std::span<const std::int32_t> tokens,
+                                          std::string* error_msg = nullptr);
+  /// EvaluateBatch plus one session's prefill chunk in the same layer pass.
+  /// `chunk_prefix` is the chunk session's prompt through the end of the
+  /// chunk (Sync semantics); the chunk is the prefill block that ends at
+  /// chunk_prefix.size(): Sync cuts blocks at multiples of MaxChunkTokens()
+  /// from 0, so the pass recomputes rows [block_start, size) with block_start
+  /// = ((size-1)/K)*K, which must not exceed `chunk_offset` and must lie
+  /// within the session's already-prefilled length. Use MixedChunkEnd() to
+  /// pick a size that stays inside one block. Output equals Sync of the
+  /// prefix followed by serial Evaluate of each lane, bit for bit. Returns
+  /// false with nothing mutated on any validation failure.
+  [[nodiscard]] static bool EvaluateBatchWithChunk(
+      std::span<Session*> lanes, std::span<const std::int32_t> tokens,
+      Session* chunk_session, std::span<const std::int32_t> chunk_prefix,
+      std::size_t chunk_offset, std::string* error_msg = nullptr);
+  /// Largest prefix end a merged chunk starting at `offset` may reach (the
+  /// end of the Sync block containing `offset`).
+  [[nodiscard]] static std::size_t MixedChunkEnd(std::size_t offset);
   [[nodiscard]] std::span<const float> Logits() const noexcept;
   [[nodiscard]] std::uint32_t Length() const noexcept;
   [[nodiscard]] std::int32_t SampleGreedy();
 
  private:
   Session(std::shared_ptr<Model> model);
+
+  [[nodiscard]] static bool RunLayerSynchronous(
+      std::span<Session*> lanes, std::span<const std::int32_t> tokens,
+      Session* chunk, std::span<const std::int32_t> chunk_tokens,
+      std::uint32_t chunk_start);
 
   static void ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                            std::uint32_t start_pos, hipStream_t stream);
