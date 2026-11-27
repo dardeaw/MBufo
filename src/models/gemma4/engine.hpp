@@ -104,6 +104,21 @@ public:
   [[nodiscard]] static bool DecodeBatch(std::span<Session*> sessions,
                                         std::span<const std::int32_t> tokens,
                                         std::string* error_msg = nullptr);
+  /// DecodeBatch plus one more session's prefill chunk in the same layer
+  /// pass. `chunk_prefix` is the chunk session's full prompt through the end
+  /// of the chunk (Sync semantics); it must continue that session's synced
+  /// prefix exactly at `chunk_offset` and add 1..MaxChunkTokens() tokens.
+  /// Returns false with nothing mutated on any validation failure (the
+  /// caller then runs Sync + DecodeBatch separately). Output equals Sync of
+  /// the chunk followed by serial Evaluate of each lane (bit-identical; the
+  /// lanes use the single-session attention cores, not the unified launch). MTP sessions refused.
+  [[nodiscard]] static bool DecodeBatchWithChunk(
+      std::span<Session*> sessions, std::span<const std::int32_t> tokens,
+      Session* chunk_session, std::span<const std::int32_t> chunk_prefix,
+      std::size_t chunk_offset, std::string* error_msg = nullptr);
+  /// Largest prompt delta one Sync/Forward chunk (and so one mixed chunk)
+  /// covers; honors GEMMA4_CHUNK.
+  [[nodiscard]] static std::uint32_t MaxChunkTokens();
   /// Runs a forward over `tokens` starting at `start_pos`.
   [[nodiscard]] bool Forward(std::span<const std::int32_t> tokens,
                              std::uint32_t start_pos,
@@ -136,6 +151,10 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 
+  [[nodiscard]] static bool DecodeBatchImpl(
+      std::span<Session*> sessions, std::span<const std::int32_t> tokens,
+      Session* chunk, std::span<const std::int32_t> chunk_prefix,
+      std::size_t chunk_offset, std::string* error_msg);
   // Single-layer phases factored out of Forward so DecodeBatch can run them
   // batch-wide with one unified attention launch in the middle.
   /// Per-layer inputs of the E-models (no-op when the model has no per-layer embeddings).

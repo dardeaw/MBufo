@@ -2900,9 +2900,43 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
   return Forward({&token, 1}, impl_->length, error_msg);
 }
 
+std::uint32_t Session::MaxChunkTokens() {
+  std::uint32_t chunk = Session::Impl::kMaxChunk;
+  if (const char* e = getenv("GEMMA4_CHUNK")) {
+    const long v = std::strtol(e, nullptr, 10);
+    if (v >= 1 && v <= (long)Session::Impl::kMaxChunk)
+      chunk = static_cast<std::uint32_t>(v);
+  }
+  return chunk;
+}
+
 bool Session::DecodeBatch(std::span<Session*> sessions,
                           std::span<const std::int32_t> tokens,
                           std::string* error_msg) {
+  return DecodeBatchImpl(sessions, tokens, nullptr, {}, 0, error_msg);
+}
+
+bool Session::DecodeBatchWithChunk(std::span<Session*> sessions,
+                                   std::span<const std::int32_t> tokens,
+                                   Session* chunk_session,
+                                   std::span<const std::int32_t> chunk_prefix,
+                                   std::size_t chunk_offset,
+                                   std::string* error_msg) {
+  if (chunk_session == nullptr) {
+    if (error_msg != nullptr && error_msg->empty())
+      *error_msg = "gemma4 DecodeBatchWithChunk needs a chunk session";
+    return false;
+  }
+  return DecodeBatchImpl(sessions, tokens, chunk_session, chunk_prefix,
+                         chunk_offset, error_msg);
+}
+
+bool Session::DecodeBatchImpl(std::span<Session*> sessions,
+                              std::span<const std::int32_t> tokens,
+                              Session* chunk,
+                              std::span<const std::int32_t> chunk_prefix,
+                              std::size_t chunk_offset,
+                              std::string* error_msg) {
   namespace mb = ::mbufo::core::compute::mixed_batch;
   const auto fail = [&](const std::string& m) {
     if (error_msg != nullptr && error_msg->empty()) *error_msg = m;
@@ -2926,6 +2960,61 @@ bool Session::DecodeBatch(std::span<Session*> sessions,
     if (s->impl_->length + 1 > s->impl_->capacity)
       return fail("gemma4 DecodeBatch token exceeds KV capacity");
   }
+  // Optional prefill chunk riding the same layer pass. Validation mirrors
+  // Sync: the chunk must continue the session's synced prefix exactly at
+  // chunk_offset (or restart from 0 when chunk_offset is 0); anything else is
+  // refused before any state is touched so the caller runs Sync separately.
+  std::uint32_t chunk_n = 0;
+  std::uint32_t chunk_start = 0;
+  bool chunk_resync = false;
+  if (chunk != nullptr) {
+    if (chunk->model_.get() != model)
+      return fail("gemma4 chunk session must share the model");
+    if (chunk->MtpEnabled())
+      return fail("gemma4 chunk session refuses MTP (use Sync)");
+    for (Session* s : sessions)
+      if (s == chunk) return fail("gemma4 chunk session is also a decode lane");
+    if (chunk_prefix.size() > chunk->impl_->capacity)
+      return fail("gemma4 chunk prompt exceeds KV capacity");
+    const auto& prev = chunk->impl_->synced_;
+    std::size_t start = 0;
+    if (!prev.empty() && chunk_prefix.size() >= prev.size() &&
+        chunk->impl_->length >= prev.size() &&
+        std::equal(prev.begin(), prev.end(), chunk_prefix.begin())) {
+      start = prev.size();
+    } else {
+      chunk_resync = true;
+    }
+    if (start != chunk_offset)
+      return fail("gemma4 chunk does not continue the synced prefix");
+    if (chunk_prefix.size() <= start ||
+        chunk_prefix.size() - start > MaxChunkTokens())
+      return fail("gemma4 chunk length outside the single-pass envelope");
+    chunk_start = static_cast<std::uint32_t>(start);
+    chunk_n = static_cast<std::uint32_t>(chunk_prefix.size() - start);
+  }
+  // Caller-owned arena (§4.2): one buffer shared by every layer launch,
+  // regrown when a wider batch needs more. Opt-out valve (default on):
+  // MBUFO_GEMMA4_UNIFIED_BATCH=0 keeps the legacy single-session attention
+  // cores inside the batch envelope.
+  // A merged prefill chunk keeps every lane on the legacy single-session
+  // attention cores: the unified launch reorders the lane's sums (measured
+  // on q8 KV: a different greedy token stream), and the merged step must
+  // equal separate Sync + Evaluate bit for bit.
+  const bool use_unified = chunk == nullptr && [] {
+    const char* e = std::getenv("MBUFO_GEMMA4_UNIFIED_BATCH");
+    return e == nullptr || e[0] != '0';
+  }();
+  const std::size_t need = mb::MixedBatchScratchBytes(sessions.size());
+  if (model->mixed_scratch_ == nullptr ||
+      model->mixed_scratch_bytes_ < need) {
+    if (model->mixed_scratch_ != nullptr) (void)hipFree(model->mixed_scratch_);
+    void* p = nullptr;
+    if (hipMalloc(&p, need) != hipSuccess)
+      return fail("gemma4 DecodeBatch scratch allocation failed");
+    model->mixed_scratch_ = p;
+    model->mixed_scratch_bytes_ = need;
+  }
   // One token embedded per session; the device position scalar each blocked
   // layer reads is uploaded per session, exactly like Forward.
   const bool q8 = model->options_.kv_cache_quant == "q8";
@@ -2942,23 +3031,23 @@ bool Session::DecodeBatch(std::span<Session*> sessions,
                         std::sqrt(static_cast<float>(hidden)), stream);
     BuildPle(*s, 1, stream);
   }
-  // Caller-owned arena (§4.2): one buffer shared by every layer launch,
-  // regrown when a wider batch needs more. Opt-out valve (default on):
-  // MBUFO_GEMMA4_UNIFIED_BATCH=0 keeps the legacy single-session attention
-  // cores inside the batch envelope.
-  const bool use_unified = [] {
-    const char* e = std::getenv("MBUFO_GEMMA4_UNIFIED_BATCH");
-    return e == nullptr || e[0] != '0';
-  };
-  const std::size_t need = mb::MixedBatchScratchBytes(sessions.size());
-  if (model->mixed_scratch_ == nullptr ||
-      model->mixed_scratch_bytes_ < need) {
-    if (model->mixed_scratch_ != nullptr) (void)hipFree(model->mixed_scratch_);
-    void* p = nullptr;
-    if (hipMalloc(&p, need) != hipSuccess)
-      return fail("gemma4 DecodeBatch scratch allocation failed");
-    model->mixed_scratch_ = p;
-    model->mixed_scratch_bytes_ = need;
+  std::vector<std::int32_t> chunk_tokens;
+  if (chunk != nullptr) {
+    if (chunk_resync) {
+      chunk->impl_->length = 0;
+      chunk->impl_->mtp_blk_dirty = true;
+    }
+    chunk->impl_->has_pending_cur = false;
+    chunk->impl_->norm_ready = -1;
+    if (q8) {
+      (void)hipMemcpyAsync(chunk->impl_->d_pos, &chunk_start,
+                           sizeof(chunk_start), hipMemcpyHostToDevice, stream);
+    }
+    chunk_tokens.assign(chunk_prefix.begin() + chunk_start, chunk_prefix.end());
+    kernels::EmbedScale(w.token_embd.device, w.token_embd.type,
+                        chunk_tokens.data(), chunk->impl_->hidden, chunk_n,
+                        hidden, std::sqrt(static_cast<float>(hidden)), stream);
+    BuildPle(*chunk, chunk_n, stream);
   }
   mb::MixedBlk blks[mb::kMaxMixedBlks];
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
@@ -2967,6 +3056,8 @@ bool Session::DecodeBatch(std::span<Session*> sessions,
     const std::uint32_t kv_heads = c.KvHeads(kv_layer);
     for (Session* s : sessions)
       ForwardLayerPre(*s, il, 1, s->impl_->length, stream);
+    if (chunk != nullptr)
+      ForwardLayerPre(*chunk, il, chunk_n, chunk_start, stream);
     const bool use_blocked = q8 && kv_heads > 0 && head_dim == 256 && sessions[0]->impl_->kv_bk[kv_layer] != nullptr;
     for (std::size_t i = 0; i < sessions.size(); ++i) {
       Session* s = sessions[i];
@@ -3030,12 +3121,20 @@ bool Session::DecodeBatch(std::span<Session*> sessions,
       for (Session* s : sessions)
         ForwardLayerAttn(*s, il, 1, s->impl_->length, stream);
     }
+    if (chunk != nullptr)
+      ForwardLayerAttn(*chunk, il, chunk_n, chunk_start, stream);
     for (Session* s : sessions)
       ForwardLayerPost(*s, il, 1, s->impl_->length, stream);
+    if (chunk != nullptr)
+      ForwardLayerPost(*chunk, il, chunk_n, chunk_start, stream);
   }
   for (Session* s : sessions)
     ForwardFinish(*s, 1, s->impl_->length, /*all_logits=*/false, stream);
+  if (chunk != nullptr)
+    ForwardFinish(*chunk, chunk_n, chunk_start, /*all_logits=*/false, stream);
   (void)hipStreamSynchronize(0);
+  if (chunk != nullptr)
+    chunk->impl_->synced_.assign(chunk_prefix.begin(), chunk_prefix.end());
   return true;
 }
 
