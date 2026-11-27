@@ -203,6 +203,17 @@ __global__ void SigmoidBiasTopKRouterKernel(
   }
 }
 
+__global__ void FlagNonFiniteTokensKernel(const float* __restrict__ data,
+                                          std::size_t per_token,
+                                          std::uint8_t* __restrict__ flags) {
+  const float* row = data + static_cast<std::size_t>(blockIdx.x) * per_token;
+  bool bad = false;
+  for (std::size_t i = threadIdx.x; i < per_token; i += blockDim.x) {
+    bad |= !isfinite(row[i]);
+  }
+  if (__syncthreads_or(bad) != 0 && threadIdx.x == 0) flags[blockIdx.x] = 1;
+}
+
 __global__ void SiluMulKernel(const float* gate, const float* up, float* out,
                               std::size_t count) {
   const std::size_t idx =
@@ -404,6 +415,15 @@ void SigmoidBiasTopKRouter(const float* logits, const float* bias,
   hipLaunchKernelGGL(SigmoidBiasTopKRouterKernel, dim3(n_tokens), dim3(1), 0,
                      stream, logits, bias, ids, weights, n_experts, top_k,
                      norm_topk, scale);
+}
+
+void FlagNonFiniteTokens(const float* data, std::uint32_t n_tokens,
+                         std::size_t per_token, std::uint8_t* flags,
+                         hipStream_t stream) {
+  if (n_tokens == 0) return;
+  (void)hipMemsetAsync(flags, 0, n_tokens, stream);
+  hipLaunchKernelGGL(FlagNonFiniteTokensKernel, dim3(n_tokens), dim3(256), 0,
+                     stream, data, per_token, flags);
 }
 
 void SiluMul(const float* gate, const float* up, float* out,
