@@ -3032,6 +3032,14 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
   if (common == prompt.size() && history_.size() == prompt.size()) {
     return true;
   }
+  // Pure extension (a chunked prefill, or a continuation of the same stream):
+  // run only the new suffix. The sconv state rolls forward, so no restart is
+  // needed. The old code restarted from 0 here, which made every prefill chunk
+  // re-prefill the whole prefix.
+  if (common == history_.size() && image_injections_.empty()) {
+    return Forward(prompt.subspan(common), static_cast<std::uint32_t>(common),
+                   error_msg);
+  }
   // Rolling sconv state cannot rewind to an arbitrary prefix: restart the
   // stream from position 0 whenever the prompt diverges.
   history_.clear();
