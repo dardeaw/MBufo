@@ -2,10 +2,13 @@
 // Model bindings for the NPU op-graph executor (npu_op_graph.hpp):
 //   * NpuGraphBgeRuntime  - bge-m3 / bge-reranker-v2-m3 encoder (24L XLM-R)
 //   * NpuQwen3Encoder     - Qwen3-Embedding-0.6B / Qwen3-Reranker-0.6B (28L)
+//   * NpuGraphEmbGemma2   - EmbeddingGemma 2 (24L Gemma-style, sliding/full,
+//   PLE)
 // Compiled only when MBUFO_ENABLE_NPU=ON.
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <span>
 #include <string>
@@ -15,6 +18,7 @@
 #include "src/core/compute/npu/npu_op_graph.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/bge_m3/forward.hpp"
+#include "src/models/embeddinggemma2/engine.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
 namespace mbufo::core::npu {
@@ -35,6 +39,53 @@ class NpuGraphBgeRuntime {
   }
 
  private:
+  graph::WeightStore store_;
+  graph::GraphExecutor exec_;
+  graph::RunStats stats_;
+};
+
+/// Which EmbeddingGemma 2 NPU runtime to use. Graph (Q8 on the shared engine)
+/// is the default: measured cos >= 0.9992 vs the CPU/GPU reference, faster than
+/// the dedicated runtime, inputs up to 512 tokens instead of 128.
+/// MBUFO_NPU_EMBGEMMA_RUNTIME=legacy|graph overrides; MBUFO_NPU_QUANT=q4 keeps
+/// the dedicated runtime (the graph has no Q4 path).
+[[nodiscard]] inline bool EmbGemma2UseGraph() {
+  const char* rt = std::getenv("MBUFO_NPU_EMBGEMMA_RUNTIME");
+  if (rt != nullptr && std::string(rt) == "legacy")
+    return false;
+  if (rt != nullptr && std::string(rt) == "graph")
+    return true;
+  const char* q = std::getenv("MBUFO_NPU_QUANT");
+  if (q != nullptr && q[0] != '\0') {
+    const std::string qs(q);
+    return qs == "q8" || qs == "Q8";
+  }
+  return true;
+}
+
+/// EmbeddingGemma 2 as a declarative graph (npu_op_graph.hpp
+/// BuildEmbGemma2Graph) on the shared Q8 engine. Same output contract as
+/// NpuEmbGemma2Runtime::Forward: L2-normalized `out_dim` embedding.
+class NpuGraphEmbGemma2 {
+public:
+  /// Host attention has no fixed tile, so unlike the 128-row BF16 kernel chain
+  /// any length up to this bound runs.
+  static constexpr std::size_t kMaxTokens = 512;
+
+  /// `reader` (GGUF mmap) must outlive the runtime: weights are zero-copy
+  /// views.
+  [[nodiscard]] bool Init(const core::GgufReader& reader,
+                          const models::embeddinggemma2::Config& cfg,
+                          graph::LinearBackend backend, std::string* error);
+  [[nodiscard]] bool Forward(std::span<const std::uint32_t> ids,
+                             std::vector<float>* out, double* ms,
+                             std::string* error);
+  [[nodiscard]] bool resident() const noexcept { return exec_.prepared(); }
+  [[nodiscard]] const graph::RunStats& last_stats() const noexcept {
+    return stats_;
+  }
+
+private:
   graph::WeightStore store_;
   graph::GraphExecutor exec_;
   graph::RunStats stats_;

@@ -6114,9 +6114,14 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         SetError(error, "EmbeddingGemma 2 NPU weight load failed: " + npu_err);
         return false;
       }
+      const bool eg_graph = mbufo::core::npu::EmbGemma2UseGraph();
       Logger::Info("loader",
-                   "event=npu_loaded model=embeddinggemma-2 quant=" +
-                       (npu_quant.empty() ? std::string("default") : npu_quant));
+                   "event=npu_loaded model=embeddinggemma-2 runtime=" +
+                       std::string(eg_graph ? "NpuOpGraph quant=q8"
+                                            : "NpuEmbGemma2Runtime quant=" +
+                                                  (npu_quant.empty()
+                                                       ? std::string("default")
+                                                       : npu_quant)));
 #else
       SetError(error,
                "NPU backend is disabled in this build (rebuild with "

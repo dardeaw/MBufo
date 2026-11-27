@@ -183,3 +183,15 @@ in-process track (§1).
 - ASR (thinker) and TTS (talker) servables warm with a real dummy decode (prefill +
   step + LM head), measured about 4.5 s each; this is the true decoder cold start
   that the first request used to pay. FLUX (0.9 s) and Z-Image (1.3 s) warm with one reduced Euler step (1+1 blocks, 8x8 latent, one text token).
+
+### EmbeddingGemma 2 on the op graph (M2)
+
+EmbeddingGemma 2 now runs on the declarative op-graph executor by default
+(`NpuGraphEmbGemma2`, shared Q8 engine, weights streamed from host memory because
+resident BOs exhaust the NPU buffer-object pool). Measured on 5 texts (9-263 tokens):
+cos(graph NPU, CPU/GPU reference) 0.9992-0.9999, host-fp32 graph = 1.00000;
+serve latency 99-215 ms vs 398-444 ms for the dedicated BF16 runtime; inputs up to
+512 tokens (the dedicated runtime stops at 128).
+Selection: `MBUFO_NPU_EMBGEMMA_RUNTIME=legacy|graph` forces a runtime; `MBUFO_NPU_QUANT=q4`
+keeps the dedicated runtime (no Q4 path in the graph). Gate: ctest
+`npu_graph_embgemma2_test` (skips when the gguf is absent).

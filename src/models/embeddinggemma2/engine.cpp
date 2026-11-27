@@ -5,6 +5,7 @@
 #include "src/core/compute/npu/npu_scheduler.hpp"
 #ifdef MBUFO_ENABLE_NPU
 #include "src/core/compute/npu/npu_embgemma2_runtime.hpp"
+#include "src/core/compute/npu/npu_graph_models.hpp"
 #endif
 
 #include <cstdlib>
@@ -14,7 +15,11 @@ namespace mbufo::models::embeddinggemma2 {
 
 #ifdef MBUFO_ENABLE_NPU
 struct EngineModel::NpuState {
+  // Declarative op-graph executor on the shared Q8 engine is the default
+  // (see EmbGemma2UseGraph); the dedicated NpuEmbGemma2Runtime is the fallback.
+  bool use_graph{false};
   mbufo::core::npu::NpuEmbGemma2Runtime runtime;
+  mbufo::core::npu::NpuGraphEmbGemma2 graph_runtime;
 };
 #else
 struct EngineModel::NpuState {};
@@ -39,12 +44,19 @@ bool EngineModel::LoadNpuWeights(const std::string& kernel_dir,
     qdir = qkenv;
   }
   const char* qenv = std::getenv("MBUFO_NPU_QUANT");
+  state->use_graph = mbufo::core::npu::EmbGemma2UseGraph();
   bool ok = false;
-  if (qenv != nullptr && (std::string(qenv) == "q8" || std::string(qenv) == "Q8")) {
+  if (state->use_graph) {
+    ok = state->graph_runtime.Init(
+        *reader_, config_, mbufo::core::npu::graph::LinearBackend::kNpuQ8,
+        error_msg);
+  } else if (qenv != nullptr &&
+             (std::string(qenv) == "q8" || std::string(qenv) == "Q8")) {
     ok = state->runtime.InitQuant(*reader_, config_,
                                   mbufo::core::npu::NpuQuantMode::kQ8Bfp16,
                                   qdir, error_msg);
-  } else if (qenv != nullptr && (std::string(qenv) == "q4" || std::string(qenv) == "Q4")) {
+  } else if (qenv != nullptr &&
+             (std::string(qenv) == "q4" || std::string(qenv) == "Q4")) {
     ok = state->runtime.InitQuant(*reader_, config_,
                                   mbufo::core::npu::NpuQuantMode::kQ4Q4nx,
                                   qdir, error_msg);
@@ -79,7 +91,10 @@ bool EngineModel::TryNpuEmbed(std::span<const std::uint32_t> ids,
     return false;
   }
 #ifdef MBUFO_ENABLE_NPU
-  if (ids.size() > mbufo::core::npu::NpuEmbGemma2Runtime::kFixedSeqLen) {
+  const std::size_t max_ids =
+      npu_->use_graph ? mbufo::core::npu::NpuGraphEmbGemma2::kMaxTokens
+                      : mbufo::core::npu::NpuEmbGemma2Runtime::kFixedSeqLen;
+  if (ids.size() > max_ids) {
     return false;
   }
   std::vector<float> values;
@@ -94,7 +109,10 @@ bool EngineModel::TryNpuEmbed(std::span<const std::uint32_t> ids,
           .coalesce_key = "embgemma2-s128"},
       [&]() {
         mbufo::core::npu::NpuWorkResult wr;
-        wr.ok = npu_->runtime.Forward(ids, &values, &prefill_ms, &run_err);
+        wr.ok = npu_->use_graph ? npu_->graph_runtime.Forward(
+                                      ids, &values, &prefill_ms, &run_err)
+                                : npu_->runtime.Forward(ids, &values,
+                                                        &prefill_ms, &run_err);
         wr.error = wr.ok ? "ok" : run_err;
         return wr;
       });

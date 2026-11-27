@@ -64,17 +64,20 @@ class WeightStore {
 // ------------------------------------------------------------------- ops ---
 
 enum class OpKind : std::uint8_t {
-  kEmbed,        ///< out = table[ids] (+ pos[t]) (+ type_row) , * scale
-  kLayerNorm,    ///< out = LN(in) * w + b
-  kRmsNorm,      ///< out = rms(in) * w
-  kLinear,       ///< out = in @ W^T (+ bias)   -- NPU engine GEMM
-  kAttention,    ///< out = softmax(QK^T/sqrt(d)) V (GQA, causal|bidir, QK-norm, RoPE)
-  kGelu,         ///< out = gelu(in)  (exact erf)
-  kSwiGlu,       ///< out = silu(in) * in2
-  kResidual,     ///< out = in + in2
-  kPool,         ///< out[1, cols] = cls | mean | last row of in
-  kL2Norm,       ///< out = in / ||in||  (per row)
-  kRowDot,       ///< out[1, k] = dot(in[last row], W.row(ids[j]))  (lm-head probe)
+  kEmbed,      ///< out = table[ids] (+ pos[t]) (+ type_row) , * scale
+  kLayerNorm,  ///< out = LN(in) * w + b
+  kRmsNorm,    ///< out = rms(in * scale) * (in * scale) * w   (w empty = unit
+               ///< weight)
+  kLinear,     ///< out = in @ W^T (+ bias)   -- NPU engine GEMM
+  kAttention,  ///< out = softmax(QK^T/sqrt(d)) V (GQA, causal|bidir, QK-norm,
+               ///< RoPE)
+  kGelu,       ///< out = gelu(in)  (exact erf)
+  kSwiGlu,     ///< out = silu(in) * in2
+  kGeGlu,      ///< out = gelu_tanh(in) * in2
+  kResidual,   ///< out = (in + in2) * scale
+  kPool,       ///< out[1, cols] = cls | mean | last row of in
+  kL2Norm,     ///< out = in / ||in||  (per row)
+  kRowDot,  ///< out[1, k] = dot(in[last row], W.row(ids[j]))  (lm-head probe)
 };
 
 enum class PoolMode : std::uint8_t { kCls, kMean, kLast };
@@ -97,6 +100,13 @@ struct Op {
   std::uint32_t head_dim{0};
   bool causal{false};
   float rope_theta{0.0F};  ///< 0 = no RoPE; NEOX split-half rotation otherwise
+  bool v_norm{false};      ///< weightless per-head RMSNorm on V (Gemma)
+  std::uint32_t window{
+      0};  ///< >0: only keys with |i-j| <= window (sliding window)
+  float attn_scale{-1.0F};  ///< score scale; < 0 = 1/sqrt(head_dim)
+  // Linear
+  bool host_f32{false};  ///< run this Linear on the host in fp32
+                         ///< (precision-critical heads)
   // Pool
   PoolMode pool{PoolMode::kCls};
   // RowDot
@@ -145,6 +155,35 @@ struct Qwen3GraphConfig {
 [[nodiscard]] Graph BuildQwen3RerankGraph(const Qwen3GraphConfig& cfg,
                                           std::vector<std::uint32_t> probe_ids);
 
+struct EmbGemma2GraphConfig {
+  std::size_t layers{24};
+  std::size_t hidden{512};
+  std::size_t ffn{2048};
+  std::size_t heads{4};
+  std::size_t head_dim_local{256};
+  std::size_t head_dim_full{512};
+  std::size_t kv_local{2};
+  std::size_t kv_full{1};
+  std::size_t sliding_window{512};
+  std::size_t ple_dim{512};
+  float eps{1e-6F};
+  float rope_local{10000.0F};
+  float rope_full{1000000.0F};
+  float embed_scale{1.0F};
+  std::vector<std::uint8_t> layer_is_full;  ///< per layer: 1 = full attention
+  std::vector<float> layer_scalar;          ///< per layer output scalar
+};
+
+/// EmbeddingGemma 2: bidirectional Gemma-style encoder (sliding-window / full
+/// attention layers, QK-norm + weightless V-norm + RoPE, unscaled scores,
+/// pre+post RMSNorms, GeGLU FFN, per-layer input embeddings), final RMSNorm,
+/// mean pool, fp32 host out_proj, L2. Weight names `tok`, `final_norm.w`,
+/// `ple_norm.w`, `out_proj.w`,
+/// `L{i}.{in_norm,post_attn,pre_ffn,post_ffn,q_norm,k_norm, ple_post}.w`,
+/// `L{i}.{q,k,v,o,gate,up,down,ple_proj,ple_gate,ple_out}.w`. Output buffer
+/// `emb` [1, out_dim].
+[[nodiscard]] Graph BuildEmbGemma2Graph(const EmbGemma2GraphConfig& cfg);
+
 // --------------------------------------------------------------- executor --
 
 struct RunStats {
@@ -179,6 +218,12 @@ class GraphExecutor {
                          std::vector<float>* out, RunStats* stats,
                          std::string* error);
 
+  /// Resident BOs (default) keep every packed weight on the device: fastest,
+  /// but a large model (EmbeddingGemma 2) exhausts the NPU buffer-object pool.
+  /// With `false` the packed blocks stay in host memory and are streamed per
+  /// call, like NpuEmbGemma2Runtime does. Set before Prepare().
+  void set_resident_weights(bool v) noexcept { resident_weights_ = v; }
+
   [[nodiscard]] bool prepared() const noexcept { return prepared_; }
   [[nodiscard]] const Graph& graph() const noexcept { return graph_; }
 
@@ -196,6 +241,7 @@ class GraphExecutor {
   }
 
   bool prepared_{false};
+  bool resident_weights_{true};
   Graph graph_;
   const WeightStore* weights_{nullptr};
   std::shared_ptr<NpuQuantGemmEngine> engine_;

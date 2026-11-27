@@ -654,7 +654,11 @@ if (BUILD_TESTING)
     add_test(NAME npu_graph_qwen3_reranker_test
       COMMAND npu_graph_models_test qwen-rerank
         /mnt/nvme-data/mbufo-models/qwen3-reranker/Qwen3-Reranker-0.6B-Q8_0.gguf)
+    add_test(NAME npu_graph_embgemma2_test
+      COMMAND npu_graph_models_test gemma-emb
+        /mnt/nvme-data/mbufo-models/embeddinggemma-2-gguf/embeddinggemma-2-bf16.gguf)
     set_tests_properties(npu_graph_qwen3_embedding_test npu_graph_qwen3_reranker_test
+      npu_graph_embgemma2_test
       PROPERTIES LABELS "npu;hardware;embedding;rerank"
       RESOURCE_LOCK npu SKIP_RETURN_CODE 77 TIMEOUT 300)
 

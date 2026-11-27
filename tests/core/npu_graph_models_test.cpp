@@ -4,13 +4,19 @@
 //       CPU F32 CLS + existing NpuBgeRuntime (gemm_1024x1024 BF16) CLS.
 //   npu_graph_models_test bge-graph <bge-m3.gguf> <ref.txt> [--host]
 //       Graph (Q8 engine, or --host exact fp32) CLS vs the reference file.
-//   npu_graph_models_test qwen-emb  <Qwen3-Embedding.gguf> [out.txt] [--host-only]
+//   npu_graph_models_test qwen-emb  <Qwen3-Embedding.gguf> [out.txt]
+//   [--host-only]
 //       NPU graph embedding vs the host-fp32 graph (same weights) + latency.
 //   npu_graph_models_test qwen-rerank <Qwen3-Reranker.gguf> [--host-only]
 //       NPU graph P(yes) vs the host-fp32 graph on fixed pairs + latency.
+//   npu_graph_models_test gemma-emb <embeddinggemma-2.gguf> [--host-only]
+//       EmbeddingGemma 2 graph (host fp32 / Q8 NPU) vs the model's CPU
+//       reference.
 //   npu_graph_models_test ids-emb|ids-rerank ...  (see usage)
 //
 // Needs the XDNA2 device (except --host-only); run one NPU process at a time.
+
+#include "src/core/compute/npu/npu_graph_models.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -24,9 +30,9 @@
 #include <string>
 #include <vector>
 
-#include "src/core/compute/npu/npu_graph_models.hpp"
 #include "src/models/bge_m3/engine.hpp"
 #include "src/models/bge_m3/forward.hpp"
+#include "src/models/embeddinggemma2/engine.hpp"
 
 namespace {
 
@@ -337,6 +343,92 @@ int QwenRerank(const std::string& gguf, bool host_only) {
   return 0;
 }
 
+// EmbeddingGemma 2: graph (host fp32 and Q8 NPU) vs the model's own CPU
+// reference, including an input longer than the 128-row legacy NPU limit.
+int GemmaEmb(const std::string& gguf, bool host_only) {
+  std::string err;
+  auto model = mbufo::models::embeddinggemma2::EngineModel::Create(gguf, &err);
+  if (!model) {
+    std::cerr << "load failed: " << err << "\n";
+    return 2;
+  }
+  const auto& cfg = model->GetConfig();
+  auto make = [&](graph::LinearBackend b)
+      -> std::unique_ptr<mbufo::core::npu::NpuGraphEmbGemma2> {
+    auto g = std::make_unique<mbufo::core::npu::NpuGraphEmbGemma2>();
+    if (!g->Init(model->GetReader(), cfg, b, &err)) {
+      std::cerr << "graph init failed: " << err << "\n";
+      return nullptr;
+    }
+    return g;
+  };
+  auto host = make(graph::LinearBackend::kHostF32);
+  if (!host)
+    return 2;
+  std::unique_ptr<mbufo::core::npu::NpuGraphEmbGemma2> npu;
+  if (!host_only) {
+    npu = make(graph::LinearBackend::kNpuQ8);
+    if (!npu)
+      return 2;
+  }
+  std::vector<std::string> texts = kTexts;
+  std::string long_text;
+  for (int i = 0; i < 18; ++i) {
+    long_text +=
+        "Sentence number " + std::to_string(i) +
+        " talks about embeddings running on a neural processing unit. ";
+  }
+  texts.push_back(long_text);
+  double worst_host = 1, worst_npu = 1;
+  for (int rep = 0; rep < 2; ++rep) {
+    for (std::size_t i = 0; i < texts.size(); ++i) {
+      const auto ids = model->Encode(texts[i]);
+      if (ids.size() > mbufo::core::npu::NpuGraphEmbGemma2::kMaxTokens)
+        continue;
+      const auto ref = model->Embed(ids, &err);
+      if (!ref) {
+        std::cerr << "cpu reference failed: " << err << "\n";
+        return 2;
+      }
+      std::vector<float> h, n;
+      double hms = 0, nms = 0;
+      if (!host->Forward(ids, &h, &hms, &err)) {
+        std::cerr << "host graph failed: " << err << "\n";
+        return 2;
+      }
+      const double ch = Cosine(h, ref->values);
+      worst_host = std::min(worst_host, ch);
+      if (!npu)
+        continue;
+      if (!npu->Forward(ids, &n, &nms, &err)) {
+        std::cerr << "npu graph failed: " << err << "\n";
+        return 2;
+      }
+      const double cn = Cosine(n, ref->values);
+      if (rep == 1) {
+        worst_npu = std::min(worst_npu, cn);
+        std::printf(
+            "text%zu tokens=%zu npu_ms=%.1f cos(host,cpu)=%.5f "
+            "cos(npu,cpu)=%.5f\n",
+            i, ids.size(), nms, ch, cn);
+      }
+    }
+  }
+  std::printf("WORST cos(host graph,cpu)=%.5f\n", worst_host);
+  if (worst_host < 0.9999) {
+    std::cerr << "FAIL: host graph deviates from the CPU reference\n";
+    return 1;
+  }
+  if (npu) {
+    std::printf("WORST cos(npu graph,cpu)=%.5f\n", worst_npu);
+    if (worst_npu < 0.993) {
+      std::cerr << "FAIL: npu graph cos " << worst_npu << " < 0.993\n";
+      return 1;
+    }
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -347,7 +439,8 @@ int main(int argc, char** argv) {
   const std::string mode = argv[1];
   const std::string a = argv[2];
   // CTest: weights absent on this machine => skip (SKIP_RETURN_CODE 77).
-  if (mode.rfind("qwen-", 0) == 0 && !std::filesystem::exists(a)) {
+  if ((mode.rfind("qwen-", 0) == 0 || mode == "gemma-emb") &&
+      !std::filesystem::exists(a)) {
     std::cout << "SKIP: weights not found: " << a << "\n";
     return 77;
   }
@@ -365,6 +458,8 @@ int main(int argc, char** argv) {
                    has("--host-only"));
   }
   if (mode == "qwen-rerank") return QwenRerank(a, has("--host-only"));
+  if (mode == "gemma-emb")
+    return GemmaEmb(a, has("--host-only"));
   std::cerr << "unknown mode\n";
   return 2;
 }

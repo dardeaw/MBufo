@@ -106,6 +106,147 @@ bool NpuGraphBgeRuntime::ForwardCls(std::span<const std::uint32_t> ids,
   return true;
 }
 
+// ------------------------------------------------------------ EmbGemma 2 --
+
+bool NpuGraphEmbGemma2::Init(const core::GgufReader& r,
+                             const models::embeddinggemma2::Config& cfg,
+                             graph::LinearBackend backend, std::string* error) {
+  if (cfg.layers == 0 || cfg.layer_is_full.size() != cfg.layers ||
+      cfg.hidden == 0 || cfg.ffn == 0 || cfg.ple_dim == 0 || cfg.out_dim == 0) {
+    return SetErr(error, "NpuGraphEmbGemma2: unsupported geometry");
+  }
+  store_ = graph::WeightStore{};
+  // Binds `slice` (row block) of `gguf` as [rows, cols]; the tensor holds
+  // `slices * rows * cols` elements.
+  auto bind = [&](const std::string& name, const std::string& gguf,
+                  std::size_t rows, std::size_t cols, std::size_t slice,
+                  std::size_t slices) -> bool {
+    const auto* t = r.FindTensor(gguf);
+    if (t == nullptr || t->ElementCount() != slices * rows * cols) {
+      return SetErr(error, "missing or mis-shaped tensor: " + gguf);
+    }
+    graph::TensorKind kind;
+    std::size_t esz;
+    switch (t->type) {
+      case core::GgmlType::kF32:
+        kind = graph::TensorKind::kF32;
+        esz = 4;
+        break;
+      case core::GgmlType::kF16:
+        kind = graph::TensorKind::kF16;
+        esz = 2;
+        break;
+      case core::GgmlType::kBF16:
+        kind = graph::TensorKind::kBf16;
+        esz = 2;
+        break;
+      default:
+        return SetErr(error, "unsupported tensor type for " + gguf);
+    }
+    store_.Put(name, Tensor::View(kind,
+                                  static_cast<const std::uint8_t*>(t->data) +
+                                      slice * rows * cols * esz,
+                                  rows, cols));
+    return true;
+  };
+  const std::size_t H = cfg.hidden, F = cfg.ffn, P = cfg.ple_dim;
+  if (!bind("tok", "embed_tokens.weight",
+            r.FindTensor("embed_tokens.weight") != nullptr
+                ? r.FindTensor("embed_tokens.weight")->ElementCount() / H
+                : 0,
+            H, 0, 1) ||
+      !bind("final_norm.w", "norm.weight", 1, H, 0, 1) ||
+      !bind("ple_norm.w", "ple.per_layer_projection_norm.weight", 1, P, 0, 1) ||
+      !bind("out_proj.w", "embedding_projection.weight", cfg.out_dim, H, 0,
+            1)) {
+    return false;
+  }
+  graph::EmbGemma2GraphConfig gc;
+  gc.layers = cfg.layers;
+  gc.hidden = H;
+  gc.ffn = F;
+  gc.heads = cfg.heads;
+  gc.head_dim_local = cfg.head_dim_local;
+  gc.head_dim_full = cfg.head_dim_full;
+  gc.kv_local = cfg.kv_local;
+  gc.kv_full = cfg.kv_full;
+  gc.sliding_window = cfg.sliding_window;
+  gc.ple_dim = P;
+  gc.eps = cfg.rms_eps;
+  gc.rope_local = cfg.rope_local;
+  gc.rope_full = cfg.rope_full;
+  gc.embed_scale = cfg.embed_scale;
+  gc.layer_is_full = cfg.layer_is_full;
+  for (std::size_t i = 0; i < cfg.layers; ++i) {
+    const bool full = cfg.layer_is_full[i] != 0;
+    const std::size_t d = full ? cfg.head_dim_full : cfg.head_dim_local;
+    const std::size_t kvh = full ? cfg.kv_full : cfg.kv_local;
+    const std::size_t qd = cfg.heads * d, kd = kvh * d;
+    const std::string p = "layers." + std::to_string(i) + ".";
+    auto n = [&](const char* s) { return LayerName(i, s); };
+    if (!bind(n("in_norm.w"), p + "input_layernorm.weight", 1, H, 0, 1) ||
+        !bind(n("post_attn.w"), p + "post_attention_layernorm.weight", 1, H, 0,
+              1) ||
+        !bind(n("pre_ffn.w"), p + "pre_feedforward_layernorm.weight", 1, H, 0,
+              1) ||
+        !bind(n("post_ffn.w"), p + "post_feedforward_layernorm.weight", 1, H, 0,
+              1) ||
+        !bind(n("q_norm.w"), p + "self_attn.q_norm.weight", 1, d, 0, 1) ||
+        !bind(n("k_norm.w"), p + "self_attn.k_norm.weight", 1, d, 0, 1) ||
+        !bind(n("q.w"), p + "self_attn.q_proj.weight", qd, H, 0, 1) ||
+        !bind(n("k.w"), p + "self_attn.k_proj.weight", kd, H, 0, 1) ||
+        !bind(n("v.w"), p + "self_attn.v_proj.weight", kd, H, 0, 1) ||
+        !bind(n("o.w"), p + "self_attn.o_proj.weight", H, qd, 0, 1) ||
+        !bind(n("gate.w"), p + "mlp.gate_proj.weight", F, H, 0, 1) ||
+        !bind(n("up.w"), p + "mlp.up_proj.weight", F, H, 0, 1) ||
+        !bind(n("down.w"), p + "mlp.down_proj.weight", H, F, 0, 1) ||
+        !bind(n("ple_proj.w"), "ple.per_layer_model_projection.weight", P, H, i,
+              cfg.layers) ||
+        !bind(n("ple_gate.w"), p + "ple_block.per_layer_input_gate.weight", P,
+              H, 0, 1) ||
+        !bind(n("ple_out.w"), p + "ple_block.per_layer_projection.weight", H, P,
+              0, 1) ||
+        !bind(n("ple_post.w"), p + "ple_block.post_per_layer_input_norm.weight",
+              1, H, 0, 1)) {
+      return false;
+    }
+    const auto* sc = r.FindTensor(p + "layer_scalar");
+    if (sc == nullptr || sc->type != core::GgmlType::kF32 ||
+        sc->ElementCount() != 1) {
+      return SetErr(error,
+                    "missing layer_scalar at layer " + std::to_string(i));
+    }
+    gc.layer_scalar.push_back(*static_cast<const float*>(sc->data));
+  }
+  std::shared_ptr<NpuQuantGemmEngine> engine;
+  if (backend == graph::LinearBackend::kNpuQ8) {
+    engine = graph::SharedQuantEngine(error);
+    if (engine == nullptr)
+      return false;
+  }
+  // ~1 GB of Q8 weights across 24 layers exhausts the NPU BO pool when kept
+  // resident (hrx_buffer_allocate failed); stream blocks like the dedicated
+  // runtime does. MBUFO_NPU_GRAPH_RESIDENT=1 forces resident BOs.
+  exec_.set_resident_weights(std::getenv("MBUFO_NPU_GRAPH_RESIDENT") !=
+                             nullptr);
+  return exec_.Prepare(graph::BuildEmbGemma2Graph(gc), &store_,
+                       std::move(engine), backend, error);
+}
+
+bool NpuGraphEmbGemma2::Forward(std::span<const std::uint32_t> ids,
+                                std::vector<float>* out, double* ms,
+                                std::string* error) {
+  if (ids.empty() || ids.size() > kMaxTokens) {
+    return SetErr(error, "NpuGraphEmbGemma2: input must be 1.." +
+                             std::to_string(kMaxTokens) + " tokens");
+  }
+  if (!exec_.Run(ids, out, &stats_, error))
+    return false;
+  if (ms != nullptr)
+    *ms = stats_.total_ms;
+  return true;
+}
+
 // ------------------------------------------------------------------ Qwen3 --
 
 std::unique_ptr<NpuQwen3Encoder> NpuQwen3Encoder::Load(
