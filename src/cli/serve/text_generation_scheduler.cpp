@@ -7,6 +7,7 @@
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <exception>
@@ -31,6 +32,17 @@
 #include "src/cli/serve/trace.hpp"
 
 namespace mbufo::server {
+
+// MBUFO_MIXED_TRACE=1 prints one stderr line per merged prefill+decode step,
+// so a deployment can verify that merging fires.
+static bool MixedTraceEnabled() {
+  static const bool enabled = [] {
+    const char* e = std::getenv("MBUFO_MIXED_TRACE");
+    return e != nullptr && e[0] != '\0' && e[0] != '0';
+  }();
+  return enabled;
+}
+
 namespace {
 
 constexpr std::size_t kDecodeProgressInterval = 50;
@@ -2070,6 +2082,9 @@ struct TextGenerationScheduler::Impl {
     // Decoders: StepMultiTokenDecodeBatch's per-lane settlement.
     const std::string execution_plan =
         "mixed-mtp-w" + std::to_string(prepared.size() + 1);
+    if (MixedTraceEnabled())
+      std::fprintf(stderr, "[mixed] mtp decodes=%zu chunk=%zu\n",
+                   prepared.size(), chunk->consumed_tokens);
     for (std::size_t index = 0; index < prepared.size(); ++index) {
       const auto& item = prepared[index];
       if (CompleteIfStopped(item.request))
@@ -2274,6 +2289,9 @@ struct TextGenerationScheduler::Impl {
     }
     const std::string execution_plan =
         "mixed-w" + std::to_string(plan.physical_width);
+    if (MixedTraceEnabled())
+      std::fprintf(stderr, "[mixed] plain decodes=%zu chunk=%zu\n",
+                   prepared.size(), step->consumed_tokens);
     for (std::size_t i = 0; i < prepared.size(); ++i) {
       const auto& item = prepared[i];
       if (failures[i]) {
