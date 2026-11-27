@@ -123,8 +123,8 @@ class NpuServableHost {
 
   /// Engine-level warmup (one M=1 GEMM per quant shape: instantiates xclbins
   /// and the HW context) plus, for ASR and TTS, one dummy prefill + decode
-  /// step + LM-head pass on the real decoder. FLUX / Z-Image stay engine-level
-  /// only: their blocks need rope/joint-attention tables built per request.
+  /// step + LM-head pass on the real decoder; FLUX / Z-Image run one reduced
+  /// Euler step (1+1 blocks, 8x8 latent, one text token).
   /// Soft-fail: a failed warm never unloads the model.
   bool Warm(const std::string& id, std::string* error) {
     namespace npu = mbufo::core::npu;
@@ -166,6 +166,25 @@ class NpuServableHost {
         if (!talker_->Prefill(row, 1, &hid, nullptr, e) ||
             !talker_->DecodeStep(row, &next, nullptr, e) ||
             !talker_->CodecTop1(next, &top1, nullptr, e)) {
+          return false;
+        }
+      } else if (id == "flux2-klein-4b" && flux_ != nullptr) {
+        // One reduced Euler step (1 double + 1 single block, 8x8 latent, one
+        // text token) through the real DiT path.
+        const std::size_t St = 1;
+        const std::vector<float> cond(7680, 0.01F);
+        std::vector<float> txt;
+        std::vector<float> z(64 * 128, 0.05F);
+        if (!flux_->EncodeContext(cond, St, &txt, nullptr, e) ||
+            !flux_->FullStep(&z, 64, txt, St, 0.5F, 0.1F, 1, 1, nullptr, e)) {
+          return false;
+        }
+      } else if (id == "z-image-turbo" && zimg_ != nullptr) {
+        const std::vector<float> te(2560, 0.01F);
+        std::vector<float> cap;
+        std::vector<float> z(64 * 64, 0.05F);
+        if (!zimg_->CapEmbed(te, 1, &cap, nullptr, e) ||
+            !zimg_->FullStep(&z, 64, cap, 1, 0.5F, 0.1F, 1, 1, nullptr, e)) {
           return false;
         }
       }

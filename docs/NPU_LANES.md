@@ -182,4 +182,4 @@ in-process track (§1).
   admin id during `/admin/load` and removed on `/admin/eject`.
 - ASR (thinker) and TTS (talker) servables warm with a real dummy decode (prefill +
   step + LM head), measured about 4.5 s each; this is the true decoder cold start
-  that the first request used to pay. FLUX / Z-Image warm at engine level only.
+  that the first request used to pay. FLUX (0.9 s) and Z-Image (1.3 s) warm with one reduced Euler step (1+1 blocks, 8x8 latent, one text token).
