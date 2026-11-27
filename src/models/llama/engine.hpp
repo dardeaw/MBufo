@@ -60,9 +60,27 @@ class Model final : public std::enable_shared_from_this<Model> {
     return *tokenizer_;
   }
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
+  /// True when every projection is Q8_0, so packed decode lanes take the same GEMV kernel as a single token.
+  [[nodiscard]] bool PackedLanesExact() const noexcept;
 
  private:
   Model() = default;
+
+  /// Packed row scratch shared by every session's lane step (one pass runs at a time under the device lock).
+  struct LaneScratch {
+    float* hidden{nullptr};
+    float* normed{nullptr};
+    float* q{nullptr};
+    float* k{nullptr};
+    float* v{nullptr};
+    float* attn{nullptr};
+    float* gate{nullptr};
+    float* up{nullptr};
+    float* ffn{nullptr};
+    float* logits{nullptr};
+  };
+  [[nodiscard]] bool EnsureLaneScratch(std::string* error_msg);
+  LaneScratch lane_;
 
   ModelOptions options_;
   std::shared_ptr<core::GgufReader> reader_;
@@ -92,13 +110,54 @@ class Session final {
   [[nodiscard]] bool Forward(std::span<const std::int32_t> tokens,
                              std::uint32_t start_pos,
                              std::string* error_msg = nullptr);
+  /// Forwards prompt[offset, prompt.size()) on top of the retained prefix (`offset` must equal Length(), or be 0 for a
+  /// restart). Sync(prompt) == Extend(prompt, 0). A span of more than one chunk runs layer-major.
+  [[nodiscard]] bool Extend(std::span<const std::int32_t> prompt, std::size_t offset,
+                            std::string* error_msg = nullptr);
   [[nodiscard]] std::span<const float> Logits() const noexcept;
   [[nodiscard]] std::uint32_t Length() const noexcept;
   [[nodiscard]] std::int32_t SampleGreedy();
 
+  /// Rows per canonical prefill piece (512 unless LLAMA_PREFILL_CHUNK overrides it).
+  [[nodiscard]] static std::uint32_t PrefillGrain() noexcept;
+  /// How far the engine may compute when the serving layer has consumed `reported` prompt tokens: the last grid
+  /// boundary at or before it (everything once the prompt is complete). The remainder stays pending, so the pieces
+  /// forwarded are the same for any scheduler budget and mixed and separate runs stay bit-identical.
+  [[nodiscard]] static std::size_t PrefillTarget(std::size_t reported, std::size_t prompt_size) noexcept;
+
+  static constexpr std::uint32_t kMaxLanes = 8;
+  struct LaneItem {
+    Session* session{nullptr};
+    std::int32_t token{0};
+  };
+  /// One token for every lane in one layer-synchronous pass: the lanes share the projection weight reads (packed
+  /// GemvBatched), each keeps its own rope / KV append / attention. Bit-identical to Evaluate on each lane. Refuses
+  /// cleanly (false, `*refused` true, nothing mutated) for non-Q8_0 weights, >8 lanes, duplicates, exhausted context.
+  [[nodiscard]] static bool StepBatch(std::span<const LaneItem> lanes, std::string* error_msg = nullptr,
+                                      bool* refused = nullptr);
+
+  /// One prefill chunk: prompt is the prefix through the END of the chunk, offset its first row. An empty chunk
+  /// (offset == prompt.size()) steps only the lanes.
+  struct ChunkItem {
+    Session* session{nullptr};
+    std::span<const std::int32_t> prompt;
+    std::size_t offset{0};
+  };
+  /// StepBatch plus one session's prefill chunk (Extend) in the same call, validated up front. The chunk never
+  /// shares a GEMM with the lanes, so both halves are bit-identical to running them separately. A false return with
+  /// `*refused` set mutated nothing; otherwise `*lanes_advanced` tells whether the lanes already took their step.
+  [[nodiscard]] static bool DecodeBatchWithChunk(std::span<const LaneItem> lanes, const ChunkItem& chunk,
+                                                 std::string* error_msg = nullptr, bool* refused = nullptr,
+                                                 bool* lanes_advanced = nullptr);
+
  private:
   Session(std::shared_ptr<Model> model);
 
+  [[nodiscard]] static bool ValidateLanes(std::span<const LaneItem> lanes, const Session* chunk_session,
+                                          std::string* error_msg, bool* refused);
+  [[nodiscard]] static bool StepLanes(std::span<const LaneItem> lanes, std::string* error_msg);
+  static void AttentionCore(Session& s, std::uint32_t il, std::uint32_t n, std::uint32_t start_pos,
+                            hipStream_t stream);
   static void ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
                            std::uint32_t start_pos, hipStream_t stream);
   static void ForwardFinish(Session& s, std::uint32_t n,

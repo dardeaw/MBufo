@@ -4689,10 +4689,10 @@ const LlamaTextRunnerState& RequireLlamaState(const TextRunnerState& state) {
 
 class LlamaTextRunner final : public HipTextModelRunner {
  public:
-  // Batch contract (see TextModelRunner): no native batch path; serial fallbacks, no merged prefill+decode.
+  // Batch contract (see TextModelRunner): serial DecodeBatch (no speculative decode); native AdvanceBatch and
+  // AdvanceBatchWithPrefillChunk for Q8_0 weights (serial / refusing otherwise); the multi-token merged entry point is
+  // an explicit refusal.
   MBUFO_RUNNER_SERIAL_DECODE_BATCH();
-  MBUFO_RUNNER_SERIAL_ADVANCE_BATCH();
-  MBUFO_RUNNER_NO_MIXED_BATCH();
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kLlama;
   }
@@ -4725,6 +4725,7 @@ class LlamaTextRunner final : public HipTextModelRunner {
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0,
                 .prefix_reuse = false,
+                .mixed_prefill_decode = model_->PackedLanesExact(),
             },
         .persistence = std::nullopt,
     };
@@ -4837,11 +4838,19 @@ class LlamaTextRunner final : public HipTextModelRunner {
     if (next_position > max_context_) {
       throw std::runtime_error("Llama prompt exceeds the served context");
     }
-    const auto prefix = LlamaEngineTokens(prompt.first(next_position));
-    std::string error;
-    if (!llama.session().Sync(prefix, &error)) {
-      llama.set_position(0);
-      throw std::runtime_error("Llama prefill failed: " + error);
+    // Incremental on a canonical grid: the engine forwards only up to the last grid boundary at or before the consumed
+    // position (everything once the prompt is complete) and keeps the rest pending, so the forwarded pieces never
+    // depend on the scheduler's budget slicing (a piece's arithmetic depends on its row count).
+    const std::size_t computed_from = offset == 0 ? 0 : llama.session().Length();
+    const std::size_t computed_to =
+        std::max(computed_from, std::size_t{LlamaSession::PrefillTarget(next_position, prompt.size())});
+    if (computed_to > computed_from) {
+      const auto prefix = LlamaEngineTokens(prompt.first(computed_to));
+      std::string error;
+      if (!llama.session().Extend(prefix, computed_from, &error)) {
+        llama.set_position(0);
+        throw std::runtime_error("Llama prefill failed: " + error);
+      }
     }
     llama.set_position(next_position);
     return {
@@ -4889,6 +4898,92 @@ class LlamaTextRunner final : public HipTextModelRunner {
     llama.set_position(llama.position() + 1);
   }
 
+  // Plain-token advance for every lane through packed layer-synchronous engine passes of up to 8 lanes (one weight
+  // read for the projections of all lanes; per-lane attention; bit-identical to Advance). The engine validates before
+  // it mutates, so a refusal reruns that group serially with nothing half-applied.
+  void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const override {
+    constexpr std::size_t kLanes = LlamaSession::kMaxLanes;
+    if (advances.size() < 2 || !model_->PackedLanesExact()) return SerialAdvanceBatch(advances);
+    for (std::size_t base = 0; base < advances.size(); base += kLanes) {
+      AdvanceGroup(advances.subspan(base, std::min(kLanes, advances.size() - base)));
+    }
+  }
+
+  // Merged plain-advance + prefill chunk: the lanes step through one packed pass and the chunk runs Extend (the same
+  // prefill core as Prefill) in the same call, so the result is bit-identical to Prefill followed by AdvanceBatch.
+  // Refuses with nothing mutated for shapes the engine cannot host.
+  [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
+      std::span<const TextRunnerAdvance> advances, std::span<std::exception_ptr> advance_failures,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt, std::size_t offset,
+      std::size_t max_input_tokens, TextPrefillStep& chunk_step) const override {
+    auto& chunk_state = RequireLlamaState(prefill_state);
+    if (advances.empty() || advances.size() > LlamaSession::kMaxLanes || advance_failures.size() != advances.size() ||
+        offset != chunk_state.position() || offset >= prompt.size() || max_input_tokens == 0 ||
+        !model_->PackedLanesExact()) {
+      throw MixedBatchRefused("llama mixed batch preconditions unmet");
+    }
+    const std::size_t consumed = std::min(max_input_tokens, prompt.size() - offset);
+    const std::size_t next_position = offset + consumed;
+    if (next_position > max_context_) throw MixedBatchRefused("llama mixed chunk exceeds the served context");
+    std::vector<LlamaSession::LaneItem> items;
+    items.reserve(advances.size());
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      if (advances[i].token > static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max())) {
+        throw MixedBatchRefused("llama mixed token exceeds engine range");
+      }
+      auto* lane = &RequireLlamaState(advances[i].state.get());
+      if (lane == &chunk_state) throw MixedBatchRefused("llama mixed batch lane is the prefill state");
+      if (lane->position() + 1 > max_context_) throw MixedBatchRefused("llama mixed lane is out of context");
+      items.push_back({&lane->session(), static_cast<std::int32_t>(advances[i].token)});
+    }
+    const std::size_t computed_from = offset == 0 ? 0 : chunk_state.session().Length();
+    const std::size_t computed_to =
+        std::max(computed_from, std::size_t{LlamaSession::PrefillTarget(next_position, prompt.size())});
+    const auto prefix = LlamaEngineTokens(prompt.first(computed_to));
+    const LlamaSession::ChunkItem chunk{&chunk_state.session(), std::span<const std::int32_t>(prefix), computed_from};
+    std::string error;
+    bool refused = false;
+    bool lanes_advanced = false;
+    if (!LlamaSession::DecodeBatchWithChunk(items, chunk, &error, &refused, &lanes_advanced)) {
+      if (refused) throw MixedBatchRefused("llama mixed batch refused: " + error);
+      if (lanes_advanced) {
+        // The lanes took their step; only the chunk failed. The pool reports the chunk failure after recording them.
+        for (std::size_t i = 0; i < advances.size(); ++i) {
+          advance_failures[i] = nullptr;
+          auto& lane = RequireLlamaState(advances[i].state.get());
+          lane.set_position(lane.position() + 1);
+        }
+        chunk_state.set_position(0);
+        return false;
+      }
+      chunk_state.set_position(0);
+      for (std::size_t i = 0; i < advances.size(); ++i) {
+        advance_failures[i] = std::make_exception_ptr(std::runtime_error("Llama mixed advance failed: " + error));
+      }
+      return false;
+    }
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      advance_failures[i] = nullptr;
+      auto& lane = RequireLlamaState(advances[i].state.get());
+      lane.set_position(lane.position() + 1);
+    }
+    chunk_state.set_position(next_position);
+    chunk_step = {.consumed_tokens = consumed, .decode_ready = next_position == prompt.size()};
+    static const bool trace = std::getenv("MBUFO_LLAMA_MIXED_TRACE") != nullptr;
+    if (trace) {
+      std::fprintf(stderr, "[llama-mixed] lanes=%zu consumed=%zu offset=%zu computed=[%zu,%zu)\n", advances.size(),
+                   consumed, offset, computed_from, computed_to);
+    }
+    return true;
+  }
+
+  // Llama has no multi-token (speculative) decode, so there is nothing to merge a chunk into.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchWithPrefillChunk(
+      std::span<const TextRunnerDecode>, TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+      std::size_t, TextPrefillStep&) const override {
+    RefuseMixedBatch("llama has no merged multi-token decode");
+  }
+
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     return SelectNext(state, sampler);
@@ -4900,6 +4995,36 @@ class LlamaTextRunner final : public HipTextModelRunner {
   }
 
  private:
+  void AdvanceGroup(std::span<const TextRunnerAdvance> group) const {
+    if (group.size() < 2) return SerialAdvanceBatch(group);
+    std::vector<LlamaSession::LaneItem> items;
+    items.reserve(group.size());
+    for (std::size_t i = 0; i < group.size(); ++i) {
+      if (group[i].token > static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max())) {
+        return SerialAdvanceBatch(group);  // the serial path reports the per-lane error
+      }
+      auto& llama = RequireLlamaState(group[i].state.get());
+      if (llama.position() + 1 > max_context_) return SerialAdvanceBatch(group);
+      items.push_back({&llama.session(), static_cast<std::int32_t>(group[i].token)});
+    }
+    std::string error;
+    bool refused = false;
+    if (!LlamaSession::StepBatch(items, &error, &refused)) {
+      if (refused) return SerialAdvanceBatch(group);
+      // Mid-pass failure: no lane can be trusted to have advanced.
+      for (const auto& advance : group) {
+        auto failure = std::make_exception_ptr(std::runtime_error("Llama batched decode failed: " + error));
+        if (advance.failure == nullptr) std::rethrow_exception(failure);
+        *advance.failure = failure;
+      }
+      return;
+    }
+    for (const auto& advance : group) {
+      auto& llama = RequireLlamaState(advance.state.get());
+      llama.set_position(llama.position() + 1);
+    }
+  }
+
   std::shared_ptr<LlamaModel> model_;
   std::uint32_t max_context_{0};
   std::vector<std::int32_t> turn_stops_;

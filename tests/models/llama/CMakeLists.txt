@@ -6,3 +6,10 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(llama_registry_pilot_test PRIVATE mbufo_llama mbufo_core
     hip::host)
 endif()
+
+if (ENGINE_ENABLE_HIP)
+  add_executable(llama_mixed_exact_test EXCLUDE_FROM_ALL
+    mixed_exact_test.cpp)
+  target_link_libraries(llama_mixed_exact_test PRIVATE mbufo_llama mbufo_core
+    hip::host)
+endif()
