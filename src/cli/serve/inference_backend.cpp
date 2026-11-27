@@ -1089,7 +1089,7 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
 class QwenTextRunner final : public HipTextModelRunner {
 public:
   // Batch contract (see TextModelRunner): native DecodeBatch/AdvanceBatch; native merged advance + prefill chunk
-  // (non-DFlash); DecodeBatchWithPrefillChunk refuses.
+  // (non-DFlash); native merged DFlash decode + prefill chunk (DecodeBatchWithPrefillChunk, lanes then chunk).
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
@@ -1566,7 +1566,7 @@ public:
   // its separate run. Lanes and chunk live in different executors, hence in
   // different arenas and streams, and run back to back (an experiment that
   // submitted the lane pass from a helper thread while the chunk ran changed
-  // neither bits nor speed). DFlash runners advertise no merged step.
+  // neither bits nor speed). DFlash sessions refuse here and use DecodeBatchWithPrefillChunk.
   [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
       std::span<const TextRunnerAdvance> advances,
       std::span<std::exception_ptr> advance_failures,
