@@ -1200,6 +1200,9 @@ Session::~Session() {
   for (void* p : sconv_bk_pm_) {
     if (p != nullptr) (void)hipFree(p);
   }
+  for (void* p : frontier_allocs_) {
+    if (p != nullptr) (void)hipFree(p);
+  }
   if (stream_ != nullptr) (void)hipStreamDestroy(stream_);
 }
 
@@ -3032,18 +3035,217 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
   if (common == prompt.size() && history_.size() == prompt.size()) {
     return true;
   }
-  // Pure extension (a chunked prefill, or a continuation of the same stream):
-  // run only the new suffix. The sconv state rolls forward, so no restart is
-  // needed. The old code restarted from 0 here, which made every prefill chunk
-  // re-prefill the whole prefix.
-  if (common == history_.size() && image_injections_.empty()) {
-    return Forward(prompt.subspan(common), static_cast<std::uint32_t>(common),
-                   error_msg);
+  const bool images = !image_injections_.empty() || images_in_history_;
+  if (!images) {
+    // Pure extension (a chunked prefill, or a continuation of the same
+    // stream): run only the new suffix. The old code restarted from 0 here,
+    // which made every prefill chunk re-prefill the whole prefix.
+    if (common == history_.size()) {
+      frontier_active_ = false;
+      const bool was_rewound = rewound_;
+      rewound_ = false;
+      if (!Forward(prompt.subspan(common), static_cast<std::uint32_t>(common),
+                   error_msg)) {
+        return false;
+      }
+      static const bool check = std::getenv("MBUFO_INKLING_REUSE_CHECK") != nullptr;
+      if (check && was_rewound) {
+        // Diagnostic: recompute the whole prompt and compare the logits.
+        const std::vector<float> reused = host_logits_;
+        const std::vector<std::int32_t> keep(prompt.begin(), prompt.end());
+        history_.clear();
+        if (!Forward(keep, 0, error_msg)) return false;
+        double max_diff = 0.0, max_abs = 0.0;
+        std::size_t arg_a = 0, arg_b = 0;
+        for (std::size_t i = 0; i < reused.size(); ++i) {
+          max_diff = std::max(max_diff, std::fabs(static_cast<double>(reused[i]) - host_logits_[i]));
+          max_abs = std::max(max_abs, std::fabs(static_cast<double>(host_logits_[i])));
+          if (reused[i] > reused[arg_a]) arg_a = i;
+          if (host_logits_[i] > host_logits_[arg_b]) arg_b = i;
+        }
+        std::fprintf(stderr,
+                     "[inkling-reuse-check] prompt=%zu max_abs_logit_diff=%.5f "
+                     "max_abs_logit=%.3f argmax_same=%d\n",
+                     prompt.size(), max_diff, max_abs, arg_a == arg_b ? 1 : 0);
+        // Baseline without any rewind: the same two-step prefill split at the
+        // frontier. reused == split means the rewind restored the state exactly.
+        const std::vector<float> fresh = host_logits_;
+        history_.clear();
+        if (!Forward(std::span<const std::int32_t>(keep).first(rewound_len_), 0, error_msg) ||
+            !Forward(std::span<const std::int32_t>(keep).subspan(rewound_len_), rewound_len_, error_msg)) {
+          return false;
+        }
+        double d_rs = 0.0, d_fs = 0.0;
+        for (std::size_t i = 0; i < reused.size(); ++i) {
+          d_rs = std::max(d_rs, std::fabs(static_cast<double>(reused[i]) - host_logits_[i]));
+          d_fs = std::max(d_fs, std::fabs(static_cast<double>(fresh[i]) - host_logits_[i]));
+        }
+        std::fprintf(stderr,
+                     "[inkling-reuse-check] split_at=%u max_diff reused_vs_split=%.5f "
+                     "fresh_vs_split=%.5f\n", rewound_len_, d_rs, d_fs);
+      }
+      return true;
+    }
+    // The prompt shares the whole prompt frontier of an earlier request but
+    // generation moved past it: rewind the non-positional state to the
+    // frontier (ring planes, rolling conv state) and prefill only the rest.
+    if (frontier_active_ && common >= frontier_len_) {
+      if (!RewindToFrontier(error_msg)) return false;
+      if (prompt.size() == frontier_len_) return true;
+      frontier_active_ = false;
+      const std::size_t resumed_at = frontier_len_;
+      if (!Forward(prompt.subspan(frontier_len_), frontier_len_, error_msg)) {
+        return false;
+      }
+      return true;
+    }
   }
   // Rolling sconv state cannot rewind to an arbitrary prefix: restart the
-  // stream from position 0 whenever the prompt diverges.
+  // stream from position 0 whenever the prompt diverges before the frontier.
   history_.clear();
+  frontier_active_ = false;
+  images_in_history_ = !image_injections_.empty();
   return Forward(prompt, 0, error_msg);
+}
+
+namespace {
+struct FrontierPlane {
+  std::size_t plane;
+  std::size_t layer;
+};
+}  // namespace
+
+bool Session::MarkFrontier(std::string* error_msg) {
+  (void)error_msg;
+  frontier_active_ = false;
+  frontier_len_ = 0;
+  if (!image_injections_.empty() || history_.empty() || host_logits_.empty()) {
+    return true;
+  }
+  const auto& cfg = model_->weights_->config;
+  const std::size_t h = cfg.hidden_size;
+  const std::size_t kv_dim =
+      static_cast<std::size_t>(cfg.num_kv_heads) * cfg.head_dim;
+  const std::size_t n_layers = cfg.num_layers;
+  const std::size_t n_loop = cfg.loop_core_end - cfg.loop_core_start;
+  std::vector<FrontierPlane> planes;
+  for (std::uint32_t l = 0; l < n_layers; ++l) {
+    const bool is_global = l < cfg.is_swa_layer.size() && cfg.is_swa_layer[l];
+    if (is_global) continue;
+    planes.push_back({l, l});
+    if (l >= cfg.loop_core_start && l < cfg.loop_core_end) {
+      const std::size_t li = l - cfg.loop_core_start;
+      planes.push_back({n_layers + li, l});
+      planes.push_back({n_layers + n_loop + li, l});
+    }
+  }
+  if (frontier_allocs_.empty()) {
+    auto alloc = [&](std::size_t bytes) -> void* {
+      void* p = nullptr;
+      if (hipMalloc(&p, bytes) != hipSuccess) return nullptr;
+      frontier_allocs_.push_back(p);
+      return p;
+    };
+    fr_plane_k_.assign(k_cache_.size(), nullptr);
+    fr_plane_v_.assign(v_cache_.size(), nullptr);
+    fr_sc_k_.assign(n_layers, nullptr);
+    fr_sc_v_.assign(n_layers, nullptr);
+    fr_sc_pa_.assign(n_layers, nullptr);
+    fr_sc_pm_.assign(n_layers, nullptr);
+    bool ok = true;
+    for (const auto& pl : planes) {
+      fr_plane_k_[pl.plane] =
+          alloc(static_cast<std::size_t>(cfg.sliding_window) * kv_row_stride_k_);
+      fr_plane_v_[pl.plane] =
+          alloc(static_cast<std::size_t>(cfg.sliding_window) * kv_row_stride_v_);
+      ok = ok && fr_plane_k_[pl.plane] != nullptr && fr_plane_v_[pl.plane] != nullptr;
+    }
+    for (std::uint32_t l = 0; l < n_layers; ++l) {
+      const std::size_t rep =
+          (l >= cfg.loop_core_start && l < cfg.loop_core_end) ? 3 : 1;
+      fr_sc_k_[l] = alloc(rep * kv_dim * 3 * sizeof(float));
+      fr_sc_v_[l] = alloc(rep * kv_dim * 3 * sizeof(float));
+      fr_sc_pa_[l] = alloc(rep * h * 3 * sizeof(float));
+      fr_sc_pm_[l] = alloc(rep * h * 3 * sizeof(float));
+      ok = ok && fr_sc_k_[l] && fr_sc_v_[l] && fr_sc_pa_[l] && fr_sc_pm_[l];
+    }
+    if (!ok) {
+      // Not enough device memory: run without the optimization.
+      for (void* p : frontier_allocs_) (void)hipFree(p);
+      frontier_allocs_.clear();
+      fr_plane_k_.clear();
+      return true;
+    }
+  }
+  if (fr_plane_k_.empty()) return true;
+  for (const auto& pl : planes) {
+    (void)hipMemcpyAsync(fr_plane_k_[pl.plane], k_cache_[pl.plane],
+                         static_cast<std::size_t>(cfg.sliding_window) * kv_row_stride_k_,
+                         hipMemcpyDeviceToDevice, stream_);
+    (void)hipMemcpyAsync(fr_plane_v_[pl.plane], v_cache_[pl.plane],
+                         static_cast<std::size_t>(cfg.sliding_window) * kv_row_stride_v_,
+                         hipMemcpyDeviceToDevice, stream_);
+  }
+  for (std::uint32_t l = 0; l < n_layers; ++l) {
+    const std::size_t rep =
+        (l >= cfg.loop_core_start && l < cfg.loop_core_end) ? 3 : 1;
+    (void)hipMemcpyAsync(fr_sc_k_[l], sconv_k_[l], rep * kv_dim * 3 * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream_);
+    (void)hipMemcpyAsync(fr_sc_v_[l], sconv_v_[l], rep * kv_dim * 3 * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream_);
+    (void)hipMemcpyAsync(fr_sc_pa_[l], sconv_pa_[l], rep * h * 3 * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream_);
+    (void)hipMemcpyAsync(fr_sc_pm_[l], sconv_pm_[l], rep * h * 3 * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream_);
+  }
+  fr_logits_ = host_logits_;
+  frontier_len_ = static_cast<std::uint32_t>(history_.size());
+  frontier_active_ = true;
+  return true;
+}
+
+bool Session::RewindToFrontier(std::string* error_msg) {
+  if (!frontier_active_ || fr_plane_k_.empty() || frontier_len_ > history_.size()) {
+    if (error_msg != nullptr) *error_msg = "inkling: no prompt frontier to rewind to";
+    return false;
+  }
+  const auto& cfg = model_->weights_->config;
+  const std::size_t h = cfg.hidden_size;
+  const std::size_t kv_dim =
+      static_cast<std::size_t>(cfg.num_kv_heads) * cfg.head_dim;
+  for (std::size_t i = 0; i < fr_plane_k_.size(); ++i) {
+    if (fr_plane_k_[i] == nullptr) continue;
+    (void)hipMemcpyAsync(k_cache_[i], fr_plane_k_[i],
+                         static_cast<std::size_t>(cfg.sliding_window) * kv_row_stride_k_,
+                         hipMemcpyDeviceToDevice, stream_);
+    (void)hipMemcpyAsync(v_cache_[i], fr_plane_v_[i],
+                         static_cast<std::size_t>(cfg.sliding_window) * kv_row_stride_v_,
+                         hipMemcpyDeviceToDevice, stream_);
+  }
+  for (std::uint32_t l = 0; l < cfg.num_layers; ++l) {
+    const std::size_t rep =
+        (l >= cfg.loop_core_start && l < cfg.loop_core_end) ? 3 : 1;
+    (void)hipMemcpyAsync(sconv_k_[l], fr_sc_k_[l], rep * kv_dim * 3 * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream_);
+    (void)hipMemcpyAsync(sconv_v_[l], fr_sc_v_[l], rep * kv_dim * 3 * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream_);
+    (void)hipMemcpyAsync(sconv_pa_[l], fr_sc_pa_[l], rep * h * 3 * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream_);
+    (void)hipMemcpyAsync(sconv_pm_[l], fr_sc_pm_[l], rep * h * 3 * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream_);
+  }
+  history_.resize(frontier_len_);
+  rewound_ = true;
+  rewound_len_ = frontier_len_;
+  host_logits_ = fr_logits_;
+  if (!Check(hipMemcpyAsync(d_logits_, host_logits_.data(),
+                            static_cast<std::size_t>(vocab_rows_) * sizeof(float),
+                            hipMemcpyHostToDevice, stream_),
+             error_msg, "restore frontier logits") ||
+      !Check(hipStreamSynchronize(stream_), error_msg, "sync frontier rewind")) {
+    return false;
+  }
+  return true;
 }
 
 bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
@@ -3293,7 +3495,8 @@ void Session::UpdateDraftStats(std::uint32_t n_draft, std::uint32_t accepted) {
 
 bool Session::SpeculativeRound(std::uint32_t n_draft,
                                std::vector<std::int32_t>* out_tokens,
-                               std::string* error_msg) {
+                               std::string* error_msg,
+                               std::span<const std::int32_t> boundary) {
   if (!dspark_) {
     if (error_msg != nullptr) {
       *error_msg = "inkling SpeculativeRound called without DSpark model";
@@ -3358,6 +3561,21 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
                      std::chrono::steady_clock::now() - sweep_t0).count());
   }
   UpdateDraftStats(n_draft, accepted);
+  if (!boundary.empty()) {
+    const auto is_boundary = [&](std::int32_t t) {
+      return std::find(boundary.begin(), boundary.end(), t) != boundary.end();
+    };
+    if (is_boundary(t0)) {
+      accepted = 0;
+    } else {
+      for (std::uint32_t i = 0; i < accepted; ++i) {
+        if (is_boundary(drafts[i])) {
+          accepted = i + 1;
+          break;
+        }
+      }
+    }
+  }
 
   if (const char* env2 = std::getenv("MBUFO_DSPARK_STATS"); env2 && env2[0] == '2') {
     std::fprintf(stderr, "[dspark-round] pos=%u t0=%d acc=%u drafts=", anchor_pos, t0, accepted);
@@ -3411,7 +3629,8 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
 bool Session::SpeculativeRoundSampled(std::uint32_t n_draft,
                                       sampling::SamplerState& sampler,
                                       std::vector<std::int32_t>* out_tokens,
-                                      std::string* error_msg) {
+                                      std::string* error_msg,
+                                      std::span<const std::int32_t> boundary) {
   if (!dspark_) {
     if (error_msg != nullptr) {
       *error_msg = "inkling SpeculativeRoundSampled called without DSpark model";
@@ -3485,6 +3704,28 @@ bool Session::SpeculativeRoundSampled(std::uint32_t n_draft,
     break;
   }
 
+  UpdateDraftStats(n_draft, accepted);
+  if (!boundary.empty()) {
+    // Cut the committed block right after the first boundary token; the
+    // residual draw belongs to a position the caller steers, so drop it.
+    const auto is_boundary = [&](std::int32_t t) {
+      return std::find(boundary.begin(), boundary.end(), t) != boundary.end();
+    };
+    bool cut = false;
+    if (is_boundary(t0)) {
+      accepted = 0;
+      cut = true;
+    } else {
+      for (std::uint32_t i = 0; i < accepted; ++i) {
+        if (is_boundary(drafts[i])) {
+          accepted = i + 1;
+          cut = true;
+          break;
+        }
+      }
+    }
+    if (cut) replacement.reset();
+  }
   out_tokens->clear();
   out_tokens->reserve(1 + accepted);
   out_tokens->push_back(t0);
@@ -3492,7 +3733,6 @@ bool Session::SpeculativeRoundSampled(std::uint32_t n_draft,
     out_tokens->push_back(drafts[i]);
   }
   history_.insert(history_.end(), out_tokens->begin(), out_tokens->end());
-  UpdateDraftStats(n_draft, accepted);
   if (replacement.has_value()) {
     sampler.DeferSample(static_cast<sampling::TokenId>(*replacement));
   }
