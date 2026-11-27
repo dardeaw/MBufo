@@ -4615,9 +4615,17 @@ class InklingTextRunnerState final : public TextRunnerState {
   [[nodiscard]] InklingSession& session() const { return *session_; }
   [[nodiscard]] std::size_t position() const noexcept { return position_; }
   void set_position(std::size_t position) noexcept { position_ = position; }
+  // Where this request's generated tokens start in the session history
+  // (fixed at the first decode step, reset when the state is leased).
+  [[nodiscard]] bool generation_started() const noexcept { return gen_started_; }
+  [[nodiscard]] std::size_t generation_start() const noexcept { return gen_start_; }
+  void start_generation(std::size_t at) noexcept { gen_start_ = at; gen_started_ = true; }
+  void reset_generation() noexcept { gen_started_ = false; }
  private:
   std::unique_ptr<InklingSession> session_;
   std::size_t position_{0};
+  std::size_t gen_start_{0};
+  bool gen_started_{false};
 };
 
 class InklingTextRunner final : public HipTextModelRunner {
@@ -4699,6 +4707,7 @@ class InklingTextRunner final : public HipTextModelRunner {
       lane.set_position(lane.position() + 1);
     }
     chunk.set_position(next_position);
+    if (next_position == prompt.size()) (void)chunk.session().MarkFrontier();
     chunk_step = {.consumed_tokens = consumed, .decode_ready = next_position == prompt.size()};
     static const bool trace = std::getenv("MBUFO_INKLING_MIXED_TRACE") != nullptr;
     if (trace) std::fprintf(stderr, "[inkling-mixed] lanes=%zu chunk=%zu offset=%zu\n", advances.size(), consumed, offset);
@@ -4727,6 +4736,19 @@ class InklingTextRunner final : public HipTextModelRunner {
         turn_stops_.push_back(static_cast<std::int32_t>(*id));
       }
     }
+    const auto special = [&](const char* name) {
+      const auto id = model_->tokenizer().FindSpecialToken(name);
+      return id ? static_cast<std::int32_t>(*id) : std::int32_t{-1};
+    };
+    tok_end_message_ = special("<|end_message|>");
+    tok_message_model_ = special("<|message_model|>");
+    tok_content_text_ = special("<|content_text|>");
+    tok_thinking_ = special("<|content_thinking|>");
+    tok_invoke_ = special("<|content_invoke_tool_json|>");
+    const char* guard_env = std::getenv("MBUFO_INKLING_GUARD");
+    structure_guard_ = (guard_env == nullptr || guard_env[0] != '0') &&
+                       tok_end_message_ >= 0 && tok_message_model_ >= 0 &&
+                       tok_content_text_ >= 0 && tok_thinking_ >= 0;
   }
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
     return {
@@ -4743,7 +4765,7 @@ class InklingTextRunner final : public HipTextModelRunner {
                 .multi_token_decode = use_dspark(),
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0,
-                .prefix_reuse = false,
+                .prefix_reuse = true,
                 .mixed_prefill_decode = !use_dspark(),
             },
         .persistence = std::nullopt,
@@ -4842,6 +4864,18 @@ class InklingTextRunner final : public HipTextModelRunner {
       TextRunnerState& state,
       std::shared_ptr<const TextPromptContext> context) const override {
     auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    st.reset_generation();
+    // A retained session that generated beyond its prompt frontier goes back
+    // to the frontier now, so an exact prompt hit decodes from the prompt's
+    // logits and a partial hit prefills from the frontier. The position is
+    // left to the pool: it is 0 on a cold assignment (the cache resets the
+    // state after or before this call) and Prefill / the first decode step
+    // set it from the session.
+    if (st.session().FrontierActive() &&
+        st.session().Length() != st.session().CheckpointLength()) {
+      std::string rewind_error;
+      (void)st.session().RewindToFrontier(&rewind_error);
+    }
     if (!context) {
       st.session().SetImageInjections({});
       return;
@@ -4873,8 +4907,31 @@ class InklingTextRunner final : public HipTextModelRunner {
                                         std::size_t offset,
                                         std::size_t max_input_tokens) const override {
     auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    static const bool reuse_trace = std::getenv("MBUFO_INKLING_REUSE_TRACE") != nullptr;
+    if (reuse_trace) {
+      std::fprintf(stderr,
+                   "[inkling-reuse] prefill session=%p offset=%zu prompt=%zu position=%zu "
+                   "length=%u frontier=%d checkpoint=%u max=%zu\n",
+                   static_cast<const void*>(&st.session()), offset, prompt.size(),
+                   st.position(), st.session().Length(),
+                   st.session().FrontierActive() ? 1 : 0,
+                   st.session().CheckpointLength(), max_input_tokens);
+    }
     if (offset != st.position()) {
-      throw std::logic_error("Inkling prefill offset does not match retained state");
+      // A retained session continues from its prompt frontier: generated
+      // tokens beyond it are discarded and the frontier state restored.
+      std::string rewind_error;
+      if (offset == 0) {
+        // Cold start on a leased state: Sync restarts the stream.
+        st.set_position(0);
+      } else if (st.session().FrontierActive() &&
+                 offset == st.session().CheckpointLength() &&
+                 (st.session().Length() == offset ||
+                  st.session().RewindToFrontier(&rewind_error))) {
+        st.set_position(offset);
+      } else {
+        throw std::logic_error("Inkling prefill offset does not match retained state");
+      }
     }
     if (offset >= prompt.size()) {
       throw std::logic_error("Inkling prefill has no remaining input");
@@ -4895,12 +4952,99 @@ class InklingTextRunner final : public HipTextModelRunner {
       throw std::runtime_error("Inkling prefill failed: " + err);
     }
     st.set_position(next_position);
+    if (next_position == prompt.size()) (void)st.session().MarkFrontier();
     return {.consumed_tokens = consumed, .decode_ready = next_position == prompt.size()};
+  }
+  // Message structure without a tool grammar. The model ends a thinking
+  // message with <|end_message|> and must continue with a new
+  // <|message_model|> header; skipping it (seen with --think off and no
+  // tools) leaves it in a degenerate state that emits runs of
+  // <|end_message|>, stray tokens and never the turn end. The tool grammar
+  // enforces this for requests with tools; here the runner forces the header
+  // after a thinking message and ends the turn after a text message.
+  // Generation starts where the session history ends once the prompt is in.
+  static void EnsureGeneration(InklingTextRunnerState& st) {
+    if (!st.generation_started()) {
+      st.start_generation(st.session().Length());
+      st.set_position(st.session().Length());
+    }
+  }
+  enum class Guard { kNone, kForce, kStop, kRestrict };
+  [[nodiscard]] Guard GuardAction(InklingTextRunnerState& st,
+                                  const sampling::SamplerState& sampler,
+                                  std::int32_t* forced = nullptr) const {
+    if (!structure_guard_ || !st.stop_at_eos() ||
+        sampler.config().constraint != nullptr) {
+      return Guard::kNone;
+    }
+    const auto history = st.session().History();
+    const std::size_t start = st.generation_start();
+    const std::size_t n = history.size();
+    // A reply always opens with the assistant header. Sampled requests used to
+    // draw a stray token here and right after it; the first token is forced
+    // and the one after the header is restricted to the two message kinds a
+    // grammar-free reply may start with.
+    if (n == start) {
+      if (forced != nullptr) *forced = tok_message_model_;
+      return Guard::kForce;
+    }
+    if (n < start) return Guard::kNone;
+    if (n == start + 1 && history[n - 1] == tok_message_model_) {
+      return Guard::kRestrict;
+    }
+    // 1 = the message ending at index `end` is a thinking message.
+    const auto thinking_ended = [&](std::size_t end) {
+      for (std::size_t i = end; i-- > start;) {
+        const std::int32_t t = history[i];
+        if (t == tok_thinking_) return true;
+        if (t == tok_content_text_ || t == tok_invoke_) return false;
+      }
+      return false;
+    };
+    const std::int32_t last = history[n - 1];
+    if (last == tok_end_message_) {
+      if (thinking_ended(n - 1)) {
+        if (forced != nullptr) *forced = tok_message_model_;
+        return Guard::kForce;
+      }
+      return Guard::kStop;
+    }
+    // The header that follows a thinking message must open a text message
+    // (no tools can be called without a grammar).
+    if (last == tok_message_model_ && n >= start + 2 &&
+        history[n - 2] == tok_end_message_ && thinking_ended(n - 2)) {
+      if (forced != nullptr) *forced = tok_content_text_;
+      return Guard::kForce;
+    }
+    return Guard::kNone;
   }
   [[nodiscard]] TextDecodeSelection SelectNext(TextRunnerState& state,
                                                sampling::SamplerState& sampler) const override {
     auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    EnsureGeneration(st);
     if (st.position() >= max_context_) return {.stop = true, .piece = {}};
+    std::int32_t forced = -1;
+    switch (GuardAction(st, sampler, &forced)) {
+      case Guard::kForce:
+        return {.stop = false,
+                .token = static_cast<TextRunnerToken>(forced),
+                .piece = model_->Decode(std::span<const std::int32_t>(&forced, 1))};
+      case Guard::kStop:
+        return {.stop = true, .token = 0, .piece = {}};
+      case Guard::kRestrict: {
+        const auto raw = st.session().Logits();
+        if (raw.empty()) throw std::runtime_error("Inkling token selection has no logits");
+        std::vector<float> masked(raw.size(), -std::numeric_limits<float>::infinity());
+        masked[static_cast<std::size_t>(tok_thinking_)] = raw[static_cast<std::size_t>(tok_thinking_)];
+        masked[static_cast<std::size_t>(tok_content_text_)] = raw[static_cast<std::size_t>(tok_content_text_)];
+        const auto choice = static_cast<std::int32_t>(sampler.Sample(masked));
+        return {.stop = false,
+                .token = static_cast<TextRunnerToken>(choice),
+                .piece = model_->Decode(std::span<const std::int32_t>(&choice, 1))};
+      }
+      case Guard::kNone:
+        break;
+    }
     const auto logits = st.session().Logits();
     if (logits.empty()) throw std::runtime_error("Inkling token selection has no logits");
     const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
@@ -4933,20 +5077,33 @@ class InklingTextRunner final : public HipTextModelRunner {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
     auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    EnsureGeneration(st);
     if (st.position() >= max_context_) return {.stop = true};
+    if (GuardAction(st, sampler) != Guard::kNone) {
+      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    }
+    // Rounds stop committing after a message end so the guard can steer it.
+    const bool guarded = structure_guard_ && st.stop_at_eos() &&
+                         sampler.config().constraint == nullptr;
+    // A round also stops after the assistant header, so the token drawn right
+    // after it goes through the guard's restriction.
+    const std::int32_t guard_boundary[2] = {tok_end_message_, tok_message_model_};
+    const std::span<const std::int32_t> boundary =
+        guarded ? std::span<const std::int32_t>(guard_boundary, 2)
+                : std::span<const std::int32_t>{};
     const std::uint32_t n_draft = static_cast<std::uint32_t>(
         std::min<std::size_t>(max_draft_tokens_, max_tokens - 1));
     std::vector<std::int32_t> block;
     std::string error;
     bool round_ok = false;
     if (greedy) {
-      round_ok = st.session().SpeculativeRound(n_draft, &block, &error);
+      round_ok = st.session().SpeculativeRound(n_draft, &block, &error, boundary);
     } else {
       // Sampled requests: lossless speculative sampling against a working
       // copy of the sampler; publish only the RNG / deferred residual draw.
       sampling::SamplerState working = sampler;
       round_ok = st.session().SpeculativeRoundSampled(n_draft, working, &block,
-                                                      &error);
+                                                      &error, boundary);
       sampler.CopyDrawStateFrom(working);
     }
     if (!round_ok || block.empty()) {
@@ -4979,9 +5136,15 @@ class InklingTextRunner final : public HipTextModelRunner {
     return SelectNext(state, sampler);
   }
   [[nodiscard]] std::size_t CheckpointPosition(const TextRunnerState& state) const override {
-    return dynamic_cast<const InklingTextRunnerState&>(state).position();
+    return dynamic_cast<const InklingTextRunnerState&>(state).session().CheckpointLength();
   }
  private:
+  std::int32_t tok_end_message_{-1};
+  std::int32_t tok_message_model_{-1};
+  std::int32_t tok_content_text_{-1};
+  std::int32_t tok_thinking_{-1};
+  std::int32_t tok_invoke_{-1};
+  bool structure_guard_{false};
   [[nodiscard]] bool use_dspark() const noexcept {
     return !dspark_model_path_.empty() && max_draft_tokens_ > 0 &&
            model_->HasDspark();

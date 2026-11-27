@@ -184,6 +184,13 @@ def validate_task(name, cwd, calls_log):
     return mcp
 
 
+def isolation_flags(opencode):
+    """`--pure` on current opencode; older builds (2.1.x) isolate with `--standalone`."""
+    help_text = subprocess.run([opencode, "run", "--help"], capture_output=True, text=True)
+    text = help_text.stdout + help_text.stderr
+    return ["--pure"] if "--pure" in text else (["--standalone"] if "--standalone" in text else [])
+
+
 def run_case(args, recorder, index, name):
     case = args.output / f"{index:02d}-{name}"
     cwd = case / "work"
@@ -206,10 +213,12 @@ def run_case(args, recorder, index, name):
         "permission": {"*": "allow"},
     }
     save(case / "opencode.json", config)
-    env = {**os.environ, "OPENCODE_CONFIG": str(case / "opencode.json"),
+    # opencode 2.1.x resolves its project directory from $PWD, which Popen(cwd=)
+    # does not update: without this it works in the harness' own directory.
+    env = {**os.environ, "PWD": str(cwd), "OPENCODE_CONFIG": str(case / "opencode.json"),
            "XDG_CONFIG_HOME": str(case / "xdg-config"), "XDG_DATA_HOME": str(case / "xdg-data"),
            "XDG_STATE_HOME": str(case / "xdg-state"), "XDG_CACHE_HOME": str(case / "xdg-cache")}
-    command = [args.opencode, "run", "--pure", "--auto", "--format", "json",
+    command = [args.opencode, "run", *isolation_flags(args.opencode), "--auto", "--format", "json",
                "-m", f"mbufo/{args.model}", PROMPTS[name]]
     save(case / "command.json", command)
     recorder.case = case.name

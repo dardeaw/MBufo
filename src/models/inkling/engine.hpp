@@ -174,9 +174,31 @@ class Session final {
       Session* chunk, std::span<const std::int32_t> prefix,
       std::string* error_msg, bool* refused);
   [[nodiscard]] std::int32_t SampleGreedy();
+  /// `boundary` lists tokens after which a round must not commit further
+  /// tokens (the caller steers generation at them, e.g. message ends): the
+  /// accepted block is cut right after the first one and the state rolled back.
   [[nodiscard]] bool SpeculativeRound(std::uint32_t n_draft,
                                       std::vector<std::int32_t>* out_tokens,
-                                      std::string* error_msg = nullptr);
+                                      std::string* error_msg = nullptr,
+                                      std::span<const std::int32_t> boundary = {});
+  [[nodiscard]] std::span<const std::int32_t> History() const noexcept {
+    return history_;
+  }
+  /// Prompt-frontier checkpoint. When a prompt prefill completes the session
+  /// snapshots the only state that cannot be re-derived by truncating the
+  /// token history: the SWA ring planes (rows get overwritten by generation),
+  /// the rolling short-conv states and the frontier logits. The next request
+  /// that shares the whole prompt rewinds to it (RewindToFrontier) instead of
+  /// re-prefilling, so an agent turn only prefills its new suffix.
+  [[nodiscard]] bool MarkFrontier(std::string* error_msg = nullptr);
+  [[nodiscard]] bool RewindToFrontier(std::string* error_msg = nullptr);
+  [[nodiscard]] bool FrontierActive() const noexcept { return frontier_active_; }
+  /// Position at which this session's state can be reused: the frontier while
+  /// generated tokens extend beyond it, the full length otherwise.
+  [[nodiscard]] std::uint32_t CheckpointLength() const noexcept {
+    return frontier_active_ ? frontier_len_
+                            : static_cast<std::uint32_t>(history_.size());
+  }
   /// Number of tokens the drafter proposed in the last speculative round
   /// (0 when the adaptive controller chose a plain decode step).
   [[nodiscard]] std::uint32_t LastDraftCount() const noexcept {
@@ -191,7 +213,8 @@ class Session final {
   /// working copy; it accepts every committed token of the round.
   [[nodiscard]] bool SpeculativeRoundSampled(
       std::uint32_t n_draft, sampling::SamplerState& sampler,
-      std::vector<std::int32_t>* out_tokens, std::string* error_msg = nullptr);
+      std::vector<std::int32_t>* out_tokens, std::string* error_msg = nullptr,
+      std::span<const std::int32_t> boundary = {});
 
  private:
   explicit Session(std::shared_ptr<Model> model);
@@ -251,6 +274,16 @@ class Session final {
   [[nodiscard]] std::uint32_t ChooseDraftLen(std::uint32_t max_n);
   void UpdateDraftStats(std::uint32_t n_draft, std::uint32_t accepted);
   std::vector<std::int32_t> history_;
+  // Frontier checkpoint (see MarkFrontier).
+  std::uint32_t frontier_len_{0};
+  bool frontier_active_{false};
+  bool images_in_history_{false};
+  bool rewound_{false};
+  std::uint32_t rewound_len_{0};
+  std::vector<void*> frontier_allocs_;
+  std::vector<void*> fr_plane_k_, fr_plane_v_;  // per KV plane, nullptr = global
+  std::vector<void*> fr_sc_k_, fr_sc_v_, fr_sc_pa_, fr_sc_pm_;  // per layer
+  std::vector<float> fr_logits_;
 
   // Device arena (all sized by kChunk / context at Init).
   std::vector<void*> arena_;
