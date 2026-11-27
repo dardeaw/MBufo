@@ -15,6 +15,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/image.hpp"
+#include "src/core/sampling.hpp"
 #include "src/models/inkling/dspark.hpp"
 #include "src/models/inkling/vision.hpp"
 #include "src/models/inkling/weights.hpp"
@@ -176,6 +177,21 @@ class Session final {
   [[nodiscard]] bool SpeculativeRound(std::uint32_t n_draft,
                                       std::vector<std::int32_t>* out_tokens,
                                       std::string* error_msg = nullptr);
+  /// Number of tokens the drafter proposed in the last speculative round
+  /// (0 when the adaptive controller chose a plain decode step).
+  [[nodiscard]] std::uint32_t LastDraftCount() const noexcept {
+    return last_draft_n_;
+  }
+  /// Sampled (temperature / top-k / top-p / penalties) speculative round.
+  /// The drafter proposes a deterministic block (q = one-hot), each proposal
+  /// d is accepted with probability p_target(d) and a rejection draws the
+  /// replacement from the residual (p without d), which is deferred into
+  /// `sampler` so the next round starts from it: the emitted stream follows
+  /// the target's sampling distribution exactly. `sampler` is the tentative
+  /// working copy; it accepts every committed token of the round.
+  [[nodiscard]] bool SpeculativeRoundSampled(
+      std::uint32_t n_draft, sampling::SamplerState& sampler,
+      std::vector<std::int32_t>* out_tokens, std::string* error_msg = nullptr);
 
  private:
   explicit Session(std::shared_ptr<Model> model);
@@ -225,6 +241,15 @@ class Session final {
   static constexpr std::uint32_t kTopK = 8;
 
   std::vector<float> host_logits_;
+  std::vector<float> host_all_logits_;
+  // Adaptive draft length (see ChooseDraftLen): decayed accepted-token and
+  // rejection counts give the per-position acceptance MLE p = A / (A + R).
+  double dspark_acc_sum_{2.0};
+  double dspark_rej_sum_{2.0};
+  std::uint32_t dspark_plain_streak_{0};
+  std::uint32_t last_draft_n_{0};
+  [[nodiscard]] std::uint32_t ChooseDraftLen(std::uint32_t max_n);
+  void UpdateDraftStats(std::uint32_t n_draft, std::uint32_t accepted);
   std::vector<std::int32_t> history_;
 
   // Device arena (all sized by kChunk / context at Init).

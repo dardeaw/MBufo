@@ -1,4 +1,5 @@
 #include "src/models/inkling/dspark.hpp"
+#include "src/models/inkling/stream_wait.hpp"
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -940,6 +941,7 @@ bool DsparkSession::DraftBlock(
         im.d_arg, n_draft, im.vocab_rows, im.stream);
   }
   out_drafts->resize(n_draft);
+  WaitStream(im.stream);
   if (!CheckHip(hipMemcpyAsync(out_drafts->data(), im.d_arg,
                                n_draft * sizeof(std::int32_t),
                                hipMemcpyDeviceToHost, im.stream),

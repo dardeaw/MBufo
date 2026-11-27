@@ -9,12 +9,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <sys/mman.h>
+#include <optional>
 #include <thread>
 #include <vector>
 
 #include "src/core/compute/gemm/gemm.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/inkling/kernels/kernels.hpp"
+#include "src/models/inkling/stream_wait.hpp"
 #include "src/core/compute/attention/blocked_kv.hpp"
 
 namespace blocked_kv = ::mbufo::core::compute::blocked_kv;
@@ -2957,6 +2959,7 @@ bool Session::ForwardChunk(std::span<const std::int32_t> tokens,
     }
   }
 
+  WaitStream(stream_);
   if (!Check(hipMemcpyAsync(host_logits_.data(), d_logits_,
                             static_cast<std::size_t>(vocab_rows_) *
                                 sizeof(float),
@@ -3201,6 +3204,7 @@ bool Session::ForwardWithAllLogits(std::span<const std::int32_t> tokens,
       static_cast<gemm::ArgmaxCandidate*>(d_argmax_scratch_);
   gemm::Argmax(d_all_logits_, scratch, d_all_argmax_, n, vocab_rows_, stream_);
   out_argmax->resize(n);
+  WaitStream(stream_);
   if (!Check(hipMemcpyAsync(out_argmax->data(), d_all_argmax_,
                             static_cast<std::size_t>(n) * sizeof(std::int32_t),
                             hipMemcpyDeviceToHost, stream_),
@@ -3209,6 +3213,74 @@ bool Session::ForwardWithAllLogits(std::span<const std::int32_t> tokens,
     return false;
   }
   return true;
+}
+
+namespace {
+struct DraftPolicy {
+  bool adaptive{true};
+  double plain_ms{34.0};  // plain decode step incl. DSpark context capture
+  double base_ms{43.5};   // fixed cost of a speculative round (draft + verify)
+  double per_tok_ms{5.5}; // incremental cost per drafted token
+  double decay{0.92};
+  std::uint32_t probe_every{12};
+};
+const DraftPolicy& GetDraftPolicy() {
+  static const DraftPolicy policy = [] {
+    DraftPolicy d;
+    auto num = [](const char* name, double def) {
+      const char* e = std::getenv(name);
+      return e != nullptr ? std::atof(e) : def;
+    };
+    d.adaptive = num("MBUFO_DSPARK_ADAPT", 1.0) != 0.0;
+    d.plain_ms = num("MBUFO_DSPARK_PLAIN_MS", d.plain_ms);
+    d.base_ms = num("MBUFO_DSPARK_BASE_MS", d.base_ms);
+    d.per_tok_ms = num("MBUFO_DSPARK_TOK_MS", d.per_tok_ms);
+    d.decay = num("MBUFO_DSPARK_DECAY", d.decay);
+    d.probe_every = static_cast<std::uint32_t>(num("MBUFO_DSPARK_PROBE", 12));
+    return d;
+  }();
+  return policy;
+}
+}  // namespace
+
+// Picks how many tokens to draft this round. A round drafting n tokens costs
+// about base + n * per_tok and yields 1 + p + ... + p^n tokens on average
+// (p = per-position acceptance), a plain step yields 1 token for plain_ms.
+// With low acceptance (prose) the plain step wins, so drafting is skipped,
+// with a periodic 2-token probe to notice when acceptance recovers.
+std::uint32_t Session::ChooseDraftLen(std::uint32_t max_n) {
+  const auto& pol = GetDraftPolicy();
+  if (!pol.adaptive || max_n == 0) return max_n;
+  const double p = dspark_acc_sum_ / (dspark_acc_sum_ + dspark_rej_sum_);
+  std::uint32_t best_n = 0;
+  double best = 1.0 / pol.plain_ms;
+  double expect = 1.0;
+  double pk = 1.0;
+  for (std::uint32_t n = 1; n <= max_n; ++n) {
+    pk *= p;
+    expect += pk;
+    const double rate = expect / (pol.base_ms + pol.per_tok_ms * n);
+    if (rate > best) {
+      best = rate;
+      best_n = n;
+    }
+  }
+  if (best_n == 0) {
+    if (++dspark_plain_streak_ >= pol.probe_every) {
+      dspark_plain_streak_ = 0;
+      best_n = std::min<std::uint32_t>(2U, max_n);
+    }
+  } else {
+    dspark_plain_streak_ = 0;
+  }
+  return best_n;
+}
+
+void Session::UpdateDraftStats(std::uint32_t n_draft, std::uint32_t accepted) {
+  if (n_draft == 0) return;
+  const double d = GetDraftPolicy().decay;
+  dspark_acc_sum_ = d * dspark_acc_sum_ + accepted;
+  dspark_rej_sum_ = d * dspark_rej_sum_ + (accepted < n_draft ? 1.0 : 0.0);
 }
 
 bool Session::SpeculativeRound(std::uint32_t n_draft,
@@ -3228,6 +3300,18 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
   const std::uint32_t max_avail =
       model_->MaxContext() - anchor_pos - 1;
   n_draft = std::min({n_draft, DsparkModel::kMaxDraft, max_avail});
+  static const bool sweep = [] {
+    const char* e = std::getenv("MBUFO_DSPARK_STATS");
+    return e != nullptr && e[0] == '3';
+  }();
+  static std::uint64_t sweep_round = 0;
+  const auto sweep_t0 = std::chrono::steady_clock::now();
+  if (sweep) {
+    n_draft = std::min(n_draft, 1U + static_cast<std::uint32_t>(sweep_round++ % 7U));
+  } else {
+    n_draft = ChooseDraftLen(n_draft);
+  }
+  last_draft_n_ = n_draft;
 
   const std::int32_t t0 = SampleGreedy();
 
@@ -3259,10 +3343,21 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
   while (accepted < n_draft && target_next[accepted] == drafts[accepted]) {
     ++accepted;
   }
-  dspark_adapt_ema_ =
-      0.85F * dspark_adapt_ema_ +
-      0.15F * (static_cast<float>(accepted) / static_cast<float>(n_draft));
+  if (sweep) {
+    // ms measured up to the verify sync (restore step excluded).
+    std::fprintf(stderr, "[dspark-sweep] n=%u acc=%u ms=%.2f\n", n_draft, accepted,
+                 std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - sweep_t0).count());
+  }
+  UpdateDraftStats(n_draft, accepted);
 
+  if (const char* env2 = std::getenv("MBUFO_DSPARK_STATS"); env2 && env2[0] == '2') {
+    std::fprintf(stderr, "[dspark-round] pos=%u t0=%d acc=%u drafts=", anchor_pos, t0, accepted);
+    for (auto d : drafts) std::fprintf(stderr, "%d,", d);
+    std::fprintf(stderr, " tgt=");
+    for (std::uint32_t i = 0; i < n_draft; ++i) std::fprintf(stderr, "%d,", target_next[i]);
+    std::fprintf(stderr, "\n");
+  }
   if (const char* env = std::getenv("MBUFO_DSPARK_STATS"); env && env[0] == '1') {
     static uint64_t dbg_rounds = 0, dbg_drafted = 0, dbg_accepted = 0;
     ++dbg_rounds;
@@ -3299,6 +3394,114 @@ bool Session::SpeculativeRound(std::uint32_t n_draft,
                             static_cast<std::size_t>(vocab_rows_) * sizeof(float),
                             hipMemcpyDeviceToHost, stream_),
              error_msg, "restore host_logits") ||
+      !Check(hipStreamSynchronize(stream_), error_msg, "sync restore prefix")) {
+    return false;
+  }
+  return true;
+}
+
+bool Session::SpeculativeRoundSampled(std::uint32_t n_draft,
+                                      sampling::SamplerState& sampler,
+                                      std::vector<std::int32_t>* out_tokens,
+                                      std::string* error_msg) {
+  if (!dspark_) {
+    if (error_msg != nullptr) {
+      *error_msg = "inkling SpeculativeRoundSampled called without DSpark model";
+    }
+    return false;
+  }
+  const std::uint32_t anchor_pos = static_cast<std::uint32_t>(history_.size());
+  if (anchor_pos >= model_->MaxContext()) {
+    if (error_msg != nullptr) *error_msg = "inkling SpeculativeRound: context full";
+    return false;
+  }
+  const std::uint32_t max_avail = model_->MaxContext() - anchor_pos - 1;
+  n_draft = ChooseDraftLen(
+      std::min({n_draft, DsparkModel::kMaxDraft, max_avail}));
+  last_draft_n_ = n_draft;
+
+  const std::int32_t t0 = static_cast<std::int32_t>(sampler.Sample(Logits()));
+  sampler.Accept(static_cast<sampling::TokenId>(t0));
+  if (n_draft == 0 || model_->IsStopToken(t0)) {
+    if (!Evaluate(t0, error_msg)) return false;
+    out_tokens->assign(1, t0);
+    return true;
+  }
+
+  std::vector<std::int32_t> drafts;
+  const auto& w = *model_->weights_;
+  if (!dspark_->DraftBlock(t0, anchor_pos, n_draft, w.token_embd, w.output,
+                           &drafts, error_msg)) {
+    return false;
+  }
+  std::vector<std::int32_t> verify_tokens;
+  verify_tokens.reserve(1 + n_draft);
+  verify_tokens.push_back(t0);
+  verify_tokens.insert(verify_tokens.end(), drafts.begin(), drafts.end());
+
+  std::vector<std::int32_t> unused_argmax;
+  if (!ForwardWithAllLogits(verify_tokens, anchor_pos, &unused_argmax,
+                            error_msg)) {
+    return false;
+  }
+  const std::size_t rows = verify_tokens.size();
+  host_all_logits_.resize(rows * vocab_rows_);
+  if (!Check(hipMemcpyAsync(host_all_logits_.data(), d_all_logits_,
+                            rows * static_cast<std::size_t>(vocab_rows_) *
+                                sizeof(float),
+                            hipMemcpyDeviceToHost, stream_),
+             error_msg, "copy all logits") ||
+      !Check(hipStreamSynchronize(stream_), error_msg, "sync all logits")) {
+    return false;
+  }
+
+  std::uint32_t accepted = 0;
+  std::optional<std::int32_t> replacement;
+  while (accepted < n_draft) {
+    const std::span<const float> row(
+        host_all_logits_.data() + static_cast<std::size_t>(accepted) * vocab_rows_,
+        vocab_rows_);
+    const auto dist = sampler.Distribution(row);
+    const auto d = static_cast<sampling::TokenId>(drafts[accepted]);
+    if (sampler.Uniform() < dist.probability(d)) {
+      sampler.Accept(d);
+      ++accepted;
+      continue;
+    }
+    // One-hot proposal: the residual is the target distribution without d.
+    const sampling::TokenId cand_id = d;
+    const float cand_p = 1.0F;
+    replacement = static_cast<std::int32_t>(dist.SampleResidual(
+        std::span<const sampling::TokenId>(&cand_id, 1),
+        std::span<const float>(&cand_p, 1), sampler.mutable_rng_state()));
+    break;
+  }
+
+  out_tokens->clear();
+  out_tokens->reserve(1 + accepted);
+  out_tokens->push_back(t0);
+  for (std::uint32_t i = 0; i < accepted; ++i) {
+    out_tokens->push_back(drafts[i]);
+  }
+  history_.insert(history_.end(), out_tokens->begin(), out_tokens->end());
+  UpdateDraftStats(n_draft, accepted);
+  if (replacement.has_value()) {
+    sampler.DeferSample(static_cast<sampling::TokenId>(*replacement));
+  }
+  if (accepted == n_draft) return true;
+  if (!RestoreSconvPrefix(accepted, error_msg)) return false;
+  // The frontier logits are those after the last committed token (row
+  // `accepted`); the next round samples (or replays the deferred token) there.
+  std::memcpy(host_logits_.data(),
+              host_all_logits_.data() +
+                  static_cast<std::size_t>(accepted) * vocab_rows_,
+              static_cast<std::size_t>(vocab_rows_) * sizeof(float));
+  const float* src_logits =
+      d_all_logits_ + static_cast<std::size_t>(accepted) * vocab_rows_;
+  if (!Check(hipMemcpyAsync(d_logits_, src_logits,
+                            static_cast<std::size_t>(vocab_rows_) * sizeof(float),
+                            hipMemcpyDeviceToDevice, stream_),
+             error_msg, "restore d_logits") ||
       !Check(hipStreamSynchronize(stream_), error_msg, "sync restore prefix")) {
     return false;
   }
