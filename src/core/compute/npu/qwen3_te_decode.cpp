@@ -51,13 +51,14 @@ bool TeNpuDecoder::EncodeTaps(std::span<const float> prompt_hidden,
                               std::span<const std::size_t> tap_layers,
                               std::vector<std::vector<float>>* taps,
                               std::vector<float>* final_raw, double* npu_ms,
-                              std::string* error) {
+                              std::string* error,
+                              const std::vector<std::uint8_t>* key_keep) {
   if (taps == nullptr || final_raw == nullptr) {
     if (error != nullptr) *error = "bad taps output";
     return false;
   }
   return dec_.PrefillFullTaps(prompt_hidden, T, tap_layers, taps, final_raw,
-                              npu_ms, error);
+                              npu_ms, error, key_keep);
 }
 
 bool TeNpuDecoder::PrefillFull(std::span<const float> prompt_hidden,

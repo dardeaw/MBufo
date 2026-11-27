@@ -699,9 +699,15 @@ if (BUILD_TESTING)
 
     add_executable(npu_te_decode_test tests/core/npu_te_decode_test.cpp)
     add_executable(npu_flux_dit_test tests/core/npu_flux_dit_test.cpp)
+    add_executable(npu_flux_block0_test tests/core/npu_flux_block0_test.cpp)
+    add_executable(npu_flux_replay_test tests/core/npu_flux_replay_test.cpp)
+    target_link_libraries(npu_flux_replay_test PRIVATE mbufo_core mbufo_npu)
+    target_link_libraries(npu_flux_block0_test PRIVATE mbufo_core mbufo_npu)
     add_executable(npu_zimage_dit_test tests/core/npu_zimage_dit_test.cpp)
     target_link_libraries(npu_zimage_dit_test PRIVATE mbufo_core mbufo_npu)
     add_test(NAME npu_zimage_dit_test COMMAND npu_zimage_dit_test)
+    add_executable(npu_zimage_block0_test tests/core/npu_zimage_block0_test.cpp)
+    target_link_libraries(npu_zimage_block0_test PRIVATE mbufo_core mbufo_npu)
     set_tests_properties(npu_zimage_dit_test PROPERTIES
       LABELS "npu;hardware;quant"
       RESOURCE_LOCK npu)

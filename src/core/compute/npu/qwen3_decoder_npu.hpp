@@ -195,7 +195,8 @@ class Qwen3NpuDecoder {
                                     std::vector<std::vector<float>>* taps,
                                     std::vector<float>* all_last,
                                     double* npu_ms = nullptr,
-                                    std::string* error = nullptr) {
+                                    std::string* error = nullptr,
+                                    const std::vector<std::uint8_t>* key_keep = nullptr) {
     if (T == 0 || hidden_rows.size() < T * cfg_.hidden) {
       if (error != nullptr) *error = "bad prefill input";
       return false;
@@ -208,7 +209,7 @@ class Qwen3NpuDecoder {
                          hidden_rows.begin() + T * cfg_.hidden);
     std::vector<std::size_t> layers(tap_layers.begin(), tap_layers.end());
     taps->clear();
-    if (!RunLayers(&h, T, 0, true, npu_ms, error, &layers, taps)) return false;
+    if (!RunLayers(&h, T, 0, true, npu_ms, error, &layers, taps, key_keep)) return false;
     pos_ = T;
     *all_last = h;
     return true;
@@ -332,7 +333,8 @@ class Qwen3NpuDecoder {
                               std::size_t pos_base, bool append_kv,
                               double* npu_ms, std::string* error,
                               const std::vector<std::size_t>* tap_layers = nullptr,
-                              std::vector<std::vector<float>>* tap_snaps = nullptr) {
+                              std::vector<std::vector<float>>* tap_snaps = nullptr,
+                              const std::vector<std::uint8_t>* key_keep = nullptr) {
     const std::size_t H = cfg_.hidden;
     const std::size_t F = cfg_.inter;
     const std::size_t nh = cfg_.n_heads;
@@ -380,20 +382,23 @@ class Qwen3NpuDecoder {
       }
       attn_out.assign(T * qd, 0.0F);
       if (append_kv) {
-        // Prefill: causal attention over the prompt rows.
+        // Prefill: causal attention over the prompt rows; key_keep masks
+        // padding keys (pipeline causal+padding mask equivalent).
         for (std::size_t t = 0; t < T; ++t) {
           for (std::size_t hh = 0; hh < nh; ++hh) {
             const std::size_t kvh = hh / group;
-            kh_slice.resize((t + 1) * hd);
-            vh_slice.resize((t + 1) * hd);
+            kh_slice.clear();
+            vh_slice.clear();
             for (std::size_t k = 0; k <= t; ++k) {
+              if (key_keep != nullptr && (*key_keep)[k] == 0) continue;
               const float* ksrc = k_all.data() + k * kd + kvh * hd;
               const float* vsrc = v_all.data() + k * kd + kvh * hd;
-              std::copy(ksrc, ksrc + hd, kh_slice.data() + k * hd);
-              std::copy(vsrc, vsrc + hd, vh_slice.data() + k * hd);
+              kh_slice.insert(kh_slice.end(), ksrc, ksrc + hd);
+              vh_slice.insert(vh_slice.end(), vsrc, vsrc + hd);
             }
+            const std::size_t n_keep = kh_slice.size() / hd;
             qwen3_detail::AttnOneQuery(q_all.data() + t * qd + hh * hd,
-                                       kh_slice.data(), vh_slice.data(), t + 1,
+                                       kh_slice.data(), vh_slice.data(), n_keep,
                                        hd, attn_out.data() + t * qd + hh * hd);
           }
         }

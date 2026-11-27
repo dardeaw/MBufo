@@ -50,13 +50,16 @@ class TeNpuDecoder {
   /// Tap encode for DiT conditioning: raw post-layer snapshots at the given
   /// layer indices plus the raw final sequence (shell: taps at layer 0,
   /// layer n/2, final, concatenated 3x2560 -> 7680).
+  /// Optional key_keep mask (1=keep, 0=masked padding key) mirrors the
+  /// pipeline's causal+padding mask.
   [[nodiscard]] bool EncodeTaps(std::span<const float> prompt_hidden,
                                 std::size_t T,
                                 std::span<const std::size_t> tap_layers,
                                 std::vector<std::vector<float>>* taps,
                                 std::vector<float>* final_raw,
                                 double* npu_ms = nullptr,
-                                std::string* error = nullptr);
+                                std::string* error = nullptr,
+                                const std::vector<std::uint8_t>* key_keep = nullptr);
 
   // Prefill/DecodeStep exposed for the decode-consistency gate (same
   // prefill-vs-incremental math check as P1/P2a on TE weights).
