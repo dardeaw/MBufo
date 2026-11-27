@@ -2925,6 +2925,13 @@ public:
                                    : model_->PrefillCapacity()});
     if (consumed == 0 || advances.size() + consumed > 1024)
       throw MixedBatchRefused("mixed batch shape exceeds envelope");
+    // EvaluateBatchWithChunk keeps no logits for the chunk, and a chunk that
+    // reaches the end of the model prompt (the prompt end or a snapshot /
+    // checkpoint frontier cut by the pool) must leave a decodable frontier and
+    // keep the legacy chunk partition and in-pass capture. Such a chunk runs on
+    // the legacy path; only interior chunks merge.
+    if (offset + consumed >= prompt.size())
+      throw MixedBatchRefused("mixed batch chunk reaches the prompt frontier");
     std::vector<QwenFlashNextSession::BatchOutcome> outcomes(advances.size());
     std::vector<QwenFlashNextSession::AdvanceRequest> requests;
     for (const auto& advance : advances) {

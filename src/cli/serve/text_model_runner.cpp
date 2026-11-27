@@ -1743,6 +1743,15 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithCoworkers(
     frontier = std::min(frontier, impl_->boundaries.front());
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
+  // A chunk that would end at a snapshot / checkpoint / boundary frontier short
+  // of the prompt end splits the prompt differently from the unmerged run, which
+  // captures that frontier inside its pass without an extra chunk. Different
+  // chunk boundaries change the arithmetic of the tail rows, so the step runs
+  // on the legacy path and the merged and unmerged partitions stay identical.
+  if (frontier < impl_->prompt.size() &&
+      impl_->prefill_offset + max_input_tokens >= frontier) {
+    return std::nullopt;
+  }
   if (impl_->cancelled && impl_->cancelled())
     throw std::runtime_error("generation cancelled");
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
@@ -1923,6 +1932,15 @@ std::optional<TextPrefillStep> TextRunnerPool::Request::PrefillWithDecoders(
     frontier = std::min(frontier, impl_->boundaries.front());
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
+  // A chunk that would end at a snapshot / checkpoint / boundary frontier short
+  // of the prompt end splits the prompt differently from the unmerged run, which
+  // captures that frontier inside its pass without an extra chunk. Different
+  // chunk boundaries change the arithmetic of the tail rows, so the step runs
+  // on the legacy path and the merged and unmerged partitions stay identical.
+  if (frontier < impl_->prompt.size() &&
+      impl_->prefill_offset + max_input_tokens >= frontier) {
+    return std::nullopt;
+  }
 
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
   const auto capabilities = impl_->runner->Descriptor().capabilities;
