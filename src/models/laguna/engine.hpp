@@ -99,8 +99,32 @@ class Session final {
   [[nodiscard]] std::uint32_t Length() const noexcept;
   [[nodiscard]] std::int32_t SampleGreedy();
 
+  /// Rows one prefill step may carry (Forward splits longer inputs into steps of this size).
+  [[nodiscard]] static constexpr std::size_t MaxChunkTokens() noexcept { return 512; }
+
+  /// Advance every lane by one token and, optionally, run one prefill chunk, all enqueued back to back
+  /// on one stream with one host synchronisation. Every lane keeps the exact single-session decode
+  /// core (n == 1 kernels) and the chunk keeps the exact prefill core, so the result is bit-identical
+  /// to Evaluate per lane plus Sync of the chunk. A weight-sharing fused GEMM would not be, and
+  /// separate streams would race on the process-global decode scratch (MoE unique buffers, Q8
+  /// activation scratch), hence the single in-order stream.
+  ///
+  /// `chunk` may be null (plain batched advance). `prefix` is the full prompt prefix the chunk session
+  /// must hold after the call and `offset` the tokens it already holds; prefix.size() - offset <=
+  /// MaxChunkTokens(). Preconditions are validated before any state is touched: a failed
+  /// validation sets *refused (when non-null) and leaves every session unchanged. Any other failure
+  /// is mid-pass and the sessions involved must be treated as dirty.
+  [[nodiscard]] static bool AdvanceBatchWithChunk(
+      std::span<Session* const> lanes, std::span<const std::int32_t> tokens,
+      Session* chunk, std::span<const std::int32_t> prefix, std::size_t offset,
+      std::string* error_msg = nullptr, bool* refused = nullptr);
+
  private:
   explicit Session(std::shared_ptr<Model> model);
+  [[nodiscard]] bool EnqueueForward(std::span<const std::int32_t> tokens,
+                                    std::uint32_t start_pos, hipStream_t stream,
+                                    std::string* error_msg);
+  [[nodiscard]] bool EnqueueLogitsCopy(hipStream_t stream, std::string* error_msg);
   [[nodiscard]] bool Init(std::string* error_msg);
   [[nodiscard]] bool ForwardTokens(std::span<const std::int32_t> tokens,
                                    std::uint32_t start_pos,
