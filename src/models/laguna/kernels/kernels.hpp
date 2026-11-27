@@ -73,6 +73,12 @@ void F16AttentionPrefill(const float* q, const __half* k_cache,
                          std::uint32_t n_kv_heads, std::uint32_t head_dim,
                          float scale, hipStream_t stream);
 
+/// Marks flags[t] = 1 for every token whose `per_token` floats starting at
+/// data + t * per_token contain a NaN or Inf (flags is zeroed first).
+void FlagNonFiniteTokens(const float* data, std::uint32_t n_tokens,
+                         std::size_t per_token, std::uint8_t* flags,
+                         hipStream_t stream);
+
 std::int32_t Argmax(const float* logits, std::uint32_t vocab_size,
                     std::int32_t* d_out, hipStream_t stream);
 

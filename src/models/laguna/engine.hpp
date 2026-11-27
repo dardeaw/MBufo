@@ -166,6 +166,7 @@ class Session final {
   std::int32_t* d_rows_slot_{nullptr};
   std::int32_t* d_tiles_{nullptr};
   std::uint32_t* d_n_tiles_{nullptr};
+  std::uint8_t* d_tok_flags_{nullptr};
   __half* d_wdq_scratch_{nullptr};
   float* d_logits_{nullptr};
   std::size_t routed_compact_rows_{0};

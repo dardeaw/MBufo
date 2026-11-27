@@ -432,6 +432,7 @@ Session::~Session() {
   free_p(d_rows_slot_);
   free_p(d_tiles_);
   free_p(d_n_tiles_);
+  free_p(d_tok_flags_);
   free_p(d_wdq_scratch_);
   free_p(d_attn_partials_);
   free_p(d_preq_scratch_);
@@ -513,6 +514,7 @@ bool Session::Init(std::string* error_msg) {
       !alloc(&d_rows_slot_, routed_compact_rows_, "d_rows_slot") ||
       !alloc(&d_tiles_, tile_cap_, "d_tiles") ||
       !alloc(&d_n_tiles_, 1, "d_n_tiles") ||
+      !alloc(&d_tok_flags_, kMaxChunk, "d_tok_flags") ||
       !alloc(&d_wdq_scratch_, max_dense_elems, "d_wdq_scratch") ||
       !Check(hipMalloc(reinterpret_cast<void**>(&d_attn_partials_),
                        attn_partials_bytes_),
@@ -762,6 +764,41 @@ bool Session::EnqueueForward(std::span<const std::int32_t> tokens,
             d_routed_act16_, d_tiles_, n_tiles_host, tile_rows, d_pad_bounds_,
             d_rows_slot_, d_rows_slot_, nullptr, d_down_e_, nullptr, h, eff,
             stream);
+        // The routed GEMMs hand the down projection its input as F16. A
+        // token with a massive expert activation (the first token in the
+        // last layers: gate ~570 times a large up) overflows F16 to Inf and
+        // NaN-poisons that token's hidden state, and through attention every
+        // prompt shorter than the sliding window. Recompute just those
+        // tokens on the F32 decode MoE path, which keeps the activation in
+        // F32; every other token keeps the batched result untouched.
+        kernels::FlagNonFiniteTokens(
+            d_down_e_, n, static_cast<std::size_t>(cfg.expert_used_count) * h,
+            d_tok_flags_, stream);
+        std::uint8_t tok_flags[kMaxChunk];
+        if (!Check(hipMemcpyAsync(tok_flags, d_tok_flags_, n,
+                                  hipMemcpyDeviceToHost, stream),
+                   error_msg, "copy token flags") ||
+            !Check(hipStreamSynchronize(stream), error_msg,
+                   "sync token flags")) {
+          return false;
+        }
+        for (std::uint32_t t = 0; t < n; ++t) {
+          if (tok_flags[t] == 0) continue;
+          const std::size_t used = cfg.expert_used_count;
+          if (!gemm::LaunchDecodeMoeKQuant(
+                  lw.ffn_gate_exps.device, ToWeightType(lw.ffn_gate_exps.type),
+                  lw.ffn_up_exps.device, lw.ffn_down_exps.device,
+                  ToWeightType(lw.ffn_down_exps.type),
+                  d_normed_ + static_cast<std::size_t>(t) * h,
+                  d_exp_ids_ + t * used, d_act_scratch_ + t * used * eff,
+                  d_down_e_ + t * used * h, 1, cfg.expert_used_count, h, eff,
+                  stream)) {
+            if (error_msg != nullptr) {
+              *error_msg = "laguna MoE: F16 routed overflow and no F32 fallback";
+            }
+            return false;
+          }
+        }
         gemm::MoeEpilogue(d_down_e_, d_exp_weights_, d_mlp_out_, n,
                           cfg.expert_used_count, h, stream);
       }
