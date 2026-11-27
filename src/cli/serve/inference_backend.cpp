@@ -1088,8 +1088,8 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
 
 class QwenTextRunner final : public HipTextModelRunner {
 public:
-  // Batch contract (see TextModelRunner): native DecodeBatch/AdvanceBatch below; no merged prefill+decode.
-  MBUFO_RUNNER_NO_MIXED_BATCH();
+  // Batch contract (see TextModelRunner): native DecodeBatch/AdvanceBatch; native merged advance + prefill chunk
+  // (non-DFlash); DecodeBatchWithPrefillChunk refuses.
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
@@ -1205,6 +1205,7 @@ public:
                 .prefix_reuse = true,
                 .partial_prefill_retention = true,
                 .prefill_rollback = true,
+                .mixed_prefill_decode = dflash_model_ == nullptr,
             },
         .persistence = persistence_,
     };
@@ -1516,6 +1517,10 @@ public:
       throw std::invalid_argument(
           "Qwen batched decode requires two to eight sessions");
     }
+    // Blocked-Q8 KV (the production default) has no batched decode kernel:
+    // ForwardTokenBatch refuses it, so each session runs its own decode core.
+    if (execution_policy_.UsesBlockedAttentionKv())
+      return SerialAdvanceBatch(advances);
 
     std::vector<hip::QwenGpuBatchItem> items;
     std::vector<QwenTextRunnerState*> states;
@@ -1545,6 +1550,85 @@ public:
     }
   }
 
+  // Merged plain-advance + prefill chunk. Every lane runs exactly the code its
+  // unmerged advance runs (AdvanceLanes: ForwardTokenBatch on the decode
+  // kernels for two or more lanes on F16 KV, the per-session decode core
+  // otherwise) and the chunk runs the unchanged Prefill core (ForwardPromptBatch,
+  // blocked-Q8 and vision aware), so each half is arithmetically identical to
+  // its separate run. Lanes and chunk live in different executors, hence in
+  // different arenas and streams, and run back to back (an experiment that
+  // submitted the lane pass from a helper thread while the chunk ran changed
+  // neither bits nor speed). DFlash runners advertise no merged step.
+  [[nodiscard]] bool AdvanceBatchWithPrefillChunk(
+      std::span<const TextRunnerAdvance> advances,
+      std::span<std::exception_ptr> advance_failures,
+      TextRunnerState& prefill_state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens,
+      TextPrefillStep& chunk_step) const override {
+    static const bool trace = std::getenv("MBUFO_MIXED_TRACE") != nullptr;
+    if (dflash_model_ != nullptr)
+      throw MixedBatchRefused("Qwen DFlash sessions do not merge");
+    auto& chunk = RequireQwenState(prefill_state);
+    if (advances.empty() || advances.size() > 8 ||
+        advance_failures.size() < advances.size() || max_input_tokens == 0 ||
+        offset != chunk.position() || offset >= prompt.size() ||
+        chunk.speculative())
+      throw MixedBatchRefused("Qwen mixed batch preconditions unmet");
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      auto& lane = RequireQwenState(advances[i].state.get());
+      if (&lane == &chunk || lane.speculative() ||
+          !lane.frontier().has_value() || lane.position() >= max_context_ ||
+          advances[i].token > std::numeric_limits<std::uint32_t>::max())
+        throw MixedBatchRefused("Qwen mixed batch lane unusable");
+      for (std::size_t j = 0; j < i; ++j)
+        if (&RequireQwenState(advances[j].state.get()) == &lane)
+          throw MixedBatchRefused("Qwen mixed batch lane repeated");
+    }
+    for (std::size_t i = 0; i < advances.size(); ++i)
+      advance_failures[i] = nullptr;
+
+    TextPrefillStep step;
+    std::exception_ptr chunk_failure;
+    const auto run_chunk = [&] {
+      try {
+        step = Prefill(prefill_state, prompt, offset, max_input_tokens);
+      } catch (...) {
+        chunk_failure = std::current_exception();
+      }
+    };
+    AdvanceLanes(advances, advance_failures);
+    // A failed shared lane pass leaves every lane failed; the chunk is not run.
+    if (advances.size() >= 2 && advance_failures[0]) return false;
+    run_chunk();
+    if (chunk_failure) {
+      if (trace) {
+        try {
+          std::rethrow_exception(chunk_failure);
+        } catch (const std::exception& error) {
+          std::cerr << "[qwen-mixed] chunk failed: " << error.what() << '\n';
+        } catch (...) {
+        }
+      }
+      // Lanes already advanced; only the chunk request is reported failed.
+      return false;
+    }
+    if (trace)
+      std::cerr << "[qwen-mixed] lanes=" << advances.size()
+                << " chunk=" << step.consumed_tokens << " offset=" << offset
+                << '\n';
+    if (step.interrupted || step.consumed_tokens == 0) return false;
+    chunk_step = step;
+    return true;
+  }
+
+  // The merged multi-token step has no Qwen engine pass to ride (DFlash verify
+  // is per session), so it refuses explicitly with nothing mutated.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatchWithPrefillChunk(
+      std::span<const TextRunnerDecode>, TextRunnerState&,
+      std::span<const TextRunnerToken>, std::size_t, std::size_t,
+      TextPrefillStep&) const override {
+    RefuseMixedBatch("Qwen has no merged multi-token decode");
+  }
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
     return RequireQwenState(state).position();
@@ -1554,7 +1638,48 @@ public:
   }
 
 private:
-  [[nodiscard]] std::size_t MaximumDecodeBatchWidth() const noexcept {
+  // Advances every lane by one token and records per-lane failures (never
+  // throws). Two or more lanes on F16 KV share one ForwardTokenBatch weight
+  // pass (a failure poisons every lane of that pass); a single lane, or
+  // blocked-Q8 KV (no batched decode kernel), runs the per-session decode core.
+  void AdvanceLanes(std::span<const TextRunnerAdvance> advances,
+                    std::span<std::exception_ptr> failures) const noexcept {
+    if (advances.size() >= 2 && !execution_policy_.UsesBlockedAttentionKv()) {
+      try {
+        std::vector<hip::QwenGpuBatchItem> items;
+        std::vector<QwenTextRunnerState*> states;
+        items.reserve(advances.size());
+        states.reserve(advances.size());
+        for (const auto& advance : advances) {
+          auto& qwen = RequireQwenState(advance.state.get());
+          states.push_back(&qwen);
+          items.push_back({.executor = &qwen.executor(),
+                           .token_id = advance.token,
+                           .position =
+                               static_cast<std::uint32_t>(qwen.position())});
+        }
+        const auto frontiers = hip::QwenGpuExecutor::ForwardTokenBatch(items);
+        if (frontiers.size() != states.size())
+          throw std::runtime_error(
+              "Qwen batched decode returned an invalid frontier count");
+        for (std::size_t i = 0; i < states.size(); ++i) {
+          states[i]->set_position(states[i]->position() + 1);
+          states[i]->set_frontier(frontiers[i]);
+        }
+      } catch (...) {
+        for (std::size_t i = 0; i < advances.size(); ++i)
+          failures[i] = std::current_exception();
+      }
+      return;
+    }
+    for (std::size_t i = 0; i < advances.size(); ++i) {
+      try {
+        Advance(advances[i].state.get(), advances[i].token);
+      } catch (...) {
+        failures[i] = std::current_exception();
+      }
+    }
+  }  [[nodiscard]] std::size_t MaximumDecodeBatchWidth() const noexcept {
     const std::size_t rows_per_session = dflash_model_ != nullptr ? 8 : 1;
     return std::clamp<std::size_t>(max_context_ / rows_per_session, 1, 8);
   }
