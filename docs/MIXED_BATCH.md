@@ -228,7 +228,32 @@ fallback can be found with `grep MBUFO_RUNNER_ src/cli/serve/inference_backend.c
 | DeepSeek V4 Flash | native (serial in some conditions) | native | no |
 | Qwen3.8 Flash-Next | native | native | **yes** (`AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) |
 | Muse Glimmer | native without a shared draft, serial otherwise | serial | no |
-| GPT-OSS, Laguna, Inkling, Llama, Gemma 4 | serial | serial | no |
+| Llama (Q8_0 weights) | serial | native (packed lanes, up to 8 per pass) | **yes** (`AdvanceBatchWithPrefillChunk`; `DecodeBatchWithPrefillChunk` refuses, no multi-token decode) |
+| GPT-OSS, Laguna, Inkling, Gemma 4 | serial | serial | no |
 
 Adding a model: derive from `HipTextModelRunner` and declare all four; the
 compiler rejects a runner that leaves one out.
+
+### Llama notes (native advance + merged advance/prefill)
+
+- Engine: `Session::StepBatch` runs up to 8 decode lanes in one layer-synchronous pass. The projections of all lanes share
+  one `GemvBatched` weight read (for Q8_0 weights n = 1 already takes that kernel, so a lane's row is bit-identical to
+  `Evaluate`); rope / KV append / attention stay per lane through `AttentionCore`, the same code `Evaluate` runs
+  (`FlashSinkDecode` for f16 KV, split-K for q8 KV). `Session::DecodeBatchWithChunk` adds one prefill chunk: the chunk never
+  shares a GEMM with the lanes (`Extend`, the same prefill core as `Sync`), so both halves equal the separate runs.
+  Non-Q8_0 weights (F16 GGUF) refuse the packed path (`MixedBatchRefused` / serial advance), because n = 1 and n > 1 take
+  different GEMV kernels there.
+- Prefill is now incremental: `Session::Extend(prompt, offset)` forwards only the new rows (the old `Sync(prefix)` restarted
+  at 0 on every scheduler chunk). A piece's arithmetic depends on its row count (odd or tiny row counts take other
+  kernel routes; measured: grids of 63/65/33/16/1 rows differ from `Sync`), so the pieces are a function of the prompt
+  alone: `Session::PrefillTarget` lets the engine compute only up to the last 512-row grid boundary at or before the
+  consumed position (everything at prompt end) and keeps the rest pending. Mixed and separate runs, and any budget
+  slicing, forward identical pieces. Consequence: an interior scheduler chunk smaller than 512 rows may compute nothing
+  (work arrives in grid-sized bursts) and the merged step then steps only the lanes.
+- Not a perf win for the chunk itself: on one 5k prompt with 4 streams decoding, mixed vs separate was 10.3 s vs 9.8 s
+  (f16 KV) and 11.3 s vs 11.1 s (q8 KV). The win is the shared lane weight read in `AdvanceBatch` and the removal of the
+  quadratic prefix recompute. Multi-chunk prompts now use the 512-aligned grid instead of equal splits, so their logits
+  differ in the last bits from the pre-change build (5081-token prompt: greedy text diverges after ~15 tokens).
+- Verified: `llama_mixed_exact_test` (tests/models/llama; Extend budget walks == Sync, StepBatch 2-4 lanes == serial
+  Evaluate, mixed chunk == Sync + lanes, f16 and q8 KV) and a serve A/B (5067-token prompt prefilling while 4 streams
+  decode, `MBUFO_MIXED_BATCH` 1 vs 0, 13 merged steps, all five completion SHAs identical for f16 and q8 KV).

@@ -463,47 +463,20 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) {
   return session;
 }
 
-void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
-                           std::uint32_t start_pos, hipStream_t stream) {
+// Rope, KV append and attention for the n rows currently in impl.qbuf/kbuf/vbuf; result in impl.attn_out. Shared by the
+// per-session forward and the packed-lane step (which points the four row buffers into its packed scratch).
+void Session::AttentionCore(Session& s, std::uint32_t il, std::uint32_t n,
+                            std::uint32_t start_pos, hipStream_t stream) {
   auto& w = *s.model_->weights_;
   const auto& c = w.config;
-  const std::uint32_t hidden = c.hidden_size;
+  [[maybe_unused]] const std::uint32_t hidden = c.hidden_size;
   const std::uint32_t d = c.head_dim;
-  const std::uint32_t qdim = c.num_heads * d;
+  [[maybe_unused]] const std::uint32_t qdim = c.num_heads * d;
   const std::uint32_t kvdim = c.num_kv_heads * d;
-  const auto& l = w.layers[il];
+  [[maybe_unused]] const auto& l = w.layers[il];
   auto& impl = *s.impl_;
   const bool use_blocked = s.model_->options_.kv_cache_quant == "q8";
   const float score_scale = 1.0F / std::sqrt(static_cast<float>(d));
-
-  float* hidden_buf = impl.hidden;
-  // Attention block.
-  kernels::RmsNorm(hidden_buf,
-                   static_cast<const float*>(l.attn_norm.device),
-                   impl.normed, n, hidden, c.rms_eps, stream);
-  LlamaGemm(&impl.predq, l.wq, impl.normed, impl.x16, impl.qbuf, n, qdim,
-            hidden, stream);
-  LlamaGemm(&impl.predq, l.wk, impl.normed, impl.x16, impl.kbuf, n, kvdim,
-            hidden, stream);
-  LlamaGemm(&impl.predq, l.wv, impl.normed, impl.x16, impl.vbuf, n, kvdim,
-            hidden, stream);
-  if (getenv("LLAMA_DUMP_QKV") != nullptr && n <= 32 && il < 2) {
-    (void)hipStreamSynchronize(stream);
-    auto dump0 = [&](const float* dev, std::size_t cnt, const char* name) {
-      std::vector<float> h(cnt);
-      (void)hipMemcpy(h.data(), dev, cnt * sizeof(float),
-                      hipMemcpyDeviceToHost);
-      std::string path = std::string("/tmp/llama_qkv_L") +
-                         std::to_string(il) + "_" + name + "_" +
-                         std::to_string(start_pos) + ".bin";
-      FILE* f = std::fopen(path.c_str(), "wb");
-      if (f != nullptr) {
-        (void)std::fwrite(h.data(), sizeof(float), cnt, f);
-        (void)std::fclose(f);
-      }
-    };
-    dump0(impl.qbuf, static_cast<std::size_t>(n) * qdim, "qprerope");
-  }
   kernels::Rope(impl.qbuf, n, c.num_heads, d, start_pos, c.rope_theta,
                 stream);
   kernels::Rope(impl.kbuf, n, c.num_kv_heads, d, start_pos, c.rope_theta,
@@ -627,6 +600,48 @@ void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
     }
   }
   }
+}
+
+void Session::ForwardLayer(Session& s, std::uint32_t il, std::uint32_t n,
+                           std::uint32_t start_pos, hipStream_t stream) {
+  auto& w = *s.model_->weights_;
+  const auto& c = w.config;
+  const std::uint32_t hidden = c.hidden_size;
+  const std::uint32_t d = c.head_dim;
+  const std::uint32_t qdim = c.num_heads * d;
+  const std::uint32_t kvdim = c.num_kv_heads * d;
+  const auto& l = w.layers[il];
+  auto& impl = *s.impl_;
+
+  float* hidden_buf = impl.hidden;
+  // Attention block.
+  kernels::RmsNorm(hidden_buf,
+                   static_cast<const float*>(l.attn_norm.device),
+                   impl.normed, n, hidden, c.rms_eps, stream);
+  LlamaGemm(&impl.predq, l.wq, impl.normed, impl.x16, impl.qbuf, n, qdim,
+            hidden, stream);
+  LlamaGemm(&impl.predq, l.wk, impl.normed, impl.x16, impl.kbuf, n, kvdim,
+            hidden, stream);
+  LlamaGemm(&impl.predq, l.wv, impl.normed, impl.x16, impl.vbuf, n, kvdim,
+            hidden, stream);
+  if (getenv("LLAMA_DUMP_QKV") != nullptr && n <= 32 && il < 2) {
+    (void)hipStreamSynchronize(stream);
+    auto dump0 = [&](const float* dev, std::size_t cnt, const char* name) {
+      std::vector<float> h(cnt);
+      (void)hipMemcpy(h.data(), dev, cnt * sizeof(float),
+                      hipMemcpyDeviceToHost);
+      std::string path = std::string("/tmp/llama_qkv_L") +
+                         std::to_string(il) + "_" + name + "_" +
+                         std::to_string(start_pos) + ".bin";
+      FILE* f = std::fopen(path.c_str(), "wb");
+      if (f != nullptr) {
+        (void)std::fwrite(h.data(), sizeof(float), cnt, f);
+        (void)std::fclose(f);
+      }
+    };
+    dump0(impl.qbuf, static_cast<std::size_t>(n) * qdim, "qprerope");
+  }
+  AttentionCore(s, il, n, start_pos, stream);
   LlamaGemm(&impl.predq, l.wo, impl.attn_out, impl.x16, impl.ffn_out, n, hidden,
             qdim, stream);
   // Llama has no post-attention norm: plain residual add.
@@ -840,13 +855,37 @@ bool Session::Forward(std::span<const std::int32_t> tokens,
 
 bool Session::Sync(std::span<const std::int32_t> prompt,
                    std::string* error_msg) {
+  if (prompt.empty()) {
+    impl_->length = 0;
+    return true;
+  }
+  return Extend(prompt, 0, error_msg);
+}
+
+bool Session::Extend(std::span<const std::int32_t> prompt, std::size_t offset,
+                     std::string* error_msg) {
   if (prompt.size() > model_->options_.max_context) {
     if (error_msg != nullptr)
       *error_msg = "prompt exceeds llama KV capacity";
     return false;
   }
-  impl_->length = 0;
-  const std::size_t n_chunks = (prompt.size() + kMaxChunk - 1) / kMaxChunk;
+  if (offset >= prompt.size() || (offset != 0 && offset != impl_->length)) {
+    if (error_msg != nullptr)
+      *error_msg = "llama Extend does not continue the retained prefix";
+    return false;
+  }
+  impl_->length = static_cast<std::uint32_t>(offset);
+  // Canonical grid: pieces end at multiples of the prefill grain (the last one at the prompt end). The arithmetic of a
+  // piece depends on its row count and start (small or odd row counts take other kernel routes), so the pieces must be a
+  // function of the prompt alone, never of how the scheduler sliced the prefill budget (see PrefillTarget).
+  struct Span { std::size_t off, len; };
+  std::vector<Span> chunks;
+  for (std::size_t off = offset; off < prompt.size();) {
+    const std::size_t end = std::min<std::size_t>(prompt.size(), (off / kMaxChunk + 1) * kMaxChunk);
+    chunks.push_back({off, end - off});
+    off = end;
+  }
+  const std::size_t n_chunks = chunks.size();
   if (n_chunks >= 2 && impl_->predq_arena != nullptr && impl_->hidden_all != nullptr &&
       std::getenv("LLAMA_NO_LAYER_MAJOR") == nullptr) {
     // Layer-major prefill: each layer's weights are dequantized once (tiled F16) and every chunk of the prompt runs
@@ -856,13 +895,6 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     const auto& w = *model_->weights_;
     const std::uint32_t hidden = w.config.hidden_size;
     hipStream_t stream = 0;
-    struct Span { std::size_t off, len; };
-    std::vector<Span> chunks;
-    for (std::size_t off = 0, left = n_chunks; off < prompt.size(); --left) {
-      const std::size_t len = (prompt.size() - off + left - 1) / left;
-      chunks.push_back({off, len});
-      off += len;
-    }
     float* const saved_hidden = impl.hidden;
     const auto slice = [&](const Span& c) { return impl.hidden_all + c.off * hidden; };
     const auto set_pos = [&](std::size_t off) {
@@ -901,13 +933,19 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     ForwardFinish(*this, static_cast<std::uint32_t>(last.len), static_cast<std::uint32_t>(last.off), stream);
     impl.hidden = saved_hidden;
   } else {
-    for (std::size_t off = 0; off < prompt.size(); off += kMaxChunk) {
-      const std::size_t len = std::min<std::size_t>(kMaxChunk, prompt.size() - off);
-      if (!Forward(prompt.subspan(off, len), static_cast<std::uint32_t>(off), error_msg)) return false;
+    for (const Span& c : chunks) {
+      if (!Forward(prompt.subspan(c.off, c.len), static_cast<std::uint32_t>(c.off), error_msg)) return false;
     }
   }
   (void)hipStreamSynchronize(0);
   return true;
+}
+
+std::uint32_t Session::PrefillGrain() noexcept { return kMaxChunk; }
+
+std::size_t Session::PrefillTarget(std::size_t reported, std::size_t prompt_size) noexcept {
+  if (reported >= prompt_size) return prompt_size;
+  return reported / kMaxChunk * kMaxChunk;
 }
 
 bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
@@ -941,6 +979,181 @@ std::int32_t Session::SampleGreedy() {
     std::fprintf(stderr, " greedy=%d\n", tok);
   }
   return tok;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Packed decode lanes and the merged lanes + prefill-chunk step.
+//
+// Several sessions each decode one token in one layer-synchronous pass: the dense projections of all lanes share one
+// GemvBatched weight read (rows are independent in that kernel and, for Q8_0 weights, n = 1 takes the same kernel as
+// n > 1, so a lane's result is bit-identical to Evaluate), while each lane keeps its own rope / KV append / attention
+// core (AttentionCore, the exact code Evaluate runs) on its own cache. A prefill chunk never shares a GEMM with the lanes:
+// it runs Extend, the same prefill core as Sync, in the same call.
+// ---------------------------------------------------------------------------------------------------------------------
+
+bool Model::PackedLanesExact() const noexcept {
+  const auto q8 = [](const TensorRef& t) {
+    return !t.empty() && t.type == core::GgmlType::kQ8_0 && (t.cols % 32) == 0;
+  };
+  if (!q8(weights_->output)) return false;
+  for (const auto& l : weights_->layers) {
+    if (!q8(l.wq) || !q8(l.wk) || !q8(l.wv) || !q8(l.wo) || !q8(l.ffn_gate) || !q8(l.ffn_up) || !q8(l.ffn_down))
+      return false;
+  }
+  return true;
+}
+
+bool Model::EnsureLaneScratch(std::string* error_msg) {
+  if (lane_.hidden != nullptr) return true;
+  const auto& c = weights_->config;
+  const std::size_t lanes = Session::kMaxLanes;
+  const std::size_t qdim = static_cast<std::size_t>(c.num_heads) * c.head_dim;
+  const std::size_t kvdim = static_cast<std::size_t>(c.num_kv_heads) * c.head_dim;
+  const std::size_t ff = c.intermediate_size;
+  std::vector<void*> got;
+  const auto alloc = [&](std::size_t floats) -> float* {
+    void* p = nullptr;
+    if (hipMalloc(&p, floats * sizeof(float)) != hipSuccess || p == nullptr) return nullptr;
+    got.push_back(p);
+    return static_cast<float*>(p);
+  };
+  LaneScratch s;
+  s.hidden = alloc(lanes * c.hidden_size);
+  s.normed = alloc(lanes * c.hidden_size);
+  s.q = alloc(lanes * qdim);
+  s.k = alloc(lanes * kvdim);
+  s.v = alloc(lanes * kvdim);
+  s.attn = alloc(lanes * qdim);
+  s.gate = alloc(lanes * ff);
+  s.up = alloc(lanes * ff);
+  s.ffn = alloc(lanes * c.hidden_size);
+  s.logits = alloc(lanes * c.vocab_size);
+  if (s.hidden == nullptr || s.normed == nullptr || s.q == nullptr || s.k == nullptr || s.v == nullptr ||
+      s.attn == nullptr || s.gate == nullptr || s.up == nullptr || s.ffn == nullptr || s.logits == nullptr) {
+    for (void* p : got) (void)hipFree(p);
+    if (error_msg != nullptr) *error_msg = "llama lane scratch allocation failed";
+    return false;
+  }
+  for (void* p : got) device_allocations_.push_back(p);
+  lane_ = s;
+  return true;
+}
+
+namespace {
+bool Refuse(std::string* error_msg, bool* refused, const char* why) {
+  if (error_msg != nullptr) *error_msg = why;
+  if (refused != nullptr) *refused = true;
+  return false;
+}
+}  // namespace
+
+bool Session::ValidateLanes(std::span<const LaneItem> lanes, const Session* chunk_session, std::string* error_msg,
+                            bool* refused) {
+  if (lanes.empty() || lanes.size() > kMaxLanes) return Refuse(error_msg, refused, "llama lane count out of range");
+  const Model* model = lanes[0].session != nullptr ? lanes[0].session->model_.get() : nullptr;
+  if (model == nullptr) return Refuse(error_msg, refused, "llama lane has no session");
+  if (!model->PackedLanesExact()) return Refuse(error_msg, refused, "llama packed lanes need Q8_0 weights");
+  for (std::size_t i = 0; i < lanes.size(); ++i) {
+    const Session* s = lanes[i].session;
+    if (s == nullptr || s->model_.get() != model) return Refuse(error_msg, refused, "llama lane model mismatch");
+    if (s == chunk_session) return Refuse(error_msg, refused, "llama lane is the prefill session");
+    for (std::size_t j = 0; j < i; ++j)
+      if (lanes[j].session == s) return Refuse(error_msg, refused, "llama duplicate lane");
+    if (s->impl_->length + 1 > model->options_.max_context)
+      return Refuse(error_msg, refused, "llama lane context exhausted");
+    if (lanes[i].token < 0 || static_cast<std::uint32_t>(lanes[i].token) >= model->weights_->config.vocab_size)
+      return Refuse(error_msg, refused, "llama lane token out of range");
+  }
+  return true;
+}
+
+bool Session::StepLanes(std::span<const LaneItem> lanes, std::string* error_msg) {
+  Model& m = *lanes[0].session->model_;
+  if (!m.EnsureLaneScratch(error_msg)) return false;
+  const auto& w = *m.weights_;
+  const auto& c = w.config;
+  const auto& sc = m.lane_;
+  const std::uint32_t nl = static_cast<std::uint32_t>(lanes.size());
+  const std::uint32_t hidden = c.hidden_size;
+  const std::uint32_t qdim = c.num_heads * c.head_dim;
+  const std::uint32_t kvdim = c.num_kv_heads * c.head_dim;
+  const std::uint32_t ff = c.intermediate_size;
+  const bool use_blocked = m.options_.kv_cache_quant == "q8";
+  hipStream_t stream = 0;
+
+  for (std::uint32_t i = 0; i < nl; ++i) {
+    auto& li = *lanes[i].session->impl_;
+    if (use_blocked) {
+      const std::uint32_t pos = li.length;
+      (void)hipMemcpyAsync(li.d_pos, &pos, sizeof(pos), hipMemcpyHostToDevice, stream);
+    }
+    const std::int32_t tok = lanes[i].token;
+    (void)hipMemcpyAsync(li.d_tokens, &tok, sizeof(tok), hipMemcpyHostToDevice, stream);
+    kernels::Embed(w.token_embd.device, w.token_embd.type, li.d_tokens, sc.hidden + static_cast<std::size_t>(i) * hidden,
+                   1, hidden, stream);
+  }
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    const auto& l = w.layers[il];
+    kernels::RmsNorm(sc.hidden, static_cast<const float*>(l.attn_norm.device), sc.normed, nl, hidden, c.rms_eps, stream);
+    LlamaGemm(nullptr, l.wq, sc.normed, nullptr, sc.q, nl, qdim, hidden, stream);
+    LlamaGemm(nullptr, l.wk, sc.normed, nullptr, sc.k, nl, kvdim, hidden, stream);
+    LlamaGemm(nullptr, l.wv, sc.normed, nullptr, sc.v, nl, kvdim, hidden, stream);
+    for (std::uint32_t i = 0; i < nl; ++i) {
+      Session& s = *lanes[i].session;
+      auto& li = *s.impl_;
+      float* const saved[4] = {li.qbuf, li.kbuf, li.vbuf, li.attn_out};
+      li.qbuf = sc.q + static_cast<std::size_t>(i) * qdim;
+      li.kbuf = sc.k + static_cast<std::size_t>(i) * kvdim;
+      li.vbuf = sc.v + static_cast<std::size_t>(i) * kvdim;
+      li.attn_out = sc.attn + static_cast<std::size_t>(i) * qdim;
+      AttentionCore(s, il, 1, li.length, stream);
+      li.qbuf = saved[0];
+      li.kbuf = saved[1];
+      li.vbuf = saved[2];
+      li.attn_out = saved[3];
+    }
+    LlamaGemm(nullptr, l.wo, sc.attn, nullptr, sc.ffn, nl, hidden, qdim, stream);
+    kernels::ResidualAdd(sc.ffn, sc.hidden, static_cast<std::size_t>(nl) * hidden, stream);
+    kernels::RmsNorm(sc.hidden, static_cast<const float*>(l.ffn_norm.device), sc.normed, nl, hidden, c.rms_eps, stream);
+    LlamaGemm(nullptr, l.ffn_gate, sc.normed, nullptr, sc.gate, nl, ff, hidden, stream);
+    LlamaGemm(nullptr, l.ffn_up, sc.normed, nullptr, sc.up, nl, ff, hidden, stream);
+    kernels::SiluMul(sc.gate, sc.up, sc.gate, static_cast<std::size_t>(nl) * ff, stream);
+    LlamaGemm(nullptr, l.ffn_down, sc.gate, nullptr, sc.ffn, nl, hidden, ff, stream);
+    kernels::ResidualAdd(sc.ffn, sc.hidden, static_cast<std::size_t>(nl) * hidden, stream);
+  }
+  kernels::RmsNorm(sc.hidden, static_cast<const float*>(w.output_norm.device), sc.normed, nl, hidden, c.rms_eps, stream);
+  LlamaGemm(nullptr, w.output, sc.normed, nullptr, sc.logits, nl, c.vocab_size, hidden, stream);
+  for (std::uint32_t i = 0; i < nl; ++i) {
+    auto& li = *lanes[i].session->impl_;
+    (void)hipMemcpyAsync(li.logits, sc.logits + static_cast<std::size_t>(i) * c.vocab_size,
+                         c.vocab_size * sizeof(float), hipMemcpyDeviceToDevice, stream);
+    (void)hipMemcpyAsync(li.host_logits.data(), li.logits, li.host_logits.size() * sizeof(float),
+                         hipMemcpyDeviceToHost, stream);
+    li.length += 1;
+  }
+  return Check(hipStreamSynchronize(stream), error_msg, "lane step sync");
+}
+
+bool Session::StepBatch(std::span<const LaneItem> lanes, std::string* error_msg, bool* refused) {
+  if (refused != nullptr) *refused = false;
+  if (!ValidateLanes(lanes, nullptr, error_msg, refused)) return false;
+  return StepLanes(lanes, error_msg);
+}
+
+bool Session::DecodeBatchWithChunk(std::span<const LaneItem> lanes, const ChunkItem& chunk, std::string* error_msg,
+                                   bool* refused, bool* lanes_advanced) {
+  if (refused != nullptr) *refused = false;
+  if (lanes_advanced != nullptr) *lanes_advanced = false;
+  if (chunk.session == nullptr || chunk.offset > chunk.prompt.size() ||
+      (chunk.offset != 0 && chunk.offset != chunk.prompt.size() && chunk.session->impl_->length != chunk.offset))
+    return Refuse(error_msg, refused, "llama chunk does not continue the retained prefix");
+  if (chunk.prompt.size() > chunk.session->model_->options_.max_context)
+    return Refuse(error_msg, refused, "llama chunk exceeds the context");
+  if (!ValidateLanes(lanes, chunk.session, error_msg, refused)) return false;
+  if (!StepLanes(lanes, error_msg)) return false;
+  if (lanes_advanced != nullptr) *lanes_advanced = true;
+  if (chunk.offset == chunk.prompt.size()) return true;  // the chunk rows are deferred to a later grid boundary
+  return chunk.session->Extend(chunk.prompt, chunk.offset, error_msg);
 }
 
 }  // namespace mbufo::models::llama
