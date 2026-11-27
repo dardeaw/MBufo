@@ -3,6 +3,32 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.40.0 (2026-11-28)
+
+### Added (merged prefill+decode for every runner that can keep bit-identity; see `docs/MIXED_BATCH.md`)
+- `TextModelRunner` batch entry points (`DecodeBatch`, `AdvanceBatch`, `AdvanceBatchWithPrefillChunk`, `DecodeBatchWithPrefillChunk`) are pure virtual: a runner must declare a native implementation or an explicit `MBUFO_RUNNER_*` fallback (serial or no-merge), so a new model cannot silently inherit "no batching". `docs/MIXED_BATCH.md` lists the status of each runner.
+- Native `AdvanceBatch` and merged advance+prefill chunk for Gemma 4, Muse Glimmer, GPT-OSS, Laguna, Llama (packed lanes, incremental prefill), Inkling (lanes and chunk on one in-order stream) and Qwen (lanes on the unchanged advance path, chunk on the unchanged `Prefill`; F16 and blocked-Q8 KV), plus `DecodeBatchWithPrefillChunk` for Qwen with DFlash2. Each was checked for identical completions against `MBUFO_MIXED_BATCH=0`. DeepSeek V4 Flash keeps the serial fallback (it needs a new layer-major engine forward). Merging gives the lanes more steps while another request prefills; it does not by itself make a step faster except on Flash-Next MTP.
+- `MBUFO_MIXED_TRACE=1` prints one stderr line per merged step.
+
+### Added (embedding and reranking)
+- `EmbeddingRunner` / `RerankRunner` interfaces (`src/cli/serve/encoder_runner.hpp`) with a pure-virtual batch entry point; EmbeddingGemma 2, bge-m3, Qwen3-Embedding, bge-reranker, Qwen3-Reranker and the NPU Qwen3 encoders implement them. `/v1/embeddings` with an array input runs as one batch.
+- EmbeddingGemma 2 (text path, `tools/convert/embeddinggemma2_to_gguf.py`): one fused device forward over many sequences (32 short texts 2.7x faster than one request each); bge-m3 uses the padded batch forward (3.9x for 32 short texts); Qwen3-Embedding fused segmented prefill (4.9x for 32 short texts). Batched vectors match single-text vectors (cosine >= 0.999998).
+- Qwen3-Reranker prefills the shared query framing once per request (identical scores) and scores documents through a small executor pool.
+
+### Fixed
+- Flash-Next plain merged chunk: it never reaches the prompt frontier (no logits there, which made the completion a single `!`), and both merged paths leave a chunk that would end at a snapshot/checkpoint frontier to the legacy path so merged and unmerged chunk partitions (and therefore outputs) match. `TextRunnerPool::PrefillWithCoworkers` no longer refuses every prompt with snapshot tokens, so plain merged steps fire on snapshot-capable runners.
+- Laguna: prompts shorter than about 512 tokens failed with "logit distribution contains no finite values": the routed-expert activation `silu(gate)*up` overflowed F16 in layers 38 and 39 for position 0; affected tokens are now recomputed on the F32 decode MoE path.
+- Gemma 4 E2B / E4B: the generation prompt no longer adds the empty thought channel (only the 12B and 26B-A4B templates do), which removes stray `<channel|>` markers and runaway generation.
+- Qwen: two or more concurrent decoders on blocked-Q8 KV (the default) failed with "blocked-Q8 attention does not support batched decode"; `AdvanceBatch` now falls back to the per-session decode cores. Batched decode on F16 KV is bit-identical to solo decode again (the Q8_0 `ssm_alpha`/`ssm_beta` projections took the INT8-activation kernel in the batch path).
+- Inkling conversations through OpenAI-compatible clients (opencode agent loops): `Session::Sync` extends the stream instead of restarting from position 0 on every 512-token chunk (a concurrent 8.6K prefill went 67 s to 12 s); the prompt frontier is reused across agent turns (7.3K-token turn 7.3 s to 1.3 s, `cached_tokens` 7439 of 7455); without a tool grammar the runner forces the assistant header, restricts the token after it to the thinking/text kinds, forces the text header after a thinking message and ends the turn after a text message, which fixes empty replies, `<|end_message|>` runs and stray tokens (sampled requests drew a stray token there about half the time, now 1 of 115 flagged); real opencode 2.1.4 passes all three cases of `tests/functional/opencode_agent.py`; new `tools/ci/verify_inkling_agent.py`.
+
+### Changed (Inkling speed)
+- DSpark draft length adapts to the measured acceptance per round and sampled (T>0) requests now use lossless speculative sampling (greedy prose 25.7 to 32.2 tok/s, T=0.7 repeat 31 to 42 tok/s); `MBUFO_DSPARK_ADAPT=0` restores the fixed length (greedy output then equals the previous build). The GPU wait polls with a 50 us sleep instead of spinning (CPU 161% to 66% while decoding, 191% to 93% while prefilling; `MBUFO_SYNC_SLEEP_US=0` restores the spin).
+- Use `Inkling-2-Mini-h6-lbf16-UD-Q4_K_M` with the BF16 DSpark draft; the deprecated Q4_K_XL file loops on `<|end_message|>` and emits stray tokens.
+
+### NPU (XDNA2) work included in this release
+- Everything from the NPU line of work since v0.39.0, including: shared decoupled seams and the `NpuScheduler` pump (P0), thinker prefill and KV decode (P1), Qwen3 decoder core and TTS talker/code-predictor decode (P2), shared Qwen3-4B text-encoder encode (P3), FLUX.2-klein and Z-Image-Turbo DiT (P4, P5, pipeline-faithful port with 4-axis RoPE tables), the in-process servable contract with warmup and eject (`INpuServable`, `Close` on every NPU model, `npu_servables` in `/admin/models`, guarded eject that retries and reports a failed remove, heap trim after eject), EmbeddingGemma 2 / bge-m3 / bge-reranker / Qwen3 embedding and reranker on the op graph, and the quantization policy (Q8 only for ASR, TTS, FLUX and Z-Image; bge on the op graph). These were validated by their authors; this release's own tests did not exercise an NPU device.
+
 ## v0.39.4 (2026-11-27)
 
 ### 48-Plane Loop KV Cache, SWA Ring Fix, K8V4 (`Q4`) KV + WMMA Prefill & Streaming Fixes
