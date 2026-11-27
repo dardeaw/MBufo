@@ -224,6 +224,114 @@ std::optional<EngineSession::ScoreResult> EngineSession::ScorePair(
   return Score(*ids, error_msg);
 }
 
+bool EngineSession::ScoreSuffixesMulti(
+    const std::vector<std::vector<tokenization::TokenId>>& batch,
+    std::size_t prefix, std::vector<float>* scores, bool* fallback,
+    std::string* error_msg) {
+  constexpr std::size_t kMaxLanes = 8;
+  *fallback = false;
+  const auto& policy = model_->Policy();
+  if (batch.size() < 2 || !policy.UsesFp16AttentionKv() ||
+      policy.UsesBlockedAttentionKv() ||
+      std::getenv("MBUFO_QWEN_RERANK_NO_MULTI") != nullptr) {
+    *fallback = true;
+    return true;
+  }
+  std::size_t longest = 0;
+  for (const auto& ids : batch) longest = std::max(longest, ids.size());
+  const std::uint32_t cap = std::min(
+      model_->Qwen().GetConfig().context_length, kQwenRerankerMaxTokens);
+  const std::uint32_t want_context = std::min<std::uint32_t>(
+      cap, std::max<std::uint32_t>(
+               512U, static_cast<std::uint32_t>((longest + 255U) / 256U * 256U)));
+  const std::size_t lanes = std::min(kMaxLanes, batch.size());
+  if (pool_.size() < lanes || pool_context_ < want_context) {
+    pool_.clear();
+    for (std::size_t i = 0; i < lanes; ++i) {
+      std::string exec_error;
+      auto executor = hip::QwenGpuExecutor::Create(
+          model_->SharedModel(), &exec_error, want_context, policy);
+      if (executor == nullptr) {
+        pool_.clear();
+        pool_context_ = 0;
+        if (error_msg != nullptr)
+          *error_msg = "qwen-reranker pool executor init failed: " + exec_error;
+        return false;
+      }
+      pool_.push_back(std::move(executor));
+    }
+    pool_context_ = want_context;
+  }
+  const std::size_t vocab = model_->Qwen().GetTokenizer().GetVocabSize();
+  const auto yes = static_cast<std::size_t>(model_->YesId());
+  const auto no = static_cast<std::size_t>(model_->NoId());
+  const std::size_t max_rows = pool_.front()->GetMaxPromptBatch();
+  const std::span<const tokenization::TokenId> shared(batch.front().data(),
+                                                      prefix);
+  // Every lane holds its own copy of the shared framing KV (recomputed once
+  // per lane: at most eight short prefills instead of one per document).
+  std::vector<hip::QwenPromptBatchItem> items;
+  for (std::size_t i = 0; i < lanes; ++i) {
+    pool_[i]->Reset();
+    items.push_back({pool_[i].get(), shared, 0U, false});
+  }
+  if (lanes * prefix > max_rows) {
+    *fallback = true;
+    return true;
+  }
+  (void)hip::QwenGpuExecutor::ForwardPromptBatchMulti(items);
+  // Longest suffixes first so lockstep rounds waste little.
+  std::vector<std::size_t> order(batch.size());
+  for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+    return batch[a].size() > batch[b].size();
+  });
+  scores->assign(batch.size(), 0.0F);
+  std::size_t next = 0;
+  while (next < order.size()) {
+    std::size_t group = std::min(lanes, order.size() - next);
+    std::size_t rows = 0;
+    for (std::size_t g = 0; g < group; ++g)
+      rows += batch[order[next + g]].size() - prefix;
+    while (group > 1 && rows > max_rows) {
+      --group;
+      rows -= batch[order[next + group]].size() - prefix;
+    }
+    items.clear();
+    for (std::size_t g = 0; g < group; ++g) {
+      const auto& ids = batch[order[next + g]];
+      items.push_back(
+          {pool_[g].get(),
+           std::span<const tokenization::TokenId>(ids).subspan(prefix),
+           static_cast<std::uint32_t>(prefix), true});
+    }
+    if (group >= 2) {
+      (void)hip::QwenGpuExecutor::ForwardPromptBatchMulti(items);
+    } else {
+      (void)pool_[0]->ForwardPromptBatch(items[0].tokens, items[0].start_pos,
+                                         true);
+    }
+    for (std::size_t g = 0; g < group; ++g) {
+      const std::span<const float> logits = pool_[g]->CopyLastLogits();
+      if (logits.size() < vocab || vocab == 0 || yes >= vocab || no >= vocab) {
+        if (error_msg != nullptr)
+          *error_msg = "qwen-reranker ScoreBatch: logit capture size mismatch";
+        return false;
+      }
+      const float score = core::rerank::YesNoScore(logits[yes], logits[no]);
+      if (!(score >= 0.0F) || !(score <= 1.0F)) {
+        if (error_msg != nullptr)
+          *error_msg =
+              "qwen-reranker ScoreBatch: non-finite yes/no readout refused";
+        return false;
+      }
+      (*scores)[order[next + g]] = score;
+    }
+    next += group;
+  }
+  return true;
+}
+
 std::optional<std::vector<float>> EngineSession::ScoreBatch(
     std::string_view query, const std::vector<std::string>& documents,
     std::string_view instruction, double* total_prefill_ms,
@@ -290,6 +398,20 @@ std::optional<std::vector<float>> EngineSession::ScoreBatch(
     }
     const auto start = std::chrono::steady_clock::now();
     try {
+      bool fallback = false;
+      std::vector<float> multi_scores;
+      if (!ScoreSuffixesMulti(batch, prefix, &multi_scores, &fallback,
+                              error_msg)) {
+        return std::nullopt;
+      }
+      if (!fallback) {
+        total_ms = std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - start)
+                       .count();
+        if (total_prefill_ms != nullptr) *total_prefill_ms = total_ms;
+        if (prompt_tokens != nullptr) *prompt_tokens = tokens;
+        return multi_scores;
+      }
       (void)executor_->ForwardPromptBatch(
           std::span<const tokenization::TokenId>(batch.front()).first(prefix),
           0, false);
