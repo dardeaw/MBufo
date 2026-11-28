@@ -3,6 +3,16 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.42.0 (2026-11-28)
+
+### Serve Cache & Prefill
+- **Defer disk cache persistence until `Commit()`** (`src/cli/serve/component_text_cache.cpp`):
+  - Memory snapshot admission in `PublishComponentSnapshot` stays immediate, while `PersistenceQueue::Persist()` is deferred to `ComponentTextCache::Lease::Commit()` after generation completes.
+  - Eliminates `--cache-disk` contention during prefill and decode without sacrificing disk persistence.
+- **Deduplicate `stable` vs `prompt` snapshots within 32 tokens** (`src/cli/serve/text_model_runner.cpp`):
+  - In `AdvancePromptTarget()`, when `fallback_position > 0` and `prompt.size() - fallback_position <= 32`, skip capturing a second full-state snapshot for the trailing framing tokens.
+  - Raises live `serve` 4K prefill (`ROCmFP4-FAST-v2q8k` + `Q8 KV` + `MTP` + `--cache-disk`) to `1703.2 tok/s` (`captures=2`).
+
 ## v0.41.3 (2026-11-28)
 
 ### Serve Cache

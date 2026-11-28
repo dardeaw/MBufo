@@ -1053,10 +1053,15 @@ struct TextRunnerPool::Request::Impl {
       snapshot_tokens.assign(prompt.begin(),
                              prompt.begin() + stable_prefix_position);
       stable_prefix_position = 0;
+      prompt_snapshot_attempted = false;
+    } else if (fallback_position > 0 &&
+               prompt.size() - fallback_position <= 32) {
+      snapshot_tokens = prompt;
+      prompt_snapshot_attempted = true;
     } else {
       snapshot_tokens = prompt;
+      prompt_snapshot_attempted = false;
     }
-    prompt_snapshot_attempted = false;
   }
 
   void StartPromptSnapshot(bool wait) noexcept {

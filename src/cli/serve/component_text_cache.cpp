@@ -655,6 +655,8 @@ struct ComponentTextCache::Lease::Impl {
   std::vector<cache::Token> capture_tokens;
   ContinuationLookup lookup_result;
   ComponentCacheMetrics metrics;
+  std::vector<std::shared_ptr<const cache::Checkpoint>> deferred_persist_checkpoints;
+  std::vector<std::shared_ptr<DurableCapture>> deferred_persist_durables;
   Impl(ComponentTextCache::Impl* cache, ComponentTextCache::Impl::Entry* entry,
        cache::SlotLease slot, std::span<const cache::Token> prompt,
        cache::InputIdentity input, std::size_t stable)
@@ -1735,12 +1737,7 @@ std::size_t PublishComponentSnapshot(
   if (component && component->durable) {
     if (!persist)
       return 0;
-    const auto started = Clock::now();
-    lease_impl.metrics.disk_queued_bytes +=
-        lease_impl.cache->Persist(component->durable);
-    lease_impl.metrics.disk_enqueue_ms +=
-        std::chrono::duration<double, std::milli>(Clock::now() - started)
-            .count();
+    lease_impl.deferred_persist_durables.push_back(component->durable);
     return 0;
   }
   if (!component || !component->checkpoint)
@@ -1762,17 +1759,7 @@ std::size_t PublishComponentSnapshot(
         component->checkpoint->Id();
   }
   if (persist) {
-    try {
-      const auto started = Clock::now();
-      lease_impl.metrics.disk_queued_bytes +=
-          lease_impl.cache->Persist(component->checkpoint);
-      lease_impl.metrics.disk_enqueue_ms +=
-          std::chrono::duration<double, std::milli>(Clock::now() - started)
-              .count();
-    } catch (const std::exception& error) {
-      Logger::Info("cache", std::string("event=persistence_refused reason=") +
-                                error.what());
-    }
+    lease_impl.deferred_persist_checkpoints.push_back(component->checkpoint);
   }
   return component->bytes;
 }
@@ -1834,6 +1821,34 @@ std::size_t ComponentTextCache::Lease::Commit(
         At(impl_->input, impl_->prompt.size()), std::move(positions)});
     impl_->entry->busy = false;
   }
+  for (auto& durable : impl_->deferred_persist_durables) {
+    try {
+      const auto started = Clock::now();
+      impl_->metrics.disk_queued_bytes +=
+          impl_->cache->Persist(std::move(durable));
+      impl_->metrics.disk_enqueue_ms +=
+          std::chrono::duration<double, std::milli>(Clock::now() - started)
+              .count();
+    } catch (const std::exception& error) {
+      Logger::Info("cache", std::string("event=persistence_refused reason=") +
+                                error.what());
+    }
+  }
+  impl_->deferred_persist_durables.clear();
+  for (auto& ckpt : impl_->deferred_persist_checkpoints) {
+    try {
+      const auto started = Clock::now();
+      impl_->metrics.disk_queued_bytes +=
+          impl_->cache->Persist(std::move(ckpt));
+      impl_->metrics.disk_enqueue_ms +=
+          std::chrono::duration<double, std::milli>(Clock::now() - started)
+              .count();
+    } catch (const std::exception& error) {
+      Logger::Info("cache", std::string("event=persistence_refused reason=") +
+                                error.what());
+    }
+  }
+  impl_->deferred_persist_checkpoints.clear();
   impl_->active = false;
   return bytes;
 }
