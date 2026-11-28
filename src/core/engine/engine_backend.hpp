@@ -2,8 +2,9 @@
 #define MBUFO_CORE_ENGINE_ENGINE_BACKEND_HPP_
 
 // L0 engine surface: the Load -> CreateSession -> Sync -> Evaluate/Forward
-// -> Logits/Length contract shared by all five engines (llama, glimmer,
-// gemma4, qwen3.8-flash-next, qwen3.8-27b).
+// -> Logits/Length contract shared by all nine engines (llama, glimmer,
+// gemma4, qwen3.8-flash-next, qwen3.8-27b, deepseek_v4_flash, inkling,
+// gptoss, laguna).
 //
 // Deliberately NOT unified here (stays model-side):
 //   - SSM state, vision sidecars, three-format batch layouts, and the 27B
@@ -11,6 +12,13 @@
 //   - draft-weight loading, acceptance policy, target verify loops.
 // Virtual dispatch lives only in this host-orchestration layer; device
 // kernels stay non-virtual.
+//
+// Prefix-reuse contract (OOP Task 3): Sync implementations must not restart
+// from position 0 when the new prompt strictly extends the committed
+// history. The helpers below encode the shared shape; engines with rolling
+// recurrent state (e.g. Inkling sconv) must still ResetAndPrefill on true
+// divergence (common < history.size()) but must ForwardAppend on pure
+// extension. New engines should build their Sync on SyncPrefix.
 
 #include <cstddef>
 #include <cstdint>
@@ -52,6 +60,36 @@ class EngineSession {
  protected:
   EngineSession() = default;
 };
+
+/// Shared Sync shape (OOP Task 3): classifies a Sync request against the
+/// committed history so implementations share one prefix policy.
+enum class SyncPrefix {
+  /// Empty prompt or context overflow: reject (SetError explains).
+  kInvalid,
+  /// Prompt identical to history: nothing to do.
+  kIdentical,
+  /// Prompt strictly extends history: append tail at position history.size().
+  kAppend,
+  /// True divergence (or empty history with a non-empty prompt): full prefill.
+  kReset,
+};
+
+/// Classifies `prompt` against committed `history` within `max_context`.
+/// Pure function: no engine state, unit-testable.
+[[nodiscard]] inline SyncPrefix ClassifySyncPrefix(
+    std::span<const std::int32_t> history, std::span<const std::int32_t> prompt,
+    std::uint32_t max_context) noexcept {
+  if (prompt.empty() || prompt.size() > max_context) return SyncPrefix::kInvalid;
+  std::size_t common = 0;
+  while (common < history.size() && common < prompt.size() &&
+         history[common] == prompt[common]) {
+    ++common;
+  }
+  if (common == history.size() && prompt.size() == history.size())
+    return SyncPrefix::kIdentical;
+  if (common == history.size()) return SyncPrefix::kAppend;
+  return SyncPrefix::kReset;
+}
 
 /// Weight/table owner. Sessions are per-conversation views over one model.
 class EngineModel {

@@ -291,6 +291,24 @@ struct TextRunnerDecode {
 /// Prefill and Advance are the only model execution work units. SelectNext
 /// exposes the already-computed frontier token separately so streaming does
 /// not wait for the following decode forward pass.
+///
+/// Snapshot capability contract (OOP Task 2): runners with native
+/// snapshot/fork support MUST inherit ISnapshotCapable; the capability flags
+/// in Descriptor() must match. Runners on the component-cache path
+/// (UsesComponentCache()) are exempt: their snapshots flow through the
+/// component adapter, not these methods. ValidateRunner enforces the match
+/// at startup so a hand-filled bool can never drift from the implementation.
+class ISnapshotCapable {
+ public:
+  virtual ~ISnapshotCapable() = default;
+  [[nodiscard]] virtual std::size_t SnapshotPayloadBytes(
+      const TextRunnerState& state) const = 0;
+  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> CaptureSnapshot(
+      const TextRunnerState& state) const = 0;
+  virtual void RestoreOrFork(TextRunnerState& state,
+                             const TextRunnerSnapshot& snapshot) const = 0;
+};
+
 class TextModelRunner {
 public:
   TextModelRunner() = default;
@@ -459,9 +477,38 @@ public:
   [[nodiscard]] virtual TextDecodeSelection SelectNext(
       TextRunnerState& state, sampling::SamplerState& sampler) const = 0;
   virtual void Advance(TextRunnerState& state, TextRunnerToken token) const = 0;
+  // NVI gate (OOP contract Task 1): speculative multi-token decode must
+  // never run under an active tool/JSON constraint, reasoning budget, forced
+  // token or constraint mask. Subclasses implement DecodeSpeculativeImpl;
+  // this final entry point routes constrained requests to the single-token
+  // path (SelectNext + Advance) and validates the speculative contract
+  // (committed selections advance the runner position exactly once each).
   [[nodiscard]] virtual TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const final;
+ protected:
+  // True only when the runner's speculative loop fully participates in the
+  // sampler's verification (constraint mask applied to every draft accept).
+  // Only runners whose SpeculativeVerifier threads the SamplerState through
+  // the whole verify loop may return true; the default is single-step.
+  [[nodiscard]] virtual bool SupportsConstrainedSpeculative() const noexcept {
+    return false;
+  }
+  // Speculative multi-token implementation. Must not call sampler.Accept:
+  // the pool accepts each published selection exactly once. Must advance the
+  // runner position by step.selections.size() (committed tokens only), never
+  // by the raw draft block size. Fallbacks inside an Impl MUST call
+  // DecodeSingleStep (never TextModelRunner::DecodeStep, which would
+  // re-enter this Impl through the NVI gate and recurse forever).
+  [[nodiscard]] virtual TextDecodeStep DecodeSpeculativeImpl(
+      TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const;
+  // Non-virtual single-token path shared by the NVI gate and by Impl
+  // fallbacks. Samples exactly one token through the sampler and advances
+  // once; never dispatches back into DecodeSpeculativeImpl.
+  [[nodiscard]] TextDecodeStep DecodeSingleStep(
+      TextRunnerState& state, sampling::SamplerState& sampler) const;
+ public:
   // Batch execution contract. These four entry points are pure virtual on
   // purpose: a runner cannot compile until it has decided, for each one,
   // between a native merged implementation and an explicit fallback. The

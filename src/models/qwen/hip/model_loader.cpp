@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/core/quant/parallel.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/hip/blocked_q8.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -37,37 +38,27 @@ void CopyMappedWeights(const core::GgufMappedRegion& source, void* copy) {
   constexpr std::size_t kChunkBytes = 16ULL << 20;
   const auto chunks =
       source.size / kChunkBytes + (source.size % kChunkBytes != 0);
-  std::atomic<std::size_t> next{0};
-  std::atomic<int> failure{0};
-  auto copy_chunk = [&] {
-    while (failure.load(std::memory_order_relaxed) == 0) {
-      const auto index = next.fetch_add(1, std::memory_order_relaxed);
-      if (index >= chunks)
-        break;
-      const auto offset = index * kChunkBytes;
-      const auto bytes = std::min(kChunkBytes, source.size - offset);
-      auto* input = const_cast<std::uint8_t*>(
-                        static_cast<const std::uint8_t*>(source.data)) +
-                    offset;
-      if (madvise(input, bytes, MADV_POPULATE_READ) != 0) {
-        failure.store(errno, std::memory_order_relaxed);
-        break;
-      }
-      std::memcpy(static_cast<std::uint8_t*>(copy) + offset, input, bytes);
-      // The immutable copy now owns these resident bytes. Keep the original
-      // mapping valid for the reader without retaining its populated PTEs.
-      (void)madvise(input, bytes, MADV_DONTNEED);
-    }
-  };
-  {
-    std::vector<std::jthread> workers;
-    for (std::size_t i = 1; i < std::min<std::size_t>(16, chunks); ++i)
-      workers.emplace_back(copy_chunk);
-    copy_chunk();
-  }
-  if (const auto error = failure.load(); error != 0)
-    throw std::system_error(error, std::generic_category(),
-                            "cannot read mapped Qwen weights");
+  ::mbufo::quant::ParallelForTasks(
+      chunks,
+      [&](std::size_t index) {
+        const auto offset = index * kChunkBytes;
+        const auto bytes = std::min(kChunkBytes, source.size - offset);
+        auto* input = const_cast<std::uint8_t*>(
+                          static_cast<const std::uint8_t*>(source.data)) +
+                      offset;
+        if (madvise(input, bytes, MADV_POPULATE_READ) != 0) {
+          // ParallelForTasks rethrows the first worker exception after
+          // joining, preserving the original system_error contract.
+          const int e = errno != 0 ? errno : EIO;
+          throw std::system_error(e, std::generic_category(),
+                                  "cannot read mapped Qwen weights");
+        }
+        std::memcpy(static_cast<std::uint8_t*>(copy) + offset, input, bytes);
+        // The immutable copy now owns these resident bytes. Keep the original
+        // mapping valid for the reader without retaining its populated PTEs.
+        (void)madvise(input, bytes, MADV_DONTNEED);
+      },
+      16);
 }
 
 [[nodiscard]] hipError_t MapRegisteredRegion(

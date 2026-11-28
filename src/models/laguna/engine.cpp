@@ -14,6 +14,7 @@
 #include "src/core/compute/attention/flash_wmma_gqa.hpp"
 #include "src/core/compute/gemm/gemm.hpp" 
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/core/quant/parallel.hpp"
 #include "src/models/laguna/kernels/kernels.hpp"
 
 namespace mbufo::models::laguna {
@@ -65,36 +66,25 @@ static bool CopyMappedRegion(const core::GgufMappedRegion& source, void* copy,
                              std::string* error_msg) {
   constexpr std::size_t kChunkBytes = 64ULL << 20;
   const std::size_t chunks = (source.size + kChunkBytes - 1) / kChunkBytes;
-  std::atomic<std::size_t> next{0};
-  std::atomic<int> failure{0};
-  auto worker = [&]() {
-    while (failure.load(std::memory_order_relaxed) == 0) {
-      const std::size_t idx = next.fetch_add(1, std::memory_order_relaxed);
-      if (idx >= chunks) break;
-      const std::size_t offset = idx * kChunkBytes;
-      const std::size_t bytes = std::min(kChunkBytes, source.size - offset);
-      auto* input = const_cast<std::uint8_t*>(
-                        static_cast<const std::uint8_t*>(source.data)) +
-                    offset;
+  try {
+    ::mbufo::quant::ParallelForTasks(
+        chunks,
+        [&](std::size_t idx) {
+          const std::size_t offset = idx * kChunkBytes;
+          const std::size_t bytes = std::min(kChunkBytes, source.size - offset);
+          auto* input = const_cast<std::uint8_t*>(
+                            static_cast<const std::uint8_t*>(source.data)) +
+                        offset;
 #ifdef MADV_POPULATE_READ
-      if (madvise(input, bytes, MADV_POPULATE_READ) != 0) {
-        failure.store(errno != 0 ? errno : EIO, std::memory_order_relaxed);
-        break;
-      }
+          if (madvise(input, bytes, MADV_POPULATE_READ) != 0) {
+            throw std::runtime_error("laguna: failed to read mapped GGUF weights");
+          }
 #endif
-      std::memcpy(static_cast<std::uint8_t*>(copy) + offset, input, bytes);
-      (void)madvise(input, bytes, MADV_DONTNEED);
-    }
-  };
-  const std::size_t n_threads = std::min<std::size_t>(16, std::max<std::size_t>(1, chunks));
-  std::vector<std::jthread> workers;
-  workers.reserve(n_threads > 0 ? n_threads - 1 : 0);
-  for (std::size_t i = 1; i < n_threads; ++i) {
-    workers.emplace_back(worker);
-  }
-  worker();
-  workers.clear();
-  if (failure.load() != 0) {
+          std::memcpy(static_cast<std::uint8_t*>(copy) + offset, input, bytes);
+          (void)madvise(input, bytes, MADV_DONTNEED);
+        },
+        16);
+  } catch (const std::exception&) {
     if (error_msg != nullptr) {
       *error_msg = "laguna: failed to read mapped GGUF weights";
     }

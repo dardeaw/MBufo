@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "src/core/compute/npu/npu_pooling.hpp"
+#include "src/core/quant/parallel.hpp"
 
 namespace mbufo::core::npu {
 namespace {
@@ -309,22 +310,7 @@ bool NpuQuantGemmEngine::PackMatrixKN(const float* w_kn, std::size_t K,
   };
 
   const std::size_t n_blks = out->blocks.size();
-  const std::size_t n_threads = std::min<std::size_t>(
-      n_blks, std::max<unsigned>(1u, std::thread::hardware_concurrency()));
-  if (n_threads <= 1u) {
-    for (std::size_t bi = 0; bi < n_blks; ++bi) pack_one(bi);
-  } else {
-    std::vector<std::thread> pool;
-    pool.reserve(n_threads);
-    for (std::size_t tid = 0; tid < n_threads; ++tid) {
-      pool.emplace_back([&, tid]() {
-        for (std::size_t bi = tid; bi < n_blks; bi += n_threads) {
-          pack_one(bi);
-        }
-      });
-    }
-    for (auto& th : pool) th.join();
-  }
+  ::mbufo::quant::ParallelForTasks(n_blks, pack_one);
 
   return MaterializeBlocks(out, make_bo_resident, error);
 }
@@ -380,22 +366,7 @@ bool NpuQuantGemmEngine::PackMatrixNK(const float* w_nk, std::size_t N,
   };
 
   const std::size_t n_blks = out->blocks.size();
-  const std::size_t n_threads = std::min<std::size_t>(
-      n_blks, std::max<unsigned>(1u, std::thread::hardware_concurrency()));
-  if (n_threads <= 1u) {
-    for (std::size_t bi = 0; bi < n_blks; ++bi) pack_one(bi);
-  } else {
-    std::vector<std::thread> pool;
-    pool.reserve(n_threads);
-    for (std::size_t tid = 0; tid < n_threads; ++tid) {
-      pool.emplace_back([&, tid]() {
-        for (std::size_t bi = tid; bi < n_blks; bi += n_threads) {
-          pack_one(bi);
-        }
-      });
-    }
-    for (auto& th : pool) th.join();
-  }
+  ::mbufo::quant::ParallelForTasks(n_blks, pack_one);
 
   return MaterializeBlocks(out, make_bo_resident, error);
 }
@@ -452,22 +423,7 @@ bool NpuQuantGemmEngine::PackMatrixBf16NK(const std::uint16_t* w_bf16_nk,
   };
 
   const std::size_t n_blks = out->blocks.size();
-  const std::size_t n_threads = std::min<std::size_t>(
-      n_blks, std::max<unsigned>(1u, std::thread::hardware_concurrency()));
-  if (n_threads <= 1u) {
-    for (std::size_t bi = 0; bi < n_blks; ++bi) pack_one(bi);
-  } else {
-    std::vector<std::thread> pool;
-    pool.reserve(n_threads);
-    for (std::size_t tid = 0; tid < n_threads; ++tid) {
-      pool.emplace_back([&, tid]() {
-        for (std::size_t bi = tid; bi < n_blks; bi += n_threads) {
-          pack_one(bi);
-        }
-      });
-    }
-    for (auto& th : pool) th.join();
-  }
+  ::mbufo::quant::ParallelForTasks(n_blks, pack_one);
 
   return MaterializeBlocks(out, make_bo_resident, error);
 }

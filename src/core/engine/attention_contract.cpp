@@ -44,8 +44,7 @@ void CheckPath(const char* which, const AttentionPathInfo& p, bool core_ok, bool
 
 }  // namespace
 
-AttentionContractReport ValidateAttentionContract(const AttentionGeometry& g, const AttentionKernelInfo& k) {
-  AttentionContractReport r;
+AttentionContractReport ValidateAttentionContract(const AttentionGeometry& g, const AttentionKernelInfo& k) {  AttentionContractReport r;
   if (g.groups.empty()) {
     r.problems.push_back("no attention layers declared (engines without attention register with attention = false)");
     return r;
@@ -73,6 +72,19 @@ AttentionContractReport ValidateAttentionContract(const AttentionGeometry& g, co
   CheckPath("decode", k.decode, core_ok, /*need_row_invariant=*/true, &r);
   CheckPath("prefill", k.prefill, core_ok, /*need_row_invariant=*/false, &r);
   return r;
+}
+
+std::string ValidateChunkAgainstWindow(std::uint32_t prefill_chunk,
+                                       std::uint32_t window) {
+  if (window == 0) return {};
+  if (prefill_chunk == 0)
+    return "prefill chunk must be at least one token";
+  if (prefill_chunk >= window)
+    return "prefill chunk (" + std::to_string(prefill_chunk) +
+           ") must be smaller than the sliding window (" +
+           std::to_string(window) + "); equal-or-larger chunks silently " +
+           "corrupt SWA attention at the chunk boundary";
+  return {};
 }
 
 }  // namespace mbufo::core::engine

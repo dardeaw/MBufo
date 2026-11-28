@@ -266,6 +266,27 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
     throw std::invalid_argument(
         "text runner fork capability requires snapshot support");
   }
+  // OOP Task 2: snapshot/fork capability must match the implementation.
+  // Native runners inherit ISnapshotCapable; component-cache runners
+  // (UsesComponentCache) snapshot through the component adapter instead.
+  // A hand-filled bool that drifts from the implementation fails fast here
+  // at startup instead of misbehaving mid-request.
+  {
+    const bool native_snapshot =
+        dynamic_cast<const ISnapshotCapable*>(runner.get()) != nullptr;
+    const bool component_snapshot = runner->UsesComponentCache();
+    if ((descriptor.capabilities.snapshot || descriptor.capabilities.fork) &&
+        !native_snapshot && !component_snapshot) {
+      throw std::invalid_argument(
+          "text runner advertises snapshot/fork but implements neither "
+          "ISnapshotCapable nor the component-cache snapshot path");
+    }
+    if (native_snapshot && !descriptor.capabilities.snapshot) {
+      throw std::invalid_argument(
+          "text runner implements ISnapshotCapable but does not advertise "
+          "snapshot support");
+    }
+  }
   if (descriptor.persistence.has_value()) {
     if (!descriptor.capabilities.snapshot || !descriptor.capabilities.fork) {
       throw std::invalid_argument(
@@ -560,6 +581,60 @@ void TextModelRunner::SerialAdvanceBatch(
 }
 
 TextDecodeStep TextModelRunner::DecodeStep(
+    TextRunnerState& state, std::size_t max_tokens,
+    sampling::SamplerState& sampler) const {
+  if (max_tokens == 0) {
+    throw std::invalid_argument(
+        "text runner decode step budget must be at least one token");
+  }
+  // NVI gate: speculative decode is only valid for unconstrained greedy
+  // sampling. Any grammar constraint, reasoning budget, forced token or
+  // constraint mask forces the single-token path, which samples exactly one
+  // token through the sampler and advances once. Runners whose speculative
+  // loop fully verifies against the sampler constraint opt in via
+  // SupportsConstrainedSpeculative().
+  const bool greedy = sampler.config().can_use_unmodified_argmax();
+  const bool constrained = sampler.ForcedToken().has_value() || !greedy ||
+                           sampler.config().constraint != nullptr ||
+                           sampler.config().reasoning_budget != nullptr ||
+                           sampler.NeedsConstraintMask();
+  if (constrained && !SupportsConstrainedSpeculative()) {
+    return DecodeSingleStep(state, sampler);
+  }
+  const std::size_t position_before = CheckpointPosition(state);
+  TextDecodeStep step = DecodeSpeculativeImpl(state, max_tokens, sampler);
+  // Contract check: committed selections must match executed position
+  // advance exactly (catches block.size() vs selections.size() off-by-1).
+  const std::size_t position_after = CheckpointPosition(state);
+  if (position_after != position_before + step.selections.size() &&
+      !(step.stop && position_after >= position_before)) {
+    throw std::runtime_error(
+        "text runner speculative step position mismatch: position advanced by " +
+        std::to_string(position_after - position_before) + " for " +
+        std::to_string(step.selections.size()) + " committed tokens");
+  }
+  return step;
+}
+
+TextDecodeStep TextModelRunner::DecodeSingleStep(
+    TextRunnerState& state, sampling::SamplerState& sampler) const {
+  auto selection = SelectNext(state, sampler);
+  if (selection.stop) {
+    return {
+        .selections = {},
+        .draft_tokens = 0,
+        .draft_accepted_tokens = 0,
+        .stop = true,
+    };
+  }
+  const TextRunnerToken token = selection.token;
+  Advance(state, token);
+  return {
+      .selections = {std::move(selection)},
+  };
+}
+
+TextDecodeStep TextModelRunner::DecodeSpeculativeImpl(
     TextRunnerState& state, std::size_t max_tokens,
     sampling::SamplerState& sampler) const {
   if (max_tokens == 0) {
