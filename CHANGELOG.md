@@ -3,7 +3,7 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
-## Unreleased (OOP contract Phase 1: Tasks 1-4)
+## v0.41.0 (2026-11-28) (OOP contract Phase 1: Tasks 1-4)
 
 ### Refactoring (compile-time / startup enforcement, behavior-preserving)
 - **Task 1 — `DecodeStep` NVI gate** (`src/cli/serve/text_model_runner.*`, `inference_backend.cpp`):
