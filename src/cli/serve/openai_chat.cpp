@@ -156,7 +156,8 @@ ToolMarkerSet ToolMarkers(
     // (Phase 2: served by GemmaDialect.)
     return GemmaDialectInstance().Markers().openers;
   if (*format == Format::kAtem)
-    return ToolMarkerSet(atem);
+    // (Phase 2: served by AtemDialect.)
+    return AtemDialectInstance().Markers().openers;
   if (*format == Format::kLlama)
     return LlamaDialectInstance().Markers().openers;
   if (*format == Format::kInkling)
@@ -247,7 +248,8 @@ ToolCloserSet ToolClosers(
     // (Phase 2: served by GemmaDialect.)
     return GemmaDialectInstance().Markers().closers;
   if (*format == Format::kAtem)
-    return kAtemClosers;
+    // (Phase 2: served by AtemDialect.)
+    return AtemDialectInstance().Markers().closers;
   if (*format == Format::kLlama)
     return LlamaDialectInstance().Markers().closers;
   if (*format == Format::kInkling)

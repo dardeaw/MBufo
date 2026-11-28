@@ -141,4 +141,26 @@ const IChatDialect& GemmaDialectInstance() noexcept {
   return kInstance;
 }
 
+// Mirrors openai_chat.cpp's former AtemToolSyntax::kCallsOpen + kAtemClosers.
+// No reasoning envelope.
+constexpr std::array<std::string_view, 1> kAtemOpeners{
+    "<atem:function_calls>"};
+constexpr std::array<std::string_view, 2> kAtemDialectClosers{
+    "</atem:function_calls>",
+    "</invoke>",
+};
+
+DialectMarkers AtemDialect::Markers() const noexcept {
+  return {
+      .openers = kAtemOpeners,
+      .closers = kAtemDialectClosers,
+      .reasoning_envelope = {},
+  };
+}
+
+const IChatDialect& AtemDialectInstance() noexcept {
+  static const AtemDialect kInstance;
+  return kInstance;
+}
+
 }  // namespace mbufo::server

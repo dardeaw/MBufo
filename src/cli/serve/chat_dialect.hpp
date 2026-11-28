@@ -113,6 +113,19 @@ class GemmaDialect final : public IChatDialect {
 
 [[nodiscard]] const IChatDialect& GemmaDialectInstance() noexcept;
 
+// Muse Glimmer (ATEM) framing (<atem:function_calls> ... </atem:function_calls>).
+// No reasoning envelope.
+class AtemDialect final : public IChatDialect {
+ public:
+  [[nodiscard]] DialectMarkers Markers() const noexcept override;
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat GrammarFormat()
+      const noexcept override {
+    return sampling::JsonConstraint::ToolFormat::kAtem;
+  }
+};
+
+[[nodiscard]] const IChatDialect& AtemDialectInstance() noexcept;
+
 }  // namespace mbufo::server
 
 #endif  // MBUFO_SERVER_CHAT_DIALECT_HPP_
