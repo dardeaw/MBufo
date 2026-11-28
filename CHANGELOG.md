@@ -3,6 +3,13 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.41.2 (2026-11-28)
+
+### Qwen3.8-Flash-Next
+- **Q8 KV prefill regression fix** (`src/models/qwen38_flash_next/kernels/rocm/executor.cpp`):
+  - Bypassed `AttentionQ8Gemm` (`kQ8Out=true` instantiation of `DenseF16GEMMKernel`, which `rocprofv3` measured at 327.2 ms vs <42 ms for the F16 epilogue across 24 calls at 3.88K tokens) in favor of `Dense` + `PrepareAttentionKv`.
+  - Restores Q8 KV `serve` prefill parity with FP16 KV (+130–136 tok/s on `ROCmFP4-FAST-v2q8k` MTP, ~1611–1669 tok/s vs ~1483–1536 tok/s).
+
 ## v0.41.1 (2026-11-28)
 
 ### Inkling

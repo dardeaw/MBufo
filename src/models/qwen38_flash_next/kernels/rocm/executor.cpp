@@ -2789,7 +2789,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
     // 4-bit value layout needs the per-block packing of PrepareAttentionKv, so
     // both take the Dense + PrepareAttentionKv route instead.
     const bool q8_fused_ok =
-        options_.kv_format != rocm::KvFormat::kQ8 || n_tokens >= 1024;
+        options_.kv_format != rocm::KvFormat::kQ8;
     const bool fused_projection =
         options_.kv_format != rocm::KvFormat::kFp8 &&
         !KvValueIs4Bit(options_.kv_format) &&
