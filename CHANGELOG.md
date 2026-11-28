@@ -3,6 +3,14 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.42.1 (2026-11-28)
+
+### Serve Cache (Shared Layer)
+- **Unified deferred disk persistence hook across all models** (`src/cli/serve/text_model_runner.cpp`):
+  - Added `PendingDiskSave` + `QueueDiskSave()` / `FlushPendingDiskSaves()` on `TextRunnerPool::Request::Impl`.
+  - Both `FinishPromptSnapshot()` and `CaptureBoundarySnapshot()` now enqueue `ContinuationDiskStore::CaptureReservation` (preserving queue-capacity preflight accounting) and defer `disk_store->SaveAsync(...)` until `TextRunnerPool::Request::Commit()`, matching `ComponentTextCache::Lease::Commit()`.
+  - Cancelled/aborted requests drop queued saves cleanly without NVMe I/O. Every snapshot-capable model (`Inkling`, `DeepSeek`, `Gemma4`, `Qwen`, `Glimmer`, `Laguna`, `Llama`) now benefits automatically with zero model-specific code.
+
 ## v0.42.0 (2026-11-28)
 
 ### Serve Cache & Prefill

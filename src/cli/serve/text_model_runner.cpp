@@ -1192,19 +1192,10 @@ struct TextRunnerPool::Request::Impl {
         lease.restored_from_disk() &&
         lease.cached_tokens() == snapshot_tokens.size();
     if (disk_store && !already_persisted) {
-      const auto started = std::chrono::steady_clock::now();
-      try {
-        const auto identity = InputIdentity(snapshot_tokens.size());
-        snapshot_metrics.disk_queued_bytes += disk_store->SaveAsync(
-            runner, snapshot_tokens, prompt_snapshot,
-            {identity.begin(), identity.end()}, std::move(disk_capture));
-      } catch (...) {
-        // Earlier checkpoints may already be queued.
-      }
-      snapshot_metrics.disk_enqueue_ms +=
-          std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - started)
-              .count();
+      const auto identity = InputIdentity(snapshot_tokens.size());
+      QueueDiskSave(snapshot_tokens, prompt_snapshot,
+                    {identity.begin(), identity.end()}, std::move(disk_capture),
+                    false);
     }
     disk_capture.reset();
     if (!retain_snapshot)
@@ -1292,14 +1283,9 @@ struct TextRunnerPool::Request::Impl {
       // A RAM checkpoint and a learned disk boundary can coincide. Share the
       // immutable copy instead of reading the same device state twice.
       if (snapshot && persistence) {
-        const auto saved = disk_store->SaveAsync(
-            runner, {prefix.begin(), prefix.end()}, std::move(snapshot),
-            {identity.begin(), identity.end()}, std::move(persistence),
-            /*shared_prefix=*/true);
-        if (saved != 0) {
-          ++snapshot_metrics.shared_prefix_snapshots;
-          snapshot_metrics.shared_prefix_bytes += saved;
-        }
+        QueueDiskSave({prefix.begin(), prefix.end()}, std::move(snapshot),
+                      {identity.begin(), identity.end()},
+                      std::move(persistence), true);
       }
     } catch (...) {
       failed = true;
@@ -1363,7 +1349,60 @@ struct TextRunnerPool::Request::Impl {
   std::size_t snapshot_bytes{0};
   bool retain_snapshot{false};
   std::chrono::steady_clock::time_point snapshot_start;
+  struct PendingDiskSave {
+    std::vector<TextRunnerToken> tokens;
+    std::shared_ptr<const TextRunnerSnapshot> snapshot;
+    std::vector<std::uint8_t> identity;
+    std::unique_ptr<ContinuationDiskStore::CaptureReservation> reservation;
+    bool shared_prefix{false};
+  };
+  void QueueDiskSave(
+      std::vector<TextRunnerToken> tokens,
+      std::shared_ptr<const TextRunnerSnapshot> snapshot,
+      std::vector<std::uint8_t> identity,
+      std::unique_ptr<ContinuationDiskStore::CaptureReservation> reservation,
+      bool shared_prefix) {
+    pending_disk_saves.push_back(PendingDiskSave{
+        .tokens = std::move(tokens),
+        .snapshot = std::move(snapshot),
+        .identity = std::move(identity),
+        .reservation = std::move(reservation),
+        .shared_prefix = shared_prefix,
+    });
+  }
+  void FlushPendingDiskSaves() noexcept {
+    if (!disk_store || pending_disk_saves.empty()) {
+      pending_disk_saves.clear();
+      return;
+    }
+    for (auto& pending : pending_disk_saves) {
+      const auto started = std::chrono::steady_clock::now();
+      try {
+        const auto saved = disk_store->SaveAsync(
+            runner, std::move(pending.tokens), std::move(pending.snapshot),
+            std::move(pending.identity), std::move(pending.reservation),
+            pending.shared_prefix);
+        if (pending.shared_prefix) {
+          if (saved != 0) {
+            ++snapshot_metrics.shared_prefix_snapshots;
+            snapshot_metrics.shared_prefix_bytes += saved;
+          }
+        } else {
+          snapshot_metrics.disk_queued_bytes += saved;
+        }
+      } catch (...) {
+      }
+      if (!pending.shared_prefix) {
+        snapshot_metrics.disk_enqueue_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started)
+                .count();
+      }
+    }
+    pending_disk_saves.clear();
+  }
   std::unique_ptr<ContinuationDiskStore::CaptureReservation> disk_capture;
+  std::vector<PendingDiskSave> pending_disk_saves;
   std::future<std::unique_ptr<TextRunnerSnapshot>> snapshot_future;
 };
 
@@ -2267,6 +2306,7 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
   }
   checkpoint.resize(position);
   if (capabilities.snapshot && capabilities.fork) {
+    impl_->FlushPendingDiskSaves();
     CommitMetrics metrics = impl_->snapshot_metrics;
     metrics.snapshot_bytes += impl_->lease.Commit(
         std::move(impl_->snapshot_tokens), std::move(impl_->prompt_snapshot),
