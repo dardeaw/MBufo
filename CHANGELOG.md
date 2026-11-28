@@ -3,6 +3,25 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## Unreleased (OOP contract Phase 1: Tasks 1-4)
+
+### Refactoring (compile-time / startup enforcement, behavior-preserving)
+- **Task 1 — `DecodeStep` NVI gate** (`src/cli/serve/text_model_runner.*`, `inference_backend.cpp`):
+  - `TextModelRunner::DecodeStep` is now `final`; constrained requests (grammar constraint, reasoning budget, forced token, constraint mask) fall back to single-token `SelectNext`+`Advance` unless a runner opts in via `SupportsConstrainedSpeculative()` (default `false`).
+  - Six runners override `DecodeSpeculativeImpl` instead of `DecodeStep`.
+  - Fixed: Glimmer double `sampler.Accept` (repetition-penalty corruption); Inkling `position += block.size()` off-by-1 on stop break (now `selections.size()`); NVI position contract check (committed count vs actual advance).
+- **Task 4 — shared parallel helper + SWA contract** (`src/core/quant/parallel.hpp`, `src/core/engine/attention_contract.*`):
+  - New `ParallelForTasks` converging the ad-hoc jthread/thread pools; Inkling `CopyMappedRegion` uses it (behavior-preserving).
+  - New `ValidateChunkAgainstWindow`; Inkling `Session::Init` enforces `kChunk(512) < sliding_window(1024)` at load.
+- **Task 2 — snapshot capability contract** (`text_model_runner.hpp`, `ValidateRunner`):
+  - New `ISnapshotCapable` pure interface (serve layer); DeepSeek inherits it (`Snapshot` -> `CaptureSnapshot`).
+  - `ValidateRunner` rejects snapshot/fork capability drift at startup. `PinnedStagingBuffer` resolved as reuse of existing `HostAllocations` (no new class).
+- **Task 3 — Sync prefix contract** (`src/core/engine/engine_backend.hpp`):
+  - Nine-engine comment fix; new `SyncPrefix` + `ClassifySyncPrefix` shared helper (extend-vs-reset policy). Inkling `Session::Sync` already conforms.
+
+### Tests
+- New `oop_contract_test` (`tests/core/oop_contract_test.cpp`, labels `cpu;core;oop`): covers `ParallelForTasks`, `ValidateChunkAgainstWindow`, `ClassifySyncPrefix`.
+
 ## v0.40.1 (2026-11-28)
 
 ### Serving, Speculative Decoding, Vision, Cache & DeltaNet Optimizations (Halogen 0.17–0.21 Parity)
