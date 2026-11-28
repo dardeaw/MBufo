@@ -86,6 +86,20 @@ class QwenDialect final : public IChatDialect {
 
 [[nodiscard]] const IChatDialect& QwenDialectInstance() noexcept;
 
+// DeepSeek: two-element opener (with/without template separator), no
+// closers (content is everything outside the native call block), and a
+// two-element native header envelope.
+class DeepSeekDialect final : public IChatDialect {
+ public:
+  [[nodiscard]] DialectMarkers Markers() const noexcept override;
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat GrammarFormat()
+      const noexcept override {
+    return sampling::JsonConstraint::ToolFormat::kDeepSeek;
+  }
+};
+
+[[nodiscard]] const IChatDialect& DeepSeekDialectInstance() noexcept;
+
 }  // namespace mbufo::server
 
 #endif  // MBUFO_SERVER_CHAT_DIALECT_HPP_

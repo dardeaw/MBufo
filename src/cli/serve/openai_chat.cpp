@@ -150,7 +150,8 @@ ToolMarkerSet ToolMarkers(
   // Match the canonical opener selected by JsonConstraint::WithTools. Other
   // dialects are ordinary prose under that grammar, not additional calls.
   if (*format == Format::kDeepSeek)
-    return ToolMarkerSet(deepseek);
+    // (Phase 2: served by DeepSeekDialect.)
+    return DeepSeekDialectInstance().Markers().openers;
   if (*format == Format::kGemma)
     return ToolMarkerSet(gemma);
   if (*format == Format::kAtem)
@@ -179,7 +180,8 @@ ToolMarkerSet ReasoningToolMarkers(ToolMarkerSet markers) {
   if (markers.size() == 2 &&
       markers.back() ==
           models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen)
-    return deepseek;
+    // (Phase 2: served by DeepSeekDialect.)
+    return DeepSeekDialectInstance().Markers().reasoning_envelope;
   // Gemma never emits a reasoning envelope: no thought tags means no
   // implicit reasoning boundary to detect, constrained or not.
   return {};
@@ -234,7 +236,8 @@ ToolCloserSet ToolClosers(
   // block, which ends the output: there is no echo to strip, and client
   // envelope syntax the model writes stays visible text.
   if (*format == Format::kDeepSeek)
-    return {};
+    // (Phase 2: served by DeepSeekDialect — empty: no echo to strip.)
+    return DeepSeekDialectInstance().Markers().closers;
   // Mirror ToolMarkers: stripping follows the dialect the request admitted,
   // and another dialect's closing tags are ordinary prose like its openers —
   // the client's envelope excepted, which no dialect admits and every one of

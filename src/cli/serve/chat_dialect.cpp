@@ -97,4 +97,27 @@ const IChatDialect& QwenDialectInstance() noexcept {
   return kInstance;
 }
 
+// Mirrors openai_chat.cpp's former deepseek opener pair + envelope pair.
+// Closers are an empty set: DeepSeek content is everything outside its
+// native call block (no echo to strip).
+constexpr std::array<std::string_view, 2> kDeepSeekOpeners{
+    models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpenWithSeparator,
+    models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen};
+constexpr std::array<std::string_view, 2> kDeepSeekReasoningEnvelope{
+    models::deepseek_v4_flash::DeepSeekToolSyntax::kNativeCallOpenWithSeparator,
+    models::deepseek_v4_flash::DeepSeekToolSyntax::kNativeCallOpen};
+
+DialectMarkers DeepSeekDialect::Markers() const noexcept {
+  return {
+      .openers = kDeepSeekOpeners,
+      .closers = {},
+      .reasoning_envelope = kDeepSeekReasoningEnvelope,
+  };
+}
+
+const IChatDialect& DeepSeekDialectInstance() noexcept {
+  static const DeepSeekDialect kInstance;
+  return kInstance;
+}
+
 }  // namespace mbufo::server
