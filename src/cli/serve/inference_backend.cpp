@@ -1459,7 +1459,7 @@ public:
     return SelectNext(state, sampler);
   }
 
-  [[nodiscard]] TextDecodeStep DecodeStep(
+  [[nodiscard]] TextDecodeStep DecodeSpeculativeImpl(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
     auto& qwen = RequireQwenState(state);
@@ -1933,7 +1933,8 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
   return *deepseek;
 }
 
-class DeepSeekTextRunner final : public HipTextModelRunner {
+class DeepSeekTextRunner final : public HipTextModelRunner,
+                                  public ISnapshotCapable {
 public:
   // Batch contract (see TextModelRunner): native DecodeBatch/AdvanceBatch below; no merged prefill+decode.
   MBUFO_RUNNER_NO_MIXED_BATCH();
@@ -2250,7 +2251,7 @@ public:
     };
   }
 
-  [[nodiscard]] TextDecodeStep DecodeStep(
+  [[nodiscard]] TextDecodeStep DecodeSpeculativeImpl(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
     if (!use_dspark_) {
@@ -2477,6 +2478,12 @@ public:
   }
 
   [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const override {
+    return CaptureSnapshot(state);
+  }
+
+  // ISnapshotCapable: native snapshot/fork contract (OOP Task 2).
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> CaptureSnapshot(
       const TextRunnerState& state) const override {
     const auto& deepseek = RequireDeepSeekState(state);
     std::string error;
@@ -3058,7 +3065,7 @@ public:
     return SelectNext(state, sampler);
   }
 
-  [[nodiscard]] TextDecodeStep DecodeStep(
+  [[nodiscard]] TextDecodeStep DecodeSpeculativeImpl(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
     if (!use_mtp_ || max_tokens == 1) {
@@ -5065,7 +5072,7 @@ class InklingTextRunner final : public HipTextModelRunner {
     }
     st.set_position(st.position() + 1);
   }
-  [[nodiscard]] TextDecodeStep DecodeStep(
+  [[nodiscard]] TextDecodeStep DecodeSpeculativeImpl(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
     const bool greedy = sampler.config().can_use_unmodified_argmax();
@@ -5127,7 +5134,7 @@ class InklingTextRunner final : public HipTextModelRunner {
           .piece = model_->Decode(std::span<const std::int32_t>(&tok, 1)),
       });
     }
-    st.set_position(st.position() + block.size());
+    st.set_position(st.position() + step.selections.size());
     step.stop = stop;
     return step;
   }
@@ -6097,7 +6104,7 @@ class GlimmerTextRunner final : public HipTextModelRunner {
   // token. The last committed token stays "pending" (committed but not yet forwarded) and anchors the next round, so the
   // verify batch [pending, drafts...] is the only target forward per round. Any other request (sampling, penalties,
   // grammar) decodes plainly through the base step.
-  [[nodiscard]] TextDecodeStep DecodeStep(TextRunnerState& state, std::size_t max_tokens,
+  [[nodiscard]] TextDecodeStep DecodeSpeculativeImpl(TextRunnerState& state, std::size_t max_tokens,
                                           sampling::SamplerState& sampler) const override {
     if (max_tokens == 0) {
       throw std::invalid_argument("text runner decode step budget must be at least one token");
@@ -6135,9 +6142,11 @@ class GlimmerTextRunner final : public HipTextModelRunner {
         result.stop = true;
         continue;
       }
+      // NVI contract: never sampler.Accept here; the pool accepts each
+      // published selection exactly once (double Accept corrupts the
+      // repetition penalty window).
       result.selections.push_back(TextDecodeSelection{
           .stop = false, .token = static_cast<TextRunnerToken>(token), .piece = DecodeToken(token)});
-      sampler.Accept(static_cast<sampling::TokenId>(token));
     }
     glimmer.set_speculative_pending(true);
     glimmer.set_position(glimmer.committed().size());
@@ -7018,7 +7027,7 @@ class Gemma4TextRunner final : public HipTextModelRunner {
   // falls back to the single-token base path. The pool Accepts published
   // selections into the sampler itself, so this override advances only the
   // engine and the state position.
-  [[nodiscard]] TextDecodeStep DecodeStep(
+  [[nodiscard]] TextDecodeStep DecodeSpeculativeImpl(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
     if (!use_mtp() || sampler.ForcedToken().has_value() ||

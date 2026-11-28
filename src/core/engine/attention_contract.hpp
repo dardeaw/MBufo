@@ -114,6 +114,14 @@ struct AttentionContractReport {
 [[nodiscard]] AttentionContractReport ValidateAttentionContract(const AttentionGeometry& geometry,
                                                                 const AttentionKernelInfo& kernels);
 
+/// SWA/prefill-chunk contract (OOP Task 4): a sliding-window layer only sees
+/// `window` keys, so a prefill chunk must be strictly smaller than the window
+/// (equal would silently corrupt attention at the boundary). window == 0
+/// (full causal) imposes no constraint. Returns an empty string when valid,
+/// otherwise a human-readable violation.
+[[nodiscard]] std::string ValidateChunkAgainstWindow(std::uint32_t prefill_chunk,
+                                                     std::uint32_t window);
+
 [[nodiscard]] const char* AttentionKindName(AttentionKind kind) noexcept;
 [[nodiscard]] const char* AttentionKernelOriginName(AttentionKernelOrigin origin) noexcept;
 [[nodiscard]] const char* AttentionKvFormatName(AttentionKvFormat format) noexcept;
