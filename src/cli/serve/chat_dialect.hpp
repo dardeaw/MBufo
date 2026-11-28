@@ -44,6 +44,28 @@ class IChatDialect {
   // ConstrainChatRequest's `if (format == ...)` instruction branches).
   [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat GrammarFormat()
       const noexcept = 0;
+
+  // Whether a raw text span starting at `pos` opens a tool call in this
+  // dialect. The default compares against Markers().openers; dialects with
+  // envelope-qualified openers (Qwen native header, DeepSeek separator)
+  // override. Pure function, unit-testable, no parser state.
+  [[nodiscard]] virtual bool OpensToolCall(std::string_view text,
+                                           std::size_t pos) const noexcept {
+    const auto openers = Markers().openers;
+    for (const auto opener : openers) {
+      if (text.size() >= pos + opener.size() &&
+          text.compare(pos, opener.size(), opener) == 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // NOTE (Phase 2 next step): ParseToolCalls virtual dispatch over the
+  // file-static Parse*Calls parsers requires moving them out of
+  // openai_chat.cpp's anonymous namespace first. Markers migration
+  // (7/7 dialects) is complete; parser migration is a separate commit
+  // with full GPU verification.
 };
 
 // JSON fallback dialect: no native counterpart in llama.cpp; admits every

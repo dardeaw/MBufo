@@ -1166,7 +1166,8 @@ if (BUILD_TESTING)
   add_test(NAME ggml_dequant_test COMMAND ggml_dequant_test)
   set_tests_properties(ggml_dequant_test PROPERTIES LABELS "cpu;core;quant")
 
-  add_executable(oop_contract_test tests/core/oop_contract_test.cpp)
+  add_executable(oop_contract_test tests/core/oop_contract_test.cpp
+    src/cli/serve/chat_dialect.cpp)
   target_link_libraries(oop_contract_test PRIVATE mbufo_core)
 
   add_test(NAME oop_contract_test COMMAND oop_contract_test)
