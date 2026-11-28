@@ -126,6 +126,19 @@ class AtemDialect final : public IChatDialect {
 
 [[nodiscard]] const IChatDialect& AtemDialectInstance() noexcept;
 
+// Inkling: the tool-call message model tag as opener, no closers
+// (structure guard steers at message ends), no reasoning envelope.
+class InklingDialect final : public IChatDialect {
+ public:
+  [[nodiscard]] DialectMarkers Markers() const noexcept override;
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat GrammarFormat()
+      const noexcept override {
+    return sampling::JsonConstraint::ToolFormat::kInkling;
+  }
+};
+
+[[nodiscard]] const IChatDialect& InklingDialectInstance() noexcept;
+
 }  // namespace mbufo::server
 
 #endif  // MBUFO_SERVER_CHAT_DIALECT_HPP_

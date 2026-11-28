@@ -163,4 +163,20 @@ const IChatDialect& AtemDialectInstance() noexcept {
   return kInstance;
 }
 
+// Mirrors openai_chat.cpp's former inkling opener. No closers, no envelope.
+constexpr std::array<std::string_view, 1> kInklingOpeners{"<|message_model|>"};
+
+DialectMarkers InklingDialect::Markers() const noexcept {
+  return {
+      .openers = kInklingOpeners,
+      .closers = {},
+      .reasoning_envelope = {},
+  };
+}
+
+const IChatDialect& InklingDialectInstance() noexcept {
+  static const InklingDialect kInstance;
+  return kInstance;
+}
+
 }  // namespace mbufo::server

@@ -161,7 +161,8 @@ ToolMarkerSet ToolMarkers(
   if (*format == Format::kLlama)
     return LlamaDialectInstance().Markers().openers;
   if (*format == Format::kInkling)
-    return ToolMarkerSet(inkling);
+    // (Phase 2: served by InklingDialect.)
+    return InklingDialectInstance().Markers().openers;
   // (Phase 2: served by QwenDialect.)
   return QwenDialectInstance().Markers().openers;
 }
@@ -253,7 +254,8 @@ ToolCloserSet ToolClosers(
   if (*format == Format::kLlama)
     return LlamaDialectInstance().Markers().closers;
   if (*format == Format::kInkling)
-    return {};
+    // (Phase 2: served by InklingDialect — empty.)
+    return InklingDialectInstance().Markers().closers;
   // (Phase 2: served by QwenDialect.)
   return QwenDialectInstance().Markers().closers;
 }
