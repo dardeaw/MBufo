@@ -3,6 +3,27 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.40.1 (2026-11-28)
+
+### Serving, Speculative Decoding, Vision, Cache & DeltaNet Optimizations (Halogen 0.17–0.21 Parity)
+- **GPU Warm-up & Turn-Boundary Stop Guard (`src/cli/serve/serve.cpp`, `text_generation_scheduler.cpp`)**:
+  - Added short startup GPU warm-up (`event=gpu_warmup_completed`) after model load so first-request HIP Graph capture / lazy buffer init latency is absorbed before serving.
+  - Added `<|im_start|>user` / `assistant` / `system` turn-boundary stop-sequence guard preventing hallucinated multi-turn continuation when `<think>` or tool-call output hits EOT early.
+- **Grammar / Schema-Forced Drafter (`src/core/json_constraint.*`, `src/core/sampling.*`, `src/models/qwen38_flash_next/engine.cpp`)**:
+  - Host constraint state machine injects up to 8 deterministic single-candidate tokens directly into the speculative draft batch, skipping draft-model steps for deterministic JSON syntax (`draft_n=105 accepted=92`, `TG=56.0 tok/s`).
+- **Smart Prompt Lookup (`src/core/speculative/prompt_lookup.hpp`, `src/models/qwen38_flash_next/engine.cpp`)**:
+  - Added `NormalizeToolPromptText` (line-number prefix stripping + JSON `
+`/`"`/`\`/`	` un-escaping) and a non-ABI-breaking shadow n-gram index built once at prefill (`lookup_accepted=807/868` 93.0% on line-numbered code rewrite, `303/327` 92.7% on JSON-escaped tool output, `92.4–93.3 tok/s` decode).
+- **End-of-Reply RAM Auto-Cache & Long-Conversation Anti-Eviction (`src/cli/serve/component_text_cache.cpp`, `component_cache_metrics.hpp`, `src/cache/retention.*`)**:
+  - Automatically captures a non-pinned, RAM-only (`persist=false`, `cache->budget / 2` single-slot cap) continuation checkpoint at reply completion so follow-up turns hit cached replies even after GPU `LiveFrontier` slots are flushed (`305/329` cached tokens, `140.9 ms` TTFT).
+  - Replaced pure request-count LRU eviction with work-vs-length protection (`work_tokens_` vs `checkpoint->Boundary()`), preserving a 58.8K-token conversation in 4 GiB RAM cache across 30 intervening short requests (`ttft_ms` `55619.7 ms` → `128.5 ms`).
+- **Qwen Vision Encoder WMMA FlashAttention (`src/models/qwen/vision/encoder.hip`)**:
+  - Replaced tiled `hipblasGemmStridedBatchedEx` + `Softmax` + `AttentionRows` with a fused `gfx1151` `FlashAttentionWmma` kernel (`__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32`, register online softmax, `uint4` coalesced K/V loads), cutting `1280×1280` (`6400` patches) vision encoding from `2796.7 ms` to `873.81 ms` (**3.20x speedup**).
+- **MTP Depth Tuning, Q4_0 MTP Experts & FP16 DeltaNet Recurrent State (`src/models/qwen38_flash_next/`)**:
+  - Benchmarked `-d 5` vs `-d 7` and `MBUFO_MTP_GATE_P`: retained `-d 5` (`54.72` vs `53.76 tok/s`).
+  - Added load-time `Q8_0` → `Q4_0` conversion for MTP routed experts (`MBUFO_MTP_Q4_EXPS=1` default), saving `1,194 MiB` VRAM (`77,055` → `75,861 MiB`) at `55.70 tok/s` aggregate decode.
+  - Reduced Gated DeltaNet `kRecurrent` state from FP32 to FP16 (`__half`) with FP32 register accumulation (`cache_snapshot_bytes` `~279` → `221.9 MB`) and bumped `state_abi` / `ContinuationMetadata` version (`2` → `3`) for clean disk-cache rebuild.
+
 ## v0.40.0 (2026-11-28)
 
 ### Added (merged prefill+decode for every runner that can keep bit-identity; see `docs/MIXED_BATCH.md`)
