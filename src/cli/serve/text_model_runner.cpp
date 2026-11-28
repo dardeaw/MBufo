@@ -599,20 +599,7 @@ TextDecodeStep TextModelRunner::DecodeStep(
                            sampler.config().reasoning_budget != nullptr ||
                            sampler.NeedsConstraintMask();
   if (constrained && !SupportsConstrainedSpeculative()) {
-    auto selection = SelectNext(state, sampler);
-    if (selection.stop) {
-      return {
-          .selections = {},
-          .draft_tokens = 0,
-          .draft_accepted_tokens = 0,
-          .stop = true,
-      };
-    }
-    const TextRunnerToken token = selection.token;
-    Advance(state, token);
-    return {
-        .selections = {std::move(selection)},
-    };
+    return DecodeSingleStep(state, sampler);
   }
   const std::size_t position_before = CheckpointPosition(state);
   TextDecodeStep step = DecodeSpeculativeImpl(state, max_tokens, sampler);
@@ -627,6 +614,24 @@ TextDecodeStep TextModelRunner::DecodeStep(
         std::to_string(step.selections.size()) + " committed tokens");
   }
   return step;
+}
+
+TextDecodeStep TextModelRunner::DecodeSingleStep(
+    TextRunnerState& state, sampling::SamplerState& sampler) const {
+  auto selection = SelectNext(state, sampler);
+  if (selection.stop) {
+    return {
+        .selections = {},
+        .draft_tokens = 0,
+        .draft_accepted_tokens = 0,
+        .stop = true,
+    };
+  }
+  const TextRunnerToken token = selection.token;
+  Advance(state, token);
+  return {
+      .selections = {std::move(selection)},
+  };
 }
 
 TextDecodeStep TextModelRunner::DecodeSpeculativeImpl(

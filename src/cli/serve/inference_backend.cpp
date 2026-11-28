@@ -1464,7 +1464,7 @@ public:
       sampling::SamplerState& sampler) const override {
     auto& qwen = RequireQwenState(state);
     if (!qwen.speculative()) {
-      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+      return DecodeSingleStep(state, sampler);
     }
     return qwen.DecodeSpeculative(max_tokens, sampler);
   }
@@ -2255,7 +2255,7 @@ public:
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
     if (!use_dspark_) {
-      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+      return DecodeSingleStep(state, sampler);
     }
     if (max_tokens == 0) {
       throw std::invalid_argument(
@@ -3069,7 +3069,7 @@ public:
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
     if (!use_mtp_ || max_tokens == 1) {
-      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+      return DecodeSingleStep(state, sampler);
     }
     if (max_tokens == 0) {
       throw std::invalid_argument(
@@ -5081,13 +5081,13 @@ class InklingTextRunner final : public HipTextModelRunner {
         sampler.config().constraint != nullptr ||
         sampler.config().reasoning_budget != nullptr ||
         sampler.NeedsConstraintMask()) {
-      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+      return DecodeSingleStep(state, sampler);
     }
     auto& st = dynamic_cast<InklingTextRunnerState&>(state);
     EnsureGeneration(st);
     if (st.position() >= max_context_) return {.stop = true};
     if (GuardAction(st, sampler) != Guard::kNone) {
-      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+      return DecodeSingleStep(state, sampler);
     }
     // Rounds stop committing after a message end so the guard can steer it.
     const bool guarded = structure_guard_ && st.stop_at_eos() &&
@@ -6113,7 +6113,7 @@ class GlimmerTextRunner final : public HipTextModelRunner {
     const bool speculate = shared_draft_ != nullptr && glimmer.speculative_enabled() && glimmer.speculative_primed() &&
                            sampler.config().can_use_unmodified_argmax() && !sampler.ForcedToken().has_value() &&
                            sampler.config().constraint == nullptr && !sampler.NeedsConstraintMask();
-    if (!speculate) return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    if (!speculate) return DecodeSingleStep(state, sampler);
     TextDecodeStep result;
     if (glimmer.position() >= max_context_) {
       result.stop = true;
@@ -7034,7 +7034,7 @@ class Gemma4TextRunner final : public HipTextModelRunner {
         !sampler.config().can_use_unmodified_argmax() ||
         sampler.config().constraint != nullptr ||
         sampler.NeedsConstraintMask()) {
-      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+      return DecodeSingleStep(state, sampler);
     }
     if (max_tokens == 0) {
       throw std::invalid_argument(

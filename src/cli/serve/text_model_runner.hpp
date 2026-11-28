@@ -497,10 +497,17 @@ public:
   // Speculative multi-token implementation. Must not call sampler.Accept:
   // the pool accepts each published selection exactly once. Must advance the
   // runner position by step.selections.size() (committed tokens only), never
-  // by the raw draft block size.
+  // by the raw draft block size. Fallbacks inside an Impl MUST call
+  // DecodeSingleStep (never TextModelRunner::DecodeStep, which would
+  // re-enter this Impl through the NVI gate and recurse forever).
   [[nodiscard]] virtual TextDecodeStep DecodeSpeculativeImpl(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const;
+  // Non-virtual single-token path shared by the NVI gate and by Impl
+  // fallbacks. Samples exactly one token through the sampler and advances
+  // once; never dispatches back into DecodeSpeculativeImpl.
+  [[nodiscard]] TextDecodeStep DecodeSingleStep(
+      TextRunnerState& state, sampling::SamplerState& sampler) const;
  public:
   // Batch execution contract. These four entry points are pure virtual on
   // purpose: a runner cannot compile until it has decided, for each one,
