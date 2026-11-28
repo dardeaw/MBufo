@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/chat_dialect.hpp"
 #include "src/cli/serve/quote_tracker.hpp"
 #include "src/cli/serve/response_format.hpp"
 #include "src/cli/serve/sampling_request.hpp"
@@ -143,8 +144,9 @@ ToolMarkerSet ToolMarkers(
   // The JSON fallback has no native counterpart in llama.cpp. Its grammar
   // leaves text before <tool_call> unconstrained, where models still write
   // their native call syntax; keep recognizing every opener there.
+  // (Phase 2: served by JsonDialect.)
   if (!format || *format == Format::kJson)
-    return kToolMarkers;
+    return JsonDialectInstance().Markers().openers;
   // Match the canonical opener selected by JsonConstraint::WithTools. Other
   // dialects are ordinary prose under that grammar, not additional calls.
   if (*format == Format::kDeepSeek)
@@ -223,8 +225,9 @@ using ToolCloserSet = std::span<const std::string_view>;
 ToolCloserSet ToolClosers(
     std::optional<sampling::JsonConstraint::ToolFormat> format) {
   using Format = sampling::JsonConstraint::ToolFormat;
+  // (Phase 2: served by JsonDialect.)
   if (!format)
-    return kToolClosers;
+    return JsonDialectInstance().Markers().closers;
   // As in llama.cpp, DeepSeek content is everything outside its native call
   // block, which ends the output: there is no echo to strip, and client
   // envelope syntax the model writes stays visible text.
