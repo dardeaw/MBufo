@@ -1,5 +1,6 @@
-// OOP contract tests (Phase 1, Tasks 3-4): CPU-only coverage for the new
-// shared helpers. No GPU, no model weights.
+// OOP contract tests (Phase 1, Tasks 3-4; Phase 2 dialect markers):
+// CPU-only coverage for the new shared helpers. No GPU, no model weights.
+#include "src/cli/serve/chat_dialect.hpp"
 #include "src/core/engine/attention_contract.hpp"
 #include "src/core/engine/engine_backend.hpp"
 #include "src/core/quant/parallel.hpp"
@@ -105,12 +106,64 @@ void TestClassifySyncPrefix() {
         "empty history with prompt classifies kAppend");
 }
 
+void TestDialectOpensToolCall() {
+  using mbufo::server::AtemDialectInstance;
+  using mbufo::server::DeepSeekDialectInstance;
+  using mbufo::server::GemmaDialectInstance;
+  using mbufo::server::InklingDialectInstance;
+  using mbufo::server::JsonDialectInstance;
+  using mbufo::server::LlamaDialectInstance;
+  using mbufo::server::QwenDialectInstance;
+  // Json admits every known opener.
+  Check(JsonDialectInstance().OpensToolCall("<tool_call> x", 0),
+        "json opens on <tool_call>");
+  Check(JsonDialectInstance().OpensToolCall("x <tool_calls> y", 2),
+        "json opens on dsml marker at offset");
+  Check(JsonDialectInstance().OpensToolCall("<｜DSML｜tool_calls>", 0),
+        "json opens on dsml marker");
+  Check(!JsonDialectInstance().OpensToolCall("plain prose", 0),
+        "json does not open on prose");
+  // Single-opener dialects.
+  Check(QwenDialectInstance().OpensToolCall("<tool_call> x", 0),
+        "qwen opens on its marker");
+  Check(!QwenDialectInstance().OpensToolCall("<|tool_call> x", 0),
+        "qwen does not open on gemma marker");
+  Check(LlamaDialectInstance().OpensToolCall("{\"name\": \"f\"}", 0),
+        "llama opens on bare JSON object");
+  Check(GemmaDialectInstance().OpensToolCall("<|tool_call>call:f{}<tool_call|>", 0),
+        "gemma opens on its marker");
+  Check(AtemDialectInstance().OpensToolCall("<atem:function_calls>", 0),
+        "atem opens on its marker");
+  Check(InklingDialectInstance().OpensToolCall("<|message_model|>", 0),
+        "inkling opens on its marker");
+  // DeepSeek separator-qualified opener.
+  Check(DeepSeekDialectInstance().OpensToolCall("\n\n<｜DSML｜tool_calls>", 0),
+        "deepseek opens on separator-qualified marker");
+  // Grammar formats match the ToolFormat enum each dialect replaces.
+  using mbufo::sampling::JsonConstraint;
+  Check(JsonDialectInstance().GrammarFormat() == JsonConstraint::ToolFormat::kJson,
+        "json grammar format");
+  Check(QwenDialectInstance().GrammarFormat() == JsonConstraint::ToolFormat::kQwen,
+        "qwen grammar format");
+  Check(DeepSeekDialectInstance().GrammarFormat() == JsonConstraint::ToolFormat::kDeepSeek,
+        "deepseek grammar format");
+  Check(GemmaDialectInstance().GrammarFormat() == JsonConstraint::ToolFormat::kGemma,
+        "gemma grammar format");
+  Check(AtemDialectInstance().GrammarFormat() == JsonConstraint::ToolFormat::kAtem,
+        "atem grammar format");
+  Check(LlamaDialectInstance().GrammarFormat() == JsonConstraint::ToolFormat::kLlama,
+        "llama grammar format");
+  Check(InklingDialectInstance().GrammarFormat() == JsonConstraint::ToolFormat::kInkling,
+        "inkling grammar format");
+}
+
 }  // namespace
 
 int main() {
   TestParallelForTasks();
   TestValidateChunkAgainstWindow();
   TestClassifySyncPrefix();
+  TestDialectOpensToolCall();
   if (g_failures == 0) {
     std::cout << "oop_contract_test: all checks passed\n";
     return 0;

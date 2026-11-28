@@ -429,6 +429,7 @@ add_library(mbufo_http STATIC
   src/cli/serve/asr_websocket.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
+  src/cli/serve/chat_dialect.cpp
   src/cli/serve/admin_ops.cpp
   # The DeepSeek tool-call scanner lives with its model; its renderer stays in
   # the engine library, so no translation unit is linked twice.
@@ -759,6 +760,7 @@ if (BUILD_TESTING)
     tests/cli/openai_chat_test.cpp
     src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
+    src/cli/serve/chat_dialect.cpp
     src/models/deepseek_v4_flash/chat_template.cpp
     src/models/deepseek_v4_flash/tool_calls.cpp
   )
@@ -1164,7 +1166,8 @@ if (BUILD_TESTING)
   add_test(NAME ggml_dequant_test COMMAND ggml_dequant_test)
   set_tests_properties(ggml_dequant_test PROPERTIES LABELS "cpu;core;quant")
 
-  add_executable(oop_contract_test tests/core/oop_contract_test.cpp)
+  add_executable(oop_contract_test tests/core/oop_contract_test.cpp
+    src/cli/serve/chat_dialect.cpp)
   target_link_libraries(oop_contract_test PRIVATE mbufo_core)
 
   add_test(NAME oop_contract_test COMMAND oop_contract_test)

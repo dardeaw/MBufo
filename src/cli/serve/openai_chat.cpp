@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/chat_dialect.hpp"
 #include "src/cli/serve/quote_tracker.hpp"
 #include "src/cli/serve/response_format.hpp"
 #include "src/cli/serve/sampling_request.hpp"
@@ -84,15 +85,6 @@ struct ParsedGeneration {
   bool hide_tool_markup{false};
 };
 
-constexpr std::array<std::string_view, 7> kToolMarkers{
-    tokenization::QwenToolSyntax::kCallOpen,
-    "<｜DSML｜tool_calls｜>",
-    models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen,
-    "<DSML｜tool_calls｜>",
-    "<DSML｜tool_calls>",
-    "<tool_calls｜>",
-    "<tool_calls>",
-};
 using ToolMarkerSet = std::span<const std::string_view>;
 
 // Gemma 4 native tool-call framing from its canonical chat template: the
@@ -124,58 +116,44 @@ struct LlamaToolSyntax {
 ToolMarkerSet ToolMarkers(
     std::optional<sampling::JsonConstraint::ToolFormat> format) {
   using Format = sampling::JsonConstraint::ToolFormat;
-  static constexpr std::array<std::string_view, 1> qwen{
-      tokenization::QwenToolSyntax::kCallOpen};
-  static constexpr std::array<std::string_view, 1> gemma{
-      GemmaToolSyntax::kCallOpen};
-  static constexpr std::array<std::string_view, 1> atem{
-      AtemToolSyntax::kCallsOpen};
-  static constexpr std::array<std::string_view, 1> llama{
-      LlamaToolSyntax::kCallOpen};
-  static constexpr std::array<std::string_view, 1> inkling{
-      "<|message_model|>"};
-  // The template writes "\n\n" before the call block. As in llama.cpp
-  // common/parsers/deepseek.cpp (TC_SEPARATOR + FC_START), that separator is
-  // framing: returning it as content would double it when history is replayed.
-  static constexpr std::array<std::string_view, 2> deepseek{
-      models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpenWithSeparator,
-      models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen};
   // The JSON fallback has no native counterpart in llama.cpp. Its grammar
   // leaves text before <tool_call> unconstrained, where models still write
   // their native call syntax; keep recognizing every opener there.
+  // (Phase 2: served by JsonDialect.)
   if (!format || *format == Format::kJson)
-    return kToolMarkers;
+    return JsonDialectInstance().Markers().openers;
   // Match the canonical opener selected by JsonConstraint::WithTools. Other
   // dialects are ordinary prose under that grammar, not additional calls.
   if (*format == Format::kDeepSeek)
-    return ToolMarkerSet(deepseek);
+    // (Phase 2: served by DeepSeekDialect.)
+    return DeepSeekDialectInstance().Markers().openers;
   if (*format == Format::kGemma)
-    return ToolMarkerSet(gemma);
+    // (Phase 2: served by GemmaDialect.)
+    return GemmaDialectInstance().Markers().openers;
   if (*format == Format::kAtem)
-    return ToolMarkerSet(atem);
+    // (Phase 2: served by AtemDialect.)
+    return AtemDialectInstance().Markers().openers;
   if (*format == Format::kLlama)
-    return ToolMarkerSet(llama);
+    return LlamaDialectInstance().Markers().openers;
   if (*format == Format::kInkling)
-    return ToolMarkerSet(inkling);
-  return ToolMarkerSet(qwen);
+    // (Phase 2: served by InklingDialect.)
+    return InklingDialectInstance().Markers().openers;
+  // (Phase 2: served by QwenDialect.)
+  return QwenDialectInstance().Markers().openers;
 }
 
 // A native function header, rather than a bare marker mentioned in prose,
 // permits the implicit reasoning boundary used by llama.cpp's native parsers.
 ToolMarkerSet ReasoningToolMarkers(ToolMarkerSet markers) {
-  static constexpr std::array<std::string_view, 1> qwen{
-      tokenization::QwenToolSyntax::kNativeCallOpen};
-  static constexpr std::array<std::string_view, 2> deepseek{
-      models::deepseek_v4_flash::DeepSeekToolSyntax::
-          kNativeCallOpenWithSeparator,
-      models::deepseek_v4_flash::DeepSeekToolSyntax::kNativeCallOpen};
   if (markers.size() == 1 &&
       markers.front() == tokenization::QwenToolSyntax::kCallOpen)
-    return qwen;
+    // (Phase 2: served by QwenDialect.)
+    return QwenDialectInstance().Markers().reasoning_envelope;
   if (markers.size() == 2 &&
       markers.back() ==
           models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen)
-    return deepseek;
+    // (Phase 2: served by DeepSeekDialect.)
+    return DeepSeekDialectInstance().Markers().reasoning_envelope;
   // Gemma never emits a reasoning envelope: no thought tags means no
   // implicit reasoning boundary to detect, constrained or not.
   return {};
@@ -183,66 +161,38 @@ ToolMarkerSet ReasoningToolMarkers(ToolMarkerSet markers) {
 
 // Closers eligible for removal immediately after an accepted call. Standalone
 // closers and XML remain literal; the declared-tool envelope rule is separate.
-constexpr std::array<std::string_view, 4> kQwenClosers{
-    tokenization::QwenToolSyntax::kParameterClose,
-    tokenization::QwenToolSyntax::kFunctionClose,
-    tokenization::QwenToolSyntax::kCallClose,
-    // The client's envelope, whose block rules already strip it whole.
-    "</invoke>",
-};
-// Gemma 4 native closers: the call closer plus the same client envelope.
-constexpr std::array<std::string_view, 2> kGemmaClosers{
-    GemmaToolSyntax::kCallClose,
-    "</invoke>",
-};
-constexpr std::array<std::string_view, 2> kAtemClosers{
-    AtemToolSyntax::kCallsClose,
-    "</invoke>",
-};
-constexpr std::array<std::string_view, 2> kLlamaClosers{
-    "<|eot_id|>",
-    "</invoke>",
-};
-constexpr std::array<std::string_view, 9> kToolClosers{
-    // Qwen family.
-    tokenization::QwenToolSyntax::kParameterClose,
-    tokenization::QwenToolSyntax::kFunctionClose,
-    tokenization::QwenToolSyntax::kCallClose,
-    // Envelope dialects the clients and harness prompts render; Qwen models
-    // echo these back verbatim, so they are framing here too.
-    "</invoke>",
-    "</function_results>",
-    "</tool_calls>",
-    // Model-native dialects, which this fallback admits like any other opener.
-    models::deepseek_v4_flash::DeepSeekToolSyntax::kParameterCloses[0],
-    models::deepseek_v4_flash::DeepSeekToolSyntax::kInvokeCloses[0],
-    models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsClose,
-};
+// (Phase 2: closer tables now live in chat_dialect.cpp per-dialect.)
 using ToolCloserSet = std::span<const std::string_view>;
 
 ToolCloserSet ToolClosers(
     std::optional<sampling::JsonConstraint::ToolFormat> format) {
   using Format = sampling::JsonConstraint::ToolFormat;
+  // (Phase 2: served by JsonDialect.)
   if (!format)
-    return kToolClosers;
+    return JsonDialectInstance().Markers().closers;
   // As in llama.cpp, DeepSeek content is everything outside its native call
   // block, which ends the output: there is no echo to strip, and client
   // envelope syntax the model writes stays visible text.
   if (*format == Format::kDeepSeek)
-    return {};
+    // (Phase 2: served by DeepSeekDialect — empty: no echo to strip.)
+    return DeepSeekDialectInstance().Markers().closers;
   // Mirror ToolMarkers: stripping follows the dialect the request admitted,
   // and another dialect's closing tags are ordinary prose like its openers —
   // the client's envelope excepted, which no dialect admits and every one of
   // them parses.
   if (*format == Format::kGemma)
-    return kGemmaClosers;
+    // (Phase 2: served by GemmaDialect.)
+    return GemmaDialectInstance().Markers().closers;
   if (*format == Format::kAtem)
-    return kAtemClosers;
+    // (Phase 2: served by AtemDialect.)
+    return AtemDialectInstance().Markers().closers;
   if (*format == Format::kLlama)
-    return kLlamaClosers;
+    return LlamaDialectInstance().Markers().closers;
   if (*format == Format::kInkling)
-    return {};
-  return kQwenClosers;
+    // (Phase 2: served by InklingDialect — empty.)
+    return InklingDialectInstance().Markers().closers;
+  // (Phase 2: served by QwenDialect.)
+  return QwenDialectInstance().Markers().closers;
 }
 
 long long Now() {
