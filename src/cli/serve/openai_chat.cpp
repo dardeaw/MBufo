@@ -159,7 +159,8 @@ ToolMarkerSet ToolMarkers(
     return LlamaDialectInstance().Markers().openers;
   if (*format == Format::kInkling)
     return ToolMarkerSet(inkling);
-  return ToolMarkerSet(qwen);
+  // (Phase 2: served by QwenDialect.)
+  return QwenDialectInstance().Markers().openers;
 }
 
 // A native function header, rather than a bare marker mentioned in prose,
@@ -173,7 +174,8 @@ ToolMarkerSet ReasoningToolMarkers(ToolMarkerSet markers) {
       models::deepseek_v4_flash::DeepSeekToolSyntax::kNativeCallOpen};
   if (markers.size() == 1 &&
       markers.front() == tokenization::QwenToolSyntax::kCallOpen)
-    return qwen;
+    // (Phase 2: served by QwenDialect.)
+    return QwenDialectInstance().Markers().reasoning_envelope;
   if (markers.size() == 2 &&
       markers.back() ==
           models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen)
@@ -245,7 +247,8 @@ ToolCloserSet ToolClosers(
     return LlamaDialectInstance().Markers().closers;
   if (*format == Format::kInkling)
     return {};
-  return kQwenClosers;
+  // (Phase 2: served by QwenDialect.)
+  return QwenDialectInstance().Markers().closers;
 }
 
 long long Now() {

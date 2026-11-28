@@ -71,4 +71,30 @@ const IChatDialect& LlamaDialectInstance() noexcept {
   return kInstance;
 }
 
+// Mirrors openai_chat.cpp's former qwen opener + kQwenClosers + native
+// function header envelope (ReasoningToolMarkers' qwen branch).
+constexpr std::array<std::string_view, 1> kQwenOpeners{
+    tokenization::QwenToolSyntax::kCallOpen};
+constexpr std::array<std::string_view, 4> kQwenDialectClosers{
+    tokenization::QwenToolSyntax::kParameterClose,
+    tokenization::QwenToolSyntax::kFunctionClose,
+    tokenization::QwenToolSyntax::kCallClose,
+    "</invoke>",
+};
+constexpr std::array<std::string_view, 1> kQwenReasoningEnvelope{
+    tokenization::QwenToolSyntax::kNativeCallOpen};
+
+DialectMarkers QwenDialect::Markers() const noexcept {
+  return {
+      .openers = kQwenOpeners,
+      .closers = kQwenDialectClosers,
+      .reasoning_envelope = kQwenReasoningEnvelope,
+  };
+}
+
+const IChatDialect& QwenDialectInstance() noexcept {
+  static const QwenDialect kInstance;
+  return kInstance;
+}
+
 }  // namespace mbufo::server

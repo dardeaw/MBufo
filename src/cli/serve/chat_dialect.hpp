@@ -73,6 +73,19 @@ class LlamaDialect final : public IChatDialect {
 
 [[nodiscard]] const IChatDialect& LlamaDialectInstance() noexcept;
 
+// Qwen family: <tool_call> opener, four closers, and a native function
+// header envelope for the implicit reasoning boundary.
+class QwenDialect final : public IChatDialect {
+ public:
+  [[nodiscard]] DialectMarkers Markers() const noexcept override;
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat GrammarFormat()
+      const noexcept override {
+    return sampling::JsonConstraint::ToolFormat::kQwen;
+  }
+};
+
+[[nodiscard]] const IChatDialect& QwenDialectInstance() noexcept;
+
 }  // namespace mbufo::server
 
 #endif  // MBUFO_SERVER_CHAT_DIALECT_HPP_
