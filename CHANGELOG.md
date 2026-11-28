@@ -3,6 +3,13 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.41.3 (2026-11-28)
+
+### Serve Cache
+- **Preserve full prefill chunks across grid checkpoints** (`src/cli/serve/component_text_cache.cpp`):
+  - Filtered out non-required `splits_pass` grid checkpoints in `ComponentTextCache::Lease::PlannedCaptures` so a 4K prompt is no longer cut into two ~2K chunks (`2048` + remainder) on 4096-chunk models like `Qwen3.8-Flash-Next`.
+  - Raises live `serve` 4K prefill (`ROCmFP4-FAST-v2q8k` + `Q8 KV` + `MTP` + `--cache-disk`) from `1611.1` to `1669.4 tok/s` (`chunks=1`).
+
 ## v0.41.2 (2026-11-28)
 
 ### Qwen3.8-Flash-Next

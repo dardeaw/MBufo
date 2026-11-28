@@ -1872,7 +1872,7 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
        cache::GridLimit(impl_->cache->budget, private_bytes)});
   std::vector<std::size_t> boundaries;
   for (const auto& capture : plan)
-    if (!capture.required &&
+    if (!capture.required && !capture.splits_pass &&
         !HasSnapshotFor(std::span<const cache::Token>(impl_->prompt)
                             .first(capture.boundary)))
       boundaries.push_back(capture.boundary);
