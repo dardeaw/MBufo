@@ -1164,6 +1164,12 @@ if (BUILD_TESTING)
   add_test(NAME ggml_dequant_test COMMAND ggml_dequant_test)
   set_tests_properties(ggml_dequant_test PROPERTIES LABELS "cpu;core;quant")
 
+  add_executable(oop_contract_test tests/core/oop_contract_test.cpp)
+  target_link_libraries(oop_contract_test PRIVATE mbufo_core)
+
+  add_test(NAME oop_contract_test COMMAND oop_contract_test)
+  set_tests_properties(oop_contract_test PROPERTIES LABELS "cpu;core;oop")
+
   add_executable(ggml_gemm_parity_test tests/core/ggml_gemm_parity_test.cpp)
   target_link_libraries(ggml_gemm_parity_test PRIVATE mbufo_core)
 
