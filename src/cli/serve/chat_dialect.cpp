@@ -50,4 +50,25 @@ const IChatDialect& JsonDialectInstance() noexcept {
   return kInstance;
 }
 
+// Mirrors openai_chat.cpp's former LlamaToolSyntax::kCallOpen + kLlamaClosers.
+constexpr std::string_view kLlamaCallOpen = "{\"name\":";
+constexpr std::array<std::string_view, 1> kLlamaOpeners{kLlamaCallOpen};
+constexpr std::array<std::string_view, 2> kLlamaDialectClosers{
+    "<|eot_id|>",
+    "</invoke>",
+};
+
+DialectMarkers LlamaDialect::Markers() const noexcept {
+  return {
+      .openers = kLlamaOpeners,
+      .closers = kLlamaDialectClosers,
+      .reasoning_envelope = {},
+  };
+}
+
+const IChatDialect& LlamaDialectInstance() noexcept {
+  static const LlamaDialect kInstance;
+  return kInstance;
+}
+
 }  // namespace mbufo::server

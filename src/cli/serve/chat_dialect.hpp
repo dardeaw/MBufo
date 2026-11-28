@@ -60,6 +60,19 @@ class JsonDialect final : public IChatDialect {
 
 [[nodiscard]] const IChatDialect& JsonDialectInstance() noexcept;
 
+// Llama-3.1 custom tool calls (canonical template): the model emits a
+// bare JSON object {"name": "fn", "parameters": {...}} per call.
+class LlamaDialect final : public IChatDialect {
+ public:
+  [[nodiscard]] DialectMarkers Markers() const noexcept override;
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat GrammarFormat()
+      const noexcept override {
+    return sampling::JsonConstraint::ToolFormat::kLlama;
+  }
+};
+
+[[nodiscard]] const IChatDialect& LlamaDialectInstance() noexcept;
+
 }  // namespace mbufo::server
 
 #endif  // MBUFO_SERVER_CHAT_DIALECT_HPP_

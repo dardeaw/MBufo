@@ -156,7 +156,7 @@ ToolMarkerSet ToolMarkers(
   if (*format == Format::kAtem)
     return ToolMarkerSet(atem);
   if (*format == Format::kLlama)
-    return ToolMarkerSet(llama);
+    return LlamaDialectInstance().Markers().openers;
   if (*format == Format::kInkling)
     return ToolMarkerSet(inkling);
   return ToolMarkerSet(qwen);
@@ -242,7 +242,7 @@ ToolCloserSet ToolClosers(
   if (*format == Format::kAtem)
     return kAtemClosers;
   if (*format == Format::kLlama)
-    return kLlamaClosers;
+    return LlamaDialectInstance().Markers().closers;
   if (*format == Format::kInkling)
     return {};
   return kQwenClosers;
