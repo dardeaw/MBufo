@@ -1974,8 +1974,8 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = true,
-                .fork = true,
+                .snapshot = false,
+                .fork = false,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = dspark,
@@ -3748,8 +3748,8 @@ class GptOssTextRunner final : public HipTextModelRunner {
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = false,
-                .fork = false,
+                .snapshot = true,
+                .fork = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = false,
@@ -4607,6 +4607,25 @@ void LogInklingTemplateSource(const InklingModel& model) {
   Logger::Info("loader", "event=inkling_template source=" + source);
 }
 
+class InklingTextRunnerSnapshot final : public TextRunnerSnapshot {
+ public:
+  InklingTextRunnerSnapshot(
+      std::shared_ptr<InklingModel> model,
+      std::unique_ptr<models::inkling::SessionSnapshot> snapshot,
+      std::size_t position)
+      : model(std::move(model)),
+        snapshot(std::move(snapshot)),
+        position(position) {}
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept {
+    return snapshot ? snapshot->PayloadBytes() : 0;
+  }
+
+  std::shared_ptr<InklingModel> model;
+  std::unique_ptr<models::inkling::SessionSnapshot> snapshot;
+  std::size_t position{0};
+};
+
 class InklingTextRunnerState final : public TextRunnerState {
  public:
   explicit InklingTextRunnerState(const std::shared_ptr<InklingModel>& model) {
@@ -4635,7 +4654,8 @@ class InklingTextRunnerState final : public TextRunnerState {
   bool gen_started_{false};
 };
 
-class InklingTextRunner final : public HipTextModelRunner {
+class InklingTextRunner final : public HipTextModelRunner,
+                                public ISnapshotCapable {
  public:
   // Batch contract (see TextModelRunner): DecodeBatch is serial; AdvanceBatch and the merged plain-advance +
   // prefill chunk are native when the runner has no DSpark draft. Native means one in-order engine pass on one
@@ -4765,8 +4785,8 @@ class InklingTextRunner final : public HipTextModelRunner {
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = false,
-                .fork = false,
+                .snapshot = true,
+                .fork = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = use_dspark(),
@@ -5143,7 +5163,45 @@ class InklingTextRunner final : public HipTextModelRunner {
     return SelectNext(state, sampler);
   }
   [[nodiscard]] std::size_t CheckpointPosition(const TextRunnerState& state) const override {
-    return dynamic_cast<const InklingTextRunnerState&>(state).session().CheckpointLength();
+    return dynamic_cast<const InklingTextRunnerState&>(state).position();
+  }
+  [[nodiscard]] std::size_t SnapshotPayloadBytes(
+      const TextRunnerState& state) const override {
+    const auto& st = dynamic_cast<const InklingTextRunnerState&>(state);
+    return st.session().SnapshotBytes(static_cast<std::uint32_t>(st.position()));
+  }
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const override {
+    return CaptureSnapshot(state);
+  }
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> CaptureSnapshot(
+      const TextRunnerState& state) const override {
+    const auto& st = dynamic_cast<const InklingTextRunnerState&>(state);
+    const auto pos = static_cast<std::uint32_t>(st.position());
+    std::string error;
+    auto snap = st.session().SaveSnapshot(pos, &error);
+    if (!snap) {
+      throw std::runtime_error("Inkling snapshot failed: " + error);
+    }
+    return std::make_unique<InklingTextRunnerSnapshot>(
+        model_, std::move(snap), pos);
+  }
+  void RestoreOrFork(TextRunnerState& state,
+                     const TextRunnerSnapshot& snapshot) const override {
+    const auto* inkling_snap =
+        dynamic_cast<const InklingTextRunnerSnapshot*>(&snapshot);
+    if (inkling_snap == nullptr || inkling_snap->model != model_ ||
+        !inkling_snap->snapshot) {
+      throw std::invalid_argument(
+          "Inkling snapshot does not belong to this model");
+    }
+    auto& st = dynamic_cast<InklingTextRunnerState&>(state);
+    st.reset_generation();
+    std::string error;
+    if (!st.session().RestoreSnapshot(*inkling_snap->snapshot, &error)) {
+      throw std::runtime_error("Inkling snapshot restore failed: " + error);
+    }
+    st.set_position(inkling_snap->position);
   }
  private:
   std::int32_t tok_end_message_{-1};

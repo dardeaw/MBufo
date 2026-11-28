@@ -615,57 +615,89 @@ bool ConvertLoadTimeFormats(ModelWeights& w,
                             std::vector<std::vector<std::uint16_t>>* owned,
                             std::vector<std::vector<std::uint8_t>>* owned_q80,
                             std::string* error_msg) {
-  // Q8_0 dense path (token_embd, output, Q/K/V/G/O, rel) is bypassed on
-  // inkling: host DequantizeQ8_0 (verified small: token100 first8, max scale
-  // 0.09) -> F16, then dense F16 GEMM/EmbedGather. Fixes embed-norm
-  // -4854/16425, L0-attn-out-raw 0, gate/wo NaN without touching core calls.
-  // NVFP4 experts (blk.0-19) go NVFP4->Q8_0 instead (ConvertNvfp4ToQ80);
-  // Q8_0 experts (blk.20-23) keep the existing Q8_0->F16 path untouched.
-  auto convert_experts = [&](TensorRef& t, const TensorRef* scale) -> bool {
-    if (IsNvfp4(t.type)) {
-      return ConvertNvfp4ToQ40(t, scale, owned_q80, error_msg);
-    }
-    if (t.type == core::GgmlType::kQ8_0 || t.type == core::GgmlType::kQ4_0) {
-      return true;
-    }
-    if (t.type == core::GgmlType::kQ4_K || t.type == core::GgmlType::kQ5_K ||
-        t.type == core::GgmlType::kQ6_K) {
-      return ConvertKQuantToQ80(t, owned_q80, error_msg);
-    }
-    return ConvertTensorToF16(t, scale, owned, error_msg);
+  struct Task {
+    enum class Mode : std::uint8_t { kF16, kExpert, kKeepQ8OrF16 };
+    TensorRef* t;
+    const TensorRef* scale;
+    Mode mode;
   };
-  auto keep_q8_or_f16 = [&](TensorRef& t) -> bool {
-    if (t.type == core::GgmlType::kQ8_0 || t.type == core::GgmlType::kQ6_K ||
-        t.type == core::GgmlType::kQ5_K || t.type == core::GgmlType::kQ4_K) {
-      return true;
-    }
-    return ConvertTensorToF16(t, nullptr, owned, error_msg);
-  };
-  if (!ConvertTensorToF16(w.token_embd, nullptr, owned, error_msg) ||
-      !ConvertTensorToF16(w.output, nullptr, owned, error_msg)) {
-    return false;
-  }
+  std::vector<Task> tasks;
+  tasks.reserve(2 + w.layers.size() * 23);
+  tasks.push_back({&w.token_embd, nullptr, Task::Mode::kF16});
+  tasks.push_back({&w.output, nullptr, Task::Mode::kF16});
   for (auto& l : w.layers) {
-    if (!keep_q8_or_f16(l.wq) ||
-        !keep_q8_or_f16(l.wk) ||
-        !keep_q8_or_f16(l.wv) ||
-        !keep_q8_or_f16(l.wo) ||
-        !keep_q8_or_f16(l.attn_gate) ||
-        !keep_q8_or_f16(l.attn_rel) ||
-        !convert_experts(l.ffn_gate_up_exps, &l.ffn_gate_up_scale) ||
-        !convert_experts(l.ffn_down_exps, &l.ffn_down_scale) ||
-        !keep_q8_or_f16(l.attn_sink_proj) ||
-        !keep_q8_or_f16(l.attn_k_conv_proj) ||
-        !keep_q8_or_f16(l.attn_v_conv_proj)) {
-      return false;
+    for (auto* tp : {&l.wq, &l.wk, &l.wv, &l.wo, &l.attn_gate, &l.attn_rel,
+                     &l.attn_sink_proj, &l.attn_k_conv_proj,
+                     &l.attn_v_conv_proj}) {
+      tasks.push_back({tp, nullptr, Task::Mode::kKeepQ8OrF16});
     }
+    tasks.push_back(
+        {&l.ffn_gate_up_exps, &l.ffn_gate_up_scale, Task::Mode::kExpert});
+    tasks.push_back(
+        {&l.ffn_down_exps, &l.ffn_down_scale, Task::Mode::kExpert});
     for (auto* lt : {&l.loop_attn, &l.loop_k, &l.loop_mlp, &l.loop_v}) {
-      if (!ConvertTensorToF16(lt->down, nullptr, owned, error_msg) ||
-          !ConvertTensorToF16(lt->forget, nullptr, owned, error_msg) ||
-          !ConvertTensorToF16(lt->gain, nullptr, owned, error_msg)) {
-        return false;
+      tasks.push_back({&lt->down, nullptr, Task::Mode::kF16});
+      tasks.push_back({&lt->forget, nullptr, Task::Mode::kF16});
+      tasks.push_back({&lt->gain, nullptr, Task::Mode::kF16});
+    }
+  }
+
+  std::vector<std::vector<std::vector<std::uint16_t>>> task_f16(tasks.size());
+  std::vector<std::vector<std::vector<std::uint8_t>>> task_q80(tasks.size());
+  std::vector<std::string> task_err(tasks.size());
+  std::atomic<bool> failed{false};
+
+  ::mbufo::quant::ParallelForTasks(
+      tasks.size(),
+      [&](std::size_t idx) {
+        if (failed.load(std::memory_order_relaxed)) return;
+        const Task& task = tasks[idx];
+        TensorRef& t = *task.t;
+        auto& lf16 = task_f16[idx];
+        auto& lq80 = task_q80[idx];
+        auto& lerr = task_err[idx];
+        bool ok = true;
+        if (task.mode == Task::Mode::kF16) {
+          ok = ConvertTensorToF16(t, nullptr, &lf16, &lerr);
+        } else if (task.mode == Task::Mode::kKeepQ8OrF16) {
+          if (t.type != core::GgmlType::kQ8_0 &&
+              t.type != core::GgmlType::kQ6_K &&
+              t.type != core::GgmlType::kQ5_K &&
+              t.type != core::GgmlType::kQ4_K) {
+            ok = ConvertTensorToF16(t, nullptr, &lf16, &lerr);
+          }
+        } else {
+          if (IsNvfp4(t.type)) {
+            ok = ConvertNvfp4ToQ40(t, task.scale, &lq80, &lerr);
+          } else if (t.type != core::GgmlType::kQ8_0 &&
+                     t.type != core::GgmlType::kQ4_0) {
+            if (t.type == core::GgmlType::kQ4_K ||
+                t.type == core::GgmlType::kQ5_K ||
+                t.type == core::GgmlType::kQ6_K) {
+              ok = ConvertKQuantToQ80(t, &lq80, &lerr);
+            } else {
+              ok = ConvertTensorToF16(t, task.scale, &lf16, &lerr);
+            }
+          }
+        }
+        if (!ok) failed.store(true, std::memory_order_relaxed);
+      },
+      16);
+
+  if (failed.load(std::memory_order_relaxed)) {
+    for (const auto& e : task_err) {
+      if (!e.empty()) {
+        if (error_msg != nullptr) *error_msg = e;
+        break;
       }
     }
+    return false;
+  }
+  for (auto& lf16 : task_f16) {
+    for (auto& buf : lf16) owned->push_back(std::move(buf));
+  }
+  for (auto& lq80 : task_q80) {
+    for (auto& buf : lq80) owned_q80->push_back(std::move(buf));
   }
   return true;
 }
@@ -1149,6 +1181,7 @@ Session::Session(std::shared_ptr<Model> model) : model_(std::move(model)) {}
 
 Session::~Session() {
   if (stream_ != nullptr) (void)hipStreamSynchronize(stream_);
+  if (snap_stage_ != nullptr) (void)hipHostFree(snap_stage_);
   if (decode_graph_exec_ != nullptr) (void)hipGraphExecDestroy(decode_graph_exec_);
   if (decode_graph_ != nullptr) (void)hipGraphDestroy(decode_graph_);
   for (void* p : k_cache_) {
@@ -3753,6 +3786,248 @@ bool Session::SpeculativeRoundSampled(std::uint32_t n_draft,
       !Check(hipStreamSynchronize(stream_), error_msg, "sync restore prefix")) {
     return false;
   }
+  return true;
+}
+
+std::size_t Session::SnapshotBytes(std::uint32_t pos) const noexcept {
+  const auto& cfg = model_->weights_->config;
+  const std::size_t kv_dim = static_cast<std::size_t>(cfg.num_kv_heads) * cfg.head_dim;
+  const std::size_t h = cfg.hidden_size;
+
+  std::size_t total = static_cast<std::size_t>(pos) * sizeof(std::int32_t) +
+                      host_logits_.size() * sizeof(float);
+  for (std::uint32_t l = 0; l < cfg.num_layers; ++l) {
+    const bool is_loop = (l >= cfg.loop_core_start && l < cfg.loop_core_end);
+    const std::uint32_t pass_slots = is_loop ? 3U : 1U;
+    const bool is_global =
+        l < cfg.is_swa_layer.size() && cfg.is_swa_layer[l];
+    const std::size_t valid_rows =
+        is_global ? pos : std::min<std::size_t>(pos, cfg.sliding_window);
+    const std::size_t plane_bytes =
+        valid_rows * (static_cast<std::size_t>(kv_row_stride_k_) + kv_row_stride_v_);
+    total += plane_bytes * (is_loop ? 3ULL : 1ULL);
+    total += static_cast<std::size_t>(pass_slots) * (2ULL * kv_dim + 2ULL * h) *
+             3ULL * sizeof(float);
+  }
+  if (dspark_ != nullptr) {
+    total += dspark_->SnapshotBytes(pos);
+  }
+  return total;
+}
+
+std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
+    std::uint32_t pos, std::string* error_msg) const {
+  const auto& cfg = model_->weights_->config;
+  if (pos > history_.size()) {
+    if (error_msg) *error_msg = "inkling: snapshot pos exceeds history";
+    return nullptr;
+  }
+  const std::uint32_t num_loop_layers =
+      (cfg.loop_core_end > cfg.loop_core_start)
+          ? (cfg.loop_core_end - cfg.loop_core_start)
+          : 0U;
+  const std::size_t kv_dim = static_cast<std::size_t>(cfg.num_kv_heads) * cfg.head_dim;
+  const std::size_t h = cfg.hidden_size;
+
+  auto snap = std::make_unique<SessionSnapshot>();
+  snap->pos = pos;
+  snap->sconv_slot = sconv_slot_;
+  snap->history.assign(history_.begin(), history_.begin() + pos);
+  snap->host_logits = host_logits_;
+  snap->planes.resize(k_cache_.size());
+  snap->sconv.resize(cfg.num_layers);
+  snap->dspark_adapt_ema = dspark_adapt_ema_;
+  snap->dspark_adapt_cooldown = dspark_adapt_cooldown_;
+
+  const std::size_t max_plane_k =
+      static_cast<std::size_t>(pos) * kv_row_stride_k_;
+  const std::size_t max_plane_v =
+      static_cast<std::size_t>(pos) * kv_row_stride_v_;
+  const std::size_t max_sconv =
+      3ULL * std::max(kv_dim, h) * 3ULL * sizeof(float);
+  const std::size_t needed_stage =
+      std::max({max_plane_k, max_plane_v, max_sconv, std::size_t{4096}});
+  if (snap_stage_bytes_ < needed_stage) {
+    if (snap_stage_ != nullptr) {
+      (void)hipHostFree(snap_stage_);
+      snap_stage_ = nullptr;
+      snap_stage_bytes_ = 0;
+    }
+    if (!Check(hipHostMalloc(&snap_stage_, needed_stage, hipHostMallocDefault),
+               error_msg, "snap stage alloc")) {
+      return nullptr;
+    }
+    snap_stage_bytes_ = needed_stage;
+  }
+  auto copy_d2h = [&](void* dst_vec_data, const void* src_dev, std::size_t bytes,
+                      const char* what) -> bool {
+    if (bytes == 0) return true;
+    if (!Check(hipMemcpyAsync(snap_stage_, src_dev, bytes,
+                              hipMemcpyDeviceToHost, stream_),
+               error_msg, what) ||
+        !Check(hipStreamSynchronize(stream_), error_msg, what)) {
+      return false;
+    }
+    std::memcpy(dst_vec_data, snap_stage_, bytes);
+    return true;
+  };
+  auto copy_plane = [&](std::size_t plane_idx, std::size_t valid_rows) -> bool {
+    const std::size_t kb = valid_rows * kv_row_stride_k_;
+    const std::size_t vb = valid_rows * kv_row_stride_v_;
+    auto& dst = snap->planes[plane_idx];
+    dst.k.resize(kb);
+    dst.v.resize(vb);
+    return copy_d2h(dst.k.data(), k_cache_[plane_idx], kb, "snap k_cache") &&
+           copy_d2h(dst.v.data(), v_cache_[plane_idx], vb, "snap v_cache");
+  };
+
+  for (std::uint32_t l = 0; l < cfg.num_layers; ++l) {
+    const bool is_loop = (l >= cfg.loop_core_start && l < cfg.loop_core_end);
+    const std::uint32_t pass_slots = is_loop ? 3U : 1U;
+    const bool is_global =
+        l < cfg.is_swa_layer.size() && cfg.is_swa_layer[l];
+    const std::size_t valid_rows =
+        is_global ? pos : std::min<std::size_t>(pos, cfg.sliding_window);
+    if (!copy_plane(l, valid_rows)) return nullptr;
+    if (is_loop) {
+      const std::size_t li = l - cfg.loop_core_start;
+      if (!copy_plane(static_cast<std::size_t>(cfg.num_layers) + li, valid_rows) ||
+          !copy_plane(static_cast<std::size_t>(cfg.num_layers) +
+                          num_loop_layers + li,
+                      valid_rows)) {
+        return nullptr;
+      }
+    }
+    auto& sl = snap->sconv[l];
+    const std::size_t kv_elems = static_cast<std::size_t>(pass_slots) * kv_dim * 3ULL;
+    const std::size_t h_elems = static_cast<std::size_t>(pass_slots) * h * 3ULL;
+    sl.k.resize(kv_elems);
+    sl.v.resize(kv_elems);
+    sl.pa.resize(h_elems);
+    sl.pm.resize(h_elems);
+    if (!copy_d2h(sl.k.data(), sconv_k_[l], kv_elems * sizeof(float), "snap sconv_k") ||
+        !copy_d2h(sl.v.data(), sconv_v_[l], kv_elems * sizeof(float), "snap sconv_v") ||
+        !copy_d2h(sl.pa.data(), sconv_pa_[l], h_elems * sizeof(float), "snap sconv_pa") ||
+        !copy_d2h(sl.pm.data(), sconv_pm_[l], h_elems * sizeof(float), "snap sconv_pm")) {
+      return nullptr;
+    }
+  }
+  if (dspark_ != nullptr) {
+    snap->has_dspark = true;
+    if (!dspark_->SaveSnapshot(pos, &snap->dspark, error_msg)) {
+      return nullptr;
+    }
+  }
+  return snap;
+}
+
+bool Session::RestoreSnapshot(const SessionSnapshot& snap,
+                              std::string* error_msg) {
+  const auto& cfg = model_->weights_->config;
+  if (snap.planes.size() != k_cache_.size() ||
+      snap.sconv.size() != cfg.num_layers ||
+      snap.history.size() != snap.pos ||
+      snap.pos > model_->MaxContext()) {
+    if (error_msg) *error_msg = "inkling: snapshot metadata mismatch";
+    return false;
+  }
+  const std::uint32_t num_loop_layers =
+      (cfg.loop_core_end > cfg.loop_core_start)
+          ? (cfg.loop_core_end - cfg.loop_core_start)
+          : 0U;
+  const std::size_t kv_dim = static_cast<std::size_t>(cfg.num_kv_heads) * cfg.head_dim;
+  const std::size_t h = cfg.hidden_size;
+
+  auto restore_plane = [&](std::size_t plane_idx, std::size_t valid_rows) -> bool {
+    const std::size_t kb = valid_rows * kv_row_stride_k_;
+    const std::size_t vb = valid_rows * kv_row_stride_v_;
+    const auto& src = snap.planes[plane_idx];
+    if (src.k.size() != kb || src.v.size() != vb) {
+      if (error_msg) *error_msg = "inkling: snapshot plane size mismatch";
+      return false;
+    }
+    if (kb > 0 &&
+        !Check(hipMemcpyAsync(k_cache_[plane_idx], src.k.data(), kb,
+                              hipMemcpyHostToDevice, stream_),
+               error_msg, "restore k_cache")) {
+      return false;
+    }
+    if (vb > 0 &&
+        !Check(hipMemcpyAsync(v_cache_[plane_idx], src.v.data(), vb,
+                              hipMemcpyHostToDevice, stream_),
+               error_msg, "restore v_cache")) {
+      return false;
+    }
+    return true;
+  };
+
+  for (std::uint32_t l = 0; l < cfg.num_layers; ++l) {
+    const bool is_loop = (l >= cfg.loop_core_start && l < cfg.loop_core_end);
+    const std::uint32_t pass_slots = is_loop ? 3U : 1U;
+    const bool is_global =
+        l < cfg.is_swa_layer.size() && cfg.is_swa_layer[l];
+    const std::size_t valid_rows =
+        is_global ? snap.pos : std::min<std::size_t>(snap.pos, cfg.sliding_window);
+    if (!restore_plane(l, valid_rows)) return false;
+    if (is_loop) {
+      const std::size_t li = l - cfg.loop_core_start;
+      if (!restore_plane(static_cast<std::size_t>(cfg.num_layers) + li, valid_rows) ||
+          !restore_plane(static_cast<std::size_t>(cfg.num_layers) +
+                             num_loop_layers + li,
+                         valid_rows)) {
+        return false;
+      }
+    }
+    const auto& sl = snap.sconv[l];
+    const std::size_t kv_elems = static_cast<std::size_t>(pass_slots) * kv_dim * 3ULL;
+    const std::size_t h_elems = static_cast<std::size_t>(pass_slots) * h * 3ULL;
+    if (sl.k.size() != kv_elems || sl.v.size() != kv_elems ||
+        sl.pa.size() != h_elems || sl.pm.size() != h_elems) {
+      if (error_msg) *error_msg = "inkling: snapshot sconv size mismatch";
+      return false;
+    }
+    if (!Check(hipMemcpyAsync(sconv_k_[l], sl.k.data(),
+                              kv_elems * sizeof(float), hipMemcpyHostToDevice,
+                              stream_),
+               error_msg, "restore sconv_k") ||
+        !Check(hipMemcpyAsync(sconv_v_[l], sl.v.data(),
+                              kv_elems * sizeof(float), hipMemcpyHostToDevice,
+                              stream_),
+               error_msg, "restore sconv_v") ||
+        !Check(hipMemcpyAsync(sconv_pa_[l], sl.pa.data(),
+                              h_elems * sizeof(float), hipMemcpyHostToDevice,
+                              stream_),
+               error_msg, "restore sconv_pa") ||
+        !Check(hipMemcpyAsync(sconv_pm_[l], sl.pm.data(),
+                              h_elems * sizeof(float), hipMemcpyHostToDevice,
+                              stream_),
+               error_msg, "restore sconv_pm")) {
+      return false;
+    }
+  }
+  if (!snap.host_logits.empty() &&
+      snap.host_logits.size() == vocab_rows_ &&
+      !Check(hipMemcpyAsync(d_logits_, snap.host_logits.data(),
+                            snap.host_logits.size() * sizeof(float),
+                            hipMemcpyHostToDevice, stream_),
+             error_msg, "restore d_logits")) {
+    return false;
+  }
+  if (dspark_ != nullptr && snap.has_dspark) {
+    if (!dspark_->RestoreSnapshot(snap.dspark, error_msg)) {
+      return false;
+    }
+  }
+  if (!Check(hipStreamSynchronize(stream_), error_msg, "restore sync")) {
+    return false;
+  }
+  history_ = snap.history;
+  host_logits_ = snap.host_logits;
+  sconv_slot_ = snap.sconv_slot;
+  dspark_adapt_ema_ = snap.dspark_adapt_ema;
+  dspark_adapt_cooldown_ = snap.dspark_adapt_cooldown;
+  frontier_active_ = false;
+  frontier_len_ = snap.pos;
   return true;
 }
 

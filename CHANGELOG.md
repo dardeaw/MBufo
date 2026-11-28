@@ -3,6 +3,18 @@
 Based on upstream `gufo-org/gufo`, focused on low-precision KV, decode bandwidth and MTP speculative decoding.
 Format: `version.txt` is the version; pushes go to the fork only, never upstream.
 
+## v0.41.1 (2026-11-28)
+
+### Inkling
+- **Cross-request prompt cache snapshots (`ISnapshotCapable`)** (`src/models/inkling/dspark.{hpp,hip}`, `src/models/inkling/engine.{hpp,cpp}`, `src/cli/serve/inference_backend.cpp`):
+  - Added `DsparkSession::Snapshot` and `inkling::SessionSnapshot` (`SnapshotBytes`, `SaveSnapshot`, `RestoreSnapshot`) with `hipHostMalloc` pinned staging buffers so full KV, SConv, and DSpark state survive session eviction.
+  - Wired `InklingTextRunner` to `ISnapshotCapable` (`.snapshot = true`, `.fork = true`) and implemented `Snapshot` -> `CaptureSnapshot`, `SnapshotPayloadBytes`, and `RestoreOrFork`.
+  - Fixed `GptOssTextRunner::Descriptor()` back to `.snapshot = false, .fork = false`.
+- **Fast load (`ParallelForTasks`)** (`src/models/inkling/engine.cpp`):
+  - Parallelized `ConvertLoadTimeFormats` using `::mbufo::quant::ParallelForTasks(..., 16)` (cuts `Inkling-2-Mini` load time from ~125s to ~13.8s).
+- **Checkpoint position contract fix** (`src/cli/serve/inference_backend.cpp`):
+  - Changed `InklingTextRunner::CheckpointPosition`, `SnapshotPayloadBytes`, and `CaptureSnapshot` to use `st.position()` instead of `session().CheckpointLength()`, resolving the `DecodeStep` NVI speculative position mismatch when `frontier_active_` is set.
+
 ## v0.41.0 (2026-11-28) (OOP contract Phase 1: Tasks 1-4)
 
 ### Refactoring (compile-time / startup enforcement, behavior-preserving)

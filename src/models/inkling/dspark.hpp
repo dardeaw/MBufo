@@ -72,6 +72,29 @@ class DsparkSession {
       const TensorRef& target_output, std::vector<std::int32_t>* out_drafts,
       std::string* error_msg);
 
+  struct Snapshot {
+    std::uint32_t pos{0};
+    std::uint32_t kv_dim{0};
+    std::uint32_t hidden{0};
+    std::array<std::vector<std::uint16_t>, DsparkModel::kNumLayers> k_ctx;
+    std::array<std::vector<std::uint16_t>, DsparkModel::kNumLayers> v_ctx;
+    std::vector<float> markov_ctx;
+
+    [[nodiscard]] std::size_t PayloadBytes() const noexcept {
+      std::size_t total = markov_ctx.size() * sizeof(float);
+      for (std::size_t i = 0; i < DsparkModel::kNumLayers; ++i) {
+        total += (k_ctx[i].size() + v_ctx[i].size()) * sizeof(std::uint16_t);
+      }
+      return total;
+    }
+  };
+
+  [[nodiscard]] std::size_t SnapshotBytes(std::uint32_t pos) const noexcept;
+  [[nodiscard]] bool SaveSnapshot(std::uint32_t pos, Snapshot* out,
+                                  std::string* error_msg) const;
+  [[nodiscard]] bool RestoreSnapshot(const Snapshot& snap,
+                                     std::string* error_msg);
+
  private:
   DsparkSession() = default;
   struct Impl;

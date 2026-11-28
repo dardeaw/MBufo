@@ -641,7 +641,11 @@ struct DsparkSession::Impl {
   float* d_mk_proj{nullptr};
   float* d_mk_out{nullptr};
 
+  void* snap_stage{nullptr};
+  std::size_t snap_stage_bytes{0};
+
   ~Impl() {
+    if (snap_stage != nullptr) (void)hipHostFree(snap_stage);
     for (void* p : allocs) {
       if (p != nullptr) (void)hipFree(p);
     }
@@ -947,6 +951,136 @@ bool DsparkSession::DraftBlock(
                                hipMemcpyDeviceToHost, im.stream),
                 error_msg, "copy drafts") ||
       !CheckHip(hipStreamSynchronize(im.stream), error_msg, "sync drafts")) {
+    return false;
+  }
+  return true;
+}
+
+std::size_t DsparkSession::SnapshotBytes(std::uint32_t pos) const noexcept {
+  if (!impl_ || !impl_->model || pos == 0) return 0;
+  const auto& mi = impl_->model->impl();
+  const std::uint32_t clamped = std::min(pos, impl_->max_context);
+  const std::size_t kv_dim = static_cast<std::size_t>(mi.kv_heads) * mi.head_dim;
+  std::size_t total = static_cast<std::size_t>(DsparkModel::kNumLayers) * 2ULL *
+                      clamped * kv_dim * sizeof(std::uint16_t);
+  if (impl_->d_markov_ctx != nullptr) {
+    total += static_cast<std::size_t>(clamped) * mi.hidden * sizeof(float);
+  }
+  return total;
+}
+
+bool DsparkSession::SaveSnapshot(std::uint32_t pos, Snapshot* out,
+                                 std::string* error_msg) const {
+  if (!impl_ || !impl_->model || out == nullptr) {
+    if (error_msg) *error_msg = "dspark: invalid snapshot target";
+    return false;
+  }
+  auto& im = *impl_;
+  const auto& mi = im.model->impl();
+  if (pos > im.max_context) {
+    if (error_msg) *error_msg = "dspark: snapshot pos exceeds max_context";
+    return false;
+  }
+  out->pos = pos;
+  out->kv_dim = mi.kv_heads * mi.head_dim;
+  out->hidden = mi.hidden;
+  const std::size_t kv_elems = static_cast<std::size_t>(pos) * out->kv_dim;
+  const std::size_t kv_bytes = kv_elems * sizeof(__half);
+  const std::size_t mk_elems =
+      (im.d_markov_ctx != nullptr) ? static_cast<std::size_t>(pos) * mi.hidden : 0;
+  const std::size_t mk_bytes = mk_elems * sizeof(float);
+  const std::size_t max_bytes = std::max(kv_bytes, mk_bytes);
+  if (max_bytes > 0 && im.snap_stage_bytes < max_bytes) {
+    if (im.snap_stage != nullptr) {
+      (void)hipHostFree(im.snap_stage);
+      im.snap_stage = nullptr;
+      im.snap_stage_bytes = 0;
+    }
+    if (!CheckHip(hipHostMalloc(&im.snap_stage, max_bytes, hipHostMallocDefault),
+                  error_msg, "dspark snap stage")) {
+      return false;
+    }
+    im.snap_stage_bytes = max_bytes;
+  }
+  auto copy_d2h = [&](void* dst_vec_data, const void* src_dev, std::size_t bytes,
+                      const char* what) -> bool {
+    if (bytes == 0) return true;
+    if (!CheckHip(hipMemcpyAsync(im.snap_stage, src_dev, bytes,
+                                 hipMemcpyDeviceToHost, im.stream),
+                  error_msg, what) ||
+        !CheckHip(hipStreamSynchronize(im.stream), error_msg, what)) {
+      return false;
+    }
+    std::memcpy(dst_vec_data, im.snap_stage, bytes);
+    return true;
+  };
+  for (std::uint32_t i = 0; i < DsparkModel::kNumLayers; ++i) {
+    out->k_ctx[i].resize(kv_elems);
+    out->v_ctx[i].resize(kv_elems);
+    if (!copy_d2h(out->k_ctx[i].data(), im.k_ctx_cache[i], kv_bytes, "dspark snap k_ctx") ||
+        !copy_d2h(out->v_ctx[i].data(), im.v_ctx_cache[i], kv_bytes, "dspark snap v_ctx")) {
+      return false;
+    }
+  }
+  if (im.d_markov_ctx != nullptr) {
+    out->markov_ctx.resize(mk_elems);
+    if (!copy_d2h(out->markov_ctx.data(), im.d_markov_ctx, mk_bytes, "dspark snap markov_ctx")) {
+      return false;
+    }
+  } else {
+    out->markov_ctx.clear();
+  }
+  return true;
+}
+
+bool DsparkSession::RestoreSnapshot(const Snapshot& snap,
+                                    std::string* error_msg) {
+  if (!impl_ || !impl_->model) {
+    if (error_msg) *error_msg = "dspark: uninitialized session";
+    return false;
+  }
+  auto& im = *impl_;
+  const auto& mi = im.model->impl();
+  if (snap.pos > im.max_context || snap.kv_dim != mi.kv_heads * mi.head_dim ||
+      snap.hidden != mi.hidden) {
+    if (error_msg) *error_msg = "dspark: snapshot shape mismatch";
+    return false;
+  }
+  const std::size_t kv_elems = static_cast<std::size_t>(snap.pos) * snap.kv_dim;
+  for (std::uint32_t i = 0; i < DsparkModel::kNumLayers; ++i) {
+    if (snap.k_ctx[i].size() != kv_elems || snap.v_ctx[i].size() != kv_elems) {
+      if (error_msg) *error_msg = "dspark: snapshot buffer size mismatch";
+      return false;
+    }
+    if (kv_elems > 0) {
+      if (!CheckHip(hipMemcpyAsync(im.k_ctx_cache[i], snap.k_ctx[i].data(),
+                                   kv_elems * sizeof(__half),
+                                   hipMemcpyHostToDevice, im.stream),
+                    error_msg, "dspark restore k_ctx") ||
+          !CheckHip(hipMemcpyAsync(im.v_ctx_cache[i], snap.v_ctx[i].data(),
+                                   kv_elems * sizeof(__half),
+                                   hipMemcpyHostToDevice, im.stream),
+                    error_msg, "dspark restore v_ctx")) {
+        return false;
+      }
+    }
+  }
+  if (im.d_markov_ctx != nullptr) {
+    const std::size_t mk_elems = static_cast<std::size_t>(snap.pos) * mi.hidden;
+    if (snap.markov_ctx.size() != mk_elems) {
+      if (error_msg) *error_msg = "dspark: markov snapshot size mismatch";
+      return false;
+    }
+    if (mk_elems > 0 &&
+        !CheckHip(hipMemcpyAsync(im.d_markov_ctx, snap.markov_ctx.data(),
+                                 mk_elems * sizeof(float),
+                                 hipMemcpyHostToDevice, im.stream),
+                  error_msg, "dspark restore markov_ctx")) {
+      return false;
+    }
+  }
+  if (snap.pos > 0 && !CheckHip(hipStreamSynchronize(im.stream), error_msg,
+                                "dspark restore sync")) {
     return false;
   }
   return true;

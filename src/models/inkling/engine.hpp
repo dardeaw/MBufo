@@ -139,6 +139,43 @@ class Model final : public std::enable_shared_from_this<Model> {
   friend class Session;
 };
 
+struct SessionSnapshot {
+  std::uint32_t pos{0};
+  std::uint32_t sconv_slot{0};
+  std::vector<std::int32_t> history;
+  std::vector<float> host_logits;
+  struct Plane {
+    std::vector<std::uint8_t> k;
+    std::vector<std::uint8_t> v;
+  };
+  std::vector<Plane> planes;
+  struct SconvLayer {
+    std::vector<float> k;
+    std::vector<float> v;
+    std::vector<float> pa;
+    std::vector<float> pm;
+  };
+  std::vector<SconvLayer> sconv;
+  float dspark_adapt_ema{0.50F};
+  std::uint32_t dspark_adapt_cooldown{0U};
+  bool has_dspark{false};
+  DsparkSession::Snapshot dspark;
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept {
+    std::size_t total = history.size() * sizeof(std::int32_t) +
+                        host_logits.size() * sizeof(float);
+    for (const auto& p : planes) {
+      total += p.k.size() + p.v.size();
+    }
+    for (const auto& l : sconv) {
+      total += (l.k.size() + l.v.size() + l.pa.size() + l.pm.size()) *
+               sizeof(float);
+    }
+    if (has_dspark) total += dspark.PayloadBytes();
+    return total;
+  }
+};
+
 class Session final {
  public:
   ~Session();
@@ -195,6 +232,11 @@ class Session final {
   [[nodiscard]] bool FrontierActive() const noexcept { return frontier_active_; }
   /// Position at which this session's state can be reused: the frontier while
   /// generated tokens extend beyond it, the full length otherwise.
+  [[nodiscard]] std::size_t SnapshotBytes(std::uint32_t pos) const noexcept;
+  [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
+      std::uint32_t pos, std::string* error_msg = nullptr) const;
+  [[nodiscard]] bool RestoreSnapshot(const SessionSnapshot& snap,
+                                     std::string* error_msg = nullptr);
   [[nodiscard]] std::uint32_t CheckpointLength() const noexcept {
     return frontier_active_ ? frontier_len_
                             : static_cast<std::uint32_t>(history_.size());
@@ -387,6 +429,8 @@ class Session final {
   std::vector<void*> sconv_bk_v_;
   std::vector<void*> sconv_bk_pa_;
   std::vector<void*> sconv_bk_pm_;
+  mutable void* snap_stage_{nullptr};
+  mutable std::size_t snap_stage_bytes_{0};
 
   friend class Model;
 };
