@@ -12,6 +12,7 @@ Format: `version.txt` is the version; pushes go to the fork only, never upstream
   - Fixed: Glimmer double `sampler.Accept` (repetition-penalty corruption); Inkling `position += block.size()` off-by-1 on stop break (now `selections.size()`); NVI position contract check (committed count vs actual advance).
 - **Task 4 — shared parallel helper + SWA contract** (`src/core/quant/parallel.hpp`, `src/core/engine/attention_contract.*`):
   - New `ParallelForTasks` converging the ad-hoc jthread/thread pools; Inkling `CopyMappedRegion` uses it (behavior-preserving).
+  Follow-ups converge the remaining pools onto it (NPU `PackMatrixKN` x3, Qwen `CopyMappedWeights`, Laguna `CopyMappedRegion`).
   - New `ValidateChunkAgainstWindow`; Inkling `Session::Init` enforces `kChunk(512) < sliding_window(1024)` at load.
 - **Task 2 — snapshot capability contract** (`text_model_runner.hpp`, `ValidateRunner`):
   - New `ISnapshotCapable` pure interface (serve layer); DeepSeek inherits it (`Snapshot` -> `CaptureSnapshot`).
