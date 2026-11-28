@@ -153,7 +153,8 @@ ToolMarkerSet ToolMarkers(
     // (Phase 2: served by DeepSeekDialect.)
     return DeepSeekDialectInstance().Markers().openers;
   if (*format == Format::kGemma)
-    return ToolMarkerSet(gemma);
+    // (Phase 2: served by GemmaDialect.)
+    return GemmaDialectInstance().Markers().openers;
   if (*format == Format::kAtem)
     return ToolMarkerSet(atem);
   if (*format == Format::kLlama)
@@ -243,7 +244,8 @@ ToolCloserSet ToolClosers(
   // the client's envelope excepted, which no dialect admits and every one of
   // them parses.
   if (*format == Format::kGemma)
-    return kGemmaClosers;
+    // (Phase 2: served by GemmaDialect.)
+    return GemmaDialectInstance().Markers().closers;
   if (*format == Format::kAtem)
     return kAtemClosers;
   if (*format == Format::kLlama)

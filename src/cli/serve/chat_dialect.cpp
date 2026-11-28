@@ -120,4 +120,25 @@ const IChatDialect& DeepSeekDialectInstance() noexcept {
   return kInstance;
 }
 
+// Mirrors openai_chat.cpp's former GemmaToolSyntax::kCallOpen + kGemmaClosers.
+// No reasoning envelope (see ReasoningToolMarkers' Gemma comment).
+constexpr std::array<std::string_view, 1> kGemmaOpeners{"<|tool_call>"};
+constexpr std::array<std::string_view, 2> kGemmaDialectClosers{
+    "<tool_call|>",
+    "</invoke>",
+};
+
+DialectMarkers GemmaDialect::Markers() const noexcept {
+  return {
+      .openers = kGemmaOpeners,
+      .closers = kGemmaDialectClosers,
+      .reasoning_envelope = {},
+  };
+}
+
+const IChatDialect& GemmaDialectInstance() noexcept {
+  static const GemmaDialect kInstance;
+  return kInstance;
+}
+
 }  // namespace mbufo::server

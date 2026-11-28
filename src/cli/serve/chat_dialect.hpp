@@ -100,6 +100,19 @@ class DeepSeekDialect final : public IChatDialect {
 
 [[nodiscard]] const IChatDialect& DeepSeekDialectInstance() noexcept;
 
+// Gemma 4 native framing (<|tool_call>call:NAME{args}<tool_call|>).
+// No reasoning envelope: no thought tags means no implicit boundary.
+class GemmaDialect final : public IChatDialect {
+ public:
+  [[nodiscard]] DialectMarkers Markers() const noexcept override;
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat GrammarFormat()
+      const noexcept override {
+    return sampling::JsonConstraint::ToolFormat::kGemma;
+  }
+};
+
+[[nodiscard]] const IChatDialect& GemmaDialectInstance() noexcept;
+
 }  // namespace mbufo::server
 
 #endif  // MBUFO_SERVER_CHAT_DIALECT_HPP_
